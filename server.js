@@ -160,12 +160,21 @@ app.post('/api/auth/login', async (req, res) => {
     if (error) throw error;
 
     // Get user details
-    const { data: userDetails } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', data.user.id)
-      .single();
 
+
+    // Login endpoint — after signInWithPassword
+  const { data: userDetails } = await supabase
+    .from('users')
+    .select('*')
+    .eq('id', data.user.id)
+    .single();
+
+// ✅ Add this guard
+if (!userDetails) {
+  return res.status(401).json({ 
+    error: 'User account not fully set up. No profile found.' 
+  });
+}
     // Update last login
     await supabase
       .from('users')
