@@ -21,8 +21,15 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// Initialize Supabase
+// Initialize Supabase - TWO clients needed:
+// 1. supabase (anon key) - for user-facing auth (signInWithPassword, refreshSession)
+// 2. supabaseAdmin (service_role key) - for all DB queries (bypasses RLS)
 const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
+
+const supabaseAdmin = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
@@ -38,10 +45,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
-
-// Handle OPTIONS preflight for all routes
 app.options('*', cors());
-
 app.use(express.json());
 
 // ============================================================================
@@ -57,7 +61,6 @@ const authenticateToken = (req, res, next) => {
   }
 
   try {
-    // Verify JWT with Supabase secret
     const decoded = jwt.verify(token, process.env.SUPABASE_JWT_SECRET || 'your-secret');
     req.user = decoded;
     next();
@@ -69,7 +72,7 @@ const authenticateToken = (req, res, next) => {
 // Middleware to get restaurant_id from authenticated user
 const getRestaurantId = async (req, res, next) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('users')
       .select('restaurant_id, role')
       .eq('id', req.user.sub)
@@ -106,8 +109,8 @@ app.post('/api/auth/signup', async (req, res) => {
   try {
     const { email, password, full_name, restaurant_id, role = 'kitchen_staff' } = req.body;
 
-    // Create auth user
-    const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+    // Create auth user (admin client needed for createUser)
+    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
       email,
       password,
       email_confirm: false
@@ -116,7 +119,7 @@ app.post('/api/auth/signup', async (req, res) => {
     if (authError) throw authError;
 
     // Create user record
-    const { data: userData, error: userError } = await supabase
+    const { data: userData, error: userError } = await supabaseAdmin
       .from('users')
       .insert({
         id: authData.user.id,
@@ -131,7 +134,7 @@ app.post('/api/auth/signup', async (req, res) => {
     if (userError) throw userError;
 
     // Log signup
-    await supabase.from('audit_logs').insert({
+    await supabaseAdmin.from('audit_logs').insert({
       user_id: authData.user.id,
       restaurant_id,
       action: 'User signup',
@@ -152,6 +155,7 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
+    // Use anon client for user auth sign-in
     const { data, error } = await supabase.auth.signInWithPassword({
       email,
       password
@@ -159,30 +163,25 @@ app.post('/api/auth/login', async (req, res) => {
 
     if (error) throw error;
 
-    // Get user details
+    // Use admin client for DB queries
+    const { data: userDetails } = await supabaseAdmin
+      .from('users')
+      .select('*')
+      .eq('id', data.user.id)
+      .single();
 
+    if (!userDetails) {
+      return res.status(401).json({ error: 'User account not fully set up. No profile found.' });
+    }
 
-    // Login endpoint — after signInWithPassword
-  const { data: userDetails } = await supabase
-    .from('users')
-    .select('*')
-    .eq('id', data.user.id)
-    .single();
-
-// ✅ Add this guard
-if (!userDetails) {
-  return res.status(401).json({ 
-    error: 'User account not fully set up. No profile found.' 
-  });
-}
     // Update last login
-    await supabase
+    await supabaseAdmin
       .from('users')
       .update({ last_login: new Date() })
       .eq('id', data.user.id);
 
     // Log login
-    await supabase.from('audit_logs').insert({
+    await supabaseAdmin.from('audit_logs').insert({
       user_id: data.user.id,
       restaurant_id: userDetails.restaurant_id,
       action: 'User login',
@@ -205,6 +204,7 @@ app.post('/api/auth/refresh', async (req, res) => {
   try {
     const { refreshToken } = req.body;
 
+    // Use anon client for session refresh
     const { data, error } = await supabase.auth.refreshSession({
       refresh_token: refreshToken
     });
@@ -230,7 +230,7 @@ app.get('/api/orders', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const { status, limit = 50, offset = 0 } = req.query;
 
-    let query = supabase
+    let query = supabaseAdmin
       .from('orders')
       .select(`
         *,
@@ -260,7 +260,7 @@ app.get('/api/orders', authenticateToken, getRestaurantId, async (req, res) => {
 // Get single order
 app.get('/api/orders/:id', authenticateToken, getRestaurantId, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('orders')
       .select(`
         *,
@@ -292,11 +292,9 @@ app.post('/api/orders', authenticateToken, getRestaurantId, async (req, res) => 
 
     const { table_id, items, notes } = req.body;
 
-    // Generate order number
     const orderNumber = `ORD-${Date.now()}`;
 
-    // Create order
-    const { data: orderData, error: orderError } = await supabase
+    const { data: orderData, error: orderError } = await supabaseAdmin
       .from('orders')
       .insert({
         restaurant_id: req.restaurant_id,
@@ -310,12 +308,11 @@ app.post('/api/orders', authenticateToken, getRestaurantId, async (req, res) => 
 
     if (orderError) throw orderError;
 
-    // Add order items
     let subtotal = 0;
     const orderItems = [];
 
     for (const item of items) {
-      const { data: menuItem } = await supabase
+      const { data: menuItem } = await supabaseAdmin
         .from('menu_items')
         .select('price')
         .eq('id', item.menu_item_id)
@@ -323,7 +320,7 @@ app.post('/api/orders', authenticateToken, getRestaurantId, async (req, res) => 
 
       subtotal += menuItem.price * item.quantity;
 
-      const { data: itemData, error: itemError } = await supabase
+      const { data: itemData, error: itemError } = await supabaseAdmin
         .from('order_items')
         .insert({
           order_id: orderData.id,
@@ -338,37 +335,29 @@ app.post('/api/orders', authenticateToken, getRestaurantId, async (req, res) => 
       if (itemError) throw itemError;
       orderItems.push(itemData);
 
-      // Create KDS item for kitchen display
-      await supabase.from('kds_items').insert({
+      await supabaseAdmin.from('kds_items').insert({
         restaurant_id: req.restaurant_id,
         order_item_id: itemData.id,
         status: 'pending'
       });
     }
 
-    // Update order total
-    const tax = subtotal * 0.1; // 10% tax
+    const tax = subtotal * 0.1;
     const total = subtotal + tax;
 
-    await supabase
+    await supabaseAdmin
       .from('orders')
-      .update({
-        subtotal,
-        tax,
-        total_amount: total
-      })
+      .update({ subtotal, tax, total_amount: total })
       .eq('id', orderData.id);
 
-    // Update table status
     if (table_id) {
-      await supabase
+      await supabaseAdmin
         .from('tables')
         .update({ status: 'occupied' })
         .eq('id', table_id);
     }
 
-    // Log action
-    await supabase.from('audit_logs').insert({
+    await supabaseAdmin.from('audit_logs').insert({
       user_id: req.user.sub,
       restaurant_id: req.restaurant_id,
       action: 'Order created',
@@ -377,13 +366,7 @@ app.post('/api/orders', authenticateToken, getRestaurantId, async (req, res) => 
 
     res.json({ 
       success: true, 
-      order: {
-        ...orderData,
-        subtotal,
-        tax,
-        total_amount: total,
-        order_items: orderItems
-      }
+      order: { ...orderData, subtotal, tax, total_amount: total, order_items: orderItems }
     });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -395,7 +378,7 @@ app.put('/api/orders/:id/status', authenticateToken, getRestaurantId, async (req
   try {
     const { status } = req.body;
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('orders')
       .update({ status })
       .eq('id', req.params.id)
@@ -405,8 +388,7 @@ app.put('/api/orders/:id/status', authenticateToken, getRestaurantId, async (req
 
     if (error) throw error;
 
-    // Log action
-    await supabase.from('audit_logs').insert({
+    await supabaseAdmin.from('audit_logs').insert({
       user_id: req.user.sub,
       restaurant_id: req.restaurant_id,
       action: 'Order status updated',
@@ -426,7 +408,7 @@ app.delete('/api/orders/:id', authenticateToken, getRestaurantId, async (req, re
       return res.status(403).json({ error: 'Unauthorized' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('orders')
       .update({ status: 'cancelled' })
       .eq('id', req.params.id)
@@ -436,8 +418,7 @@ app.delete('/api/orders/:id', authenticateToken, getRestaurantId, async (req, re
 
     if (error) throw error;
 
-    // Log action
-    await supabase.from('audit_logs').insert({
+    await supabaseAdmin.from('audit_logs').insert({
       user_id: req.user.sub,
       restaurant_id: req.restaurant_id,
       action: 'Order cancelled',
@@ -459,7 +440,7 @@ app.get('/api/kds/feed', authenticateToken, getRestaurantId, async (req, res) =>
   try {
     const { status = 'pending' } = req.query;
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('kds_items')
       .select(`
         *,
@@ -486,7 +467,7 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
   try {
     const { status } = req.body;
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('kds_items')
       .update({ status })
       .eq('id', req.params.id)
@@ -509,7 +490,7 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
 // Get all tables
 app.get('/api/tables', authenticateToken, getRestaurantId, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('tables')
       .select('*')
       .eq('restaurant_id', req.restaurant_id)
@@ -528,7 +509,7 @@ app.put('/api/tables/:id/status', authenticateToken, getRestaurantId, async (req
   try {
     const { status } = req.body;
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('tables')
       .update({ status })
       .eq('id', req.params.id)
@@ -557,7 +538,7 @@ app.post('/api/payments', authenticateToken, getRestaurantId, async (req, res) =
 
     const { order_id, amount, payment_method } = req.body;
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('payments')
       .insert({
         restaurant_id: req.restaurant_id,
@@ -572,28 +553,25 @@ app.post('/api/payments', authenticateToken, getRestaurantId, async (req, res) =
 
     if (error) throw error;
 
-    // Update order payment status
-    await supabase
+    await supabaseAdmin
       .from('orders')
       .update({ payment_status: 'paid', status: 'completed' })
       .eq('id', order_id);
 
-    // Update table status to available
-    const { data: order } = await supabase
+    const { data: order } = await supabaseAdmin
       .from('orders')
       .select('table_id')
       .eq('id', order_id)
       .single();
 
     if (order.table_id) {
-      await supabase
+      await supabaseAdmin
         .from('tables')
         .update({ status: 'available' })
         .eq('id', order.table_id);
     }
 
-    // Log action
-    await supabase.from('audit_logs').insert({
+    await supabaseAdmin.from('audit_logs').insert({
       user_id: req.user.sub,
       restaurant_id: req.restaurant_id,
       action: 'Payment processed',
@@ -620,7 +598,7 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
     const { date } = req.query;
     const reportDate = date || new Date().toISOString().split('T')[0];
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('orders')
       .select('id, total_amount, status, created_at, order_items(menu_item:menu_item_id(category))')
       .eq('restaurant_id', req.restaurant_id)
@@ -630,12 +608,10 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
 
     if (error) throw error;
 
-    // Calculate metrics
     const totalRevenue = data.reduce((sum, order) => sum + (order.total_amount || 0), 0);
     const totalOrders = data.length;
     const avgOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
 
-    // Category breakdown
     const categoryBreakdown = {};
     data.forEach(order => {
       order.order_items?.forEach(item => {
@@ -646,13 +622,7 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
 
     res.json({
       success: true,
-      report: {
-        date: reportDate,
-        totalOrders,
-        totalRevenue,
-        avgOrderValue,
-        categoryBreakdown
-      }
+      report: { date: reportDate, totalOrders, totalRevenue, avgOrderValue, categoryBreakdown }
     });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -663,7 +633,7 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
 // WEBSOCKET - REAL-TIME UPDATES
 // ============================================================================
 
-const clients = new Map(); // Store connected clients
+const clients = new Map();
 
 wss.on('connection', (ws) => {
   console.log('WebSocket client connected');
@@ -679,7 +649,6 @@ wss.on('connection', (ws) => {
         userId = data.userId;
         restaurantId = data.restaurantId;
         
-        // Store client connection
         if (!clients.has(restaurantId)) {
           clients.set(restaurantId, []);
         }
@@ -708,7 +677,6 @@ wss.on('connection', (ws) => {
   });
 });
 
-// Function to broadcast updates to all clients in a restaurant
 function broadcastToRestaurant(restaurantId, data) {
   if (clients.has(restaurantId)) {
     clients.get(restaurantId).forEach(client => {
@@ -718,10 +686,6 @@ function broadcastToRestaurant(restaurantId, data) {
     });
   }
 }
-
-// Listen for Supabase realtime updates and broadcast to WebSocket clients
-// This would be set up using Supabase Realtime subscriptions
-// For now, KDS updates happen when items are updated via PUT endpoint
 
 // ============================================================================
 // START SERVER
@@ -735,7 +699,6 @@ server.listen(PORT, () => {
   console.log(`🗄️  Database: ${process.env.SUPABASE_URL}\n`);
 });
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('SIGTERM signal received: closing HTTP server');
   server.close(() => {
