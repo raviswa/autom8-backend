@@ -901,7 +901,7 @@ app.post('/api/catalog/sync', authenticateToken, getRestaurantId, async (req, re
 // Get sync status / last sync time
 app.get('/api/catalog/status', authenticateToken, getRestaurantId, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('menu_items')
       .select('updated_at')
       .eq('restaurant_id', req.restaurant_id)
@@ -925,7 +925,7 @@ app.get('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) 
   try {
     const { category, available_only } = req.query;
 
-    let query = supabase
+    let query = supabaseAdmin
       .from('menu_items')
       .select('*')
       .eq('restaurant_id', req.restaurant_id)
@@ -958,7 +958,7 @@ app.put('/api/menu-items/:id/availability', authenticateToken, getRestaurantId, 
 
     const { is_available } = req.body;
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('menu_items')
       .update({ is_available })
       .eq('id', req.params.id)
