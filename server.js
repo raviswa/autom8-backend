@@ -1029,7 +1029,7 @@ function startScheduledSync() {
     console.log('⏰ Running scheduled catalog sync...');
 
     try {
-      const { data: restaurants } = await supabase
+      const { data: restaurants } = await supabaseAdmin
         .from('restaurants')
         .select('id')
         .eq('is_active', true); // Only sync active restaurants (add this column if needed)
