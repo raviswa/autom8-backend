@@ -48,11 +48,7 @@ app.use(cors({
 app.options('*', cors());
 app.use(express.json());
 
-// ============================================================================
-// AUTHENTICATION MIDDLEWARE
-// ============================================================================
-
-const authenticateToken = (req, res, next) => {
+const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
@@ -61,14 +57,19 @@ const authenticateToken = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.SUPABASE_JWT_SECRET || 'your-secret');
-    req.user = decoded;
+    // Use Supabase to verify the token - no JWT secret needed
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+
+    if (error || !user) {
+      return res.status(403).json({ error: 'Invalid or expired token' });
+    }
+
+    req.user = { sub: user.id, email: user.email };
     next();
   } catch (err) {
-    return res.status(403).json({ error: 'Invalid token' });
+    return res.status(403).json({ error: 'Authentication failed' });
   }
 };
-
 // Middleware to get restaurant_id from authenticated user
 const getRestaurantId = async (req, res, next) => {
   try {
