@@ -1,0 +1,35 @@
+# ============================================================================
+# AUTOM8 BACKEND - ENVIRONMENT VARIABLES
+# ============================================================================
+# Copy this file to .env and fill in your actual values
+
+# Server
+PORT=3001
+NODE_ENV=development
+
+# Supabase
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+SUPABASE_JWT_SECRET=your-jwt-secret-from-supabase
+
+# Frontend URL (for CORS)
+FRONTEND_URL=http://localhost:3000
+
+# Facebook OAuth (Optional)
+FACEBOOK_APP_ID=your_facebook_app_id
+FACEBOOK_APP_SECRET=your_facebook_app_secret
+
+# JWT Token Expiration
+JWT_EXPIRATION=24h
+REFRESH_TOKEN_EXPIRATION=7d
+
+# Database
+DATABASE_URL=postgresql://user:password@localhost:5432/autom8
+
+# Logging
+LOG_LEVEL=info
+
+# Features
+ENABLE_WEBSOCKET=true
+ENABLE_REALTIME=true
