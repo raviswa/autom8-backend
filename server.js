@@ -29,11 +29,19 @@ const supabase = createClient(
 
 // Middleware
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:5173', process.env.FRONTEND_URL || '*'],
+  origin: [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    process.env.FRONTEND_URL
+  ].filter(Boolean),
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
+
+// Handle OPTIONS preflight for all routes
+app.options('*', cors());
+
 app.use(express.json());
 
 // ============================================================================
