@@ -766,3 +766,303 @@ process.on('SIGTERM', () => {
 });
 
 module.exports = { app, wss, broadcastToRestaurant };
+// ============================================================================
+// AUTOM8 - META CATALOG SYNC
+// Add this to your existing server.js
+// ============================================================================
+
+// ============================================================================
+// CATALOG SYNC - CONFIGURATION
+// Add these to your Railway backend environment variables:
+//
+// META_ACCESS_TOKEN=EAAxxxxxxx
+// META_CATALOG_ID=1234567890123
+// META_WEBHOOK_VERIFY_TOKEN=autom8-webhook-secret  (make up any string)
+// ============================================================================
+
+// ============================================================================
+// 1. SYNC FUNCTION - Pulls catalog from Meta and updates Supabase
+// ============================================================================
+
+async function syncCatalogFromMeta(restaurantId) {
+  const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+  const META_CATALOG_ID = process.env.META_CATALOG_ID;
+
+  if (!META_ACCESS_TOKEN || !META_CATALOG_ID) {
+    console.error('Missing META_ACCESS_TOKEN or META_CATALOG_ID');
+    return { success: false, error: 'Missing Meta credentials' };
+  }
+
+  try {
+    console.log('🔄 Starting Meta catalog sync...');
+
+    // Fetch all products from Meta Catalog
+    let allProducts = [];
+    let nextUrl = `https://graph.facebook.com/v18.0/${META_CATALOG_ID}/products?fields=id,name,description,price,currency,image_url,availability,category,retailer_id&limit=100&access_token=${META_ACCESS_TOKEN}`;
+
+    // Handle pagination - Meta returns max 100 items per page
+    while (nextUrl) {
+      const response = await fetch(nextUrl);
+      const data = await response.json();
+
+      if (data.error) {
+        throw new Error(data.error.message);
+      }
+
+      allProducts = [...allProducts, ...(data.data || [])];
+      nextUrl = data.paging?.next || null;
+    }
+
+    console.log(`📦 Fetched ${allProducts.length} products from Meta`);
+
+    // Process each product and upsert into Supabase
+    let synced = 0;
+    let errors = 0;
+
+    for (const product of allProducts) {
+      try {
+        // Parse price (Meta sends as "10.99 USD" or in cents)
+        let price = 0;
+        if (product.price) {
+          // Meta format: "1099" (in cents) or "10.99"
+          price = typeof product.price === 'string'
+            ? parseFloat(product.price.replace(/[^0-9.]/g, '')) / 100
+            : product.price / 100;
+        }
+
+        const menuItem = {
+          restaurant_id: restaurantId,
+          name: product.name,
+          description: product.description || '',
+          price: price,
+          image_url: product.image_url || null,
+          category: product.category || 'General',
+          is_available: product.availability === 'in stock',
+          meta_product_id: product.id,
+          retailer_id: product.retailer_id || product.id,
+          updated_at: new Date().toISOString()
+        };
+
+        // Upsert: insert if new, update if exists (match by meta_product_id)
+        const { error } = await supabase
+          .from('menu_items')
+          .upsert(menuItem, {
+            onConflict: 'restaurant_id,meta_product_id',
+            ignoreDuplicates: false
+          });
+
+        if (error) {
+          console.error(`Error upserting ${product.name}:`, error);
+          errors++;
+        } else {
+          synced++;
+        }
+      } catch (itemError) {
+        console.error(`Error processing product ${product.id}:`, itemError);
+        errors++;
+      }
+    }
+
+    console.log(`✅ Sync complete: ${synced} synced, ${errors} errors`);
+
+    return {
+      success: true,
+      total: allProducts.length,
+      synced,
+      errors,
+      timestamp: new Date().toISOString()
+    };
+
+  } catch (err) {
+    console.error('Catalog sync failed:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+// ============================================================================
+// 2. API ENDPOINTS
+// ============================================================================
+
+// Manual sync trigger (Owner can click "Sync Now" button)
+app.post('/api/catalog/sync', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    // Only owner can trigger manual sync
+    if (req.user_role !== 'owner' && req.user_role !== 'manager') {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    const result = await syncCatalogFromMeta(req.restaurant_id);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get sync status / last sync time
+app.get('/api/catalog/status', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('menu_items')
+      .select('updated_at')
+      .eq('restaurant_id', req.restaurant_id)
+      .order('updated_at', { ascending: false })
+      .limit(1);
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      lastSync: data?.[0]?.updated_at || null,
+      itemCount: data?.length || 0
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Get all menu items for portal
+app.get('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { category, available_only } = req.query;
+
+    let query = supabase
+      .from('menu_items')
+      .select('*')
+      .eq('restaurant_id', req.restaurant_id)
+      .order('category', { ascending: true })
+      .order('name', { ascending: true });
+
+    if (category) {
+      query = query.eq('category', category);
+    }
+
+    if (available_only === 'true') {
+      query = query.eq('is_available', true);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    res.json({ success: true, items: data });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Toggle item availability (Owner only)
+app.put('/api/menu-items/:id/availability', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'owner') {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    const { is_available } = req.body;
+
+    const { data, error } = await supabase
+      .from('menu_items')
+      .update({ is_available })
+      .eq('id', req.params.id)
+      .eq('restaurant_id', req.restaurant_id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ success: true, item: data });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// 3. META WEBHOOK - Real-time updates when catalog changes
+// ============================================================================
+
+// Webhook verification (Meta sends GET to verify)
+app.get('/api/catalog/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
+    console.log('✅ Meta webhook verified');
+    res.status(200).send(challenge);
+  } else {
+    res.status(403).json({ error: 'Forbidden' });
+  }
+});
+
+// Webhook receiver (Meta sends POST when catalog changes)
+app.post('/api/catalog/webhook', async (req, res) => {
+  try {
+    const body = req.body;
+    console.log('📨 Meta webhook received:', JSON.stringify(body, null, 2));
+
+    // Acknowledge receipt immediately (Meta requires fast response)
+    res.status(200).send('EVENT_RECEIVED');
+
+    // Process the catalog update in background
+    if (body.object === 'product_catalog') {
+      // Get all restaurants (or specific one from webhook data)
+      const { data: restaurants } = await supabase
+        .from('restaurants')
+        .select('id');
+
+      // Sync catalog for each restaurant
+      for (const restaurant of restaurants || []) {
+        await syncCatalogFromMeta(restaurant.id);
+      }
+    }
+  } catch (err) {
+    console.error('Webhook processing error:', err);
+    res.status(200).send('EVENT_RECEIVED'); // Always return 200 to Meta
+  }
+});
+
+// ============================================================================
+// 4. SCHEDULED AUTO-SYNC (every 5 minutes as fallback)
+// ============================================================================
+
+function startScheduledSync() {
+  const SYNC_INTERVAL = 5 * 60 * 1000; // 5 minutes
+
+  setInterval(async () => {
+    console.log('⏰ Running scheduled catalog sync...');
+
+    try {
+      const { data: restaurants } = await supabase
+        .from('restaurants')
+        .select('id')
+        .eq('is_active', true); // Only sync active restaurants (add this column if needed)
+
+      for (const restaurant of restaurants || []) {
+        await syncCatalogFromMeta(restaurant.id);
+      }
+    } catch (err) {
+      console.error('Scheduled sync error:', err);
+    }
+  }, SYNC_INTERVAL);
+
+  console.log('⏰ Scheduled catalog sync started (every 5 minutes)');
+}
+
+// Start scheduled sync when server starts
+startScheduledSync();
+
+// ============================================================================
+// SUPABASE SCHEMA UPDATE - Run this SQL in Supabase SQL Editor
+// ============================================================================
+/*
+-- Add meta_product_id column to menu_items table
+ALTER TABLE public.menu_items
+ADD COLUMN IF NOT EXISTS meta_product_id TEXT,
+ADD COLUMN IF NOT EXISTS retailer_id TEXT;
+
+-- Add unique constraint for upsert to work
+ALTER TABLE public.menu_items
+ADD CONSTRAINT unique_restaurant_meta_product
+UNIQUE (restaurant_id, meta_product_id);
+
+-- Index for faster lookups
+CREATE INDEX IF NOT EXISTS idx_menu_items_meta_product_id
+ON public.menu_items(meta_product_id);
+*/
