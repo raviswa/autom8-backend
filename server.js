@@ -52,7 +52,7 @@ app.use(express.json());
 // AUTHENTICATION MIDDLEWARE
 // ============================================================================
 
-const authenticateToken = (req, res, next) => {
+const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
@@ -61,8 +61,10 @@ const authenticateToken = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.SUPABASE_JWT_SECRET || 'your-secret');
-    req.user = decoded;
+    // Let Supabase verify the token instead of doing it manually
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user) throw error || new Error('Invalid token');
+    req.user = { sub: user.id, ...user };
     next();
   } catch (err) {
     return res.status(403).json({ error: 'Invalid token' });
