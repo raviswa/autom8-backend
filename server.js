@@ -628,6 +628,47 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
     res.status(400).json({ error: err.message });
   }
 });
+// ============================================================================
+// MENU ITEMS ENDPOINTS
+// ============================================================================
+
+// Get all menu items
+app.get('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('menu_items')
+      .select('*')
+      .eq('restaurant_id', req.restaurant_id)
+      .eq('is_available', true)
+      .order('category', { ascending: true });
+
+    if (error) throw error;
+
+    res.json({ success: true, items: data });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Create menu item
+app.post('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'manager' && req.user_role !== 'owner') {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    const { name, description, price, category } = req.body;
+    const { data, error } = await supabaseAdmin
+      .from('menu_items')
+      .insert({ restaurant_id: req.restaurant_id, name, description, price, category, is_available: true })
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ success: true, item: data });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
 
 // ============================================================================
 // WEBSOCKET - REAL-TIME UPDATES
