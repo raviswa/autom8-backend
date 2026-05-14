@@ -844,7 +844,7 @@ async function syncCatalogFromMeta(restaurantId) {
         };
 
         // Upsert: insert if new, update if exists (match by meta_product_id)
-        const { error } = await supabase
+        const { error } = await supabaseAdmin
           .from('menu_items')
           .upsert(menuItem, {
             onConflict: 'restaurant_id,meta_product_id',
@@ -1003,7 +1003,7 @@ app.post('/api/catalog/webhook', async (req, res) => {
     // Process the catalog update in background
     if (body.object === 'product_catalog') {
       // Get all restaurants (or specific one from webhook data)
-      const { data: restaurants } = await supabase
+      const { data: restaurants } = await supabaseAdmin
         .from('restaurants')
         .select('id');
 
