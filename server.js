@@ -52,7 +52,7 @@ app.use(express.json());
 // AUTHENTICATION MIDDLEWARE
 // ============================================================================
 
-const authenticateToken = async (req, res, next) => {
+const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
@@ -61,10 +61,8 @@ const authenticateToken = async (req, res, next) => {
   }
 
   try {
-    // Let Supabase verify the token instead of doing it manually
-    const { data: { user }, error } = await supabase.auth.getUser(token);
-    if (error || !user) throw error || new Error('Invalid token');
-    req.user = { sub: user.id, ...user };
+    const decoded = jwt.verify(token, process.env.SUPABASE_JWT_SECRET || 'your-secret');
+    req.user = decoded;
     next();
   } catch (err) {
     return res.status(403).json({ error: 'Invalid token' });
@@ -420,6 +418,22 @@ app.delete('/api/orders/:id', authenticateToken, getRestaurantId, async (req, re
 
     if (error) throw error;
 
+    // Release the table if no other active orders on it
+    if (data.table_id) {
+      const { data: activeOrders } = await supabaseAdmin
+        .from('orders')
+        .select('id')
+        .eq('table_id', data.table_id)
+        .in('status', ['pending', 'confirmed', 'in_progress']);
+
+      if (!activeOrders || activeOrders.length === 0) {
+        await supabaseAdmin
+          .from('tables')
+          .update({ status: 'available' })
+          .eq('id', data.table_id);
+      }
+    }
+
     await supabaseAdmin.from('audit_logs').insert({
       user_id: req.user.sub,
       restaurant_id: req.restaurant_id,
@@ -626,47 +640,6 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
       success: true,
       report: { date: reportDate, totalOrders, totalRevenue, avgOrderValue, categoryBreakdown }
     });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-// ============================================================================
-// MENU ITEMS ENDPOINTS
-// ============================================================================
-
-// Get all menu items
-app.get('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) => {
-  try {
-    const { data, error } = await supabaseAdmin
-      .from('menu_items')
-      .select('*')
-      .eq('restaurant_id', req.restaurant_id)
-      .eq('is_available', true)
-      .order('category', { ascending: true });
-
-    if (error) throw error;
-
-    res.json({ success: true, items: data });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// Create menu item
-app.post('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) => {
-  try {
-    if (req.user_role !== 'manager' && req.user_role !== 'owner') {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
-    const { name, description, price, category } = req.body;
-    const { data, error } = await supabaseAdmin
-      .from('menu_items')
-      .insert({ restaurant_id: req.restaurant_id, name, description, price, category, is_available: true })
-      .select()
-      .single();
-
-    if (error) throw error;
-    res.json({ success: true, item: data });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
