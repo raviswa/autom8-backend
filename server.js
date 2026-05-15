@@ -1,7 +1,7 @@
-// ============================================================================
+// =============================================================
 // AUTOM8 BACKEND - MAIN SERVER
 // server.js
-// ============================================================================
+// =============================================================
 // This is the main entry point for the backend API
 // Install: npm install express cors dotenv supabase ws jsonwebtoken bcrypt
 // Run: npm run dev (development) or npm start (production)
