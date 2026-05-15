@@ -809,7 +809,7 @@ async function syncCatalogFromMeta(restaurantId) {
         if (product.price) {
           // Meta format: "1099" (in cents) or "10.99"
           price = typeof product.price === 'string'
-            ? parseFloat(product.price.replace(/[^0-9.]/g, '')) / 100
+            ? parseFloat(product.price.replace(/[^0-9.]/g, '')) 
             : product.price / 100;
         }
 
