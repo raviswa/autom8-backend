@@ -226,6 +226,23 @@ app.post('/api/auth/refresh', async (req, res) => {
 // MENU ITEMS ENDPOINTS
 // ============================================================================
 
+// Get all menu items
+app.get('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('menu_items')
+      .select('*')
+      .eq('restaurant_id', req.restaurant_id)
+      .eq('is_available', true)
+      .order('category', { ascending: true });
+
+    if (error) throw error;
+
+    res.json({ success: true, items: data });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
 
 // Create menu item
 app.post('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) => {
@@ -768,8 +785,6 @@ module.exports = { app, wss, broadcastToRestaurant };
 // ============================================================================
 
 async function syncCatalogFromMeta(restaurantId) {
-  console.log('META_ACCESS_TOKEN set:', !!process.env.META_ACCESS_TOKEN);
-  console.log('META_CATALOG_ID set:', !!process.env.META_CATALOG_ID);
   const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
   const META_CATALOG_ID = process.env.META_CATALOG_ID;
 
@@ -789,8 +804,6 @@ async function syncCatalogFromMeta(restaurantId) {
     while (nextUrl) {
       const response = await fetch(nextUrl);
       const data = await response.json();
-      console.log('Meta API response status:', response.status);
-      console.log('Meta API data:', JSON.stringify(data).substring(0, 500));
 
       if (data.error) {
         throw new Error(data.error.message);
@@ -813,7 +826,7 @@ async function syncCatalogFromMeta(restaurantId) {
         if (product.price) {
           // Meta format: "1099" (in cents) or "10.99"
           price = typeof product.price === 'string'
-            ? parseFloat(product.price.replace(/[^0-9.]/g, '')) 
+            ? parseFloat(product.price.replace(/[^0-9.]/g, '')) / 100
             : product.price / 100;
         }
 
@@ -923,7 +936,7 @@ app.get('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) 
       query = query.eq('category', category);
     }
 
-    if (available_only === 'true') {
+    if (available_only !== 'false') {
       query = query.eq('is_available', true);
     }
 
