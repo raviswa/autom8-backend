@@ -770,6 +770,8 @@ module.exports = { app, wss, broadcastToRestaurant };
 async function syncCatalogFromMeta(restaurantId) {
   const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
   const META_CATALOG_ID = process.env.META_CATALOG_ID;
+  console.log('META_ACCESS_TOKEN set:', !!process.env.META_ACCESS_TOKEN);
+  console.log('META_CATALOG_ID set:', !!process.env.META_CATALOG_ID);
 
   if (!META_ACCESS_TOKEN || !META_CATALOG_ID) {
     console.error('Missing META_ACCESS_TOKEN or META_CATALOG_ID');
