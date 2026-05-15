@@ -1,7 +1,7 @@
-// =============================================================
+// ============================================================================
 // AUTOM8 BACKEND - MAIN SERVER
 // server.js
-// =============================================================
+// ============================================================================
 // This is the main entry point for the backend API
 // Install: npm install express cors dotenv supabase ws jsonwebtoken bcrypt
 // Run: npm run dev (development) or npm start (production)
@@ -226,45 +226,19 @@ app.post('/api/auth/refresh', async (req, res) => {
 // MENU ITEMS ENDPOINTS
 // ============================================================================
 
+// Get all menu items
 app.get('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) => {
   try {
-    const { category, available_only } = req.query;
-
-    // Determine current time slot (IST = UTC+5:30)
-    const now = new Date();
-    const istHour = (now.getUTCHours() + 5 + Math.floor((now.getUTCMinutes() + 30) / 60)) % 24;
-
-    let currentSlot;
-    if (istHour >= 6 && istHour < 11)       currentSlot = 'morning';
-    else if (istHour >= 11 && istHour < 15)  currentSlot = 'tiffin';
-    else if (istHour >= 15 && istHour < 18)  currentSlot = 'afternoon';
-    else if (istHour >= 18 && istHour < 23)  currentSlot = 'night';
-    else                                      currentSlot = null; // closed hours
-
-    let query = supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('menu_items')
       .select('*')
       .eq('restaurant_id', req.restaurant_id)
-      .order('category', { ascending: true })
-      .order('name', { ascending: true });
+      .eq('is_available', true)
+      .order('category', { ascending: true });
 
-    if (available_only !== 'false') {
-      query = query.eq('is_available', true);
-    }
-
-    // Filter by time slot — show items for current slot + items tagged 'all'
-    if (currentSlot) {
-      query = query.or(`time_slot.eq.${currentSlot},time_slot.eq.all`);
-    }
-
-    if (category) {
-      query = query.eq('category', category);
-    }
-
-    const { data, error } = await query;
     if (error) throw error;
 
-    res.json({ success: true, items: data, current_slot: currentSlot });
+    res.json({ success: true, items: data });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -826,7 +800,6 @@ async function syncCatalogFromMeta(restaurantId) {
     let allProducts = [];
     let nextUrl = `https://graph.facebook.com/v18.0/${META_CATALOG_ID}/products?fields=id,name,description,price,currency,image_url,availability,category,retailer_id,custom_label_0&limit=100&access_token=${META_ACCESS_TOKEN}`;
 
-
     // Handle pagination - Meta returns max 100 items per page
     while (nextUrl) {
       const response = await fetch(nextUrl);
@@ -867,6 +840,7 @@ async function syncCatalogFromMeta(restaurantId) {
           is_available: product.availability === 'in stock',
           meta_product_id: product.id,
           retailer_id: product.retailer_id || product.id,
+          time_slot: product.custom_label_0 ? product.custom_label_0.toLowerCase().replace(' ', '_') : 'all',
           updated_at: new Date().toISOString()
         };
 
@@ -952,6 +926,19 @@ app.get('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) 
   try {
     const { category, available_only } = req.query;
 
+    // Determine current time slot (IST = UTC+5:30)
+    const now = new Date();
+    const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+    const istMinutes = (utcMinutes + 330) % (24 * 60); // +330 mins = +5h30m
+    const istHour = Math.floor(istMinutes / 60);
+
+    let currentSlot;
+    if (istHour >= 6 && istHour < 11)       currentSlot = 'morning_tiffin';
+    else if (istHour >= 11 && istHour < 15)  currentSlot = 'lunch';
+    else if (istHour >= 15 && istHour < 19)  currentSlot = 'evening_snacks';
+    else if (istHour >= 19 && istHour < 23)  currentSlot = 'dinner_tiffin';
+    else                                      currentSlot = null;
+
     let query = supabaseAdmin
       .from('menu_items')
       .select('*')
@@ -959,18 +946,23 @@ app.get('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) 
       .order('category', { ascending: true })
       .order('name', { ascending: true });
 
+    if (available_only !== 'false') {
+      query = query.eq('is_available', true);
+    }
+
     if (category) {
       query = query.eq('category', category);
     }
 
-    if (available_only !== 'false') {
-      query = query.eq('is_available', true);
+    // Filter by time slot — show items for current slot + always-on items
+    if (currentSlot) {
+      query = query.or(`time_slot.eq.${currentSlot},time_slot.eq.all`);
     }
 
     const { data, error } = await query;
     if (error) throw error;
 
-    res.json({ success: true, items: data });
+    res.json({ success: true, items: data, current_slot: currentSlot, ist_hour: istHour });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
