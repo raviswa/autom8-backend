@@ -798,7 +798,8 @@ async function syncCatalogFromMeta(restaurantId) {
 
     // Fetch all products from Meta Catalog
     let allProducts = [];
-    let nextUrl = `https://graph.facebook.com/v18.0/${META_CATALOG_ID}/products?fields=id,name,description,price,currency,image_url,availability,category,retailer_id&limit=100&access_token=${META_ACCESS_TOKEN}`;
+    let nextUrl = `https://graph.facebook.com/v18.0/${META_CATALOG_ID}/products?fields=id,name,description,price,currency,image_url,availability,category,retailer_id,custom_label_0&limit=100&access_token=${META_ACCESS_TOKEN}`;
+
 
     // Handle pagination - Meta returns max 100 items per page
     while (nextUrl) {
