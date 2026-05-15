@@ -789,6 +789,8 @@ async function syncCatalogFromMeta(restaurantId) {
     while (nextUrl) {
       const response = await fetch(nextUrl);
       const data = await response.json();
+      console.log('Meta API response status:', response.status);
+      console.log('Meta API data:', JSON.stringify(data).substring(0, 500));
 
       if (data.error) {
         throw new Error(data.error.message);
