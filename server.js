@@ -781,7 +781,7 @@ module.exports = { app, wss, broadcastToRestaurant };
 // ============================================================================
 
 // ============================================================================
-// 1. SYNC FUNCTION - Pulls catalog from Meta and updates Supabase
+// 1. UPDATED SYNC FUNCTION - With "Reset" Logic
 // ============================================================================
 
 async function syncCatalogFromMeta(restaurantId) {
@@ -794,37 +794,33 @@ async function syncCatalogFromMeta(restaurantId) {
   }
 
   try {
-    console.log('🔄 Starting Meta catalog sync...');
+    console.log(`🔄 Starting sync for Restaurant: ${restaurantId}...`);
 
-    // Fetch all products from Meta Catalog
+    // STEP 1: RESET - Mark all items as unavailable first.
+    // This ensures items removed from the Google Sheet/Meta feed disappear from the portal.
+    await supabaseAdmin
+      .from('menu_items')
+      .update({ is_available: false })
+      .eq('restaurant_id', restaurantId);
+
+    // STEP 2: FETCH - Get products from Meta
     let allProducts = [];
     let nextUrl = `https://graph.facebook.com/v18.0/${META_CATALOG_ID}/products?fields=id,name,description,price,currency,image_url,availability,category,retailer_id,custom_label_0&limit=100&access_token=${META_ACCESS_TOKEN}`;
 
-    // Handle pagination - Meta returns max 100 items per page
     while (nextUrl) {
       const response = await fetch(nextUrl);
       const data = await response.json();
-
-      if (data.error) {
-        throw new Error(data.error.message);
-      }
-
+      if (data.error) throw new Error(data.error.message);
       allProducts = [...allProducts, ...(data.data || [])];
       nextUrl = data.paging?.next || null;
     }
 
-    console.log(`📦 Fetched ${allProducts.length} products from Meta`);
-
-    // Process each product and upsert into Supabase
+    // STEP 3: UPSERT - Reactivate current items
     let synced = 0;
-    let errors = 0;
-
     for (const product of allProducts) {
       try {
-        // Parse price (Meta sends as "10.99 USD" or in cents)
         let price = 0;
         if (product.price) {
-          // Meta format: "1099" (in cents) or "10.99"
           price = typeof product.price === 'string'
             ? parseFloat(product.price.replace(/[^0-9.]/g, '')) / 100
             : product.price / 100;
@@ -837,43 +833,27 @@ async function syncCatalogFromMeta(restaurantId) {
           price: price,
           image_url: product.image_url || null,
           category: product.category || 'General',
-          is_available: product.availability === 'in stock',
+          // Only items currently "in stock" in Meta become available
+          is_available: product.availability === 'in stock', 
           meta_product_id: product.id,
           retailer_id: product.retailer_id || product.id,
-          time_slot: product.custom_label_0 ? product.custom_label_0.toLowerCase().replace(' ', '_') : 'all',
           updated_at: new Date().toISOString()
         };
 
-        // Upsert: insert if new, update if exists (match by meta_product_id)
-        const { error } = await supabaseAdmin
+        await supabaseAdmin
           .from('menu_items')
           .upsert(menuItem, {
             onConflict: 'restaurant_id,meta_product_id',
             ignoreDuplicates: false
           });
 
-        if (error) {
-          console.error(`Error upserting ${product.name}:`, error);
-          errors++;
-        } else {
-          synced++;
-        }
+        synced++;
       } catch (itemError) {
         console.error(`Error processing product ${product.id}:`, itemError);
-        errors++;
       }
     }
 
-    console.log(`✅ Sync complete: ${synced} synced, ${errors} errors`);
-
-    return {
-      success: true,
-      total: allProducts.length,
-      synced,
-      errors,
-      timestamp: new Date().toISOString()
-    };
-
+    return { success: true, synced, total_in_feed: allProducts.length };
   } catch (err) {
     console.error('Catalog sync failed:', err);
     return { success: false, error: err.message };
@@ -900,21 +880,29 @@ app.post('/api/catalog/sync', authenticateToken, getRestaurantId, async (req, re
 });
 
 // Get sync status / last sync time
-app.get('/api/catalog/status', authenticateToken, getRestaurantId, async (req, res) => {
+app.get('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) => {
   try {
-    const { data, error } = await supabaseAdmin
-      .from('menu_items')
-      .select('updated_at')
-      .eq('restaurant_id', req.restaurant_id)
-      .order('updated_at', { ascending: false })
-      .limit(1);
+    const { category } = req.query;
 
+    let query = supabaseAdmin
+      .from('menu_items')
+      .select('*')
+      .eq('restaurant_id', req.restaurant_id)
+      .eq('is_available', true) // Only show what is currently "Reset & Reactivated"
+      .order('category', { ascending: true })
+      .order('name', { ascending: true });
+
+    if (category) {
+      query = query.eq('category', category);
+    }
+
+    const { data, error } = await query;
     if (error) throw error;
 
-    res.json({
-      success: true,
-      lastSync: data?.[0]?.updated_at || null,
-      itemCount: data?.length || 0
+    res.json({ 
+      success: true, 
+      count: data.length, 
+      items: data 
     });
   } catch (err) {
     res.status(400).json({ error: err.message });
