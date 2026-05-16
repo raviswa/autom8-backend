@@ -1047,6 +1047,358 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
 });
 
 // ============================================================================
+// WALK-IN TOKEN SYSTEM
+// ============================================================================
+//
+// Supabase table required — run this SQL once in your Supabase SQL editor:
+//
+//   CREATE TABLE walk_in_tokens (
+//     id            TEXT         PRIMARY KEY,       -- e.g. 'T-001'
+//     restaurant_id UUID         NOT NULL REFERENCES restaurants(id),
+//     name          TEXT         NOT NULL,
+//     phone         TEXT,
+//     type          TEXT         NOT NULL CHECK (type IN ('dinein','takeaway')),
+//     pax           INT          DEFAULT 1,
+//     status        TEXT         DEFAULT 'waiting'
+//                                CHECK (status IN ('waiting','seated','completed','takeaway')),
+//     table_id      BIGINT       REFERENCES tables(id),
+//     table_number  INT,
+//     arrived_at    TIMESTAMPTZ  DEFAULT NOW(),
+//     seated_at     TIMESTAMPTZ,
+//     completed_at  TIMESTAMPTZ
+//   );
+//
+//   -- index for fast polling by restaurant + status
+//   CREATE INDEX idx_walk_in_tokens_restaurant ON walk_in_tokens(restaurant_id, status);
+//
+// Add these to your .env:
+//   WHATSAPP_API_URL=https://graph.facebook.com/v19.0
+//   WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
+//   WHATSAPP_ACCESS_TOKEN=your_access_token
+//   MANAGER_WHATSAPP_NUMBER=91XXXXXXXXXX
+//
+// ============================================================================
+
+// ── WhatsApp helper (uses fetch, consistent with existing catalog sync code) ──
+
+async function sendWhatsAppMessage(toNumber, message) {
+  try {
+    const response = await fetch(
+      `${process.env.WHATSAPP_API_URL}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          to: String(toNumber),
+          type: 'text',
+          text: { body: message },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      console.error('[WhatsApp] API error:', err);
+    } else {
+      console.log(`[WhatsApp] ✅ Sent to ${toNumber}`);
+    }
+  } catch (err) {
+    // Non-fatal — WhatsApp failure must never block portal operations
+    console.error('[WhatsApp] Failed to send message:', err.message);
+  }
+}
+
+// ── Token ID generator — reads last token from DB to stay sequential ──────────
+
+async function generateTokenId(restaurantId) {
+  // Get count of today's tokens to build a sequential ID for this session
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+
+  const { count, error } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .select('*', { count: 'exact', head: true })
+    .eq('restaurant_id', restaurantId)
+    .gte('arrived_at', todayStart.toISOString());
+
+  if (error) {
+    console.error('[generateTokenId] count query failed:', error.message);
+  }
+
+  const seq = (count ?? 0) + 1;
+  return `T-${String(seq).padStart(3, '0')}`;
+}
+
+// ── POST /api/tokens ──────────────────────────────────────────────────────────
+// Public — called by QR-code customer form (no auth required).
+// Body: { name, phone, type: 'dinein'|'takeaway', pax, restaurant_id }
+// Returns: { token }
+// Sends WhatsApp alert to manager and broadcasts via WebSocket.
+
+app.post('/api/tokens', async (req, res) => {
+  try {
+    const { name, phone, type, pax, restaurant_id } = req.body;
+
+    if (!name || !name.trim())  return res.status(400).json({ error: 'name is required' });
+    if (!type)                  return res.status(400).json({ error: 'type is required (dinein or takeaway)' });
+    if (!restaurant_id)         return res.status(400).json({ error: 'restaurant_id is required' });
+    if (!['dinein', 'takeaway'].includes(type)) {
+      return res.status(400).json({ error: 'type must be dinein or takeaway' });
+    }
+
+    const tokenId = await generateTokenId(restaurant_id);
+    const status  = type === 'takeaway' ? 'takeaway' : 'waiting';
+
+    const tokenRecord = {
+      id:            tokenId,
+      restaurant_id,
+      name:          name.trim(),
+      phone:         phone ? String(phone).replace(/\D/g, '') : null,
+      type,
+      pax:           type === 'takeaway' ? 1 : (parseInt(pax) || 1),
+      status,
+      arrived_at:    new Date().toISOString(),
+    };
+
+    const { data: token, error: insertError } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .insert(tokenRecord)
+      .select()
+      .single();
+
+    if (insertError) throw insertError;
+
+    // Notify manager via WhatsApp
+    if (process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
+      const arrivalTime = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+      const typeLabel   = type === 'dinein' ? 'Dine-in' : 'Takeaway';
+      const paxLine     = type === 'dinein' ? `, ${token.pax} ${token.pax === 1 ? 'person' : 'people'}` : '';
+
+      const managerMsg =
+        `🪑 *New Walk-in* — Token *${token.id}*\n` +
+        `👤 ${token.name}${paxLine}\n` +
+        `📋 ${typeLabel}\n` +
+        `🕐 ${arrivalTime}\n\n` +
+        `Open portal to assign table:\n${process.env.FRONTEND_URL || 'https://autom8-frontend-production.up.railway.app'}/dashboard/manager`;
+
+      // Fire-and-forget — don't await, don't block the response
+      sendWhatsAppMessage(process.env.MANAGER_WHATSAPP_NUMBER, managerMsg);
+    }
+
+    // Push real-time update to manager portal via WebSocket
+    broadcastToRestaurant(restaurant_id, {
+      type:      'NEW_TOKEN',
+      token,
+      timestamp: new Date().toISOString(),
+    });
+
+    res.status(201).json({ success: true, token });
+  } catch (err) {
+    console.error('[POST /api/tokens]', err);
+    res.status(500).json({ error: err.message || 'Failed to create token' });
+  }
+});
+
+// ── GET /api/tokens ───────────────────────────────────────────────────────────
+// Protected — manager portal polls this every 5 seconds.
+// Returns all non-completed tokens for today, ordered by arrival.
+
+app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { status } = req.query;
+
+    // Scope to today so old tokens don't accumulate in the queue view
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    let query = supabaseAdmin
+      .from('walk_in_tokens')
+      .select('*')
+      .eq('restaurant_id', req.restaurant_id)
+      .gte('arrived_at', todayStart.toISOString())
+      .order('arrived_at', { ascending: true });
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    res.json({ success: true, tokens: data || [] });
+  } catch (err) {
+    console.error('[GET /api/tokens]', err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ── PUT /api/tokens/:id/assign ────────────────────────────────────────────────
+// Protected — manager assigns a table to a waiting token.
+// Body: { table_id, table_number }
+// - Marks token as 'seated', records table
+// - Sets table status to 'occupied' in Supabase
+// - Sends WhatsApp confirmation to customer
+// - Broadcasts WebSocket update to portal
+
+app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { table_id, table_number } = req.body;
+
+    if (!table_id || !table_number) {
+      return res.status(400).json({ error: 'table_id and table_number are required' });
+    }
+
+    // Fetch token and verify it belongs to this restaurant
+    const { data: token, error: fetchError } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .select('*')
+      .eq('id', req.params.id)
+      .eq('restaurant_id', req.restaurant_id)
+      .single();
+
+    if (fetchError || !token) return res.status(404).json({ error: 'Token not found' });
+    if (token.status !== 'waiting') {
+      return res.status(400).json({ error: `Token is already ${token.status}` });
+    }
+
+    // Update token to seated
+    const { data: updatedToken, error: updateError } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .update({
+        status:       'seated',
+        table_id,
+        table_number,
+        seated_at:    new Date().toISOString(),
+      })
+      .eq('id', req.params.id)
+      .eq('restaurant_id', req.restaurant_id)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    // Mark table as occupied
+    await supabaseAdmin
+      .from('tables')
+      .update({ status: 'occupied' })
+      .eq('id', table_id)
+      .eq('restaurant_id', req.restaurant_id);
+
+    // Send WhatsApp confirmation to customer
+    if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+      const customerMsg =
+        `✅ *Your table is ready!*\n\n` +
+        `Token: *${token.id}*\n` +
+        `Table: *Table ${table_number}*\n\n` +
+        `Please proceed to your table. Enjoy your meal! 🍽️`;
+
+      sendWhatsAppMessage(token.phone, customerMsg);
+    }
+
+    // Broadcast to portal via WebSocket
+    broadcastToRestaurant(req.restaurant_id, {
+      type:      'TOKEN_ASSIGNED',
+      token:     updatedToken,
+      timestamp: new Date().toISOString(),
+    });
+
+    await supabaseAdmin.from('audit_logs').insert({
+      user_id:       req.user.sub,
+      restaurant_id: req.restaurant_id,
+      action:        'Token assigned to table',
+      details:       { token_id: req.params.id, table_id, table_number },
+    });
+
+    res.json({ success: true, token: updatedToken });
+  } catch (err) {
+    console.error('[PUT /api/tokens/:id/assign]', err);
+    res.status(500).json({ error: err.message || 'Failed to assign table' });
+  }
+});
+
+// ── PUT /api/tokens/:id/complete ──────────────────────────────────────────────
+// Protected — manager marks a seated token as done, frees the table.
+
+app.put('/api/tokens/:id/complete', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { data: token, error: fetchError } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .select('*')
+      .eq('id', req.params.id)
+      .eq('restaurant_id', req.restaurant_id)
+      .single();
+
+    if (fetchError || !token) return res.status(404).json({ error: 'Token not found' });
+
+    const { data: updatedToken, error: updateError } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .update({
+        status:       'completed',
+        completed_at: new Date().toISOString(),
+      })
+      .eq('id', req.params.id)
+      .eq('restaurant_id', req.restaurant_id)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    // Free the table — only if no active orders remain on it
+    if (token.table_id) {
+      const { data: activeOrders } = await supabaseAdmin
+        .from('orders')
+        .select('id')
+        .eq('table_id', token.table_id)
+        .in('status', ['pending', 'confirmed', 'in_progress']);
+
+      if (!activeOrders || activeOrders.length === 0) {
+        await supabaseAdmin
+          .from('tables')
+          .update({ status: 'available' })
+          .eq('id', token.table_id)
+          .eq('restaurant_id', req.restaurant_id);
+      }
+    }
+
+    // Broadcast to portal
+    broadcastToRestaurant(req.restaurant_id, {
+      type:      'TOKEN_COMPLETED',
+      token:     updatedToken,
+      timestamp: new Date().toISOString(),
+    });
+
+    res.json({ success: true, token: updatedToken });
+  } catch (err) {
+    console.error('[PUT /api/tokens/:id/complete]', err);
+    res.status(500).json({ error: err.message || 'Failed to complete token' });
+  }
+});
+
+// ── DELETE /api/tokens/:id ────────────────────────────────────────────────────
+// Protected — manager dismisses a token from the queue.
+
+app.delete('/api/tokens/:id', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { error } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .delete()
+      .eq('id', req.params.id)
+      .eq('restaurant_id', req.restaurant_id);
+
+    if (error) throw error;
+
+    res.json({ success: true, message: 'Token dismissed' });
+  } catch (err) {
+    console.error('[DELETE /api/tokens/:id]', err);
+    res.status(500).json({ error: err.message || 'Failed to dismiss token' });
+  }
+});
+
+// ============================================================================
 // WEBSOCKET - REAL-TIME UPDATES
 // ============================================================================
 
