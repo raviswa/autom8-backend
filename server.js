@@ -5,7 +5,7 @@
 // This is the main entry point for the backend API
 // Install: npm install express cors dotenv supabase ws jsonwebtoken bcrypt
 // Run: npm run dev (development) or npm start (production)
-const axios = require('axios');
+//const axios = require('axios');
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
