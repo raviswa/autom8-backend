@@ -424,7 +424,7 @@ app.post('/api/catalog/sync', authenticateToken, getRestaurantId, async (req, re
 
 app.get('/api/catalog/webhook', (req, res) => {
   const mode = req.query['hub.mode'], token = req.query['hub.verify_token'], challenge = req.query['hub.challenge'];
-  if (mode === 'subscribe' && token === process.env.BOTBIZ_WEBHOOK_VERIFY_TOKEN) {
+  if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
     console.log('✅ Meta webhook verified');
     res.status(200).send(challenge);
   } else {
