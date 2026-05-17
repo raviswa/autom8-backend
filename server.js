@@ -1315,8 +1315,11 @@ app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, async (req
         `Please proceed to your table. Enjoy your meal! 🍽️`;
 
       sendWhatsAppMessage(token.phone, customerMsg);
+      await sendWhatsAppMessage(token.phone, customerMsg);
+      console.log(`[assign] Sending catalog to ${token.phone} for restaurant ${req.restaurant_id}`);
       await sendWhatsAppCatalogMessage(token.phone, req.restaurant_id);
-    }
+      console.log(`[assign] Catalog sent`);
+      }
 
     // Broadcast to portal via WebSocket
     broadcastToRestaurant(req.restaurant_id, {
