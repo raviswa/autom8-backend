@@ -1205,6 +1205,7 @@ app.post('/api/tokens', async (req, res) => {
 
       // Fire-and-forget — don't await, don't block the response
       sendWhatsAppMessage(process.env.MANAGER_WHATSAPP_NUMBER, managerMsg);
+      
     }
 
     // Push real-time update to manager portal via WebSocket
@@ -1315,6 +1316,7 @@ app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, async (req
         `Please proceed to your table. Enjoy your meal! 🍽️`;
 
       sendWhatsAppMessage(token.phone, customerMsg);
+      await sendWhatsAppCatalogMessage(token.phone, req.restaurant_id);
     }
 
     // Broadcast to portal via WebSocket
