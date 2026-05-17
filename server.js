@@ -223,6 +223,59 @@ app.post('/api/auth/refresh', async (req, res) => {
   }
 });
 
+// Send Whatsapp Catalog
+
+async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
+  try {
+    const CATALOG_ID = process.env.META_CATALOG_ID;
+    if (!CATALOG_ID) {
+      console.warn('[catalog-msg] META_CATALOG_ID not set');
+      return;
+    }
+
+    const response = await fetch(
+      `${process.env.WHATSAPP_API_URL}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          to: String(toNumber),
+          type: 'interactive',
+          interactive: {
+            type: 'catalog_message',
+            body: {
+              text: '🍽️ Browse today\'s menu and add items to your basket 🛒',
+            },
+            footer: {
+              text: 'Tap any item to see details and order',
+            },
+            action: {
+              name: 'catalog_message',
+              parameters: {
+                thumbnail_product_retailer_id: null,
+              },
+            },
+          },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      console.error('[catalog-msg] API error:', err);
+    } else {
+      console.log(`[catalog-msg] ✅ Sent to ${toNumber}`);
+    }
+  } catch (err) {
+    console.error('[catalog-msg] Failed:', err.message);
+  }
+}
+
+
 // ============================================================================
 // SLOT SCHEDULER — owns is_available
 // Runs SQL updates at slot boundaries to activate/deactivate items by time_slot
@@ -1315,8 +1368,6 @@ app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, async (req
         `Please proceed to your table. Enjoy your meal! 🍽️`;
 
       sendWhatsAppMessage(token.phone, customerMsg);
-      await sendWhatsAppMessage(token.phone, customerMsg);
-      console.log(`[assign] Sending catalog to ${token.phone} for restaurant ${req.restaurant_id}`);
       await sendWhatsAppCatalogMessage(token.phone, req.restaurant_id);
       console.log(`[assign] Catalog sent`);
       }
