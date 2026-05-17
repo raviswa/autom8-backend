@@ -307,6 +307,24 @@ async function applySlotForAllRestaurants() {
 }
 
 function startSlotScheduler() {
+  setInterval(async () => {
+  const cutoff = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(); // 3 hours
+  const { data } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .update({ status: 'completed', completed_at: new Date().toISOString() })
+    .eq('status', 'seated')
+    .lt('seated_at', cutoff)
+    .select('table_id');
+
+  for (const token of data ?? []) {
+    if (token.table_id) {
+      await supabaseAdmin
+        .from('tables')
+        .update({ status: 'available' })
+        .eq('id', token.table_id);
+    }
+  }
+}, 60 * 60 * 1000); // every hour
   let lastAppliedSlot = Symbol('init');  // force run on startup
 
   // Run immediately on startup to set correct slot right away
