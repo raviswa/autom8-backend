@@ -178,7 +178,6 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
       return;
     }
 
-    // Get first available item's retailer_id for thumbnail
     const { data: thumbItem, error: thumbError } = await supabaseAdmin
       .from('menu_items')
       .select('retailer_id')
@@ -295,7 +294,6 @@ async function applySlotForAllRestaurants() {
 }
 
 function startSlotScheduler() {
-  // Auto-complete stale seated tokens every hour
   setInterval(async () => {
     const cutoff = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
     const { data } = await supabaseAdmin
@@ -641,7 +639,7 @@ app.get('/api/kds/feed', authenticateToken, getRestaurantId, async (req, res) =>
   try {
     const { status = 'pending' } = req.query;
     const { data, error } = await supabaseAdmin.from('kds_items')
-      .select(`*, order_item:order_item_id(*, menu_item:menu_item_id(name, description, prep_time_minutes), order:order_id(table:table_id(table_number, section)))`)
+      .select(`*, order_item:order_item_id(*, menu_item:menu_item_id(name, description, prep_time_minutes), order:order_id(table:table_id(table_number, section), order_number))`)
       .eq('restaurant_id', req.restaurant_id)
       .in('status', status === 'all' ? ['pending', 'in_progress', 'ready'] : [status])
       .order('created_at', { ascending: true });
@@ -659,6 +657,50 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
       .update({ status }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
       .select().single();
     if (error) throw error;
+
+    // When all items for an order are ready, notify customer via WhatsApp
+    if (status === 'ready') {
+      try {
+        const { data: kdsItem } = await supabaseAdmin
+          .from('kds_items')
+          .select('order_item:order_item_id(order_id)')
+          .eq('id', req.params.id)
+          .single();
+
+        const orderId = kdsItem?.order_item?.order_id;
+        if (orderId) {
+          const { data: allItems } = await supabaseAdmin
+            .from('kds_items')
+            .select('status, order_item:order_item_id(order_id)')
+            .eq('restaurant_id', req.restaurant_id);
+
+          const orderItems = allItems?.filter(i => i.order_item?.order_id === orderId) ?? [];
+          const allReady = orderItems.length > 0 && orderItems.every(i => i.status === 'ready');
+
+          if (allReady) {
+            const { data: order } = await supabaseAdmin
+              .from('orders')
+              .select('order_number, table:table_id(table_number), walk_in_tokens(phone)')
+              .eq('id', orderId)
+              .single();
+
+            const phone = order?.walk_in_tokens?.[0]?.phone;
+            if (phone) {
+              await sendWhatsAppMessage(phone,
+                `✅ *Your order is ready!*\n\n` +
+                `Order: *${order.order_number}*\n` +
+                `Table: *${order.table?.table_number}*\n\n` +
+                `Your food will be served shortly. Enjoy! 🍽️`
+              );
+            }
+          }
+        }
+      } catch (notifyErr) {
+        // Non-fatal — log but don't fail the status update
+        console.error('[KDS ready notify] Failed:', notifyErr.message);
+      }
+    }
+
     res.json({ success: true, item: data });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -767,7 +809,6 @@ async function generateTokenId(restaurantId) {
   return `T-${String(seq).padStart(3, '0')}`;
 }
 
-// POST /api/tokens — public, called by chatbot and QR form
 app.post('/api/tokens', async (req, res) => {
   try {
     const { name, phone, type, pax, restaurant_id } = req.body;
@@ -790,7 +831,6 @@ app.post('/api/tokens', async (req, res) => {
       .from('walk_in_tokens').insert(tokenRecord).select().single();
     if (insertError) throw insertError;
 
-    // Notify manager via WhatsApp
     if (process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
       const arrivalTime = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
       const typeLabel   = type === 'dinein' ? 'Dine-in' : 'Takeaway';
@@ -812,7 +852,6 @@ app.post('/api/tokens', async (req, res) => {
   }
 });
 
-// GET /api/tokens — protected, manager portal polls every 5s
 app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const { status } = req.query;
@@ -832,7 +871,6 @@ app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
   }
 });
 
-// PUT /api/tokens/:id/assign — manager assigns table, notifies customer + sends catalog
 app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const { table_id, table_number } = req.body;
@@ -853,11 +891,9 @@ app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, async (req
       .select().single();
     if (updateError) throw updateError;
 
-    // Mark table occupied
     await supabaseAdmin.from('tables').update({ status: 'occupied' })
       .eq('id', table_id).eq('restaurant_id', req.restaurant_id);
 
-    // Notify customer — table ready message + catalog
     if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
       const customerMsg =
         `✅ *Your table is ready!*\n\n` +
@@ -887,7 +923,6 @@ app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, async (req
   }
 });
 
-// PUT /api/tokens/:id/complete — manager marks done, frees table
 app.put('/api/tokens/:id/complete', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const { data: token, error: fetchError } = await supabaseAdmin
@@ -920,7 +955,6 @@ app.put('/api/tokens/:id/complete', authenticateToken, getRestaurantId, async (r
   }
 });
 
-// DELETE /api/tokens/:id — manager dismisses token
 app.delete('/api/tokens/:id', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const { error } = await supabaseAdmin.from('walk_in_tokens')
@@ -932,6 +966,260 @@ app.delete('/api/tokens/:id', authenticateToken, getRestaurantId, async (req, re
     res.status(500).json({ error: err.message || 'Failed to dismiss token' });
   }
 });
+
+// ============================================================================
+// WHATSAPP ORDER WEBHOOK
+// Receives customer orders placed via WhatsApp catalog
+// Register this URL in Meta Developer Portal → WhatsApp → Configuration → Webhook
+// Subscribe to the "messages" field
+// ============================================================================
+
+// GET — Meta webhook verification handshake
+app.get('/api/whatsapp/webhook', (req, res) => {
+  const mode      = req.query['hub.mode'];
+  const token     = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
+    console.log('✅ [WA Webhook] Verified');
+    return res.status(200).send(challenge);
+  }
+  console.warn('[WA Webhook] Verification failed — token mismatch');
+  res.status(403).json({ error: 'Forbidden' });
+});
+
+// POST — incoming WhatsApp messages (orders, status updates, etc.)
+app.post('/api/whatsapp/webhook', async (req, res) => {
+  // Always ack immediately — Meta retries if it doesn't get 200 within 20s
+  res.status(200).send('EVENT_RECEIVED');
+
+  try {
+    const body = req.body;
+    if (body.object !== 'whatsapp_business_account') return;
+
+    for (const entry of body.entry ?? []) {
+      for (const change of entry.changes ?? []) {
+        if (change.field !== 'messages') continue;
+
+        const value    = change.value;
+        const metadata = value.metadata; // { phone_number_id, display_phone_number }
+
+        for (const message of value.messages ?? []) {
+          console.log(`[WA Webhook] Message type: ${message.type} from ${message.from}`);
+
+          if (message.type === 'order') {
+            // Customer placed an order via catalog
+            await handleWhatsAppOrder(message, metadata).catch(err =>
+              console.error('[WA Webhook] handleWhatsAppOrder failed:', err.message)
+            );
+          }
+
+          // Log all incoming messages for debugging
+          await supabaseAdmin.from('audit_logs').insert({
+            action: 'WhatsApp message received',
+            details: {
+              type: message.type,
+              from: message.from,
+              phone_number_id: metadata?.phone_number_id,
+              message_id: message.id,
+            },
+          }).catch(() => {}); // non-fatal
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[WA Webhook] Top-level error:', err.message);
+  }
+});
+
+// ----------------------------------------------------------------------------
+// handleWhatsAppOrder
+// Called when Meta delivers a type:"order" webhook (customer checked out)
+// ----------------------------------------------------------------------------
+async function handleWhatsAppOrder(message, metadata) {
+  const customerPhone = message.from;                     // e.g. "919876543210"
+  const productItems  = message.order?.product_items ?? []; // [{ product_retailer_id, quantity, item_price, currency }]
+
+  console.log(`[WA Order] 📦 From ${customerPhone}, items: ${productItems.length}`);
+
+  if (productItems.length === 0) {
+    console.warn('[WA Order] Empty product_items — skipping');
+    return;
+  }
+
+  // 1. Find restaurant by WhatsApp phone_number_id
+  //    Requires a `whatsapp_phone_number_id` column on the restaurants table.
+  //    If you only have one restaurant, you can fall back to RESTAURANT_ID env var.
+  let restaurantId = process.env.DEFAULT_RESTAURANT_ID || null;
+
+  if (metadata?.phone_number_id) {
+    const { data: restaurant } = await supabaseAdmin
+      .from('restaurants')
+      .select('id')
+      .eq('whatsapp_phone_number_id', metadata.phone_number_id)
+      .eq('is_active', true)
+      .single();
+
+    if (restaurant) restaurantId = restaurant.id;
+  }
+
+  if (!restaurantId) {
+    console.error('[WA Order] Could not resolve restaurant for phone_number_id:', metadata?.phone_number_id);
+    return;
+  }
+
+  // 2. Find the customer's active seated token (matched by phone number)
+  //    Phone from Meta arrives without leading +, strip any non-digits to be safe
+  const normalizedPhone = String(customerPhone).replace(/\D/g, '');
+
+  const { data: token } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .select('*')
+    .eq('restaurant_id', restaurantId)
+    .eq('phone', normalizedPhone)
+    .eq('status', 'seated')
+    .order('seated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!token) {
+    console.warn(`[WA Order] No seated token found for phone ${normalizedPhone} — cannot assign table`);
+    await sendWhatsAppMessage(customerPhone,
+      `⚠️ We couldn't find your table assignment.\nPlease ask a staff member for help.`
+    );
+    return;
+  }
+
+  // 3. Create the order record
+  const orderNumber = `ORD-WA-${Date.now()}`;
+
+  const { data: orderData, error: orderError } = await supabaseAdmin
+    .from('orders')
+    .insert({
+      restaurant_id: restaurantId,
+      table_id:      token.table_id,
+      order_number:  orderNumber,
+      status:        'pending',
+      source:        'whatsapp',           // add column: alter table orders add column source text default 'pos';
+    })
+    .select()
+    .single();
+
+  if (orderError) {
+    console.error('[WA Order] Failed to create order:', orderError.message);
+    return;
+  }
+
+  console.log(`[WA Order] ✅ Order created: ${orderNumber} (${orderData.id})`);
+
+  // 4. Process each ordered item → order_items + kds_items
+  let subtotal = 0;
+  const kdsInserts = [];
+
+  for (const item of productItems) {
+    // Match by retailer_id (the SKU you set in Meta catalog)
+    const { data: menuItem } = await supabaseAdmin
+      .from('menu_items')
+      .select('id, name, price')
+      .eq('restaurant_id', restaurantId)
+      .eq('retailer_id', item.product_retailer_id)
+      .maybeSingle();
+
+    if (!menuItem) {
+      console.warn(`[WA Order] ⚠️ No menu item found for retailer_id: ${item.product_retailer_id} — skipping`);
+      continue;
+    }
+
+    const unitPrice = menuItem.price;
+    subtotal += unitPrice * item.quantity;
+
+    const { data: orderItem, error: itemError } = await supabaseAdmin
+      .from('order_items')
+      .insert({
+        order_id:   orderData.id,
+        menu_item_id: menuItem.id,
+        quantity:   item.quantity,
+        unit_price: unitPrice,
+      })
+      .select()
+      .single();
+
+    if (itemError) {
+      console.error(`[WA Order] Failed to insert order_item for ${menuItem.name}:`, itemError.message);
+      continue;
+    }
+
+    kdsInserts.push({
+      restaurant_id: restaurantId,
+      order_item_id: orderItem.id,
+      status:        'pending',
+      priority:      'normal',
+    });
+
+    console.log(`  ➕ ${item.quantity}x ${menuItem.name} @ ₹${unitPrice}`);
+  }
+
+  // 5. Bulk-insert all KDS items
+  if (kdsInserts.length > 0) {
+    const { error: kdsError } = await supabaseAdmin.from('kds_items').insert(kdsInserts);
+    if (kdsError) {
+      console.error('[WA Order] KDS insert failed:', kdsError.message);
+    } else {
+      console.log(`[WA Order] ✅ ${kdsInserts.length} KDS item(s) created — kitchen notified`);
+    }
+  }
+
+  // 6. Update order totals
+  const tax   = subtotal * 0.1;
+  const total = subtotal + tax;
+  await supabaseAdmin
+    .from('orders')
+    .update({ subtotal, tax, total_amount: total })
+    .eq('id', orderData.id);
+
+  // 7. Broadcast to KDS via WebSocket → instant sound alert, no waiting for poll
+  broadcastToRestaurant(restaurantId, {
+    type:         'ORDER_NEW',
+    order_id:     orderData.id,
+    order_number: orderNumber,
+    table_number: token.table_number,
+    source:       'whatsapp',
+    item_count:   kdsInserts.length,
+    timestamp:    new Date().toISOString(),
+  });
+
+  // 8. Notify manager on WhatsApp
+  if (process.env.MANAGER_WHATSAPP_NUMBER) {
+    const itemLines = productItems
+      .map(i => `• ${i.quantity}x ${i.product_retailer_id}`)
+      .join('\n');
+    await sendWhatsAppMessage(
+      process.env.MANAGER_WHATSAPP_NUMBER,
+      `🍽️ *New WhatsApp Order*\n` +
+      `Order: *${orderNumber}*\n` +
+      `Table: *${token.table_number}*\n` +
+      `Customer: ${token.name}\n\n` +
+      `${itemLines}\n\n` +
+      `Total: ₹${total.toFixed(2)}`
+    );
+  }
+
+  // 9. Confirm back to customer
+  await sendWhatsAppMessage(
+    customerPhone,
+    `✅ *Order received!*\n\n` +
+    `Order: *${orderNumber}*\n` +
+    `Table: *Table ${token.table_number}*\n` +
+    `Items: ${kdsInserts.length}\n\n` +
+    `We're preparing your food now. We'll notify you when it's ready! 🍳`
+  );
+
+  await supabaseAdmin.from('audit_logs').insert({
+    restaurant_id: restaurantId,
+    action:        'WhatsApp order created',
+    details:       { order_id: orderData.id, order_number: orderNumber, phone: normalizedPhone, item_count: kdsInserts.length },
+  }).catch(() => {});
+}
 
 // ============================================================================
 // WEBSOCKET
