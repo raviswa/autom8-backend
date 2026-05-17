@@ -1220,15 +1220,13 @@ async function handleWhatsAppOrder(message, metadata) {
     details:       { order_id: orderData.id, order_number: orderNumber, phone: normalizedPhone, item_count: kdsInserts.length },
   }).catch(() => {});
 }
-// ============================================================================
-// ADD THIS BLOCK TO server.js — paste it right before the WEBSOCKET section
-// ============================================================================
 
-// ── KDS INTERNAL NOTIFY ENDPOINT ─────────────────────────────────────────────
+// ============================================================================
+// KDS INTERNAL NOTIFY ENDPOINT
 // Called by munafe (chatbot) when a customer confirms an order.
 // Secured by a shared secret — NOT protected by JWT auth.
-// Inserts kds_items and broadcasts ORDER_NEW via WebSocket.
-// ─────────────────────────────────────────────────────────────────────────────
+// Inserts kds_items (with special_notes) and broadcasts ORDER_NEW via WebSocket.
+// ============================================================================
 
 app.post('/api/kds/notify', async (req, res) => {
   try {
@@ -1241,7 +1239,7 @@ app.post('/api/kds/notify', async (req, res) => {
       table_number,
       service_type,
       special_notes,   // customer preferences e.g. "less spicy, no onion"
-      items,
+      items,           // [{ retailer_id, name, qty, unit_price }]
     } = req.body;
 
     // ── Shared-secret guard ────────────────────────────────────────────────
@@ -1286,14 +1284,13 @@ app.post('/api/kds/notify', async (req, res) => {
       return res.status(500).json({ error: orderError.message });
     }
 
-    // ── Process each item ─────────────────────────────────────────────────
-    let subtotal     = 0;
-    let kdsCreated   = 0;
+    // ── Process each item ──────────────────────────────────────────────────
+    let subtotal   = 0;
+    let kdsCreated = 0;
     const kdsInserts = [];
 
     for (const item of items) {
-      // Match menu item by retailer_id; fall back gracefully for manual items
-      let menuItemId   = null;
+      let menuItemId    = null;
       let resolvedPrice = item.unit_price || 0;
 
       if (item.retailer_id && item.retailer_id !== 'manual') {
@@ -1315,11 +1312,11 @@ app.post('/api/kds/notify', async (req, res) => {
       const { data: orderItem, error: itemError } = await supabaseAdmin
         .from('order_items')
         .insert({
-          order_id:      orderData.id,
-          menu_item_id:  menuItemId,         // null is fine for manual items
-          quantity:      item.qty || 1,
-          unit_price:    resolvedPrice,
-          special_instructions: item.name,   // store item name as note for manual items
+          order_id:             orderData.id,
+          menu_item_id:         menuItemId,
+          quantity:             item.qty || 1,
+          unit_price:           resolvedPrice,
+          special_instructions: item.name,   // item name stored as note for manual items
         })
         .select()
         .single();
@@ -1331,14 +1328,14 @@ app.post('/api/kds/notify', async (req, res) => {
 
       kdsInserts.push({
         restaurant_id,
-        order_item_id: orderItem.id,
-        status:        'pending',
-        priority:      'normal',
-        special_instructions: special_notes || null,  // customer preferences shown on KDS card
+        order_item_id:        orderItem.id,
+        status:               'pending',
+        priority:             'normal',
+        special_instructions: special_notes || null,  // ⚠️ customer preferences shown on KDS card
       });
     }
 
-    // ── Bulk insert KDS items ─────────────────────────────────────────────
+    // ── Bulk insert KDS items ──────────────────────────────────────────────
     if (kdsInserts.length > 0) {
       const { error: kdsError } = await supabaseAdmin
         .from('kds_items')
@@ -1352,7 +1349,7 @@ app.post('/api/kds/notify', async (req, res) => {
       }
     }
 
-    // ── Update order totals ───────────────────────────────────────────────
+    // ── Update order totals ────────────────────────────────────────────────
     const tax   = subtotal * 0.1;
     const total = subtotal + tax;
     await supabaseAdmin
@@ -1360,33 +1357,37 @@ app.post('/api/kds/notify', async (req, res) => {
       .update({ subtotal, tax, total_amount: total })
       .eq('id', orderData.id);
 
-    // ── WebSocket broadcast → KDS screen updates instantly ────────────────
+    // ── WebSocket broadcast → KDS screen updates instantly ─────────────────
     broadcastToRestaurant(restaurant_id, {
-      type:             'ORDER_NEW',
-      order_id:         orderData.id,
-      order_number:     orderNumber,
-      token_number:     token_number,
-      table_number:     table_number || null,
-      customer_name:    customer_name,
-      service_type:     service_type || 'whatsapp',
-      kds_items_count:  kdsCreated,
-      source:           'whatsapp',
-      timestamp:        new Date().toISOString(),
+      type:            'ORDER_NEW',
+      order_id:        orderData.id,
+      order_number:    orderNumber,
+      token_number:    token_number,
+      table_number:    table_number || null,
+      customer_name:   customer_name,
+      service_type:    service_type || 'whatsapp',
+      kds_items_count: kdsCreated,
+      special_notes:   special_notes || null,
+      source:          'whatsapp',
+      timestamp:       new Date().toISOString(),
     });
 
-    // ── Log to audit ──────────────────────────────────────────────────────
-    await supabaseAdmin.from('audit_logs').insert({
-      restaurant_id,
-      action:  'KDS notified via WhatsApp order',
-      details: {
-        order_id:         orderData.id,
-        order_number:     orderNumber,
-        token_number,
-        table_number,
-        customer_phone,
-        kds_items_created: kdsCreated,
-      },
-    }).catch(() => {});
+    // ── Log to audit (no .catch — use try/catch instead) ───────────────────
+    try {
+      await supabaseAdmin.from('audit_logs').insert({
+        restaurant_id,
+        action:  'KDS notified via WhatsApp order',
+        details: {
+          order_id:          orderData.id,
+          order_number:      orderNumber,
+          token_number,
+          table_number,
+          customer_phone,
+          kds_items_created: kdsCreated,
+          special_notes:     special_notes || null,
+        },
+      });
+    } catch (_) { /* non-fatal */ }
 
     res.json({
       success:           true,
