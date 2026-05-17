@@ -1220,7 +1220,6 @@ async function handleWhatsAppOrder(message, metadata) {
     details:       { order_id: orderData.id, order_number: orderNumber, phone: normalizedPhone, item_count: kdsInserts.length },
   }).catch(() => {});
 }
-
 // ============================================================================
 // ADD THIS BLOCK TO server.js — paste it right before the WEBSOCKET section
 // ============================================================================
@@ -1241,7 +1240,8 @@ app.post('/api/kds/notify', async (req, res) => {
       token_number,
       table_number,
       service_type,
-      items,           // [{ retailer_id, name, qty, unit_price }]
+      special_notes,   // customer preferences e.g. "less spicy, no onion"
+      items,
     } = req.body;
 
     // ── Shared-secret guard ────────────────────────────────────────────────
@@ -1334,6 +1334,7 @@ app.post('/api/kds/notify', async (req, res) => {
         order_item_id: orderItem.id,
         status:        'pending',
         priority:      'normal',
+        special_instructions: special_notes || null,  // customer preferences shown on KDS card
       });
     }
 
@@ -1399,7 +1400,6 @@ app.post('/api/kds/notify', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 
 // ============================================================================
 // WEBSOCKET
