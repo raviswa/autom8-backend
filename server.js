@@ -1222,6 +1222,186 @@ async function handleWhatsAppOrder(message, metadata) {
 }
 
 // ============================================================================
+// ADD THIS BLOCK TO server.js — paste it right before the WEBSOCKET section
+// ============================================================================
+
+// ── KDS INTERNAL NOTIFY ENDPOINT ─────────────────────────────────────────────
+// Called by munafe (chatbot) when a customer confirms an order.
+// Secured by a shared secret — NOT protected by JWT auth.
+// Inserts kds_items and broadcasts ORDER_NEW via WebSocket.
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.post('/api/kds/notify', async (req, res) => {
+  try {
+    const {
+      secret,
+      restaurant_id,
+      customer_name,
+      customer_phone,
+      token_number,
+      table_number,
+      service_type,
+      items,           // [{ retailer_id, name, qty, unit_price }]
+    } = req.body;
+
+    // ── Shared-secret guard ────────────────────────────────────────────────
+    const expected = process.env.AUTOM8_KDS_SECRET || 'munafe_kds_sync_2026';
+    if (secret !== expected) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    if (!restaurant_id || !items || items.length === 0) {
+      return res.status(400).json({ error: 'restaurant_id and items are required' });
+    }
+
+    const orderNumber = `ORD-WA-${Date.now()}`;
+
+    // ── Find table_id from table_number (if provided) ──────────────────────
+    let tableId = null;
+    if (table_number) {
+      const { data: tableRow } = await supabaseAdmin
+        .from('tables')
+        .select('id')
+        .eq('restaurant_id', restaurant_id)
+        .eq('table_number', String(table_number))
+        .maybeSingle();
+      if (tableRow) tableId = tableRow.id;
+    }
+
+    // ── Create order record ────────────────────────────────────────────────
+    const { data: orderData, error: orderError } = await supabaseAdmin
+      .from('orders')
+      .insert({
+        restaurant_id,
+        table_id:     tableId,
+        order_number: orderNumber,
+        status:       'pending',
+        source:       'whatsapp',
+      })
+      .select()
+      .single();
+
+    if (orderError) {
+      console.error('[kds-notify] Order insert failed:', orderError.message);
+      return res.status(500).json({ error: orderError.message });
+    }
+
+    // ── Process each item ─────────────────────────────────────────────────
+    let subtotal     = 0;
+    let kdsCreated   = 0;
+    const kdsInserts = [];
+
+    for (const item of items) {
+      // Match menu item by retailer_id; fall back gracefully for manual items
+      let menuItemId   = null;
+      let resolvedPrice = item.unit_price || 0;
+
+      if (item.retailer_id && item.retailer_id !== 'manual') {
+        const { data: menuItem } = await supabaseAdmin
+          .from('menu_items')
+          .select('id, price')
+          .eq('restaurant_id', restaurant_id)
+          .eq('retailer_id', item.retailer_id)
+          .maybeSingle();
+
+        if (menuItem) {
+          menuItemId    = menuItem.id;
+          resolvedPrice = menuItem.price;
+        }
+      }
+
+      subtotal += resolvedPrice * (item.qty || 1);
+
+      const { data: orderItem, error: itemError } = await supabaseAdmin
+        .from('order_items')
+        .insert({
+          order_id:      orderData.id,
+          menu_item_id:  menuItemId,         // null is fine for manual items
+          quantity:      item.qty || 1,
+          unit_price:    resolvedPrice,
+          special_instructions: item.name,   // store item name as note for manual items
+        })
+        .select()
+        .single();
+
+      if (itemError) {
+        console.error(`[kds-notify] order_item insert failed for ${item.name}:`, itemError.message);
+        continue;
+      }
+
+      kdsInserts.push({
+        restaurant_id,
+        order_item_id: orderItem.id,
+        status:        'pending',
+        priority:      'normal',
+      });
+    }
+
+    // ── Bulk insert KDS items ─────────────────────────────────────────────
+    if (kdsInserts.length > 0) {
+      const { error: kdsError } = await supabaseAdmin
+        .from('kds_items')
+        .insert(kdsInserts);
+
+      if (kdsError) {
+        console.error('[kds-notify] kds_items insert failed:', kdsError.message);
+      } else {
+        kdsCreated = kdsInserts.length;
+        console.log(`[kds-notify] ✅ ${kdsCreated} KDS item(s) created — order ${orderNumber}`);
+      }
+    }
+
+    // ── Update order totals ───────────────────────────────────────────────
+    const tax   = subtotal * 0.1;
+    const total = subtotal + tax;
+    await supabaseAdmin
+      .from('orders')
+      .update({ subtotal, tax, total_amount: total })
+      .eq('id', orderData.id);
+
+    // ── WebSocket broadcast → KDS screen updates instantly ────────────────
+    broadcastToRestaurant(restaurant_id, {
+      type:             'ORDER_NEW',
+      order_id:         orderData.id,
+      order_number:     orderNumber,
+      token_number:     token_number,
+      table_number:     table_number || null,
+      customer_name:    customer_name,
+      service_type:     service_type || 'whatsapp',
+      kds_items_count:  kdsCreated,
+      source:           'whatsapp',
+      timestamp:        new Date().toISOString(),
+    });
+
+    // ── Log to audit ──────────────────────────────────────────────────────
+    await supabaseAdmin.from('audit_logs').insert({
+      restaurant_id,
+      action:  'KDS notified via WhatsApp order',
+      details: {
+        order_id:         orderData.id,
+        order_number:     orderNumber,
+        token_number,
+        table_number,
+        customer_phone,
+        kds_items_created: kdsCreated,
+      },
+    }).catch(() => {});
+
+    res.json({
+      success:           true,
+      order_id:          orderData.id,
+      order_number:      orderNumber,
+      kds_items_created: kdsCreated,
+    });
+
+  } catch (err) {
+    console.error('[kds-notify] Unexpected error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ============================================================================
 // WEBSOCKET
 // ============================================================================
 
