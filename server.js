@@ -867,14 +867,29 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
 // ============================================================================
 
 async function generateTokenId(restaurantId) {
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-  const { count, error } = await supabaseAdmin
-    .from('walk_in_tokens').select('*', { count: 'exact', head: true })
-    .eq('restaurant_id', restaurantId).gte('arrived_at', todayStart.toISOString());
-  if (error) console.error('[generateTokenId] count query failed:', error.message);
-  const seq = (count ?? 0) + 1;
-  return `T-${String(seq).padStart(3, '0')}`;
+  // Fix: use ALL-TIME count to avoid duplicate key collisions with existing tokens.
+  // Previous approach used today-only count which always returned 0 since existing
+  // tokens were created on prior days, causing T-001 duplicate key errors.
+  let attempts = 0;
+  while (attempts < 10) {
+    const { count, error } = await supabaseAdmin
+      .from('walk_in_tokens').select('*', { count: 'exact', head: true })
+      .eq('restaurant_id', restaurantId);
+    if (error) console.error('[generateTokenId] count query failed:', error.message);
+    const seq = (count ?? 0) + 1 + attempts;
+    const candidate = `T-${String(seq).padStart(3, '0')}`;
+    // Verify this ID doesn't already exist
+    const { data: existing } = await supabaseAdmin
+      .from('walk_in_tokens').select('id').eq('id', candidate).maybeSingle();
+    if (!existing) {
+      console.log(`[generateTokenId] Generated: ${candidate} (attempt ${attempts + 1})`);
+      return candidate;
+    }
+    console.warn(`[generateTokenId] ${candidate} already exists, trying next...`);
+    attempts++;
+  }
+  // Final fallback: timestamp-based ID
+  return `T-${Date.now().toString().slice(-6)}`;
 }
 
 // POST /api/tokens — public, called by WhatsApp bot and WalkInForm
@@ -930,12 +945,23 @@ app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
 
     console.log(`[GET /api/tokens] restaurant_id=${req.restaurant_id} status=${status || 'all'} from=${todayStart.toISOString()}`);
 
-    let query = supabaseAdmin.from('walk_in_tokens').select('*')
-      .eq('restaurant_id', req.restaurant_id)
-      .gte('arrived_at', todayStart.toISOString())
-      .order('arrived_at', { ascending: true });
-
-    if (status) query = query.eq('status', status);
+    // Show active tokens (waiting/seated/takeaway) regardless of date,
+    // PLUS completed tokens from today only (for audit trail)
+    let query;
+    if (status) {
+      // Specific status requested — filter by it, today only
+      query = supabaseAdmin.from('walk_in_tokens').select('*')
+        .eq('restaurant_id', req.restaurant_id)
+        .eq('status', status)
+        .gte('arrived_at', todayStart.toISOString())
+        .order('arrived_at', { ascending: true });
+    } else {
+      // No status filter — show all active tokens (any date) + today's completed
+      query = supabaseAdmin.from('walk_in_tokens').select('*')
+        .eq('restaurant_id', req.restaurant_id)
+        .or(`status.in.(waiting,seated,takeaway),and(status.eq.completed,arrived_at.gte.${todayStart.toISOString()})`)
+        .order('arrived_at', { ascending: true });
+    }
 
     const { data, error } = await query;
     if (error) {
@@ -943,16 +969,7 @@ app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
       throw error;
     }
 
-    // Fix 7: log result so we can see what's returned in Railway logs
     console.log(`[GET /api/tokens] Found ${data?.length ?? 0} token(s) for restaurant ${req.restaurant_id}`);
-    if (data?.length === 0) {
-      // Extra diagnostic: check if any tokens exist at all (ignoring date filter)
-      const { count: totalCount } = await supabaseAdmin
-        .from('walk_in_tokens')
-        .select('*', { count: 'exact', head: true })
-        .eq('restaurant_id', req.restaurant_id);
-      console.log(`[GET /api/tokens] Total tokens ever for this restaurant: ${totalCount ?? 0}`);
-    }
 
     res.json({ success: true, tokens: data || [] });
   } catch (err) {
