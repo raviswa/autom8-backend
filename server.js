@@ -15,6 +15,8 @@
 //            in Railway logs with the reason
 //  Fix 8  — getRestaurantId: explicit 401 with reason when user not found
 //            instead of silent failure that left req.restaurant_id undefined
+//  Fix D  — generateTokenId: use MAX(numeric suffix) instead of COUNT(*) so
+//            deleted/dismissed tokens never cause a duplicate-key 23505 crash
 // ============================================================================
 
 const express   = require('express');
@@ -81,7 +83,6 @@ const getRestaurantId = async (req, res, next) => {
       .single();
 
     if (error) {
-      // Fix 8: log the actual error so it's visible in Railway logs
       console.error(`[getRestaurantId] DB error for user ${req.user.sub}:`, error.message);
       return res.status(401).json({ error: `User lookup failed: ${error.message}` });
     }
@@ -92,9 +93,7 @@ const getRestaurantId = async (req, res, next) => {
     }
 
     if (!data.restaurant_id) {
-      // Fix 6: fallback — try to find restaurant by matching the hardcoded portal restaurant
       console.warn(`[getRestaurantId] User ${req.user.sub} has no restaurant_id in users table`);
-      // Use the default restaurant if only one exists
       const { data: restaurants } = await supabaseAdmin
         .from('restaurants')
         .select('id')
@@ -863,47 +862,68 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
 
 // ============================================================================
 // WALK-IN TOKEN SYSTEM
-// Fix 6: GET /api/tokens now logs clearly why tokens may be empty
 // ============================================================================
 
+// Fix D: generateTokenId uses MAX(numeric suffix) instead of COUNT(*).
+// COUNT(*) broke when tokens were deleted/dismissed — the next candidate
+// (count+1) could already exist, causing a Postgres 23505 duplicate-key
+// error and a 500 from POST /api/tokens. Using MAX ensures the sequence
+// always starts above the highest token used today, regardless of gaps.
 async function generateTokenId(restaurantId) {
-  // Token IDs reset daily (T-001 each morning).
-  // Uses today's date as part of uniqueness check to avoid collisions
-  // with previous days' tokens that share the same T-00N format.
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
 
-  // Count only today's tokens for the sequence number
-  const { count: todayCount, error: countError } = await supabaseAdmin
+  // Fetch all of today's token IDs for this restaurant.
+  const { data: todayTokens, error: fetchError } = await supabaseAdmin
     .from('walk_in_tokens')
-    .select('*', { count: 'exact', head: true })
+    .select('id')
     .eq('restaurant_id', restaurantId)
     .gte('arrived_at', todayStart.toISOString());
 
-  if (countError) console.error('[generateTokenId] count query failed:', countError.message);
+  if (fetchError) {
+    console.error('[generateTokenId] fetch error:', fetchError.message);
+  }
 
-  let attempts = 0;
-  while (attempts < 20) {
-    const seq = (todayCount ?? 0) + 1 + attempts;
+  // Find the highest numeric suffix used today.
+  let maxSeq = 0;
+  for (const row of todayTokens ?? []) {
+    const match = String(row.id).match(/^T-(\d+)$/);
+    if (match) {
+      const n = parseInt(match[1], 10);
+      if (n > maxSeq) maxSeq = n;
+    }
+  }
+
+  // Build a Set of all today's ids for fast in-memory collision check.
+  const usedToday = new Set((todayTokens ?? []).map(r => r.id));
+
+  // Try candidates starting from maxSeq+1.
+  const MAX_ATTEMPTS = 20;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const seq       = maxSeq + 1 + attempt;
     const candidate = `T-${String(seq).padStart(3, '0')}`;
 
-    // Verify uniqueness — only check today's tokens (yesterday's T-001 is fine to reuse tomorrow)
-    const { data: existing } = await supabaseAdmin
-      .from('walk_in_tokens')
-      .select('id')
-      .eq('id', candidate)
-      .gte('arrived_at', todayStart.toISOString())
-      .maybeSingle();
+    if (!usedToday.has(candidate)) {
+      // DB-level uniqueness check guards against parallel requests.
+      const { data: existing } = await supabaseAdmin
+        .from('walk_in_tokens')
+        .select('id')
+        .eq('id', candidate)
+        .gte('arrived_at', todayStart.toISOString())
+        .maybeSingle();
 
-    if (!existing) {
-      console.log(`[generateTokenId] Generated: ${candidate} for today (attempt ${attempts + 1})`);
-      return candidate;
+      if (!existing) {
+        console.log(`[generateTokenId] Generated: ${candidate} (maxSeq=${maxSeq}, attempt=${attempt + 1})`);
+        return candidate;
+      }
+      console.warn(`[generateTokenId] ${candidate} taken (race), trying next...`);
     }
-    console.warn(`[generateTokenId] ${candidate} already used today, trying next...`);
-    attempts++;
   }
-  // Fallback: timestamp suffix
-  return `T-${Date.now().toString().slice(-6)}`;
+
+  // Fallback: timestamp suffix — guaranteed unique.
+  const fallback = `T-${Date.now().toString().slice(-6)}`;
+  console.warn(`[generateTokenId] All ${MAX_ATTEMPTS} candidates exhausted, using fallback: ${fallback}`);
+  return fallback;
 }
 
 // POST /api/tokens — public, called by WhatsApp bot and WalkInForm
@@ -950,7 +970,6 @@ app.post('/api/tokens', async (req, res) => {
 });
 
 // GET /api/tokens — authenticated, manager portal queue
-// Fix 6+7: verbose logging so Railway logs show exactly why queue is empty
 app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const { status } = req.query;
@@ -959,18 +978,14 @@ app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
 
     console.log(`[GET /api/tokens] restaurant_id=${req.restaurant_id} status=${status || 'all'} from=${todayStart.toISOString()}`);
 
-    // Show active tokens (waiting/seated/takeaway) regardless of date,
-    // PLUS completed tokens from today only (for audit trail)
     let query;
     if (status) {
-      // Specific status requested — filter by it, today only
       query = supabaseAdmin.from('walk_in_tokens').select('*')
         .eq('restaurant_id', req.restaurant_id)
         .eq('status', status)
         .gte('arrived_at', todayStart.toISOString())
         .order('arrived_at', { ascending: true });
     } else {
-      // No status filter — show all active tokens (any date) + today's completed
       query = supabaseAdmin.from('walk_in_tokens').select('*')
         .eq('restaurant_id', req.restaurant_id)
         .or(`status.in.(waiting,seated,takeaway),and(status.eq.completed,arrived_at.gte.${todayStart.toISOString()})`)
@@ -992,8 +1007,7 @@ app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
   }
 });
 
-// GET /api/tokens/:id — public endpoint so munafe bot can check table assignment
-// Called by booking_agent.py when customer messages while awaiting_table_assignment
+// GET /api/tokens/:id — public, bot uses this to check table assignment
 app.get('/api/tokens/:id', async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
