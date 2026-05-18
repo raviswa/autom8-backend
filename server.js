@@ -56,6 +56,67 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+// ============================================================================
+// FEATURE CONSTANTS — mirrors db/models.py Feature class
+// ============================================================================
+
+const FEATURES = {
+  TOKEN_MANAGEMENT: 'token_management',
+  DINE_IN:          'dine_in',
+  TAKEAWAY:         'takeaway',
+  DELIVERY:         'delivery',
+  RESERVE_TABLE:    'reserve_table',
+};
+
+// In-process feature cache: restaurant_id -> { features, ts }
+const _featureCache = new Map();
+const FEATURE_CACHE_TTL = 300_000; // 5 minutes
+
+async function getRestaurantFeatures(restaurantId) {
+  const cached = _featureCache.get(restaurantId);
+  if (cached && Date.now() - cached.ts < FEATURE_CACHE_TTL) return cached.features;
+
+  const { data, error } = await supabaseAdmin
+    .from('restaurants')
+    .select('subscribed_features')
+    .eq('id', restaurantId)
+    .single();
+
+  const features = (!error && data?.subscribed_features) ? data.subscribed_features : [];
+  _featureCache.set(restaurantId, { features, ts: Date.now() });
+  return features;
+}
+
+function invalidateFeatureCache(restaurantId) {
+  _featureCache.delete(restaurantId);
+}
+
+// Express middleware: attach feature list to req for downstream use
+async function resolveFeatures(req, res, next) {
+  if (!req.restaurant_id) return next();
+  try {
+    req.features = await getRestaurantFeatures(req.restaurant_id);
+  } catch (err) {
+    req.features = [];
+  }
+  next();
+}
+
+// Express middleware: gate a route behind a feature subscription
+function requireFeature(feature) {
+  return async (req, res, next) => {
+    const features = req.features || await getRestaurantFeatures(req.restaurant_id);
+    if (!features.includes(feature)) {
+      return res.status(403).json({
+        error: `Feature '${feature}' is not enabled for this restaurant.`,
+        feature,
+        code: 'FEATURE_NOT_SUBSCRIBED',
+      });
+    }
+    next();
+  };
+}
+
 app.use(cors({
   origin: [
     'http://localhost:3000',
@@ -88,6 +149,9 @@ const authenticateToken = async (req, res, next) => {
 };
 
 // Fix 6 + Fix 8: robust restaurant_id resolution with clear error messages
+// Note: resolveFeatures is chained after getRestaurantId in each route
+// that needs feature checks. It reads req.restaurant_id set by getRestaurantId.
+
 const getRestaurantId = async (req, res, next) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -133,6 +197,66 @@ const getRestaurantId = async (req, res, next) => {
 // ============================================================================
 // HEALTH CHECK
 // ============================================================================
+
+// ============================================================================
+// SUBSCRIPTION MANAGEMENT ENDPOINTS
+// ============================================================================
+
+// GET current subscription info
+app.get('/api/subscription', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { data: restaurant, error } = await supabaseAdmin
+      .from('restaurants')
+      .select('subscribed_features')
+      .eq('id', req.restaurant_id)
+      .single();
+    if (error) throw error;
+
+    const { data: sub } = await supabaseAdmin
+      .from('restaurant_subscriptions')
+      .select('*')
+      .eq('restaurant_id', req.restaurant_id)
+      .single();
+
+    res.json({
+      success: true,
+      subscribed_features: restaurant.subscribed_features || [],
+      subscription: sub || null,
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// PUT update subscribed features (owner only)
+app.put('/api/subscription/features', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'owner') return res.status(403).json({ error: 'Owner only' });
+
+    const { features } = req.body;
+    const VALID = Object.values(FEATURES);
+    const invalid = features.filter(f => !VALID.includes(f));
+    if (invalid.length) return res.status(400).json({ error: `Invalid features: ${invalid.join(', ')}` });
+    if (features.length < 2) return res.status(400).json({ error: 'At least 2 features required' });
+
+    const { error } = await supabaseAdmin
+      .from('restaurants')
+      .update({ subscribed_features: features })
+      .eq('id', req.restaurant_id);
+    if (error) throw error;
+
+    await supabaseAdmin
+      .from('restaurant_subscriptions')
+      .update({ features })
+      .eq('restaurant_id', req.restaurant_id);
+
+    invalidateFeatureCache(req.restaurant_id);
+
+    res.json({ success: true, subscribed_features: features });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime() });
@@ -613,7 +737,20 @@ app.put('/api/menu-items/:id/availability', authenticateToken, getRestaurantId, 
 // ORDERS ENDPOINTS
 // ============================================================================
 
-app.get('/api/orders', authenticateToken, getRestaurantId, async (req, res) => {
+// Orders are accessible if restaurant has ANY order feature
+async function requireAnyOrderFeature(req, res, next) {
+  const features = req.features || await getRestaurantFeatures(req.restaurant_id);
+  const orderFeatures = [FEATURES.DINE_IN, FEATURES.TAKEAWAY, FEATURES.DELIVERY];
+  if (!orderFeatures.some(f => features.includes(f))) {
+    return res.status(403).json({
+      error: 'Ordering features (dine_in, takeaway, or delivery) are not enabled for this restaurant.',
+      code: 'FEATURE_NOT_SUBSCRIBED',
+    });
+  }
+  next();
+}
+
+app.get('/api/orders', authenticateToken, getRestaurantId, requireAnyOrderFeature, async (req, res) => {
   try {
     const { status, limit = 50, offset = 0 } = req.query;
     let query = supabaseAdmin.from('orders')
@@ -630,7 +767,7 @@ app.get('/api/orders', authenticateToken, getRestaurantId, async (req, res) => {
   }
 });
 
-app.get('/api/orders/:id', authenticateToken, getRestaurantId, async (req, res) => {
+app.get('/api/orders/:id', authenticateToken, getRestaurantId, requireAnyOrderFeature, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin.from('orders')
       .select(`*, table:table_id(table_number, section), order_items(*, menu_item:menu_item_id(name, category, price)), payments(*)`)
@@ -642,7 +779,7 @@ app.get('/api/orders/:id', authenticateToken, getRestaurantId, async (req, res) 
   }
 });
 
-app.post('/api/orders', authenticateToken, getRestaurantId, async (req, res) => {
+app.post('/api/orders', authenticateToken, getRestaurantId, requireAnyOrderFeature, async (req, res) => {
   try {
     if (req.user_role !== 'manager' && req.user_role !== 'owner')
       return res.status(403).json({ error: 'Unauthorized' });
@@ -681,7 +818,7 @@ app.post('/api/orders', authenticateToken, getRestaurantId, async (req, res) => 
   }
 });
 
-app.put('/api/orders/:id/status', authenticateToken, getRestaurantId, async (req, res) => {
+app.put('/api/orders/:id/status', authenticateToken, getRestaurantId, requireAnyOrderFeature, async (req, res) => {
   try {
     const { status } = req.body;
     const { data, error } = await supabaseAdmin.from('orders')
@@ -698,7 +835,7 @@ app.put('/api/orders/:id/status', authenticateToken, getRestaurantId, async (req
   }
 });
 
-app.delete('/api/orders/:id', authenticateToken, getRestaurantId, async (req, res) => {
+app.delete('/api/orders/:id', authenticateToken, getRestaurantId, requireAnyOrderFeature, async (req, res) => {
   try {
     if (req.user_role !== 'manager' && req.user_role !== 'owner')
       return res.status(403).json({ error: 'Unauthorized' });
@@ -1007,7 +1144,7 @@ app.post('/api/tokens', async (req, res) => {
 });
 
 // GET /api/tokens — authenticated, manager portal queue
-app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
+app.get('/api/tokens', authenticateToken, getRestaurantId, requireFeature(FEATURES.TOKEN_MANAGEMENT), async (req, res) => {
   try {
     const { status } = req.query;
     const todayStart = new Date();
@@ -1059,7 +1196,7 @@ app.get('/api/tokens/:id', async (req, res) => {
   }
 });
 
-app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, async (req, res) => {
+app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, requireFeature(FEATURES.TOKEN_MANAGEMENT), async (req, res) => {
   try {
     const { table_id, table_number } = req.body;
     if (!table_id || !table_number)
@@ -1110,7 +1247,7 @@ app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, async (req
   }
 });
 
-app.put('/api/tokens/:id/complete', authenticateToken, getRestaurantId, async (req, res) => {
+app.put('/api/tokens/:id/complete', authenticateToken, getRestaurantId, requireFeature(FEATURES.TOKEN_MANAGEMENT), async (req, res) => {
   try {
     const { data: token, error: fetchError } = await supabaseAdmin
       .from('walk_in_tokens').select('*')
@@ -1142,7 +1279,7 @@ app.put('/api/tokens/:id/complete', authenticateToken, getRestaurantId, async (r
   }
 });
 
-app.delete('/api/tokens/:id', authenticateToken, getRestaurantId, async (req, res) => {
+app.delete('/api/tokens/:id', authenticateToken, getRestaurantId, requireFeature(FEATURES.TOKEN_MANAGEMENT), async (req, res) => {
   try {
     const { error } = await supabaseAdmin.from('walk_in_tokens')
       .delete().eq('id', req.params.id).eq('restaurant_id', req.restaurant_id);
