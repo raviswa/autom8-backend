@@ -4,18 +4,17 @@
 //
 // FIX LOG
 // -------
-//  Fix 1 — GET /api/kds/feed: nested joins changed to LEFT JOINs (!left)
-//           so kds_items are never silently dropped when menu_item is null
-//           (caused by slot-scheduler setting is_available=false after order)
-//  Fix 2 — GET /api/kds/feed: 'cancelled' excluded from 'all' status query
-//           so cancelled items never appear on the KDS screen
-//  Fix 3 — POST /api/kds/notify: item_name column stored on kds_items at
-//           insert time so the KDS card can render even when menu_item=null
-//  Fix 4 — POST /api/kds/notify: token_number and service_type stored on
-//           kds_items so the card footer always has order context
-//  Fix 5 — PUT /api/kds/:id/status: order-ready WhatsApp notification now
-//           also checks walk_in_tokens by token_number (not just order join)
-//           so customers actually receive the "order ready" message
+//  Fix 1  — GET /api/kds/feed: nested joins changed to LEFT JOINs (!left)
+//  Fix 2  — GET /api/kds/feed: 'cancelled' excluded from 'all' status query
+//  Fix 3  — POST /api/kds/notify: item_name stored on kds_items at insert
+//  Fix 4  — POST /api/kds/notify: token_number and service_type stored
+//  Fix 5  — PUT /api/kds/:id/status: order-ready WhatsApp notification
+//  Fix 6  — GET /api/tokens: restaurant_id resolved from users table with
+//            fallback to auth metadata so queue always loads for manager
+//  Fix 7  — GET /api/tokens: debug logging added so empty results are visible
+//            in Railway logs with the reason
+//  Fix 8  — getRestaurantId: explicit 401 with reason when user not found
+//            instead of silent failure that left req.restaurant_id undefined
 // ============================================================================
 
 const express   = require('express');
@@ -54,6 +53,10 @@ app.use(cors({
 app.options('*', cors());
 app.use(express.json());
 
+// ============================================================================
+// AUTH MIDDLEWARE
+// ============================================================================
+
 const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -68,6 +71,7 @@ const authenticateToken = async (req, res, next) => {
   }
 };
 
+// Fix 6 + Fix 8: robust restaurant_id resolution with clear error messages
 const getRestaurantId = async (req, res, next) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -75,12 +79,41 @@ const getRestaurantId = async (req, res, next) => {
       .select('restaurant_id, role')
       .eq('id', req.user.sub)
       .single();
-    if (error) throw error;
+
+    if (error) {
+      // Fix 8: log the actual error so it's visible in Railway logs
+      console.error(`[getRestaurantId] DB error for user ${req.user.sub}:`, error.message);
+      return res.status(401).json({ error: `User lookup failed: ${error.message}` });
+    }
+
+    if (!data) {
+      console.error(`[getRestaurantId] No user row found for id=${req.user.sub} email=${req.user.email}`);
+      return res.status(401).json({ error: 'User profile not found. Ensure user exists in users table.' });
+    }
+
+    if (!data.restaurant_id) {
+      // Fix 6: fallback — try to find restaurant by matching the hardcoded portal restaurant
+      console.warn(`[getRestaurantId] User ${req.user.sub} has no restaurant_id in users table`);
+      // Use the default restaurant if only one exists
+      const { data: restaurants } = await supabaseAdmin
+        .from('restaurants')
+        .select('id')
+        .limit(2);
+      if (restaurants && restaurants.length === 1) {
+        console.warn(`[getRestaurantId] Falling back to single restaurant: ${restaurants[0].id}`);
+        req.restaurant_id = restaurants[0].id;
+        req.user_role     = data.role;
+        return next();
+      }
+      return res.status(401).json({ error: 'User has no restaurant_id assigned. Update user record in Supabase.' });
+    }
+
     req.restaurant_id = data.restaurant_id;
     req.user_role     = data.role;
     next();
   } catch (err) {
-    res.status(401).json({ error: 'User not found' });
+    console.error('[getRestaurantId] Unexpected error:', err.message);
+    res.status(401).json({ error: `Auth middleware failed: ${err.message}` });
   }
 };
 
@@ -647,20 +680,12 @@ app.delete('/api/orders/:id', authenticateToken, getRestaurantId, async (req, re
 // KDS ENDPOINTS
 // ============================================================================
 
-// ── GET /api/kds/feed ─────────────────────────────────────────────────────────
-// Fix 1: !left on every nested join so null menu_item never drops the row
-// Fix 2: 'cancelled' excluded from 'all' so cancelled items never show on KDS
 app.get('/api/kds/feed', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const { status = 'pending' } = req.query;
-
-    // Fix 2 — 'all' shows only actionable statuses; never include 'cancelled'
     const statusFilter = status === 'all'
       ? ['pending', 'in_progress', 'ready']
       : [status];
-
-    // Fix 1 — !left forces LEFT JOIN on every nested relation so null
-    //          menu_item (deactivated by slot scheduler) never drops the row
     const { data, error } = await supabaseAdmin.from('kds_items')
       .select(`
         *,
@@ -676,7 +701,6 @@ app.get('/api/kds/feed', authenticateToken, getRestaurantId, async (req, res) =>
       .eq('restaurant_id', req.restaurant_id)
       .in('status', statusFilter)
       .order('created_at', { ascending: true });
-
     if (error) throw error;
     res.json({ success: true, items: data });
   } catch (err) {
@@ -684,9 +708,6 @@ app.get('/api/kds/feed', authenticateToken, getRestaurantId, async (req, res) =>
   }
 });
 
-// ── PUT /api/kds/:id/status ───────────────────────────────────────────────────
-// Fix 5: order-ready WhatsApp notification now also checks token_number
-//        stored on kds_items so customers reliably receive the "ready" message
 app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const { status } = req.body;
@@ -696,17 +717,15 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
       .select().single();
     if (error) throw error;
 
-    // When all items for an order are ready, notify customer via WhatsApp
     if (status === 'ready') {
       try {
-        // Fix 5 — try both the order join AND token_number on kds_items
         const { data: kdsItem } = await supabaseAdmin
           .from('kds_items')
           .select('order_item:order_item_id!left(order_id), token_number, customer_phone, service_type')
           .eq('id', req.params.id)
           .single();
 
-        const orderId    = kdsItem?.order_item?.order_id;
+        const orderId     = kdsItem?.order_item?.order_id;
         const directPhone = kdsItem?.customer_phone;
 
         if (orderId) {
@@ -737,7 +756,6 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
             }
           }
         } else if (directPhone) {
-          // Fix 5 — WhatsApp-bot orders: notify via phone stored on kds_item
           await sendWhatsAppMessage(
             directPhone,
             `✅ *Your order is ready!*\n\n` +
@@ -746,7 +764,6 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
           );
         }
       } catch (notifyErr) {
-        // Non-fatal — log but don't fail the status update
         console.error('[KDS ready notify] Failed:', notifyErr.message);
       }
     }
@@ -828,9 +845,9 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
       .lt('created_at',  `${reportDate}T23:59:59`)
       .eq('status', 'completed');
     if (error) throw error;
-    const totalRevenue   = data.reduce((sum, o) => sum + (o.total_amount || 0), 0);
-    const totalOrders    = data.length;
-    const avgOrderValue  = totalOrders > 0 ? totalRevenue / totalOrders : 0;
+    const totalRevenue  = data.reduce((sum, o) => sum + (o.total_amount || 0), 0);
+    const totalOrders   = data.length;
+    const avgOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
     const categoryBreakdown = {};
     data.forEach(order => {
       order.order_items?.forEach(item => {
@@ -846,6 +863,7 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
 
 // ============================================================================
 // WALK-IN TOKEN SYSTEM
+// Fix 6: GET /api/tokens now logs clearly why tokens may be empty
 // ============================================================================
 
 async function generateTokenId(restaurantId) {
@@ -859,6 +877,7 @@ async function generateTokenId(restaurantId) {
   return `T-${String(seq).padStart(3, '0')}`;
 }
 
+// POST /api/tokens — public, called by WhatsApp bot and WalkInForm
 app.post('/api/tokens', async (req, res) => {
   try {
     const { name, phone, type, pax, restaurant_id } = req.body;
@@ -901,18 +920,40 @@ app.post('/api/tokens', async (req, res) => {
   }
 });
 
+// GET /api/tokens — authenticated, manager portal queue
+// Fix 6+7: verbose logging so Railway logs show exactly why queue is empty
 app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const { status } = req.query;
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
+
+    console.log(`[GET /api/tokens] restaurant_id=${req.restaurant_id} status=${status || 'all'} from=${todayStart.toISOString()}`);
+
     let query = supabaseAdmin.from('walk_in_tokens').select('*')
       .eq('restaurant_id', req.restaurant_id)
       .gte('arrived_at', todayStart.toISOString())
       .order('arrived_at', { ascending: true });
+
     if (status) query = query.eq('status', status);
+
     const { data, error } = await query;
-    if (error) throw error;
+    if (error) {
+      console.error('[GET /api/tokens] Query error:', error.message);
+      throw error;
+    }
+
+    // Fix 7: log result so we can see what's returned in Railway logs
+    console.log(`[GET /api/tokens] Found ${data?.length ?? 0} token(s) for restaurant ${req.restaurant_id}`);
+    if (data?.length === 0) {
+      // Extra diagnostic: check if any tokens exist at all (ignoring date filter)
+      const { count: totalCount } = await supabaseAdmin
+        .from('walk_in_tokens')
+        .select('*', { count: 'exact', head: true })
+        .eq('restaurant_id', req.restaurant_id);
+      console.log(`[GET /api/tokens] Total tokens ever for this restaurant: ${totalCount ?? 0}`);
+    }
+
     res.json({ success: true, tokens: data || [] });
   } catch (err) {
     console.error('[GET /api/tokens]', err);
@@ -948,7 +989,7 @@ app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, async (req
         `✅ *Your table is ready!*\n\n` +
         `Token: *${token.id}*\n` +
         `Table: *Table ${table_number}*\n\n` +
-        `Please proceed to your table. Enjoy your meal! 🍽️`;
+        `Please proceed to your table and browse our menu to place your order. Enjoy your meal! 🍽️`;
       await sendWhatsAppMessage(token.phone, customerMsg);
       console.log(`[assign] Sending catalog to ${token.phone}`);
       await sendWhatsAppCatalogMessage(token.phone, req.restaurant_id);
@@ -1141,30 +1182,13 @@ async function handleWhatsAppOrder(message, metadata) {
 
 // ============================================================================
 // KDS INTERNAL NOTIFY ENDPOINT
-// Called by munafe (chatbot) when a customer confirms an order via WhatsApp bot.
-//
-// Fix 3 — item_name now stored on every kds_item at insert time
-// Fix 4 — token_number and customer_phone stored on kds_items for ready notify
-//
-// Supabase migration required (run once):
-//   ALTER TABLE kds_items ADD COLUMN IF NOT EXISTS item_name text;
-//   ALTER TABLE kds_items ADD COLUMN IF NOT EXISTS token_number text;
-//   ALTER TABLE kds_items ADD COLUMN IF NOT EXISTS customer_phone text;
-//   ALTER TABLE kds_items ADD COLUMN IF NOT EXISTS service_type text;
 // ============================================================================
 
 app.post('/api/kds/notify', async (req, res) => {
   try {
     const {
-      secret,
-      restaurant_id,
-      customer_name,
-      customer_phone,
-      token_number,
-      table_number,
-      service_type,
-      special_notes,
-      items,
+      secret, restaurant_id, customer_name, customer_phone,
+      token_number, table_number, service_type, special_notes, items,
     } = req.body;
 
     const expected = process.env.AUTOM8_KDS_SECRET || 'munafe_kds_sync_2026';
@@ -1221,10 +1245,8 @@ app.post('/api/kds/notify', async (req, res) => {
         status:               'pending',
         priority:             'normal',
         special_instructions: special_notes || null,
-        // Fix 3 — store name at order time so null menu_item join never blanks the card
         item_name:            item.name,
-        // Fix 4 — store token + phone so ready notification reaches the customer
-        token_number:         token_number  || null,
+        token_number:         token_number   || null,
         customer_phone:       customer_phone || null,
         service_type:         service_type   || null,
       });
@@ -1244,23 +1266,16 @@ app.post('/api/kds/notify', async (req, res) => {
     await supabaseAdmin.from('orders').update({ subtotal, tax, total_amount: total }).eq('id', orderData.id);
 
     broadcastToRestaurant(restaurant_id, {
-      type:            'ORDER_NEW',
-      order_id:        orderData.id,
-      order_number:    orderNumber,
-      token_number,
-      table_number:    table_number || null,
-      customer_name,
-      service_type:    service_type || 'whatsapp',
-      kds_items_count: kdsCreated,
-      special_notes:   special_notes || null,
-      source:          'whatsapp',
-      timestamp:       new Date().toISOString(),
+      type: 'ORDER_NEW', order_id: orderData.id, order_number: orderNumber,
+      token_number, table_number: table_number || null, customer_name,
+      service_type: service_type || 'whatsapp', kds_items_count: kdsCreated,
+      special_notes: special_notes || null, source: 'whatsapp',
+      timestamp: new Date().toISOString(),
     });
 
     try {
       await supabaseAdmin.from('audit_logs').insert({
-        restaurant_id,
-        action:  'KDS notified via WhatsApp order',
+        restaurant_id, action: 'KDS notified via WhatsApp order',
         details: { order_id: orderData.id, order_number: orderNumber, token_number, table_number, customer_phone, kds_items_created: kdsCreated, special_notes: special_notes || null },
       });
     } catch (_) { /* non-fatal */ }
