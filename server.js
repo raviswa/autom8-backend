@@ -17,6 +17,20 @@
 //            instead of silent failure that left req.restaurant_id undefined
 //  Fix D  — generateTokenId: use MAX(numeric suffix) instead of COUNT(*) so
 //            deleted/dismissed tokens never cause a duplicate-key 23505 crash
+//  Fix P  — syncCatalogFromMeta: price parsing hardened.
+//            Meta always sends price as a STRING like "22000 INR" (paise×100).
+//            After stripping non-numeric chars → 22000 → /100 = ₹220 ✅.
+//            If Meta ever sends a plain number we check its magnitude:
+//              > 100  → treat as paise, divide by 100
+//              ≤ 100  → treat as rupees already, use as-is
+//            This prevents the double-division bug that stored ₹2.20 instead
+//            of ₹220. After deploying this fix, run the SQL repair below once:
+//
+//            -- Run in Supabase SQL editor AFTER verifying prices look ×100 too small:
+//            UPDATE menu_items
+//            SET price = ROUND((price * 100)::numeric, 2)
+//            WHERE restaurant_id = '<your-restaurant-id>'
+//              AND price < 10;   -- safety guard: only touch suspiciously small prices
 // ============================================================================
 
 const express   = require('express');
@@ -382,6 +396,37 @@ app.post('/api/catalog/slot-sync', authenticateToken, getRestaurantId, async (re
 // CATALOG SYNC
 // ============================================================================
 
+// Fix P: parseMetaPrice
+// Meta always sends price as a string e.g. "22000 INR" which means 22000 paise = ₹220.
+// Strip non-numeric chars → "22000" → parseFloat → 22000 → divide by 100 → 220.00 ✅
+// If Meta ever sends a raw number, we check magnitude to avoid double-division:
+//   ≥ 100  → assume paise (e.g. 22000) → divide by 100 → ₹220
+//   < 100  → assume already in rupees (e.g. 50) → use as-is → ₹50
+// This replaces the previous branch that did `product.price / 100` unconditionally
+// for numeric values, which caused ₹220 to be stored as ₹2.20.
+function parseMetaPrice(rawPrice) {
+  if (!rawPrice) return 0;
+
+  if (typeof rawPrice === 'string') {
+    // "22000 INR" → strip everything except digits and dot → "22000" → 220.00
+    const numeric = parseFloat(rawPrice.replace(/[^0-9.]/g, ''));
+    if (isNaN(numeric)) return 0;
+    const result = numeric / 100;
+    console.log(`[parseMetaPrice] string "${rawPrice}" → numeric ${numeric} → ₹${result}`);
+    return result;
+  }
+
+  if (typeof rawPrice === 'number') {
+    // Heuristic: Meta catalog prices in paise are always ≥ 100 for any real item (₹1+)
+    // If the number is already < 100 it's probably already in rupees.
+    const result = rawPrice >= 100 ? rawPrice / 100 : rawPrice;
+    console.log(`[parseMetaPrice] number ${rawPrice} → ₹${result} (${rawPrice >= 100 ? 'paise÷100' : 'already rupees'})`);
+    return result;
+  }
+
+  return 0;
+}
+
 async function syncCatalogFromMeta(restaurantId) {
   const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
   const META_CATALOG_ID   = process.env.META_CATALOG_ID;
@@ -404,22 +449,22 @@ async function syncCatalogFromMeta(restaurantId) {
       nextUrl = data.paging?.next || null;
     }
     console.log(`  📦 Fetched ${allProducts.length} products from Meta`);
+
     let synced = 0, skipped = 0;
     const errors = [];
+
     for (const product of allProducts) {
       try {
-        let price = 0;
-        if (product.price) {
-          price = typeof product.price === 'string'
-            ? parseFloat(product.price.replace(/[^0-9.]/g, '')) / 100
-            : product.price / 100;
-        }
+        // Fix P: use parseMetaPrice instead of the old inline branch
+        const price = parseMetaPrice(product.price);
+
         const SLOT_MAP = {
           'morning tiffin': 'morning_tiffin', 'lunch': 'lunch',
           'evening snacks': 'evening_snacks', 'dinner tiffin': 'dinner_tiffin',
         };
         const rawSlot  = (product.custom_label_0 || '').trim().toLowerCase();
         const timeSlot = SLOT_MAP[rawSlot] || 'all';
+
         const menuItem = {
           restaurant_id:   restaurantId,
           name:            product.name?.trim(),
@@ -432,6 +477,7 @@ async function syncCatalogFromMeta(restaurantId) {
           retailer_id:     product.retailer_id || product.id,
           updated_at:      new Date().toISOString(),
         };
+
         const { error } = await supabaseAdmin.from('menu_items')
           .upsert(menuItem, { onConflict: 'restaurant_id,meta_product_id', ignoreDuplicates: false });
         if (error) throw error;
@@ -442,6 +488,7 @@ async function syncCatalogFromMeta(restaurantId) {
         console.error(`  ⚠️  Skipped product ${product.id}:`, itemError.message);
       }
     }
+
     await applySlotAvailability(restaurantId, getCurrentSlotIST());
     const result = { success: true, synced, skipped, total: allProducts.length, errors: errors.length > 0 ? errors : undefined };
     console.log(`  ✅ Sync complete:`, result);
@@ -865,15 +912,10 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
 // ============================================================================
 
 // Fix D: generateTokenId uses MAX(numeric suffix) instead of COUNT(*).
-// COUNT(*) broke when tokens were deleted/dismissed — the next candidate
-// (count+1) could already exist, causing a Postgres 23505 duplicate-key
-// error and a 500 from POST /api/tokens. Using MAX ensures the sequence
-// always starts above the highest token used today, regardless of gaps.
 async function generateTokenId(restaurantId) {
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
 
-  // Fetch all of today's token IDs for this restaurant.
   const { data: todayTokens, error: fetchError } = await supabaseAdmin
     .from('walk_in_tokens')
     .select('id')
@@ -884,7 +926,6 @@ async function generateTokenId(restaurantId) {
     console.error('[generateTokenId] fetch error:', fetchError.message);
   }
 
-  // Find the highest numeric suffix used today.
   let maxSeq = 0;
   for (const row of todayTokens ?? []) {
     const match = String(row.id).match(/^T-(\d+)$/);
@@ -894,17 +935,14 @@ async function generateTokenId(restaurantId) {
     }
   }
 
-  // Build a Set of all today's ids for fast in-memory collision check.
   const usedToday = new Set((todayTokens ?? []).map(r => r.id));
 
-  // Try candidates starting from maxSeq+1.
   const MAX_ATTEMPTS = 20;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const seq       = maxSeq + 1 + attempt;
     const candidate = `T-${String(seq).padStart(3, '0')}`;
 
     if (!usedToday.has(candidate)) {
-      // DB-level uniqueness check guards against parallel requests.
       const { data: existing } = await supabaseAdmin
         .from('walk_in_tokens')
         .select('id')
@@ -920,7 +958,6 @@ async function generateTokenId(restaurantId) {
     }
   }
 
-  // Fallback: timestamp suffix — guaranteed unique.
   const fallback = `T-${Date.now().toString().slice(-6)}`;
   console.warn(`[generateTokenId] All ${MAX_ATTEMPTS} candidates exhausted, using fallback: ${fallback}`);
   return fallback;
@@ -999,7 +1036,6 @@ app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
     }
 
     console.log(`[GET /api/tokens] Found ${data?.length ?? 0} token(s) for restaurant ${req.restaurant_id}`);
-
     res.json({ success: true, tokens: data || [] });
   } catch (err) {
     console.error('[GET /api/tokens]', err);
