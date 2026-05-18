@@ -3,7 +3,7 @@
 // server.js
 //
 // FIX LOG
-// -------
+// ------
 //  Fix 1  — GET /api/kds/feed: nested joins changed to LEFT JOINs (!left)
 //  Fix 2  — GET /api/kds/feed: 'cancelled' excluded from 'all' status query
 //  Fix 3  — POST /api/kds/notify: item_name stored on kds_items at insert
