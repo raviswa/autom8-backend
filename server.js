@@ -3,7 +3,7 @@
 // server.js
 //
 // FIX LOG
-// ------
+// -------
 //  Fix 1  — GET /api/kds/feed: nested joins changed to LEFT JOINs (!left)
 //  Fix 2  — GET /api/kds/feed: 'cancelled' excluded from 'all' status query
 //  Fix 3  — POST /api/kds/notify: item_name stored on kds_items at insert
@@ -867,28 +867,42 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
 // ============================================================================
 
 async function generateTokenId(restaurantId) {
-  // Fix: use ALL-TIME count to avoid duplicate key collisions with existing tokens.
-  // Previous approach used today-only count which always returned 0 since existing
-  // tokens were created on prior days, causing T-001 duplicate key errors.
+  // Token IDs reset daily (T-001 each morning).
+  // Uses today's date as part of uniqueness check to avoid collisions
+  // with previous days' tokens that share the same T-00N format.
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+
+  // Count only today's tokens for the sequence number
+  const { count: todayCount, error: countError } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .select('*', { count: 'exact', head: true })
+    .eq('restaurant_id', restaurantId)
+    .gte('arrived_at', todayStart.toISOString());
+
+  if (countError) console.error('[generateTokenId] count query failed:', countError.message);
+
   let attempts = 0;
-  while (attempts < 10) {
-    const { count, error } = await supabaseAdmin
-      .from('walk_in_tokens').select('*', { count: 'exact', head: true })
-      .eq('restaurant_id', restaurantId);
-    if (error) console.error('[generateTokenId] count query failed:', error.message);
-    const seq = (count ?? 0) + 1 + attempts;
+  while (attempts < 20) {
+    const seq = (todayCount ?? 0) + 1 + attempts;
     const candidate = `T-${String(seq).padStart(3, '0')}`;
-    // Verify this ID doesn't already exist
+
+    // Verify uniqueness — only check today's tokens (yesterday's T-001 is fine to reuse tomorrow)
     const { data: existing } = await supabaseAdmin
-      .from('walk_in_tokens').select('id').eq('id', candidate).maybeSingle();
+      .from('walk_in_tokens')
+      .select('id')
+      .eq('id', candidate)
+      .gte('arrived_at', todayStart.toISOString())
+      .maybeSingle();
+
     if (!existing) {
-      console.log(`[generateTokenId] Generated: ${candidate} (attempt ${attempts + 1})`);
+      console.log(`[generateTokenId] Generated: ${candidate} for today (attempt ${attempts + 1})`);
       return candidate;
     }
-    console.warn(`[generateTokenId] ${candidate} already exists, trying next...`);
+    console.warn(`[generateTokenId] ${candidate} already used today, trying next...`);
     attempts++;
   }
-  // Final fallback: timestamp-based ID
+  // Fallback: timestamp suffix
   return `T-${Date.now().toString().slice(-6)}`;
 }
 
@@ -975,6 +989,23 @@ app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
   } catch (err) {
     console.error('[GET /api/tokens]', err);
     res.status(400).json({ error: err.message });
+  }
+});
+
+// GET /api/tokens/:id — public endpoint so munafe bot can check table assignment
+// Called by booking_agent.py when customer messages while awaiting_table_assignment
+app.get('/api/tokens/:id', async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .select('id, name, phone, status, type, pax, table_number, table_id, arrived_at, seated_at')
+      .eq('id', req.params.id)
+      .single();
+    if (error || !data) return res.status(404).json({ error: 'Token not found' });
+    res.json({ success: true, token: data });
+  } catch (err) {
+    console.error('[GET /api/tokens/:id]', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
