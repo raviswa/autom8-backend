@@ -1,36 +1,6 @@
 // ============================================================================
 // AUTOM8 BACKEND - MAIN SERVER
 // server.js
-//
-// FIX LOG
-// -------
-//  Fix 1  — GET /api/kds/feed: nested joins changed to LEFT JOINs (!left)
-//  Fix 2  — GET /api/kds/feed: 'cancelled' excluded from 'all' status query
-//  Fix 3  — POST /api/kds/notify: item_name stored on kds_items at insert
-//  Fix 4  — POST /api/kds/notify: token_number and service_type stored
-//  Fix 5  — PUT /api/kds/:id/status: order-ready WhatsApp notification
-//  Fix 6  — GET /api/tokens: restaurant_id resolved from users table with
-//            fallback to auth metadata so queue always loads for manager
-//  Fix 7  — GET /api/tokens: debug logging added so empty results are visible
-//            in Railway logs with the reason
-//  Fix 8  — getRestaurantId: explicit 401 with reason when user not found
-//            instead of silent failure that left req.restaurant_id undefined
-//  Fix D  — generateTokenId: use MAX(numeric suffix) instead of COUNT(*) so
-//            deleted/dismissed tokens never cause a duplicate-key 23505 crash
-//  Fix P  — syncCatalogFromMeta: price parsing hardened.
-//            Meta always sends price as a STRING like "22000 INR" (paise×100).
-//            After stripping non-numeric chars → 22000 → /100 = ₹220 ✅.
-//            If Meta ever sends a plain number we check its magnitude:
-//              > 100  → treat as paise, divide by 100
-//              ≤ 100  → treat as rupees already, use as-is
-//            This prevents the double-division bug that stored ₹2.20 instead
-//            of ₹220. After deploying this fix, run the SQL repair below once:
-//
-//            -- Run in Supabase SQL editor AFTER verifying prices look ×100 too small:
-//            UPDATE menu_items
-//            SET price = ROUND((price * 100)::numeric, 2)
-//            WHERE restaurant_id = '<your-restaurant-id>'
-//              AND price < 10;   -- safety guard: only touch suspiciously small prices
 // ============================================================================
 
 const express   = require('express');
@@ -39,15 +9,7 @@ const dotenv    = require('dotenv');
 const http      = require('http');
 const WebSocket = require('ws');
 const { createClient } = require('@supabase/supabase-js');
-
-// Add near the top where supabase/supabaseAdmin are initialized
 const { createClient: createClientChat } = require('@supabase/supabase-js');
-
-const supabaseChat = createClientChat(
-  process.env.CHAT_SUPABASE_URL,
-  process.env.CHAT_SUPABASE_SERVICE_KEY
-);
-
 
 dotenv.config();
 
@@ -65,151 +27,13 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-
-
-
-// ============================================================================
-// REPLACE the existing app.get('/api/whatsapp-orders', ...) block in server.js
-// with this version — adds start/end date filter from query params
-// ============================================================================
- 
-app.get('/api/whatsapp-orders', async (req, res) => {
-  try {
-    const restaurantId = '46fb9b9e-431a-43c9-9edb-d316b0fef216';
- 
-    // Date range from query params — default to today if not provided
-    const now        = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
-    const start      = req.query.start || todayStart;
-    const end        = req.query.end   || now.toISOString();
- 
-    console.log(`[/api/whatsapp-orders] range: ${start} → ${end}`);
- 
-    const { data: bookings, error: bookingsError } = await supabaseChat
-      .from('bookings')
-      .select(`
-        id,
-        service_type,
-        token_number,
-        status,
-        payment_status,
-        token_advance,
-        created_at,
-        customer:customers(name, phone)
-      `)
-      .eq('restaurant_id', restaurantId)
-      .gte('created_at', start)
-      .lte('created_at', end)
-      .order('created_at', { ascending: false })
-      .limit(100);
- 
-    if (bookingsError) throw bookingsError;
- 
-    console.log(`[/api/whatsapp-orders] bookings found: ${bookings?.length ?? 0}`);
- 
-    const bookingIds = (bookings || []).map(b => b.id);
-    let itemsByBooking = {};
- 
-    if (bookingIds.length > 0) {
-      const { data: orderItems, error: itemsError } = await supabaseChat
-        .from('order_items')
-        .select(`
-          booking_id,
-          quantity,
-          unit_price,
-          menu_item:menu_items(name)
-        `)
-        .in('booking_id', bookingIds);
- 
-      if (itemsError) console.error('[/api/whatsapp-orders] order_items error:', itemsError.message);
- 
-      (orderItems || []).forEach(item => {
-        if (!itemsByBooking[item.booking_id]) itemsByBooking[item.booking_id] = [];
-        itemsByBooking[item.booking_id].push(item);
-      });
-    
- 
-    const orders = (bookings || []).map(b => ({
-      id:             b.id,
-      order_number:   b.token_number || b.id.slice(-6).toUpperCase(),
-      customer_name:  b.customer?.name  ?? 'Unknown',
-      customer_phone: b.customer?.phone ?? null,
-      service_type:   b.service_type,
-      status:         b.status,
-      payment_status: b.payment_status,
-      total_amount:   (itemsByBooking[b.id] || []).reduce(
-                        (s, i) => s + (i.quantity * parseFloat(i.unit_price || 0)), 0
-                      ) || parseFloat(b.token_advance || 0),
-      created_at:     b.created_at,
-      items:          (itemsByBooking[b.id] || []).map(i => ({
-                        name:     i.menu_item?.name ?? 'Item',
-                        quantity: i.quantity,
-                        price:    i.unit_price,
-                      })),
-    }));
- 
-    res.json({ orders });
-  } catch (err) {
-    console.error('[/api/whatsapp-orders]', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-    if (bookingsError) throw bookingsError;
-
-    // Fetch order items for these bookings
-    const bookingIds = (bookings || []).map(b => b.id);
-    let itemsByBooking = {};
-
-    if (bookingIds.length > 0) {
-      const { data: orderItems } = await supabaseChat
-        .from('order_items')
-        .select(`
-          booking_id,
-          quantity,
-          unit_price,
-          menu_item:menu_items(name)
-        `)
-        .in('booking_id', bookingIds);
-
-      (orderItems || []).forEach(item => {
-        if (!itemsByBooking[item.booking_id]) itemsByBooking[item.booking_id] = [];
-        itemsByBooking[item.booking_id].push(item);
-      });
-    }
-
-    const orders = (bookings || []).map(b => ({
-      id:              b.id,
-      order_number:    b.token_number || b.id.slice(-6).toUpperCase(),
-      customer_name:   b.customer?.name  ?? 'Unknown',
-      customer_phone:  b.customer?.phone ?? null,
-      service_type:    b.service_type,
-      status:          b.status,
-      payment_status:  b.payment_status,
-      total_amount:    (itemsByBooking[b.id] || []).reduce(
-                         (s, i) => s + (i.quantity * parseFloat(i.unit_price || 0)), 0
-                       ) || parseFloat(b.token_advance || 0),
-      created_at:      b.created_at,
-      items:           (itemsByBooking[b.id] || []).map(i => ({
-                         name:     i.menu_item?.name ?? 'Item',
-                         quantity: i.quantity,
-                         price:    i.unit_price,
-                       })),
-    }));
-
-    res.json({ orders });
-  } catch (err) {
-    console.error('[/api/whatsapp-orders]', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
-
-
+const supabaseChat = createClientChat(
+  process.env.CHAT_SUPABASE_URL,
+  process.env.CHAT_SUPABASE_SERVICE_KEY
+);
 
 // ============================================================================
-// FEATURE CONSTANTS — mirrors db/models.py Feature class
+// FEATURE CONSTANTS
 // ============================================================================
 
 const FEATURES = {
@@ -220,20 +44,14 @@ const FEATURES = {
   RESERVE_TABLE:    'reserve_table',
 };
 
-// In-process feature cache: restaurant_id -> { features, ts }
 const _featureCache = new Map();
-const FEATURE_CACHE_TTL = 300_000; // 5 minutes
+const FEATURE_CACHE_TTL = 300_000;
 
 async function getRestaurantFeatures(restaurantId) {
   const cached = _featureCache.get(restaurantId);
   if (cached && Date.now() - cached.ts < FEATURE_CACHE_TTL) return cached.features;
-
   const { data, error } = await supabaseAdmin
-    .from('restaurants')
-    .select('subscribed_features')
-    .eq('id', restaurantId)
-    .single();
-
+    .from('restaurants').select('subscribed_features').eq('id', restaurantId).single();
   const features = (!error && data?.subscribed_features) ? data.subscribed_features : [];
   _featureCache.set(restaurantId, { features, ts: Date.now() });
   return features;
@@ -243,26 +61,20 @@ function invalidateFeatureCache(restaurantId) {
   _featureCache.delete(restaurantId);
 }
 
-// Express middleware: attach feature list to req for downstream use
 async function resolveFeatures(req, res, next) {
   if (!req.restaurant_id) return next();
-  try {
-    req.features = await getRestaurantFeatures(req.restaurant_id);
-  } catch (err) {
-    req.features = [];
-  }
+  try { req.features = await getRestaurantFeatures(req.restaurant_id); }
+  catch (err) { req.features = []; }
   next();
 }
 
-// Express middleware: gate a route behind a feature subscription
 function requireFeature(feature) {
   return async (req, res, next) => {
     const features = req.features || await getRestaurantFeatures(req.restaurant_id);
     if (!features.includes(feature)) {
       return res.status(403).json({
         error: `Feature '${feature}' is not enabled for this restaurant.`,
-        feature,
-        code: 'FEATURE_NOT_SUBSCRIBED',
+        feature, code: 'FEATURE_NOT_SUBSCRIBED',
       });
     }
     next();
@@ -282,8 +94,6 @@ app.use(cors({
 app.options('*', cors());
 app.use(express.json());
 
-
-
 // ============================================================================
 // AUTH MIDDLEWARE
 // ============================================================================
@@ -302,48 +112,30 @@ const authenticateToken = async (req, res, next) => {
   }
 };
 
-// Fix 6 + Fix 8: robust restaurant_id resolution with clear error messages
-// Note: resolveFeatures is chained after getRestaurantId in each route
-// that needs feature checks. It reads req.restaurant_id set by getRestaurantId.
-
 const getRestaurantId = async (req, res, next) => {
   try {
     const { data, error } = await supabaseAdmin
-      .from('users')
-      .select('restaurant_id, role')
-      .eq('id', req.user.sub)
-      .single();
-
+      .from('users').select('restaurant_id, role').eq('id', req.user.sub).single();
     if (error) {
       console.error(`[getRestaurantId] DB error for user ${req.user.sub}:`, error.message);
       return res.status(401).json({ error: `User lookup failed: ${error.message}` });
     }
-
     if (!data) {
-      console.error(`[getRestaurantId] No user row found for id=${req.user.sub} email=${req.user.email}`);
-      return res.status(401).json({ error: 'User profile not found. Ensure user exists in users table.' });
+      return res.status(401).json({ error: 'User profile not found.' });
     }
-
     if (!data.restaurant_id) {
-      console.warn(`[getRestaurantId] User ${req.user.sub} has no restaurant_id in users table`);
-      const { data: restaurants } = await supabaseAdmin
-        .from('restaurants')
-        .select('id')
-        .limit(2);
+      const { data: restaurants } = await supabaseAdmin.from('restaurants').select('id').limit(2);
       if (restaurants && restaurants.length === 1) {
-        console.warn(`[getRestaurantId] Falling back to single restaurant: ${restaurants[0].id}`);
         req.restaurant_id = restaurants[0].id;
         req.user_role     = data.role;
         return next();
       }
-      return res.status(401).json({ error: 'User has no restaurant_id assigned. Update user record in Supabase.' });
+      return res.status(401).json({ error: 'User has no restaurant_id assigned.' });
     }
-
     req.restaurant_id = data.restaurant_id;
     req.user_role     = data.role;
     next();
   } catch (err) {
-    console.error('[getRestaurantId] Unexpected error:', err.message);
     res.status(401).json({ error: `Auth middleware failed: ${err.message}` });
   }
 };
@@ -352,231 +144,97 @@ const getRestaurantId = async (req, res, next) => {
 // HEALTH CHECK
 // ============================================================================
 
-// ============================================================================
-// SUBSCRIPTION MANAGEMENT ENDPOINTS
-// ============================================================================
-
-// GET current subscription info
-app.get('/api/subscription', authenticateToken, getRestaurantId, async (req, res) => {
-  try {
-    const { data: restaurant, error } = await supabaseAdmin
-      .from('restaurants')
-      .select('subscribed_features')
-      .eq('id', req.restaurant_id)
-      .single();
-    if (error) throw error;
-
-    const { data: sub } = await supabaseAdmin
-      .from('restaurant_subscriptions')
-      .select('*')
-      .eq('restaurant_id', req.restaurant_id)
-      .single();
-
-    res.json({
-      success: true,
-      subscribed_features: restaurant.subscribed_features || [],
-      subscription: sub || null,
-    });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// PUT update subscribed features (owner only)
-app.put('/api/subscription/features', authenticateToken, getRestaurantId, async (req, res) => {
-  try {
-    if (req.user_role !== 'owner') return res.status(403).json({ error: 'Owner only' });
-
-    const { features } = req.body;
-    const VALID = Object.values(FEATURES);
-    const invalid = features.filter(f => !VALID.includes(f));
-    if (invalid.length) return res.status(400).json({ error: `Invalid features: ${invalid.join(', ')}` });
-    if (features.length < 2) return res.status(400).json({ error: 'At least 2 features required' });
-
-    const { error } = await supabaseAdmin
-      .from('restaurants')
-      .update({ subscribed_features: features })
-      .eq('id', req.restaurant_id);
-    if (error) throw error;
-
-    await supabaseAdmin
-      .from('restaurant_subscriptions')
-      .update({ features })
-      .eq('restaurant_id', req.restaurant_id);
-
-    invalidateFeatureCache(req.restaurant_id);
-
-    res.json({ success: true, subscribed_features: features });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime() });
 });
 
 // ============================================================================
-// AUTHENTICATION ENDPOINTS
+// WHATSAPP ORDERS — chat DB
 // ============================================================================
 
-app.post('/api/auth/signup', async (req, res) => {
+app.get('/api/whatsapp-orders', async (req, res) => {
   try {
-    const { email, password, full_name, restaurant_id, role = 'kitchen_staff' } = req.body;
-    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
-      email, password, email_confirm: false,
-    });
-    if (authError) throw authError;
-    const { data: userData, error: userError } = await supabaseAdmin
-      .from('users')
-      .insert({ id: authData.user.id, email, full_name, restaurant_id, role })
-      .select().single();
-    if (userError) throw userError;
-    await supabaseAdmin.from('audit_logs').insert({
-      user_id: authData.user.id, restaurant_id, action: 'User signup', details: { email, role },
-    });
-    res.json({ success: true, user: userData });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
+    const restaurantId = '46fb9b9e-431a-43c9-9edb-d316b0fef216';
+    const now          = new Date();
+    const todayStart   = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+    const start        = req.query.start || todayStart;
+    const end          = req.query.end   || now.toISOString();
 
-app.post('/api/auth/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) throw error;
+    console.log(`[/api/whatsapp-orders] range: ${start} → ${end}`);
 
-    const { data: userDetails } = await supabaseAdmin
-      .from('users').select('*').eq('id', data.user.id).single();
-    if (!userDetails) return res.status(401).json({ error: 'User account not fully set up. No profile found.' });
-
-    // Fetch restaurant name to include in user object
-    const { data: restaurant } = await supabaseAdmin
-      .from('restaurants').select('name').eq('id', userDetails.restaurant_id).single();
-
-    await supabaseAdmin.from('users').update({ last_login: new Date() }).eq('id', data.user.id);
-    await supabaseAdmin.from('audit_logs').insert({
-      user_id: data.user.id, restaurant_id: userDetails.restaurant_id,
-      action: 'User login', ip_address: req.ip,
-    });
-
-    res.json({
-      success: true,
-      user: {
-        ...userDetails,
-        restaurant_name: restaurant?.name ?? null,
-      },
-      token: data.session.access_token,
-      refreshToken: data.session.refresh_token,
-    });
-  } catch (err) {
-    res.status(401).json({ error: err.message });
-  }
-});
-
-app.post('/api/auth/refresh', async (req, res) => {
-  try {
-    const { refreshToken } = req.body;
-    const { data, error } = await supabase.auth.refreshSession({ refresh_token: refreshToken });
-    if (error) throw error;
-    res.json({
-      success: true,
-      token: data.session.access_token, refreshToken: data.session.refresh_token,
-    });
-  } catch (err) {
-    res.status(401).json({ error: err.message });
-  }
-});
-
-// ============================================================================
-// WHATSAPP HELPERS
-// ============================================================================
-
-async function sendWhatsAppMessage(toNumber, message) {
-  try {
-    const response = await fetch(
-      `${process.env.WHATSAPP_API_URL}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
-      {
-        method:  'POST',
-        headers: {
-          Authorization:  `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messaging_product: 'whatsapp',
-          to:   String(toNumber),
-          type: 'text',
-          text: { body: message },
-        }),
-      }
-    );
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      console.error('[WhatsApp] API error:', err);
-    } else {
-      console.log(`[WhatsApp] ✅ Sent to ${toNumber}`);
-    }
-  } catch (err) {
-    console.error('[WhatsApp] Failed to send message:', err.message);
-  }
-}
-
-async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
-  try {
-    if (!process.env.META_CATALOG_ID) {
-      console.warn('[catalog-msg] META_CATALOG_ID not set');
-      return;
-    }
-    const { data: thumbItem, error: thumbError } = await supabaseAdmin
-      .from('menu_items')
-      .select('retailer_id')
+    const { data: bookings, error: bookingsError } = await supabaseChat
+      .from('bookings')
+      .select(`
+        id,
+        service_type,
+        token_number,
+        status,
+        payment_status,
+        token_advance,
+        created_at,
+        customer:customers(name, phone)
+      `)
       .eq('restaurant_id', restaurantId)
-      .eq('is_available', true)
-      .limit(1)
-      .single();
-    if (thumbError || !thumbItem?.retailer_id) {
-      console.warn('[catalog-msg] No available items found for thumbnail');
-      return;
-    }
-    const response = await fetch(
-      `${process.env.WHATSAPP_API_URL}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
-      {
-        method:  'POST',
-        headers: {
-          Authorization:  `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messaging_product: 'whatsapp',
-          to:   String(toNumber),
-          type: 'interactive',
-          interactive: {
-            type: 'catalog_message',
-            body:   { text: "🍽️ Browse today's menu and add items to your basket 🛒" },
-            footer: { text: 'Tap any item to see details and order' },
-            action: {
-              name: 'catalog_message',
-              parameters: { thumbnail_product_retailer_id: thumbItem.retailer_id },
-            },
-          },
-        }),
-      }
-    );
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      console.error('[catalog-msg] API error:', err);
-    } else {
-      console.log(`[catalog-msg] ✅ Sent to ${toNumber}`);
-    }
-  } catch (err) {
-    console.error('[catalog-msg] Failed:', err.message);
-  }
-}
+      .gte('created_at', start)
+      .lte('created_at', end)
+      .order('created_at', { ascending: false })
+      .limit(100);
 
-//==================================================
-//WABA
-//==================================================
+    if (bookingsError) throw bookingsError;
+
+    console.log(`[/api/whatsapp-orders] bookings found: ${bookings?.length ?? 0}`);
+
+    const bookingIds = (bookings || []).map(b => b.id);
+    let itemsByBooking = {};
+
+    if (bookingIds.length > 0) {
+      const { data: orderItems, error: itemsError } = await supabaseChat
+        .from('order_items')
+        .select(`
+          booking_id,
+          quantity,
+          unit_price,
+          menu_item:menu_items(name)
+        `)
+        .in('booking_id', bookingIds);
+
+      if (itemsError) console.error('[/api/whatsapp-orders] order_items error:', itemsError.message);
+
+      (orderItems || []).forEach(item => {
+        if (!itemsByBooking[item.booking_id]) itemsByBooking[item.booking_id] = [];
+        itemsByBooking[item.booking_id].push(item);
+      });
+    }
+
+    const orders = (bookings || []).map(b => ({
+      id:             b.id,
+      order_number:   b.token_number || b.id.slice(-6).toUpperCase(),
+      customer_name:  b.customer?.name  ?? 'Unknown',
+      customer_phone: b.customer?.phone ?? null,
+      service_type:   b.service_type,
+      status:         b.status,
+      payment_status: b.payment_status,
+      total_amount:   (itemsByBooking[b.id] || []).reduce(
+                        (s, i) => s + (i.quantity * parseFloat(i.unit_price || 0)), 0
+                      ) || parseFloat(b.token_advance || 0),
+      created_at:     b.created_at,
+      items:          (itemsByBooking[b.id] || []).map(i => ({
+                        name:     i.menu_item?.name ?? 'Item',
+                        quantity: i.quantity,
+                        price:    i.unit_price,
+                      })),
+    }));
+
+    res.json({ orders });
+  } catch (err) {
+    console.error('[/api/whatsapp-orders]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// WABA STATUS
+// ============================================================================
 
 app.get('/api/restaurants/:id/waba', authenticateToken, async (req, res) => {
   try {
@@ -592,8 +250,157 @@ app.get('/api/restaurants/:id/waba', authenticateToken, async (req, res) => {
   }
 });
 
+// ============================================================================
+// SUBSCRIPTION MANAGEMENT
+// ============================================================================
 
+app.get('/api/subscription', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { data: restaurant, error } = await supabaseAdmin
+      .from('restaurants').select('subscribed_features').eq('id', req.restaurant_id).single();
+    if (error) throw error;
+    const { data: sub } = await supabaseAdmin
+      .from('restaurant_subscriptions').select('*').eq('restaurant_id', req.restaurant_id).single();
+    res.json({ success: true, subscribed_features: restaurant.subscribed_features || [], subscription: sub || null });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
 
+app.put('/api/subscription/features', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'owner') return res.status(403).json({ error: 'Owner only' });
+    const { features } = req.body;
+    const VALID = Object.values(FEATURES);
+    const invalid = features.filter(f => !VALID.includes(f));
+    if (invalid.length) return res.status(400).json({ error: `Invalid features: ${invalid.join(', ')}` });
+    if (features.length < 2) return res.status(400).json({ error: 'At least 2 features required' });
+    const { error } = await supabaseAdmin.from('restaurants')
+      .update({ subscribed_features: features }).eq('id', req.restaurant_id);
+    if (error) throw error;
+    await supabaseAdmin.from('restaurant_subscriptions')
+      .update({ features }).eq('restaurant_id', req.restaurant_id);
+    invalidateFeatureCache(req.restaurant_id);
+    res.json({ success: true, subscribed_features: features });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// AUTH ENDPOINTS
+// ============================================================================
+
+app.post('/api/auth/signup', async (req, res) => {
+  try {
+    const { email, password, full_name, restaurant_id, role = 'kitchen_staff' } = req.body;
+    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
+      email, password, email_confirm: false,
+    });
+    if (authError) throw authError;
+    const { data: userData, error: userError } = await supabaseAdmin
+      .from('users').insert({ id: authData.user.id, email, full_name, restaurant_id, role }).select().single();
+    if (userError) throw userError;
+    await supabaseAdmin.from('audit_logs').insert({
+      user_id: authData.user.id, restaurant_id, action: 'User signup', details: { email, role },
+    });
+    res.json({ success: true, user: userData });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    const { data: userDetails } = await supabaseAdmin
+      .from('users').select('*').eq('id', data.user.id).single();
+    if (!userDetails) return res.status(401).json({ error: 'User account not fully set up.' });
+    const { data: restaurant } = await supabaseAdmin
+      .from('restaurants').select('name').eq('id', userDetails.restaurant_id).single();
+    await supabaseAdmin.from('users').update({ last_login: new Date() }).eq('id', data.user.id);
+    await supabaseAdmin.from('audit_logs').insert({
+      user_id: data.user.id, restaurant_id: userDetails.restaurant_id,
+      action: 'User login', ip_address: req.ip,
+    });
+    res.json({
+      success: true,
+      user: { ...userDetails, restaurant_name: restaurant?.name ?? null },
+      token: data.session.access_token,
+      refreshToken: data.session.refresh_token,
+    });
+  } catch (err) {
+    res.status(401).json({ error: err.message });
+  }
+});
+
+app.post('/api/auth/refresh', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    const { data, error } = await supabase.auth.refreshSession({ refresh_token: refreshToken });
+    if (error) throw error;
+    res.json({ success: true, token: data.session.access_token, refreshToken: data.session.refresh_token });
+  } catch (err) {
+    res.status(401).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// WHATSAPP HELPERS
+// ============================================================================
+
+async function sendWhatsAppMessage(toNumber, message) {
+  try {
+    const response = await fetch(
+      `${process.env.WHATSAPP_API_URL}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messaging_product: 'whatsapp', to: String(toNumber), type: 'text', text: { body: message } }),
+      }
+    );
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      console.error('[WhatsApp] API error:', err);
+    } else {
+      console.log(`[WhatsApp] ✅ Sent to ${toNumber}`);
+    }
+  } catch (err) {
+    console.error('[WhatsApp] Failed to send message:', err.message);
+  }
+}
+
+async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
+  try {
+    if (!process.env.META_CATALOG_ID) { console.warn('[catalog-msg] META_CATALOG_ID not set'); return; }
+    const { data: thumbItem, error: thumbError } = await supabaseAdmin
+      .from('menu_items').select('retailer_id')
+      .eq('restaurant_id', restaurantId).eq('is_available', true).limit(1).single();
+    if (thumbError || !thumbItem?.retailer_id) { console.warn('[catalog-msg] No available items'); return; }
+    const response = await fetch(
+      `${process.env.WHATSAPP_API_URL}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp', to: String(toNumber), type: 'interactive',
+          interactive: {
+            type: 'catalog_message',
+            body:   { text: "🍽️ Browse today's menu and add items to your basket 🛒" },
+            footer: { text: 'Tap any item to see details and order' },
+            action: { name: 'catalog_message', parameters: { thumbnail_product_retailer_id: thumbItem.retailer_id } },
+          },
+        }),
+      }
+    );
+    if (!response.ok) { const err = await response.json().catch(() => ({})); console.error('[catalog-msg] API error:', err); }
+    else console.log(`[catalog-msg] ✅ Sent to ${toNumber}`);
+  } catch (err) {
+    console.error('[catalog-msg] Failed:', err.message);
+  }
+}
 
 // ============================================================================
 // SLOT SCHEDULER
@@ -618,27 +425,18 @@ function getCurrentSlotIST() {
 async function applySlotAvailability(restaurantId, slotDbValue) {
   console.log(`⏰ [${new Date().toISOString()}] Applying slot: ${slotDbValue ?? 'CLOSED'} for restaurant ${restaurantId}`);
   if (!slotDbValue) {
-    const { error } = await supabaseAdmin
-      .from('menu_items')
-      .update({ is_available: false, updated_at: new Date().toISOString() })
-      .eq('restaurant_id', restaurantId);
+    const { error } = await supabaseAdmin.from('menu_items')
+      .update({ is_available: false, updated_at: new Date().toISOString() }).eq('restaurant_id', restaurantId);
     if (error) throw error;
-    console.log(`  ✅ All items set unavailable (closed hours)`);
     return { available: 0, unavailable: 'all' };
   }
-  const { data: activated, error: e1 } = await supabaseAdmin
-    .from('menu_items')
+  const { data: activated, error: e1 } = await supabaseAdmin.from('menu_items')
     .update({ is_available: true, updated_at: new Date().toISOString() })
-    .eq('restaurant_id', restaurantId)
-    .in('time_slot', [slotDbValue, 'all'])
-    .select('id');
+    .eq('restaurant_id', restaurantId).in('time_slot', [slotDbValue, 'all']).select('id');
   if (e1) throw e1;
-  const { data: deactivated, error: e2 } = await supabaseAdmin
-    .from('menu_items')
+  const { data: deactivated, error: e2 } = await supabaseAdmin.from('menu_items')
     .update({ is_available: false, updated_at: new Date().toISOString() })
-    .eq('restaurant_id', restaurantId)
-    .not('time_slot', 'in', `("${slotDbValue}","all")`)
-    .select('id');
+    .eq('restaurant_id', restaurantId).not('time_slot', 'in', `("${slotDbValue}","all")`).select('id');
   if (e2) throw e2;
   console.log(`  ✅ Activated: ${activated?.length ?? 0} | Deactivated: ${deactivated?.length ?? 0}`);
   return { slot: slotDbValue, available: activated?.length ?? 0, unavailable: deactivated?.length ?? 0 };
@@ -646,8 +444,7 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
 
 async function applySlotForAllRestaurants() {
   const slot = getCurrentSlotIST();
-  const { data: restaurants, error } = await supabaseAdmin
-    .from('restaurants').select('id').eq('is_active', true);
+  const { data: restaurants, error } = await supabaseAdmin.from('restaurants').select('id').eq('is_active', true);
   if (error) { console.error('Failed to fetch restaurants:', error); return; }
   for (const r of restaurants ?? []) {
     try { await applySlotAvailability(r.id, slot); }
@@ -658,16 +455,11 @@ async function applySlotForAllRestaurants() {
 function startSlotScheduler() {
   setInterval(async () => {
     const cutoff = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
-    const { data } = await supabaseAdmin
-      .from('walk_in_tokens')
+    const { data } = await supabaseAdmin.from('walk_in_tokens')
       .update({ status: 'completed', completed_at: new Date().toISOString() })
-      .eq('status', 'seated')
-      .lt('seated_at', cutoff)
-      .select('table_id');
+      .eq('status', 'seated').lt('seated_at', cutoff).select('table_id');
     for (const token of data ?? []) {
-      if (token.table_id) {
-        await supabaseAdmin.from('tables').update({ status: 'available' }).eq('id', token.table_id);
-      }
+      if (token.table_id) await supabaseAdmin.from('tables').update({ status: 'available' }).eq('id', token.table_id);
     }
   }, 60 * 60 * 1000);
 
@@ -681,7 +473,7 @@ function startSlotScheduler() {
       await applySlotForAllRestaurants();
     }
   }, 60 * 1000);
-  console.log('⏰ Slot scheduler started — runs at 06:00, 11:00, 15:00, 19:00, 23:00 IST');
+  console.log('⏰ Slot scheduler started');
 }
 
 app.post('/api/catalog/slot-sync', authenticateToken, getRestaurantId, async (req, res) => {
@@ -694,10 +486,8 @@ app.post('/api/catalog/slot-sync', authenticateToken, getRestaurantId, async (re
     if (slotOverride && !validSlots.includes(slotOverride))
       return res.status(400).json({ error: `Invalid slot. Must be one of: ${validSlots.join(', ')} or null` });
     const result = await applySlotAvailability(req.restaurant_id, slot);
-    res.json({
-      success: true, ...result,
-      ist_hour: Math.floor(((new Date().getUTCHours() * 60 + new Date().getUTCMinutes() + 330) % 1440) / 60),
-    });
+    res.json({ success: true, ...result,
+      ist_hour: Math.floor(((new Date().getUTCHours() * 60 + new Date().getUTCMinutes() + 330) % 1440) / 60) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -707,34 +497,20 @@ app.post('/api/catalog/slot-sync', authenticateToken, getRestaurantId, async (re
 // CATALOG SYNC
 // ============================================================================
 
-// Fix P: parseMetaPrice
-// Meta always sends price as a string e.g. "22000 INR" which means 22000 paise = ₹220.
-// Strip non-numeric chars → "22000" → parseFloat → 22000 → divide by 100 → 220.00 ✅
-// If Meta ever sends a raw number, we check magnitude to avoid double-division:
-//   ≥ 100  → assume paise (e.g. 22000) → divide by 100 → ₹220
-//   < 100  → assume already in rupees (e.g. 50) → use as-is → ₹50
-// This replaces the previous branch that did `product.price / 100` unconditionally
-// for numeric values, which caused ₹220 to be stored as ₹2.20.
 function parseMetaPrice(rawPrice) {
   if (!rawPrice) return 0;
-
   if (typeof rawPrice === 'string') {
-    // "22000 INR" → strip everything except digits and dot → "22000" → 220.00
     const numeric = parseFloat(rawPrice.replace(/[^0-9.]/g, ''));
     if (isNaN(numeric)) return 0;
     const result = numeric / 100;
     console.log(`[parseMetaPrice] string "${rawPrice}" → numeric ${numeric} → ₹${result}`);
     return result;
   }
-
   if (typeof rawPrice === 'number') {
-    // Heuristic: Meta catalog prices in paise are always ≥ 100 for any real item (₹1+)
-    // If the number is already < 100 it's probably already in rupees.
     const result = rawPrice >= 100 ? rawPrice / 100 : rawPrice;
-    console.log(`[parseMetaPrice] number ${rawPrice} → ₹${result} (${rawPrice >= 100 ? 'paise÷100' : 'already rupees'})`);
+    console.log(`[parseMetaPrice] number ${rawPrice} → ₹${result}`);
     return result;
   }
-
   return 0;
 }
 
@@ -749,8 +525,7 @@ async function syncCatalogFromMeta(restaurantId) {
   try {
     let allProducts = [];
     let nextUrl = `https://graph.facebook.com/v20.0/${META_CATALOG_ID}/products`
-      + `?fields=id,name,description,price,currency,image_url,availability,`
-      + `category,retailer_id,custom_label_0`
+      + `?fields=id,name,description,price,currency,image_url,availability,category,retailer_id,custom_label_0`
       + `&limit=100&access_token=${META_ACCESS_TOKEN}`;
     while (nextUrl) {
       const response = await fetch(nextUrl);
@@ -760,35 +535,24 @@ async function syncCatalogFromMeta(restaurantId) {
       nextUrl = data.paging?.next || null;
     }
     console.log(`  📦 Fetched ${allProducts.length} products from Meta`);
-
     let synced = 0, skipped = 0;
     const errors = [];
-
     for (const product of allProducts) {
       try {
-        // Fix P: use parseMetaPrice instead of the old inline branch
         const price = parseMetaPrice(product.price);
-
         const SLOT_MAP = {
           'morning tiffin': 'morning_tiffin', 'lunch': 'lunch',
           'evening snacks': 'evening_snacks', 'dinner tiffin': 'dinner_tiffin',
         };
         const rawSlot  = (product.custom_label_0 || '').trim().toLowerCase();
         const timeSlot = SLOT_MAP[rawSlot] || 'all';
-
         const menuItem = {
-          restaurant_id:   restaurantId,
-          name:            product.name?.trim(),
-          description:     product.description?.trim() || '',
-          price,
-          image_url:       product.image_url || null,
-          category:        product.category || 'General',
-          time_slot:       timeSlot,
-          meta_product_id: product.id,
-          retailer_id:     product.retailer_id || product.id,
-          updated_at:      new Date().toISOString(),
+          restaurant_id: restaurantId, name: product.name?.trim(),
+          description: product.description?.trim() || '', price,
+          image_url: product.image_url || null, category: product.category || 'General',
+          time_slot: timeSlot, meta_product_id: product.id,
+          retailer_id: product.retailer_id || product.id, updated_at: new Date().toISOString(),
         };
-
         const { error } = await supabaseAdmin.from('menu_items')
           .upsert(menuItem, { onConflict: 'restaurant_id,meta_product_id', ignoreDuplicates: false });
         if (error) throw error;
@@ -799,7 +563,6 @@ async function syncCatalogFromMeta(restaurantId) {
         console.error(`  ⚠️  Skipped product ${product.id}:`, itemError.message);
       }
     }
-
     await applySlotAvailability(restaurantId, getCurrentSlotIST());
     const result = { success: true, synced, skipped, total: allProducts.length, errors: errors.length > 0 ? errors : undefined };
     console.log(`  ✅ Sync complete:`, result);
@@ -822,9 +585,7 @@ app.post('/api/catalog/sync', authenticateToken, getRestaurantId, async (req, re
 });
 
 app.get('/api/catalog/webhook', (req, res) => {
-  const mode      = req.query['hub.mode'];
-  const token     = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
+  const mode = req.query['hub.mode'], token = req.query['hub.verify_token'], challenge = req.query['hub.challenge'];
   if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
     console.log('✅ Meta webhook verified');
     res.status(200).send(challenge);
@@ -859,7 +620,7 @@ async function runStartupSync() {
 }
 
 // ============================================================================
-// MENU ITEMS ENDPOINTS
+// MENU ITEMS
 // ============================================================================
 
 app.get('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) => {
@@ -910,9 +671,7 @@ app.put('/api/menu-items/:id/availability', authenticateToken, getRestaurantId, 
       return res.status(403).json({ error: 'Unauthorized' });
     const { is_available } = req.body;
     const { data, error } = await supabaseAdmin.from('menu_items')
-      .update({ is_available })
-      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
-      .select().single();
+      .update({ is_available }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).select().single();
     if (error) throw error;
     res.json({ success: true, item: data });
   } catch (err) {
@@ -921,18 +680,14 @@ app.put('/api/menu-items/:id/availability', authenticateToken, getRestaurantId, 
 });
 
 // ============================================================================
-// ORDERS ENDPOINTS
+// ORDERS
 // ============================================================================
 
-// Orders are accessible if restaurant has ANY order feature
 async function requireAnyOrderFeature(req, res, next) {
   const features = req.features || await getRestaurantFeatures(req.restaurant_id);
   const orderFeatures = [FEATURES.DINE_IN, FEATURES.TAKEAWAY, FEATURES.DELIVERY];
   if (!orderFeatures.some(f => features.includes(f))) {
-    return res.status(403).json({
-      error: 'Ordering features (dine_in, takeaway, or delivery) are not enabled for this restaurant.',
-      code: 'FEATURE_NOT_SUBSCRIBED',
-    });
+    return res.status(403).json({ error: 'Ordering features not enabled.', code: 'FEATURE_NOT_SUBSCRIBED' });
   }
   next();
 }
@@ -942,8 +697,7 @@ app.get('/api/orders', authenticateToken, getRestaurantId, requireAnyOrderFeatur
     const { status, limit = 50, offset = 0 } = req.query;
     let query = supabaseAdmin.from('orders')
       .select(`*, table:table_id(table_number, section), order_items(*, menu_item:menu_item_id(name, category))`)
-      .eq('restaurant_id', req.restaurant_id)
-      .order('created_at', { ascending: false })
+      .eq('restaurant_id', req.restaurant_id).order('created_at', { ascending: false })
       .range(offset, offset + limit - 1);
     if (status) query = query.eq('status', status);
     const { data, error } = await query;
@@ -976,21 +730,17 @@ app.post('/api/orders', authenticateToken, getRestaurantId, requireAnyOrderFeatu
       .insert({ restaurant_id: req.restaurant_id, table_id, order_number: orderNumber, notes, created_by: req.user.sub })
       .select().single();
     if (orderError) throw orderError;
-    let subtotal   = 0;
+    let subtotal = 0;
     const orderItems = [];
     for (const item of items) {
-      const { data: menuItem } = await supabaseAdmin.from('menu_items')
-        .select('price').eq('id', item.menu_item_id).single();
+      const { data: menuItem } = await supabaseAdmin.from('menu_items').select('price').eq('id', item.menu_item_id).single();
       subtotal += menuItem.price * item.quantity;
       const { data: itemData, error: itemError } = await supabaseAdmin.from('order_items')
         .insert({ order_id: orderData.id, menu_item_id: item.menu_item_id, quantity: item.quantity,
-          unit_price: menuItem.price, special_instructions: item.special_instructions })
-        .select().single();
+          unit_price: menuItem.price, special_instructions: item.special_instructions }).select().single();
       if (itemError) throw itemError;
       orderItems.push(itemData);
-      await supabaseAdmin.from('kds_items').insert({
-        restaurant_id: req.restaurant_id, order_item_id: itemData.id, status: 'pending',
-      });
+      await supabaseAdmin.from('kds_items').insert({ restaurant_id: req.restaurant_id, order_item_id: itemData.id, status: 'pending' });
     }
     const tax = subtotal * 0.1, total = subtotal + tax;
     await supabaseAdmin.from('orders').update({ subtotal, tax, total_amount: total }).eq('id', orderData.id);
@@ -1009,8 +759,7 @@ app.put('/api/orders/:id/status', authenticateToken, getRestaurantId, requireAny
   try {
     const { status } = req.body;
     const { data, error } = await supabaseAdmin.from('orders')
-      .update({ status }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
-      .select().single();
+      .update({ status }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).select().single();
     if (error) throw error;
     await supabaseAdmin.from('audit_logs').insert({
       user_id: req.user.sub, restaurant_id: req.restaurant_id,
@@ -1027,8 +776,7 @@ app.delete('/api/orders/:id', authenticateToken, getRestaurantId, requireAnyOrde
     if (req.user_role !== 'manager' && req.user_role !== 'owner')
       return res.status(403).json({ error: 'Unauthorized' });
     const { data, error } = await supabaseAdmin.from('orders')
-      .update({ status: 'cancelled' }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
-      .select().single();
+      .update({ status: 'cancelled' }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).select().single();
     if (error) throw error;
     if (data.table_id) {
       const { data: activeOrders } = await supabaseAdmin.from('orders').select('id')
@@ -1053,24 +801,10 @@ app.delete('/api/orders/:id', authenticateToken, getRestaurantId, requireAnyOrde
 app.get('/api/kds/feed', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const { status = 'pending' } = req.query;
-    const statusFilter = status === 'all'
-      ? ['pending', 'in_progress', 'ready']
-      : [status];
+    const statusFilter = status === 'all' ? ['pending', 'in_progress', 'ready'] : [status];
     const { data, error } = await supabaseAdmin.from('kds_items')
-      .select(`
-        *,
-        order_item:order_item_id!left(
-          *,
-          menu_item:menu_item_id!left(name, description, prep_time_minutes),
-          order:order_id!left(
-            table:table_id!left(table_number, section),
-            order_number
-          )
-        )
-      `)
-      .eq('restaurant_id', req.restaurant_id)
-      .in('status', statusFilter)
-      .order('created_at', { ascending: true });
+      .select(`*, order_item:order_item_id!left(*, menu_item:menu_item_id!left(name, description, prep_time_minutes), order:order_id!left(table:table_id!left(table_number, section), order_number))`)
+      .eq('restaurant_id', req.restaurant_id).in('status', statusFilter).order('created_at', { ascending: true });
     if (error) throw error;
     res.json({ success: true, items: data });
   } catch (err) {
@@ -1082,62 +816,41 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
   try {
     const { status } = req.body;
     const { data, error } = await supabaseAdmin.from('kds_items')
-      .update({ status })
-      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
-      .select().single();
+      .update({ status }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).select().single();
     if (error) throw error;
-
     if (status === 'ready') {
       try {
-        const { data: kdsItem } = await supabaseAdmin
-          .from('kds_items')
+        const { data: kdsItem } = await supabaseAdmin.from('kds_items')
           .select('order_item:order_item_id!left(order_id), token_number, customer_phone, service_type')
-          .eq('id', req.params.id)
-          .single();
-
+          .eq('id', req.params.id).single();
         const orderId     = kdsItem?.order_item?.order_id;
         const directPhone = kdsItem?.customer_phone;
-
         if (orderId) {
-          const { data: allItems } = await supabaseAdmin
-            .from('kds_items')
-            .select('status, order_item:order_item_id!left(order_id)')
-            .eq('restaurant_id', req.restaurant_id);
-
+          const { data: allItems } = await supabaseAdmin.from('kds_items')
+            .select('status, order_item:order_item_id!left(order_id)').eq('restaurant_id', req.restaurant_id);
           const orderItems = allItems?.filter(i => i.order_item?.order_id === orderId) ?? [];
           const allReady   = orderItems.length > 0 && orderItems.every(i => i.status === 'ready');
-
           if (allReady) {
-            const { data: order } = await supabaseAdmin
-              .from('orders')
-              .select('order_number, table:table_id!left(table_number), walk_in_tokens(phone)')
-              .eq('id', orderId)
-              .single();
-
+            const { data: order } = await supabaseAdmin.from('orders')
+              .select('order_number, table:table_id!left(table_number), walk_in_tokens(phone)').eq('id', orderId).single();
             const phone = order?.walk_in_tokens?.[0]?.phone ?? directPhone;
             if (phone) {
-              await sendWhatsAppMessage(
-                phone,
-                `✅ *Your order is ready!*\n\n` +
-                `Order: *${order?.order_number ?? kdsItem?.token_number ?? ''}*\n` +
+              await sendWhatsAppMessage(phone,
+                `✅ *Your order is ready!*\n\nOrder: *${order?.order_number ?? kdsItem?.token_number ?? ''}*\n` +
                 (order?.table?.table_number ? `Table: *${order.table.table_number}*\n` : '') +
                 `\nYour food will be served shortly. Enjoy! 🍽️`
               );
             }
           }
         } else if (directPhone) {
-          await sendWhatsAppMessage(
-            directPhone,
-            `✅ *Your order is ready!*\n\n` +
-            `Token: *${kdsItem?.token_number ?? ''}*\n\n` +
-            `Your food is being served now. Enjoy! 🍽️`
+          await sendWhatsAppMessage(directPhone,
+            `✅ *Your order is ready!*\n\nToken: *${kdsItem?.token_number ?? ''}*\n\nYour food is being served now. Enjoy! 🍽️`
           );
         }
       } catch (notifyErr) {
         console.error('[KDS ready notify] Failed:', notifyErr.message);
       }
     }
-
     res.json({ success: true, item: data });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -1145,7 +858,7 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
 });
 
 // ============================================================================
-// TABLES ENDPOINTS
+// TABLES
 // ============================================================================
 
 app.get('/api/tables', authenticateToken, getRestaurantId, async (req, res) => {
@@ -1163,8 +876,7 @@ app.put('/api/tables/:id/status', authenticateToken, getRestaurantId, async (req
   try {
     const { status } = req.body;
     const { data, error } = await supabaseAdmin.from('tables')
-      .update({ status }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
-      .select().single();
+      .update({ status }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).select().single();
     if (error) throw error;
     res.json({ success: true, table: data });
   } catch (err) {
@@ -1173,7 +885,7 @@ app.put('/api/tables/:id/status', authenticateToken, getRestaurantId, async (req
 });
 
 // ============================================================================
-// PAYMENTS ENDPOINTS
+// PAYMENTS
 // ============================================================================
 
 app.post('/api/payments', authenticateToken, getRestaurantId, async (req, res) => {
@@ -1199,7 +911,7 @@ app.post('/api/payments', authenticateToken, getRestaurantId, async (req, res) =
 });
 
 // ============================================================================
-// REPORTS ENDPOINTS
+// REPORTS
 // ============================================================================
 
 app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, res) => {
@@ -1211,8 +923,7 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
     const { data, error } = await supabaseAdmin.from('orders')
       .select('id, total_amount, status, created_at, order_items(menu_item:menu_item_id(category))')
       .eq('restaurant_id', req.restaurant_id)
-      .gte('created_at', `${reportDate}T00:00:00`)
-      .lt('created_at',  `${reportDate}T23:59:59`)
+      .gte('created_at', `${reportDate}T00:00:00`).lt('created_at', `${reportDate}T23:59:59`)
       .eq('status', 'completed');
     if (error) throw error;
     const totalRevenue  = data.reduce((sum, o) => sum + (o.total_amount || 0), 0);
@@ -1237,37 +948,20 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
 
 async function generateTokenId(restaurantId) {
   const { data: allTokens, error: fetchError } = await supabaseAdmin
-    .from('walk_in_tokens')
-    .select('id')
-    .eq('restaurant_id', restaurantId);
-
-  if (fetchError) {
-    console.error('[generateTokenId] fetch error:', fetchError.message);
-  }
-
+    .from('walk_in_tokens').select('id').eq('restaurant_id', restaurantId);
+  if (fetchError) console.error('[generateTokenId] fetch error:', fetchError.message);
   let maxSeq = 0;
   for (const row of allTokens ?? []) {
     const match = String(row.id).match(/^T-(\d+)$/);
-    if (match) {
-      const n = parseInt(match[1], 10);
-      if (n > maxSeq) maxSeq = n;
-    }
+    if (match) { const n = parseInt(match[1], 10); if (n > maxSeq) maxSeq = n; }
   }
-
   const usedIds = new Set((allTokens ?? []).map(r => r.id));
-
   const MAX_ATTEMPTS = 20;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const seq       = maxSeq + 1 + attempt;
     const candidate = `T-${String(seq).padStart(3, '0')}`;
-
     if (!usedIds.has(candidate)) {
-      const { data: existing } = await supabaseAdmin
-        .from('walk_in_tokens')
-        .select('id')
-        .eq('id', candidate)
-        .maybeSingle();
-
+      const { data: existing } = await supabaseAdmin.from('walk_in_tokens').select('id').eq('id', candidate).maybeSingle();
       if (!existing) {
         console.log(`[generateTokenId] Generated: ${candidate} (maxSeq=${maxSeq}, attempt=${attempt + 1})`);
         return candidate;
@@ -1275,13 +969,11 @@ async function generateTokenId(restaurantId) {
       console.warn(`[generateTokenId] ${candidate} taken (race), trying next...`);
     }
   }
-
   const fallback = `T-${Date.now().toString().slice(-6)}`;
   console.warn(`[generateTokenId] All ${MAX_ATTEMPTS} candidates exhausted, using fallback: ${fallback}`);
   return fallback;
 }
 
-// POST /api/tokens — public, called by WhatsApp bot and WalkInForm
 app.post('/api/tokens', async (req, res) => {
   try {
     const { name, phone, type, pax, restaurant_id } = req.body;
@@ -1290,7 +982,6 @@ app.post('/api/tokens', async (req, res) => {
     if (!restaurant_id)        return res.status(400).json({ error: 'restaurant_id is required' });
     if (!['dinein', 'takeaway'].includes(type))
       return res.status(400).json({ error: 'type must be dinein or takeaway' });
-
     const tokenId = await generateTokenId(restaurant_id);
     const status  = type === 'takeaway' ? 'takeaway' : 'waiting';
     const tokenRecord = {
@@ -1302,20 +993,16 @@ app.post('/api/tokens', async (req, res) => {
     const { data: token, error: insertError } = await supabaseAdmin
       .from('walk_in_tokens').insert(tokenRecord).select().single();
     if (insertError) throw insertError;
-
     if (process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
       const arrivalTime = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
       const typeLabel   = type === 'dinein' ? 'Dine-in' : 'Takeaway';
       const paxLine     = type === 'dinein' ? `, ${token.pax} ${token.pax === 1 ? 'person' : 'people'}` : '';
       const managerMsg  =
         `🪑 *New Walk-in* — Token *${token.id}*\n` +
-        `👤 ${token.name}${paxLine}\n` +
-        `📋 ${typeLabel}\n` +
-        `🕐 ${arrivalTime}\n\n` +
+        `👤 ${token.name}${paxLine}\n📋 ${typeLabel}\n🕐 ${arrivalTime}\n\n` +
         `Open portal to assign table:\n${process.env.FRONTEND_URL || 'https://autom8-frontend-production.up.railway.app'}/dashboard/manager`;
       sendWhatsAppMessage(process.env.MANAGER_WHATSAPP_NUMBER, managerMsg);
     }
-
     broadcastToRestaurant(restaurant_id, { type: 'NEW_TOKEN', token, timestamp: new Date().toISOString() });
     res.status(201).json({ success: true, token });
   } catch (err) {
@@ -1324,55 +1011,39 @@ app.post('/api/tokens', async (req, res) => {
   }
 });
 
-// GET /api/tokens — authenticated, manager portal queue
 app.get('/api/tokens', authenticateToken, getRestaurantId, requireFeature(FEATURES.TOKEN_MANAGEMENT), async (req, res) => {
   try {
     const { status } = req.query;
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
     console.log(`[GET /api/tokens] restaurant_id=${req.restaurant_id} status=${status || 'all'} from=${todayStart.toISOString()}`);
-
     let query;
     if (status) {
       query = supabaseAdmin.from('walk_in_tokens').select('*')
-        .eq('restaurant_id', req.restaurant_id)
-        .eq('status', status)
-        .gte('arrived_at', todayStart.toISOString())
-        .order('arrived_at', { ascending: true });
+        .eq('restaurant_id', req.restaurant_id).eq('status', status)
+        .gte('arrived_at', todayStart.toISOString()).order('arrived_at', { ascending: true });
     } else {
       query = supabaseAdmin.from('walk_in_tokens').select('*')
         .eq('restaurant_id', req.restaurant_id)
         .or(`status.in.(waiting,seated,takeaway),and(status.eq.completed,arrived_at.gte.${todayStart.toISOString()})`)
         .order('arrived_at', { ascending: true });
     }
-
     const { data, error } = await query;
-    if (error) {
-      console.error('[GET /api/tokens] Query error:', error.message);
-      throw error;
-    }
-
+    if (error) { console.error('[GET /api/tokens] Query error:', error.message); throw error; }
     console.log(`[GET /api/tokens] Found ${data?.length ?? 0} token(s) for restaurant ${req.restaurant_id}`);
     res.json({ success: true, tokens: data || [] });
   } catch (err) {
-    console.error('[GET /api/tokens]', err);
     res.status(400).json({ error: err.message });
   }
 });
 
-// GET /api/tokens/:id — public, bot uses this to check table assignment
 app.get('/api/tokens/:id', async (req, res) => {
   try {
-    const { data, error } = await supabaseAdmin
-      .from('walk_in_tokens')
+    const { data, error } = await supabaseAdmin.from('walk_in_tokens')
       .select('id, name, phone, status, type, pax, table_number, table_id, arrived_at, seated_at')
-      .eq('id', req.params.id)
-      .single();
+      .eq('id', req.params.id).single();
     if (error || !data) return res.status(404).json({ error: 'Token not found' });
     res.json({ success: true, token: data });
   } catch (err) {
-    console.error('[GET /api/tokens/:id]', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1380,47 +1051,28 @@ app.get('/api/tokens/:id', async (req, res) => {
 app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, requireFeature(FEATURES.TOKEN_MANAGEMENT), async (req, res) => {
   try {
     const { table_id, table_number } = req.body;
-    if (!table_id || !table_number)
-      return res.status(400).json({ error: 'table_id and table_number are required' });
-
-    const { data: token, error: fetchError } = await supabaseAdmin
-      .from('walk_in_tokens').select('*')
+    if (!table_id || !table_number) return res.status(400).json({ error: 'table_id and table_number are required' });
+    const { data: token, error: fetchError } = await supabaseAdmin.from('walk_in_tokens').select('*')
       .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).single();
     if (fetchError || !token) return res.status(404).json({ error: 'Token not found' });
-    if (token.status !== 'waiting')
-      return res.status(400).json({ error: `Token is already ${token.status}` });
-
-    const { data: updatedToken, error: updateError } = await supabaseAdmin
-      .from('walk_in_tokens')
+    if (token.status !== 'waiting') return res.status(400).json({ error: `Token is already ${token.status}` });
+    const { data: updatedToken, error: updateError } = await supabaseAdmin.from('walk_in_tokens')
       .update({ status: 'seated', table_id, table_number, seated_at: new Date().toISOString() })
-      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
-      .select().single();
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).select().single();
     if (updateError) throw updateError;
-
-    await supabaseAdmin.from('tables').update({ status: 'occupied' })
-      .eq('id', table_id).eq('restaurant_id', req.restaurant_id);
-
+    await supabaseAdmin.from('tables').update({ status: 'occupied' }).eq('id', table_id).eq('restaurant_id', req.restaurant_id);
     if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
-      const customerMsg =
-        `✅ *Your table is ready!*\n\n` +
-        `Token: *${token.id}*\n` +
-        `Table: *Table ${table_number}*\n\n` +
-        `Please proceed to your table and browse our menu to place your order. Enjoy your meal! 🍽️`;
-      await sendWhatsAppMessage(token.phone, customerMsg);
+      await sendWhatsAppMessage(token.phone,
+        `✅ *Your table is ready!*\n\nToken: *${token.id}*\nTable: *Table ${table_number}*\n\nPlease proceed to your table and browse our menu to place your order. Enjoy your meal! 🍽️`
+      );
       console.log(`[assign] Sending catalog to ${token.phone}`);
       await sendWhatsAppCatalogMessage(token.phone, req.restaurant_id);
-      console.log(`[assign] Catalog sent`);
     }
-
-    broadcastToRestaurant(req.restaurant_id, {
-      type: 'TOKEN_ASSIGNED', token: updatedToken, timestamp: new Date().toISOString(),
-    });
-
+    broadcastToRestaurant(req.restaurant_id, { type: 'TOKEN_ASSIGNED', token: updatedToken, timestamp: new Date().toISOString() });
     await supabaseAdmin.from('audit_logs').insert({
       user_id: req.user.sub, restaurant_id: req.restaurant_id,
       action: 'Token assigned to table', details: { token_id: req.params.id, table_id, table_number },
     });
-
     res.json({ success: true, token: updatedToken });
   } catch (err) {
     console.error('[PUT /api/tokens/:id/assign]', err);
@@ -1430,18 +1082,13 @@ app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, requireFea
 
 app.put('/api/tokens/:id/complete', authenticateToken, getRestaurantId, requireFeature(FEATURES.TOKEN_MANAGEMENT), async (req, res) => {
   try {
-    const { data: token, error: fetchError } = await supabaseAdmin
-      .from('walk_in_tokens').select('*')
+    const { data: token, error: fetchError } = await supabaseAdmin.from('walk_in_tokens').select('*')
       .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).single();
     if (fetchError || !token) return res.status(404).json({ error: 'Token not found' });
-
-    const { data: updatedToken, error: updateError } = await supabaseAdmin
-      .from('walk_in_tokens')
+    const { data: updatedToken, error: updateError } = await supabaseAdmin.from('walk_in_tokens')
       .update({ status: 'completed', completed_at: new Date().toISOString() })
-      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
-      .select().single();
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).select().single();
     if (updateError) throw updateError;
-
     if (token.table_id) {
       const { data: activeOrders } = await supabaseAdmin.from('orders').select('id')
         .eq('table_id', token.table_id).in('status', ['pending', 'confirmed', 'in_progress']);
@@ -1449,13 +1096,9 @@ app.put('/api/tokens/:id/complete', authenticateToken, getRestaurantId, requireF
         await supabaseAdmin.from('tables').update({ status: 'available' })
           .eq('id', token.table_id).eq('restaurant_id', req.restaurant_id);
     }
-
-    broadcastToRestaurant(req.restaurant_id, {
-      type: 'TOKEN_COMPLETED', token: updatedToken, timestamp: new Date().toISOString(),
-    });
+    broadcastToRestaurant(req.restaurant_id, { type: 'TOKEN_COMPLETED', token: updatedToken, timestamp: new Date().toISOString() });
     res.json({ success: true, token: updatedToken });
   } catch (err) {
-    console.error('[PUT /api/tokens/:id/complete]', err);
     res.status(500).json({ error: err.message || 'Failed to complete token' });
   }
 });
@@ -1467,24 +1110,20 @@ app.delete('/api/tokens/:id', authenticateToken, getRestaurantId, requireFeature
     if (error) throw error;
     res.json({ success: true, message: 'Token dismissed' });
   } catch (err) {
-    console.error('[DELETE /api/tokens/:id]', err);
     res.status(500).json({ error: err.message || 'Failed to dismiss token' });
   }
 });
 
 // ============================================================================
-// WHATSAPP ORDER WEBHOOK
+// WHATSAPP WEBHOOK
 // ============================================================================
 
 app.get('/api/whatsapp/webhook', (req, res) => {
-  const mode      = req.query['hub.mode'];
-  const token     = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
+  const mode = req.query['hub.mode'], token = req.query['hub.verify_token'], challenge = req.query['hub.challenge'];
   if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
     console.log('✅ [WA Webhook] Verified');
     return res.status(200).send(challenge);
   }
-  console.warn('[WA Webhook] Verification failed — token mismatch');
   res.status(403).json({ error: 'Forbidden' });
 });
 
@@ -1496,8 +1135,7 @@ app.post('/api/whatsapp/webhook', async (req, res) => {
     for (const entry of body.entry ?? []) {
       for (const change of entry.changes ?? []) {
         if (change.field !== 'messages') continue;
-        const value    = change.value;
-        const metadata = value.metadata;
+        const value = change.value, metadata = value.metadata;
         for (const message of value.messages ?? []) {
           console.log(`[WA Webhook] Message type: ${message.type} from ${message.from}`);
           if (message.type === 'order') {
@@ -1507,10 +1145,7 @@ app.post('/api/whatsapp/webhook', async (req, res) => {
           }
           await supabaseAdmin.from('audit_logs').insert({
             action: 'WhatsApp message received',
-            details: {
-              type: message.type, from: message.from,
-              phone_number_id: metadata?.phone_number_id, message_id: message.id,
-            },
+            details: { type: message.type, from: message.from, phone_number_id: metadata?.phone_number_id, message_id: message.id },
           }).catch(() => {});
         }
       }
@@ -1525,7 +1160,6 @@ async function handleWhatsAppOrder(message, metadata) {
   const productItems  = message.order?.product_items ?? [];
   console.log(`[WA Order] 📦 From ${customerPhone}, items: ${productItems.length}`);
   if (productItems.length === 0) { console.warn('[WA Order] Empty product_items — skipping'); return; }
-
   let restaurantId = process.env.DEFAULT_RESTAURANT_ID || null;
   if (metadata?.phone_number_id) {
     const { data: restaurant } = await supabaseAdmin.from('restaurants').select('id')
@@ -1533,24 +1167,20 @@ async function handleWhatsAppOrder(message, metadata) {
     if (restaurant) restaurantId = restaurant.id;
   }
   if (!restaurantId) { console.error('[WA Order] Could not resolve restaurant'); return; }
-
   const normalizedPhone = String(customerPhone).replace(/\D/g, '');
   const { data: token } = await supabaseAdmin.from('walk_in_tokens').select('*')
     .eq('restaurant_id', restaurantId).eq('phone', normalizedPhone).eq('status', 'seated')
     .order('seated_at', { ascending: false }).limit(1).maybeSingle();
-
   if (!token) {
     console.warn(`[WA Order] No seated token found for phone ${normalizedPhone}`);
     await sendWhatsAppMessage(customerPhone, `⚠️ We couldn't find your table assignment.\nPlease ask a staff member for help.`);
     return;
   }
-
   const orderNumber = `ORD-WA-${Date.now()}`;
   const { data: orderData, error: orderError } = await supabaseAdmin.from('orders')
     .insert({ restaurant_id: restaurantId, table_id: token.table_id, order_number: orderNumber, status: 'pending', source: 'whatsapp' })
     .select().single();
   if (orderError) { console.error('[WA Order] Failed to create order:', orderError.message); return; }
-
   let subtotal = 0;
   const kdsInserts = [];
   for (const item of productItems) {
@@ -1564,29 +1194,20 @@ async function handleWhatsAppOrder(message, metadata) {
     if (itemError) { console.error(`[WA Order] order_item insert failed:`, itemError.message); continue; }
     kdsInserts.push({ restaurant_id: restaurantId, order_item_id: orderItem.id, status: 'pending', priority: 'normal', item_name: menuItem.name });
   }
-
   if (kdsInserts.length > 0) {
     const { error: kdsError } = await supabaseAdmin.from('kds_items').insert(kdsInserts);
     if (kdsError) console.error('[WA Order] KDS insert failed:', kdsError.message);
-    else console.log(`[WA Order] ✅ ${kdsInserts.length} KDS item(s) created — kitchen notified`);
+    else console.log(`[WA Order] ✅ ${kdsInserts.length} KDS item(s) created`);
   }
-
   const tax = subtotal * 0.1, total = subtotal + tax;
   await supabaseAdmin.from('orders').update({ subtotal, tax, total_amount: total }).eq('id', orderData.id);
-
-  broadcastToRestaurant(restaurantId, {
-    type: 'ORDER_NEW', order_id: orderData.id, order_number: orderNumber,
-    table_number: token.table_number, source: 'whatsapp',
-    item_count: kdsInserts.length, timestamp: new Date().toISOString(),
-  });
-
+  broadcastToRestaurant(restaurantId, { type: 'ORDER_NEW', order_id: orderData.id, order_number: orderNumber, table_number: token.table_number, source: 'whatsapp', item_count: kdsInserts.length, timestamp: new Date().toISOString() });
   if (process.env.MANAGER_WHATSAPP_NUMBER) {
     const itemLines = productItems.map(i => `• ${i.quantity}x ${i.product_retailer_id}`).join('\n');
     await sendWhatsAppMessage(process.env.MANAGER_WHATSAPP_NUMBER,
       `🍽️ *New WhatsApp Order*\nOrder: *${orderNumber}*\nTable: *${token.table_number}*\nCustomer: ${token.name}\n\n${itemLines}\n\nTotal: ₹${total.toFixed(2)}`
     );
   }
-
   await sendWhatsAppMessage(customerPhone,
     `✅ *Order received!*\n\nOrder: *${orderNumber}*\nTable: *Table ${token.table_number}*\nItems: ${kdsInserts.length}\n\nWe're preparing your food now. We'll notify you when it's ready! 🍳`
   );
@@ -1597,107 +1218,53 @@ async function handleWhatsAppOrder(message, metadata) {
 }
 
 // ============================================================================
-// KDS INTERNAL NOTIFY ENDPOINT
+// KDS INTERNAL NOTIFY
 // ============================================================================
 
 app.post('/api/kds/notify', async (req, res) => {
   try {
-    const {
-      secret, restaurant_id, customer_name, customer_phone,
-      token_number, table_number, service_type, special_notes, items,
-    } = req.body;
-
+    const { secret, restaurant_id, customer_name, customer_phone, token_number, table_number, service_type, special_notes, items } = req.body;
     const expected = process.env.AUTOM8_KDS_SECRET || 'munafe_kds_sync_2026';
     if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
     if (!restaurant_id || !items || items.length === 0)
       return res.status(400).json({ error: 'restaurant_id and items are required' });
-
     const orderNumber = `ORD-WA-${Date.now()}`;
-
     let tableId = null;
     if (table_number) {
       const { data: tableRow } = await supabaseAdmin.from('tables').select('id')
         .eq('restaurant_id', restaurant_id).eq('table_number', String(table_number)).maybeSingle();
       if (tableRow) tableId = tableRow.id;
     }
-
     const { data: orderData, error: orderError } = await supabaseAdmin.from('orders')
       .insert({ restaurant_id, table_id: tableId, order_number: orderNumber, status: 'pending', source: 'whatsapp' })
       .select().single();
-    if (orderError) {
-      console.error('[kds-notify] Order insert failed:', orderError.message);
-      return res.status(500).json({ error: orderError.message });
-    }
-
-    let subtotal   = 0;
-    let kdsCreated = 0;
+    if (orderError) { console.error('[kds-notify] Order insert failed:', orderError.message); return res.status(500).json({ error: orderError.message }); }
+    let subtotal = 0, kdsCreated = 0;
     const kdsInserts = [];
-
     for (const item of items) {
-      let menuItemId    = null;
-      let resolvedPrice = item.unit_price || 0;
-
+      let menuItemId = null, resolvedPrice = item.unit_price || 0;
       if (item.retailer_id && item.retailer_id !== 'manual') {
         const { data: menuItem } = await supabaseAdmin.from('menu_items').select('id, price')
           .eq('restaurant_id', restaurant_id).eq('retailer_id', item.retailer_id).maybeSingle();
         if (menuItem) { menuItemId = menuItem.id; resolvedPrice = menuItem.price; }
       }
-
       subtotal += resolvedPrice * (item.qty || 1);
-
       const { data: orderItem, error: itemError } = await supabaseAdmin.from('order_items')
-        .insert({
-          order_id: orderData.id, menu_item_id: menuItemId,
-          quantity: item.qty || 1, unit_price: resolvedPrice,
-          special_instructions: item.name,
-        })
+        .insert({ order_id: orderData.id, menu_item_id: menuItemId, quantity: item.qty || 1, unit_price: resolvedPrice, special_instructions: item.name })
         .select().single();
-
       if (itemError) { console.error(`[kds-notify] order_item insert failed for ${item.name}:`, itemError.message); continue; }
-
-      kdsInserts.push({
-        restaurant_id,
-        order_item_id:        orderItem.id,
-        status:               'pending',
-        priority:             'normal',
-        special_instructions: special_notes || null,
-        item_name:            item.name,
-        token_number:         token_number   || null,
-        customer_phone:       customer_phone || null,
-        service_type:         service_type   || null,
-      });
+      kdsInserts.push({ restaurant_id, order_item_id: orderItem.id, status: 'pending', priority: 'normal', special_instructions: special_notes || null, item_name: item.name, token_number: token_number || null, customer_phone: customer_phone || null, service_type: service_type || null });
     }
-
     if (kdsInserts.length > 0) {
       const { error: kdsError } = await supabaseAdmin.from('kds_items').insert(kdsInserts);
-      if (kdsError) {
-        console.error('[kds-notify] kds_items insert failed:', kdsError.message);
-      } else {
-        kdsCreated = kdsInserts.length;
-        console.log(`[kds-notify] ✅ ${kdsCreated} KDS item(s) created — order ${orderNumber}`);
-      }
+      if (kdsError) console.error('[kds-notify] kds_items insert failed:', kdsError.message);
+      else { kdsCreated = kdsInserts.length; console.log(`[kds-notify] ✅ ${kdsCreated} KDS item(s) created — order ${orderNumber}`); }
     }
-
     const tax = subtotal * 0.1, total = subtotal + tax;
     await supabaseAdmin.from('orders').update({ subtotal, tax, total_amount: total }).eq('id', orderData.id);
-
-    broadcastToRestaurant(restaurant_id, {
-      type: 'ORDER_NEW', order_id: orderData.id, order_number: orderNumber,
-      token_number, table_number: table_number || null, customer_name,
-      service_type: service_type || 'whatsapp', kds_items_count: kdsCreated,
-      special_notes: special_notes || null, source: 'whatsapp',
-      timestamp: new Date().toISOString(),
-    });
-
-    try {
-      await supabaseAdmin.from('audit_logs').insert({
-        restaurant_id, action: 'KDS notified via WhatsApp order',
-        details: { order_id: orderData.id, order_number: orderNumber, token_number, table_number, customer_phone, kds_items_created: kdsCreated, special_notes: special_notes || null },
-      });
-    } catch (_) { /* non-fatal */ }
-
+    broadcastToRestaurant(restaurant_id, { type: 'ORDER_NEW', order_id: orderData.id, order_number: orderNumber, token_number, table_number: table_number || null, customer_name, service_type: service_type || 'whatsapp', kds_items_count: kdsCreated, special_notes: special_notes || null, source: 'whatsapp', timestamp: new Date().toISOString() });
+    await supabaseAdmin.from('audit_logs').insert({ restaurant_id, action: 'KDS notified via WhatsApp order', details: { order_id: orderData.id, order_number: orderNumber, token_number, table_number, customer_phone, kds_items_created: kdsCreated } }).catch(() => {});
     res.json({ success: true, order_id: orderData.id, order_number: orderNumber, kds_items_created: kdsCreated });
-
   } catch (err) {
     console.error('[kds-notify] Unexpected error:', err.message);
     res.status(500).json({ error: err.message });
@@ -1722,29 +1289,22 @@ wss.on('connection', (ws) => {
         clients.get(restaurantId).push(ws);
         ws.send(JSON.stringify({ type: 'SUBSCRIBED', restaurantId, timestamp: new Date().toISOString() }));
       }
-    } catch (err) {
-      console.error('WebSocket message error:', err);
-    }
+    } catch (err) { console.error('WebSocket message error:', err); }
   });
   ws.on('close', () => {
     if (restaurantId && clients.has(restaurantId)) {
-      const list  = clients.get(restaurantId);
-      const index = list.indexOf(ws);
+      const list = clients.get(restaurantId), index = list.indexOf(ws);
       if (index > -1) list.splice(index, 1);
     }
     console.log('WebSocket client disconnected');
   });
-  ws.on('error', (err) => {
-    console.error('WebSocket error:', err.message);
-  });
+  ws.on('error', (err) => { console.error('WebSocket error:', err.message); });
 });
 
 function broadcastToRestaurant(restaurantId, data) {
   if (clients.has(restaurantId)) {
     clients.get(restaurantId).forEach(client => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify(data));
-      }
+      if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(data));
     });
   }
 }
