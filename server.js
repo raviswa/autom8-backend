@@ -126,7 +126,7 @@ app.get('/api/whatsapp-orders', async (req, res) => {
         if (!itemsByBooking[item.booking_id]) itemsByBooking[item.booking_id] = [];
         itemsByBooking[item.booking_id].push(item);
       });
-    }
+    
  
     const orders = (bookings || []).map(b => ({
       id:             b.id,
