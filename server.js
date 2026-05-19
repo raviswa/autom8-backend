@@ -292,17 +292,29 @@ app.post('/api/auth/login', async (req, res) => {
     const { email, password } = req.body;
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) throw error;
+
     const { data: userDetails } = await supabaseAdmin
       .from('users').select('*').eq('id', data.user.id).single();
     if (!userDetails) return res.status(401).json({ error: 'User account not fully set up. No profile found.' });
+
+    // Fetch restaurant name to include in user object
+    const { data: restaurant } = await supabaseAdmin
+      .from('restaurants').select('name').eq('id', userDetails.restaurant_id).single();
+
     await supabaseAdmin.from('users').update({ last_login: new Date() }).eq('id', data.user.id);
     await supabaseAdmin.from('audit_logs').insert({
       user_id: data.user.id, restaurant_id: userDetails.restaurant_id,
       action: 'User login', ip_address: req.ip,
     });
+
     res.json({
-      success: true, user: userDetails,
-      token: data.session.access_token, refreshToken: data.session.refresh_token,
+      success: true,
+      user: {
+        ...userDetails,
+        restaurant_name: restaurant?.name ?? null,
+      },
+      token: data.session.access_token,
+      refreshToken: data.session.refresh_token,
     });
   } catch (err) {
     res.status(401).json({ error: err.message });
