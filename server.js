@@ -130,24 +130,6 @@ app.use(cors({
 app.options('*', cors());
 app.use(express.json());
 
-//==================================================
-//WABA
-//==================================================
-
-app.get('/api/restaurants/:id/waba', authenticateToken, async (req, res) => {
-  try {
-    const { data, error } = await supabaseAdmin
-      .from('restaurants')
-      .select('name, waba_id, whatsapp_phone_number, whatsapp_display_name')
-      .eq('id', req.params.id)
-      .single();
-    if (error || !data) return res.status(404).json({ error: 'Not found' });
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 
 
 // ============================================================================
@@ -439,6 +421,27 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
     console.error('[catalog-msg] Failed:', err.message);
   }
 }
+
+//==================================================
+//WABA
+//==================================================
+
+app.get('/api/restaurants/:id/waba', authenticateToken, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('restaurants')
+      .select('name, waba_id, whatsapp_phone_number, whatsapp_display_name')
+      .eq('id', req.params.id)
+      .single();
+    if (error || !data) return res.status(404).json({ error: 'Not found' });
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
 
 // ============================================================================
 // SLOT SCHEDULER
