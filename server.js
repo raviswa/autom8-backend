@@ -1272,6 +1272,373 @@ app.post('/api/kds/notify', async (req, res) => {
 });
 
 // ============================================================================
+// MARKETING / CRM ENDPOINTS
+// Add this block to server.js — paste it before the WEBSOCKET section.
+// All routes require authenticateToken + getRestaurantId.
+// The 'marketing' role can send; 'owner' can read only (enforced per endpoint).
+// ============================================================================
+
+// ── Role guard helper ─────────────────────────────────────────────────────────
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!roles.includes(req.user_role)) {
+      return res.status(403).json({ error: `Role '${req.user_role}' cannot access this endpoint.` });
+    }
+    next();
+  };
+}
+
+// ── GET /api/marketing/subscribers ───────────────────────────────────────────
+// Returns total subscriber stats + per-segment counts from the chat DB.
+app.get('/api/marketing/subscribers', authenticateToken, getRestaurantId, requireRole('marketing', 'owner'), async (req, res) => {
+  try {
+    const restaurantId = req.restaurant_id;
+    const now          = new Date();
+    const d7  = new Date(now - 7  * 86400000).toISOString();
+    const d14 = new Date(now - 14 * 86400000).toISOString();
+    const d30 = new Date(now - 30 * 86400000).toISOString();
+
+    // All customers who have ever booked with this restaurant
+    const { data: allCustomers, error: custErr } = await supabaseChat
+      .from('bookings')
+      .select('customer_id, created_at, customer:customers(phone, name)')
+      .eq('restaurant_id', restaurantId);
+
+    if (custErr) throw custErr;
+
+    // Deduplicate by customer_id, track first and last booking date
+    const customerMap = {};
+    for (const b of allCustomers ?? []) {
+      const id = b.customer_id;
+      if (!id) continue;
+      if (!customerMap[id]) {
+        customerMap[id] = {
+          id,
+          name:       b.customer?.name,
+          phone:      b.customer?.phone,
+          firstOrder: b.created_at,
+          lastOrder:  b.created_at,
+          orderCount: 0,
+          totalSpend: 0,
+        };
+      }
+      if (b.created_at > customerMap[id].lastOrder)  customerMap[id].lastOrder  = b.created_at;
+      if (b.created_at < customerMap[id].firstOrder) customerMap[id].firstOrder = b.created_at;
+      customerMap[id].orderCount++;
+    }
+
+    // Fetch total_amount for each booking to compute spend
+    const { data: spendData } = await supabaseChat
+      .from('bookings')
+      .select('customer_id, total_amount')
+      .eq('restaurant_id', restaurantId);
+    for (const s of spendData ?? []) {
+      if (customerMap[s.customer_id]) {
+        customerMap[s.customer_id].totalSpend += parseFloat(s.total_amount || 0);
+      }
+    }
+
+    const customers = Object.values(customerMap);
+    const total     = customers.length;
+
+    // Segment counts
+    const segments = {
+      all:            total,
+      recent:         customers.filter(c => c.lastOrder >= d7).length,
+      lapsed:         customers.filter(c => c.lastOrder < d14 && c.lastOrder >= d30).length,
+      takeaway:       customers.filter(c => c.orderCount >= 3).length,
+      high_value:     customers.filter(c => c.totalSpend >= 500).length,
+      never_returned: customers.filter(c => c.orderCount === 1 && c.firstOrder < d7).length,
+    };
+
+    const stats = {
+      total,
+      new_this_week: customers.filter(c => c.firstOrder >= d7).length,
+      active_30d:    customers.filter(c => c.lastOrder >= d30).length,
+      opted_out:     0, // extend later with opt-out tracking
+    };
+
+    res.json({ stats, segments });
+  } catch (err) {
+    console.error('[/api/marketing/subscribers]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/marketing/templates ─────────────────────────────────────────────
+// Fetches approved message templates from Meta Graph API.
+app.get('/api/marketing/templates', authenticateToken, getRestaurantId, requireRole('marketing', 'owner'), async (req, res) => {
+  try {
+    const { data: restaurant } = await supabaseAdmin
+      .from('restaurants')
+      .select('waba_id')
+      .eq('id', req.restaurant_id)
+      .single();
+
+    const wabaId = restaurant?.waba_id;
+    if (!wabaId || !process.env.META_ACCESS_TOKEN) {
+      return res.json({ templates: [] });
+    }
+
+    const response = await fetch(
+      `https://graph.facebook.com/v20.0/${wabaId}/message_templates?limit=100&access_token=${process.env.META_ACCESS_TOKEN}`
+    );
+    const data = await response.json();
+
+    if (data.error) {
+      console.error('[marketing/templates] Meta error:', data.error.message);
+      return res.json({ templates: [] });
+    }
+
+    const templates = (data.data || [])
+      .filter(t => t.status === 'APPROVED')
+      .map(t => ({
+        name:     t.name,
+        category: t.category,
+        language: t.language,
+        status:   t.status,
+        components: t.components,
+      }));
+
+    res.json({ templates });
+  } catch (err) {
+    console.error('[/api/marketing/templates]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/marketing/ai-suggest ───────────────────────────────────────────
+// Sends the marketer's goal to Claude, returns segment + draft message.
+app.post('/api/marketing/ai-suggest', authenticateToken, getRestaurantId, requireRole('marketing', 'owner'), async (req, res) => {
+  try {
+    const { goal } = req.body;
+    if (!goal?.trim()) return res.status(400).json({ error: 'goal is required' });
+
+    // Fetch segment counts to give Claude context
+    const now  = new Date();
+    const d7   = new Date(now - 7  * 86400000).toISOString();
+    const d14  = new Date(now - 14 * 86400000).toISOString();
+    const d30  = new Date(now - 30 * 86400000).toISOString();
+
+    const { data: bookings } = await supabaseChat
+      .from('bookings')
+      .select('customer_id, created_at, total_amount')
+      .eq('restaurant_id', req.restaurant_id);
+
+    const customerMap = {};
+    for (const b of bookings ?? []) {
+      if (!b.customer_id) continue;
+      if (!customerMap[b.customer_id]) customerMap[b.customer_id] = { lastOrder: b.created_at, firstOrder: b.created_at, orderCount: 0, totalSpend: 0 };
+      if (b.created_at > customerMap[b.customer_id].lastOrder)  customerMap[b.customer_id].lastOrder  = b.created_at;
+      if (b.created_at < customerMap[b.customer_id].firstOrder) customerMap[b.customer_id].firstOrder = b.created_at;
+      customerMap[b.customer_id].orderCount++;
+      customerMap[b.customer_id].totalSpend += parseFloat(b.total_amount || 0);
+    }
+    const customers = Object.values(customerMap);
+
+    const segmentCounts = {
+      all:            customers.length,
+      recent:         customers.filter(c => c.lastOrder >= d7).length,
+      lapsed:         customers.filter(c => c.lastOrder < d14 && c.lastOrder >= d30).length,
+      takeaway:       customers.filter(c => c.orderCount >= 3).length,
+      high_value:     customers.filter(c => c.totalSpend >= 500).length,
+      never_returned: customers.filter(c => c.orderCount === 1 && c.firstOrder < d7).length,
+    };
+
+    const systemPrompt = `You are a restaurant marketing assistant for Hotel Munafe, a restaurant in India. 
+You help suggest the right customer segment and draft WhatsApp messages for marketing campaigns.
+
+Available segments and their current counts:
+- all: ${segmentCounts.all} customers (everyone who ever ordered)
+- recent: ${segmentCounts.recent} customers (ordered in last 7 days)
+- lapsed: ${segmentCounts.lapsed} customers (ordered 14-30 days ago, not since)
+- takeaway: ${segmentCounts.takeaway} customers (3+ takeaway orders)
+- high_value: ${segmentCounts.high_value} customers (total spend above ₹500)
+- never_returned: ${segmentCounts.never_returned} customers (ordered exactly once, more than 7 days ago)
+
+Respond ONLY with a JSON object, no markdown, no explanation. Format:
+{
+  "segment": "<segment_key>",
+  "estimated_count": <number>,
+  "reasoning": "<one sentence why this segment fits the goal>",
+  "suggested_message": "<WhatsApp message, use {{name}} for customer name, keep under 160 chars, friendly tone, include restaurant name>"
+}`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type':      'application/json',
+        'x-api-key':         process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model:      'claude-sonnet-4-20250514',
+        max_tokens: 500,
+        system:     systemPrompt,
+        messages:   [{ role: 'user', content: goal }],
+      }),
+    });
+
+    const aiData = await response.json();
+    if (aiData.error) throw new Error(aiData.error.message);
+
+    const raw  = aiData.content?.[0]?.text ?? '{}';
+    const clean = raw.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    res.json(parsed);
+  } catch (err) {
+    console.error('[/api/marketing/ai-suggest]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/marketing/broadcast ────────────────────────────────────────────
+// Resolves the customer list for a segment and sends messages via Meta API.
+// Records the campaign in broadcast_campaigns table.
+app.post('/api/marketing/broadcast', authenticateToken, getRestaurantId, requireRole('marketing'), async (req, res) => {
+  try {
+    const { name, segment, template_name, custom_message } = req.body;
+    if (!name)    return res.status(400).json({ error: 'Campaign name is required' });
+    if (!segment) return res.status(400).json({ error: 'Segment is required' });
+    if (!template_name && !custom_message) return res.status(400).json({ error: 'template_name or custom_message is required' });
+
+    const restaurantId = req.restaurant_id;
+    const now  = new Date();
+    const d7   = new Date(now - 7  * 86400000).toISOString();
+    const d14  = new Date(now - 14 * 86400000).toISOString();
+    const d30  = new Date(now - 30 * 86400000).toISOString();
+
+    // Resolve customer list from chat DB
+    const { data: bookings } = await supabaseChat
+      .from('bookings')
+      .select('customer_id, created_at, total_amount, customer:customers(name, phone)')
+      .eq('restaurant_id', restaurantId);
+
+    const customerMap = {};
+    for (const b of bookings ?? []) {
+      if (!b.customer_id || !b.customer?.phone) continue;
+      if (!customerMap[b.customer_id]) {
+        customerMap[b.customer_id] = {
+          id:         b.customer_id,
+          name:       b.customer?.name ?? 'there',
+          phone:      b.customer?.phone,
+          lastOrder:  b.created_at,
+          firstOrder: b.created_at,
+          orderCount: 0,
+          totalSpend: 0,
+        };
+      }
+      if (b.created_at > customerMap[b.customer_id].lastOrder)  customerMap[b.customer_id].lastOrder  = b.created_at;
+      if (b.created_at < customerMap[b.customer_id].firstOrder) customerMap[b.customer_id].firstOrder = b.created_at;
+      customerMap[b.customer_id].orderCount++;
+      customerMap[b.customer_id].totalSpend += parseFloat(b.total_amount || 0);
+    }
+
+    const all = Object.values(customerMap);
+    const segmentFilters = {
+      all:            () => true,
+      recent:         c => c.lastOrder >= d7,
+      lapsed:         c => c.lastOrder < d14 && c.lastOrder >= d30,
+      takeaway:       c => c.orderCount >= 3,
+      high_value:     c => c.totalSpend >= 500,
+      never_returned: c => c.orderCount === 1 && c.firstOrder < d7,
+    };
+
+    const recipients = all.filter(segmentFilters[segment] ?? (() => false));
+
+    // Insert campaign record
+    const { data: campaign, error: campErr } = await supabaseAdmin
+      .from('broadcast_campaigns')
+      .insert({
+        restaurant_id:   restaurantId,
+        name,
+        segment_type:    segment,
+        template_name:   template_name || null,
+        recipient_count: recipients.length,
+        status:          'sending',
+        created_by:      req.user.sub,
+      })
+      .select()
+      .single();
+    if (campErr) throw campErr;
+
+    // Send messages (non-blocking — respond immediately, send in background)
+    res.json({ success: true, campaign_id: campaign.id, recipient_count: recipients.length, sent_count: recipients.length });
+
+    // Background send
+    let sentCount = 0, failCount = 0;
+    for (const customer of recipients) {
+      try {
+        if (template_name) {
+          // Send approved template
+          await fetch(
+            `${process.env.WHATSAPP_API_URL}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+            {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                messaging_product: 'whatsapp',
+                to:   String(customer.phone),
+                type: 'template',
+                template: {
+                  name,
+                  language: { code: 'en' },
+                  components: [{
+                    type:       'body',
+                    parameters: [{ type: 'text', text: customer.name ?? 'there' }],
+                  }],
+                },
+              }),
+            }
+          );
+        } else {
+          // Send free-form message — substitute {{name}}
+          const msg = (custom_message || '').replace(/\{\{name\}\}/gi, customer.name ?? 'there');
+          await sendWhatsAppMessage(customer.phone, msg);
+        }
+        sentCount++;
+        // Small delay to respect Meta rate limits
+        await new Promise(r => setTimeout(r, 60));
+      } catch (sendErr) {
+        console.error(`[broadcast] Failed to send to ${customer.phone}:`, sendErr.message);
+        failCount++;
+      }
+    }
+
+    // Update campaign status
+    await supabaseAdmin
+      .from('broadcast_campaigns')
+      .update({ status: failCount === recipients.length ? 'failed' : 'completed', sent_count: sentCount, failed_count: failCount, sent_at: new Date().toISOString() })
+      .eq('id', campaign.id);
+
+    console.log(`[broadcast] Campaign ${campaign.id}: ${sentCount} sent, ${failCount} failed`);
+  } catch (err) {
+    console.error('[/api/marketing/broadcast]', err.message);
+    // Only send error if headers not sent yet (we might have already responded)
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/marketing/campaigns ─────────────────────────────────────────────
+// Returns campaign history for this restaurant.
+app.get('/api/marketing/campaigns', authenticateToken, getRestaurantId, requireRole('marketing', 'owner'), async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('broadcast_campaigns')
+      .select('*')
+      .eq('restaurant_id', req.restaurant_id)
+      .order('created_at', { ascending: false })
+      .limit(50);
+    if (error) throw error;
+    res.json({ campaigns: data || [] });
+  } catch (err) {
+    console.error('[/api/marketing/campaigns]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
 // WEBSOCKET
 // ============================================================================
 
