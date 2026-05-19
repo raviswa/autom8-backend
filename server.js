@@ -67,14 +67,23 @@ const supabaseAdmin = createClient(
 
 
 
+// ============================================================================
+// REPLACE the existing app.get('/api/whatsapp-orders', ...) block in server.js
+// with this version — adds start/end date filter from query params
+// ============================================================================
+ 
 app.get('/api/whatsapp-orders', async (req, res) => {
   try {
     const restaurantId = '46fb9b9e-431a-43c9-9edb-d316b0fef216';
-
-// ============================================================================
-// Fetch bookings with order items from chat DB
-// ============================================================================
-
+ 
+    // Date range from query params — default to today if not provided
+    const now        = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+    const start      = req.query.start || todayStart;
+    const end        = req.query.end   || now.toISOString();
+ 
+    console.log(`[/api/whatsapp-orders] range: ${start} → ${end}`);
+ 
     const { data: bookings, error: bookingsError } = await supabaseChat
       .from('bookings')
       .select(`
@@ -88,8 +97,62 @@ app.get('/api/whatsapp-orders', async (req, res) => {
         customer:customers(name, phone)
       `)
       .eq('restaurant_id', restaurantId)
+      .gte('created_at', start)
+      .lte('created_at', end)
       .order('created_at', { ascending: false })
-      .limit(50);
+      .limit(100);
+ 
+    if (bookingsError) throw bookingsError;
+ 
+    console.log(`[/api/whatsapp-orders] bookings found: ${bookings?.length ?? 0}`);
+ 
+    const bookingIds = (bookings || []).map(b => b.id);
+    let itemsByBooking = {};
+ 
+    if (bookingIds.length > 0) {
+      const { data: orderItems, error: itemsError } = await supabaseChat
+        .from('order_items')
+        .select(`
+          booking_id,
+          quantity,
+          unit_price,
+          menu_item:menu_items(name)
+        `)
+        .in('booking_id', bookingIds);
+ 
+      if (itemsError) console.error('[/api/whatsapp-orders] order_items error:', itemsError.message);
+ 
+      (orderItems || []).forEach(item => {
+        if (!itemsByBooking[item.booking_id]) itemsByBooking[item.booking_id] = [];
+        itemsByBooking[item.booking_id].push(item);
+      });
+    }
+ 
+    const orders = (bookings || []).map(b => ({
+      id:             b.id,
+      order_number:   b.token_number || b.id.slice(-6).toUpperCase(),
+      customer_name:  b.customer?.name  ?? 'Unknown',
+      customer_phone: b.customer?.phone ?? null,
+      service_type:   b.service_type,
+      status:         b.status,
+      payment_status: b.payment_status,
+      total_amount:   (itemsByBooking[b.id] || []).reduce(
+                        (s, i) => s + (i.quantity * parseFloat(i.unit_price || 0)), 0
+                      ) || parseFloat(b.token_advance || 0),
+      created_at:     b.created_at,
+      items:          (itemsByBooking[b.id] || []).map(i => ({
+                        name:     i.menu_item?.name ?? 'Item',
+                        quantity: i.quantity,
+                        price:    i.unit_price,
+                      })),
+    }));
+ 
+    res.json({ orders });
+  } catch (err) {
+    console.error('[/api/whatsapp-orders]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
     if (bookingsError) throw bookingsError;
 
