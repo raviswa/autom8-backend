@@ -40,6 +40,15 @@ const http      = require('http');
 const WebSocket = require('ws');
 const { createClient } = require('@supabase/supabase-js');
 
+// Add near the top where supabase/supabaseAdmin are initialized
+const { createClient: createClientChat } = require('@supabase/supabase-js');
+
+const supabaseChat = createClientChat(
+  process.env.CHAT_SUPABASE_URL,
+  process.env.CHAT_SUPABASE_SERVICE_KEY
+);
+
+
 dotenv.config();
 
 const app    = express();
@@ -55,6 +64,85 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+
+
+
+app.get('/api/whatsapp-orders', async (req, res) => {
+  try {
+    const restaurantId = '46fb9b9e-431a-43c9-9edb-d316b0fef216';
+
+// ============================================================================
+// Fetch bookings with order items from chat DB
+// ============================================================================
+
+    const { data: bookings, error: bookingsError } = await supabaseChat
+      .from('bookings')
+      .select(`
+        id,
+        service_type,
+        token_number,
+        status,
+        payment_status,
+        token_advance,
+        created_at,
+        customer:customers(name, phone)
+      `)
+      .eq('restaurant_id', restaurantId)
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    if (bookingsError) throw bookingsError;
+
+    // Fetch order items for these bookings
+    const bookingIds = (bookings || []).map(b => b.id);
+    let itemsByBooking = {};
+
+    if (bookingIds.length > 0) {
+      const { data: orderItems } = await supabaseChat
+        .from('order_items')
+        .select(`
+          booking_id,
+          quantity,
+          unit_price,
+          menu_item:menu_items(name)
+        `)
+        .in('booking_id', bookingIds);
+
+      (orderItems || []).forEach(item => {
+        if (!itemsByBooking[item.booking_id]) itemsByBooking[item.booking_id] = [];
+        itemsByBooking[item.booking_id].push(item);
+      });
+    }
+
+    const orders = (bookings || []).map(b => ({
+      id:              b.id,
+      order_number:    b.token_number || b.id.slice(-6).toUpperCase(),
+      customer_name:   b.customer?.name  ?? 'Unknown',
+      customer_phone:  b.customer?.phone ?? null,
+      service_type:    b.service_type,
+      status:          b.status,
+      payment_status:  b.payment_status,
+      total_amount:    (itemsByBooking[b.id] || []).reduce(
+                         (s, i) => s + (i.quantity * parseFloat(i.unit_price || 0)), 0
+                       ) || parseFloat(b.token_advance || 0),
+      created_at:      b.created_at,
+      items:           (itemsByBooking[b.id] || []).map(i => ({
+                         name:     i.menu_item?.name ?? 'Item',
+                         quantity: i.quantity,
+                         price:    i.unit_price,
+                       })),
+    }));
+
+    res.json({ orders });
+  } catch (err) {
+    console.error('[/api/whatsapp-orders]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+
 
 // ============================================================================
 // FEATURE CONSTANTS — mirrors db/models.py Feature class
