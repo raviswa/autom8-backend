@@ -1048,23 +1048,18 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
 // WALK-IN TOKEN SYSTEM
 // ============================================================================
 
-// Fix D: generateTokenId uses MAX(numeric suffix) instead of COUNT(*).
 async function generateTokenId(restaurantId) {
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-
-  const { data: todayTokens, error: fetchError } = await supabaseAdmin
+  const { data: allTokens, error: fetchError } = await supabaseAdmin
     .from('walk_in_tokens')
     .select('id')
-    .eq('restaurant_id', restaurantId)
-    .gte('arrived_at', todayStart.toISOString());
+    .eq('restaurant_id', restaurantId);
 
   if (fetchError) {
     console.error('[generateTokenId] fetch error:', fetchError.message);
   }
 
   let maxSeq = 0;
-  for (const row of todayTokens ?? []) {
+  for (const row of allTokens ?? []) {
     const match = String(row.id).match(/^T-(\d+)$/);
     if (match) {
       const n = parseInt(match[1], 10);
@@ -1072,19 +1067,18 @@ async function generateTokenId(restaurantId) {
     }
   }
 
-  const usedToday = new Set((todayTokens ?? []).map(r => r.id));
+  const usedIds = new Set((allTokens ?? []).map(r => r.id));
 
   const MAX_ATTEMPTS = 20;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const seq       = maxSeq + 1 + attempt;
     const candidate = `T-${String(seq).padStart(3, '0')}`;
 
-    if (!usedToday.has(candidate)) {
+    if (!usedIds.has(candidate)) {
       const { data: existing } = await supabaseAdmin
         .from('walk_in_tokens')
         .select('id')
         .eq('id', candidate)
-        .gte('arrived_at', todayStart.toISOString())
         .maybeSingle();
 
       if (!existing) {
