@@ -1464,30 +1464,30 @@ Respond ONLY with a JSON object, no markdown, no explanation. Format:
   "suggested_message": "<WhatsApp message, use {{name}} for customer name, keep under 160 chars, friendly tone, include restaurant name>"
 }`;
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type':      'application/json',
-        'x-api-key':         process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model:      'claude-sonnet-4-20250514',
-        max_tokens: 500,
-        system:     systemPrompt,
-        messages:   [{ role: 'user', content: goal }],
-      }),
-    });
+const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    model:      'llama-3.1-8b-instant',
+    max_tokens: 500,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user',   content: goal },
+    ],
+  }),
+});
 
-    const aiData = await response.json();
-    if (aiData.error) throw new Error(aiData.error.message);
+const aiData = await response.json();
+if (aiData.error) throw new Error(aiData.error.message);
 
-    const raw  = aiData.content?.[0]?.text ?? '{}';
-    const clean = raw.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+const raw    = aiData.choices[0].message.content ?? '{}';
+const clean  = raw.replace(/```json|```/g, '').trim();
+const parsed = JSON.parse(clean);
 
-    res.json(parsed);
-  } catch (err) {
+res.json(parsed);  } catch (err) {
     console.error('[/api/marketing/ai-suggest]', err.message);
     res.status(500).json({ error: err.message });
   }
