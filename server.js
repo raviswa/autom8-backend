@@ -1464,30 +1464,30 @@ Respond ONLY with a JSON object, no markdown, no explanation. Format:
   "suggested_message": "<WhatsApp message, use {{name}} for customer name, keep under 160 chars, friendly tone, include restaurant name>"
 }`;
 
-const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-  method: 'POST',
-  headers: {
-    'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({
-    model:      'llama-3.1-8b-instant',
-    max_tokens: 500,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user',   content: goal },
-    ],
-  }),
-});
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type':      'application/json',
+        'x-api-key':         process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model:      'claude-sonnet-4-20250514',
+        max_tokens: 500,
+        system:     systemPrompt,
+        messages:   [{ role: 'user', content: goal }],
+      }),
+    });
 
-const aiData = await response.json();
-if (aiData.error) throw new Error(aiData.error.message);
+    const aiData = await response.json();
+    if (aiData.error) throw new Error(aiData.error.message);
 
-const raw    = aiData.choices[0].message.content ?? '{}';
-const clean  = raw.replace(/```json|```/g, '').trim();
-const parsed = JSON.parse(clean);
+    const raw  = aiData.content?.[0]?.text ?? '{}';
+    const clean = raw.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
 
-res.json(parsed);  } catch (err) {
+    res.json(parsed);
+  } catch (err) {
     console.error('[/api/marketing/ai-suggest]', err.message);
     res.status(500).json({ error: err.message });
   }
@@ -1638,6 +1638,178 @@ app.get('/api/marketing/campaigns', authenticateToken, getRestaurantId, requireR
   }
 });
 
+// ── POST /api/marketing/templates/create ─────────────────────────────────────
+// Submits a new message template to Meta for approval.
+app.post('/api/marketing/templates/create', authenticateToken, getRestaurantId, requireRole('marketing', 'owner'), async (req, res) => {
+  try {
+    const { name, category, language, components } = req.body;
+
+    if (!name)       return res.status(400).json({ error: 'name is required' });
+    if (!category)   return res.status(400).json({ error: 'category is required' });
+    if (!language)   return res.status(400).json({ error: 'language is required' });
+    if (!components?.length) return res.status(400).json({ error: 'components are required' });
+
+    // Validate name format
+    if (!/^[a-z0-9_]+$/.test(name)) {
+      return res.status(400).json({ error: 'Template name must be lowercase letters, numbers and underscores only' });
+    }
+
+    const { data: restaurant } = await supabaseAdmin
+      .from('restaurants')
+      .select('waba_id')
+      .eq('id', req.restaurant_id)
+      .single();
+
+    const wabaId = restaurant?.waba_id;
+    if (!wabaId) return res.status(400).json({ error: 'WABA ID not configured for this restaurant' });
+    if (!process.env.META_ACCESS_TOKEN) return res.status(400).json({ error: 'META_ACCESS_TOKEN not configured' });
+
+    const response = await fetch(
+      `https://graph.facebook.com/v20.0/${wabaId}/message_templates`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization:  `Bearer ${process.env.META_ACCESS_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name, category, language, components }),
+      }
+    );
+
+    const data = await response.json();
+
+    if (data.error) {
+      console.error('[marketing/templates/create] Meta error:', data.error);
+      return res.status(400).json({
+        error: data.error.message || 'Meta API error',
+        meta_error: data.error,
+      });
+    }
+
+    console.log(`[marketing/templates/create] ✅ Template '${name}' submitted, id: ${data.id}`);
+    res.json({
+      success:  true,
+      id:       data.id,
+      status:   data.status,
+      name,
+      category,
+      language,
+    });
+  } catch (err) {
+    console.error('[/api/marketing/templates/create]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/marketing/ai-rewrite ───────────────────────────────────────────
+// Rewrites a draft template message using Groq/AI for better engagement.
+app.post('/api/marketing/ai-rewrite', authenticateToken, getRestaurantId, requireRole('marketing', 'owner'), async (req, res) => {
+  try {
+    const { text, category } = req.body;
+    if (!text?.trim()) return res.status(400).json({ error: 'text is required' });
+
+    const systemPrompt = `You are a WhatsApp marketing expert for Hotel Munafe, a restaurant in India.
+Rewrite the given WhatsApp message template to be more engaging, friendly, and effective.
+Rules:
+- Keep it under 160 characters if possible
+- Keep any {{name}}, {{date}}, {{token}}, {{order}}, {{restaurant}} variables exactly as-is
+- Use a warm, friendly tone appropriate for a restaurant
+- ${category === 'UTILITY' ? 'This is a utility message — keep it informational and clear' : 'This is a marketing message — make it enticing and include a soft call to action'}
+- Return ONLY the rewritten message text, nothing else`;
+
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model:      'llama-3.1-8b-instant',
+        max_tokens: 300,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user',   content: `Rewrite this: ${text}` },
+        ],
+      }),
+    });
+
+    const data = await response.json();
+    if (data.error) throw new Error(data.error.message);
+
+    const rewritten = data.choices[0].message.content.trim();
+    res.json({ rewritten });
+  } catch (err) {
+    console.error('[/api/marketing/ai-rewrite]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/marketing/media/upload ─────────────────────────────────────────
+// Uploads an image/video/document to Meta's Media API and returns a handle.
+// The handle is then used in the template HEADER component.
+app.post('/api/marketing/media/upload', authenticateToken, getRestaurantId, requireRole('marketing', 'owner'), async (req, res) => {
+  try {
+    // Use multer for multipart parsing — install if not present: npm install multer
+    const multer = require('multer');
+    const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
+
+    upload.single('file')(req, res, async (err) => {
+      if (err) return res.status(400).json({ error: err.message });
+      if (!req.file) return res.status(400).json({ error: 'No file provided' });
+
+      const { data: restaurant } = await supabaseAdmin
+        .from('restaurants').select('waba_id').eq('id', req.restaurant_id).single();
+
+      if (!restaurant?.waba_id || !process.env.META_ACCESS_TOKEN) {
+        return res.status(400).json({ error: 'WABA not configured' });
+      }
+
+      // Step 1: Start resumable upload session
+      const startRes = await fetch(
+        `https://graph.facebook.com/v20.0/${restaurant.waba_id}/uploads`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization:  `Bearer ${process.env.META_ACCESS_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            file_length: req.file.size,
+            file_type:   req.file.mimetype,
+            access_token: process.env.META_ACCESS_TOKEN,
+          }),
+        }
+      );
+      const startData = await startRes.json();
+      if (startData.error) throw new Error(`Upload session failed: ${startData.error.message}`);
+
+      const uploadId = startData.id;
+
+      // Step 2: Upload the file data
+      const uploadRes = await fetch(
+        `https://graph.facebook.com/v20.0/${uploadId}`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization:           `OAuth ${process.env.META_ACCESS_TOKEN}`,
+            file_offset:             '0',
+            'Content-Type':          req.file.mimetype,
+          },
+          body: req.file.buffer,
+        }
+      );
+      const uploadData = await uploadRes.json();
+      if (uploadData.error) throw new Error(`File upload failed: ${uploadData.error.message}`);
+
+      const handle = uploadData.h;
+      console.log(`[media/upload] ✅ Uploaded, handle: ${handle}`);
+      res.json({ handle, upload_id: uploadId });
+    });
+  } catch (err) {
+    console.error('[/api/marketing/media/upload]', err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+});
 // ============================================================================
 // WEBSOCKET
 // ============================================================================
