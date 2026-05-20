@@ -13,6 +13,8 @@ const { createClient: createClientChat } = require('@supabase/supabase-js');
 
 dotenv.config();
 
+console.log('FRONTEND_URL:', process.env.FRONTEND_URL); // ← add this line
+
 const multer = require('multer');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
 
