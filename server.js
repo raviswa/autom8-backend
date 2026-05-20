@@ -13,6 +13,9 @@ const { createClient: createClientChat } = require('@supabase/supabase-js');
 
 dotenv.config();
 
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
+
 const app    = express();
 const server = http.createServer(app);
 const wss    = new WebSocket.Server({ server });
