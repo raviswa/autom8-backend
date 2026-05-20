@@ -505,14 +505,13 @@ function parseMetaPrice(rawPrice) {
   if (typeof rawPrice === 'string') {
     const numeric = parseFloat(rawPrice.replace(/[^0-9.]/g, ''));
     if (isNaN(numeric)) return 0;
-    const result = numeric / 100;
-    console.log(`[parseMetaPrice] string "${rawPrice}" → numeric ${numeric} → ₹${result}`);
-    return result;
+    const hasRupeeSymbol = rawPrice.includes('₹');
+    const hasDecimal     = rawPrice.includes('.');
+    const looksLikePaise = !hasRupeeSymbol && !hasDecimal && numeric >= 10000;
+    return looksLikePaise ? numeric / 100 : numeric;
   }
   if (typeof rawPrice === 'number') {
-    const result = rawPrice >= 100 ? rawPrice / 100 : rawPrice;
-    console.log(`[parseMetaPrice] number ${rawPrice} → ₹${result}`);
-    return result;
+    return rawPrice >= 10000 ? rawPrice / 100 : rawPrice;
   }
   return 0;
 }
