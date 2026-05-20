@@ -1750,67 +1750,45 @@ Rules:
 // ── POST /api/marketing/media/upload ─────────────────────────────────────────
 // Uploads an image/video/document to Meta's Media API and returns a handle.
 // The handle is then used in the template HEADER component.
-app.post('/api/marketing/media/upload', authenticateToken, getRestaurantId, requireRole('marketing', 'owner'), async (req, res) => {
+app.post('/api/marketing/media/upload', authenticateToken, getRestaurantId, requireRole('marketing', 'owner'), upload.single('file'), async (req, res) => {
   try {
-    // Use multer for multipart parsing — install if not present: npm install multer
-    const multer = require('multer');
-    const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
+    if (!req.file) return res.status(400).json({ error: 'No file provided' });
+    
+    const { data: restaurant } = await supabaseAdmin
+      .from('restaurants').select('waba_id').eq('id', req.restaurant_id).single();
 
-    upload.single('file')(req, res, async (err) => {
-      if (err) return res.status(400).json({ error: err.message });
-      if (!req.file) return res.status(400).json({ error: 'No file provided' });
+    if (!restaurant?.waba_id || !process.env.META_ACCESS_TOKEN) {
+      return res.status(400).json({ error: 'WABA not configured' });
+    }
 
-      const { data: restaurant } = await supabaseAdmin
-        .from('restaurants').select('waba_id').eq('id', req.restaurant_id).single();
-
-      if (!restaurant?.waba_id || !process.env.META_ACCESS_TOKEN) {
-        return res.status(400).json({ error: 'WABA not configured' });
+    // Step 1: Start upload session
+    const startRes = await fetch(
+      `https://graph.facebook.com/v20.0/${restaurant.waba_id}/uploads`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.META_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_length: req.file.size, file_type: req.file.mimetype }),
       }
+    );
+    const startData = await startRes.json();
+    if (startData.error) throw new Error(`Upload session failed: ${startData.error.message}`);
 
-      // Step 1: Start resumable upload session
-      const startRes = await fetch(
-        `https://graph.facebook.com/v20.0/${restaurant.waba_id}/uploads`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization:  `Bearer ${process.env.META_ACCESS_TOKEN}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            file_length: req.file.size,
-            file_type:   req.file.mimetype,
-            access_token: process.env.META_ACCESS_TOKEN,
-          }),
-        }
-      );
-      const startData = await startRes.json();
-      if (startData.error) throw new Error(`Upload session failed: ${startData.error.message}`);
+    // Step 2: Upload file bytes
+    const uploadRes = await fetch(
+      `https://graph.facebook.com/v20.0/${startData.id}`,
+      {
+        method: 'POST',
+        headers: { Authorization: `OAuth ${process.env.META_ACCESS_TOKEN}`, file_offset: '0', 'Content-Type': req.file.mimetype },
+        body: req.file.buffer,
+      }
+    );
+    const uploadData = await uploadRes.json();
+    if (uploadData.error) throw new Error(`File upload failed: ${uploadData.error.message}`);
 
-      const uploadId = startData.id;
-
-      // Step 2: Upload the file data
-      const uploadRes = await fetch(
-        `https://graph.facebook.com/v20.0/${uploadId}`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization:           `OAuth ${process.env.META_ACCESS_TOKEN}`,
-            file_offset:             '0',
-            'Content-Type':          req.file.mimetype,
-          },
-          body: req.file.buffer,
-        }
-      );
-      const uploadData = await uploadRes.json();
-      if (uploadData.error) throw new Error(`File upload failed: ${uploadData.error.message}`);
-
-      const handle = uploadData.h;
-      console.log(`[media/upload] ✅ Uploaded, handle: ${handle}`);
-      res.json({ handle, upload_id: uploadId });
-    });
+    res.json({ handle: uploadData.h, upload_id: startData.id });
   } catch (err) {
     console.error('[/api/marketing/media/upload]', err.message);
-    if (!res.headersSent) res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 // ============================================================================
