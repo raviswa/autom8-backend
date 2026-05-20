@@ -13,6 +13,8 @@ const { createClient: createClientChat } = require('@supabase/supabase-js');
 
 dotenv.config();
 
+npm install multer
+
 const app    = express();
 const server = http.createServer(app);
 const wss    = new WebSocket.Server({ server });
