@@ -1498,6 +1498,70 @@ app.get('/api/dashboard/wa-orders', authenticateToken, getRestaurantId, async (r
 });
 
 // ============================================================================
+// CANCEL STATS FROM MUNAFE CHAT BOOKINGS
+// ============================================================================
+
+app.get('/api/dashboard/cancel-stats', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { start, end } = req.query;
+    if (!start || !end) return res.status(400).json({ error: 'start and end required' });
+
+    // Pull from autom8 orders table for order-level cancellations
+    const [cancelRes, totalRes] = await Promise.all([
+      supabaseAdmin.from('orders')
+        .select('total_amount')
+        .eq('restaurant_id', req.restaurant_id)
+        .eq('status', 'cancelled')
+        .gte('created_at', start)
+        .lte('created_at', end),
+      supabaseAdmin.from('orders')
+        .select('*', { count: 'exact', head: true })
+        .eq('restaurant_id', req.restaurant_id)
+        .gte('created_at', start)
+        .lte('created_at', end),
+    ]);
+
+    const orderCancels  = cancelRes.data ?? [];
+    const totalOrders   = totalRes.count ?? 0;
+    const orderRevLost  = orderCancels.reduce((s, o) => s + (o.total_amount ?? 0), 0);
+
+    // Also pull from Munafe Chat bookings for booking-level cancellations
+    let bookingCancels = 0, totalBookings = 0;
+    if (supabaseChat) {
+      const [bcRes, btRes] = await Promise.all([
+        supabaseChat.from('bookings')
+          .select('id', { count: 'exact', head: true })
+          .eq('status', 'cancelled')
+          .gte('created_at', start)
+          .lte('created_at', end),
+        supabaseChat.from('bookings')
+          .select('id', { count: 'exact', head: true })
+          .gte('created_at', start)
+          .lte('created_at', end),
+      ]);
+      bookingCancels = bcRes.count ?? 0;
+      totalBookings  = btRes.count ?? 0;
+    }
+
+    res.json({
+      success: true,
+      // Order-level (manager cancelled placed orders)
+      orderCancels:  orderCancels.length,
+      orderRevLost,
+      totalOrders,
+      orderRate: totalOrders > 0 ? Math.round((orderCancels.length / totalOrders) * 100) : 0,
+      // Booking-level (customer cancelled session / flow reset)
+      bookingCancels,
+      totalBookings,
+      bookingRate: totalBookings > 0 ? Math.round((bookingCancels / totalBookings) * 100) : 0,
+    });
+  } catch (err) {
+    console.error('[GET /api/dashboard/cancel-stats]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
 // WEBSOCKET
 // ============================================================================
 
