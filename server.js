@@ -917,7 +917,7 @@ async function generateTokenId(restaurantId) {
 }
   // Fallback: timestamp suffix
   return `T-${Date.now().toString().slice(-6)}`;
-}
+
 
 // POST /api/tokens — public, called by WhatsApp bot and WalkInForm
 app.post('/api/tokens', async (req, res) => {
