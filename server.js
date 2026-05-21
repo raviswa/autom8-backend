@@ -1410,42 +1410,59 @@ app.get('/api/dashboard/wa-orders', authenticateToken, getRestaurantId, async (r
     const { start, end } = req.query;
     if (!start || !end) return res.status(400).json({ error: 'start and end query params required' });
 
-    // Try bookings with customer join
+    // First: inspect what columns bookings table actually has
+    const { data: sample } = await supabaseChat
+      .from('bookings')
+      .select('*')
+      .limit(1)
+      .maybeSingle();
+
+    const cols = sample ? Object.keys(sample) : [];
+    console.log('[wa-orders] bookings columns:', cols.join(', ') || 'table empty or missing');
+
+    // Detect which date column to use
+    const dateCol = cols.includes('created_at') ? 'created_at'
+      : cols.includes('booking_time')           ? 'booking_time'
+      : cols.includes('inserted_at')            ? 'inserted_at'
+      : 'created_at'; // default attempt
+
+    // Build select — include customer join only if foreign key likely exists
+    const hasCustomers = cols.includes('customer_id');
+    const selectStr = hasCustomers
+      ? `id, ${dateCol}, service_type, status, total_amount, party_size, token_number, customer_id, customers(name, phone)`
+      : `id, ${dateCol}, service_type, status, total_amount, party_size, token_number, customer_id`;
+
     const { data, error } = await supabaseChat
       .from('bookings')
-      .select('id, created_at, service_type, status, total_amount, party_size, token_number, customer_id, customers(name, phone)')
-      .gte('created_at', start)
-      .lte('created_at', end)
-      .order('created_at', { ascending: false })
+      .select(selectStr)
+      .gte(dateCol, start)
+      .lte(dateCol, end)
+      .order(dateCol, { ascending: false })
       .limit(500);
 
     if (!error && data) {
-      return res.json({ success: true, orders: data });
+      console.log(`[wa-orders] Found ${data.length} bookings via ${dateCol}`);
+      // Normalize date field to created_at for frontend
+      const normalized = data.map(r => ({
+        ...r,
+        created_at: r[dateCol] ?? r.created_at,
+      }));
+      return res.json({ success: true, orders: normalized });
     }
 
-    // Fallback: bookings without join
-    const { data: plain, error: e2 } = await supabaseChat
+    console.warn('[wa-orders] bookings query failed:', error?.message);
+
+    // Fallback: try without date filter to see if table has any data
+    const { data: all } = await supabaseChat
       .from('bookings')
-      .select('id, created_at, service_type, status, total_amount, party_size, token_number, customer_id')
-      .gte('created_at', start)
-      .lte('created_at', end)
-      .order('created_at', { ascending: false })
-      .limit(500);
-
-    if (!e2 && plain) {
-      return res.json({ success: true, orders: plain });
+      .select('id, service_type, status, total_amount, party_size, token_number, customer_id')
+      .limit(10);
+    console.log('[wa-orders] Unfiltered sample count:', all?.length ?? 0);
+    if (all?.length) {
+      console.log('[wa-orders] Sample row keys:', Object.keys(all[0]).join(', '));
     }
 
-    // Last fallback: conversation_events
-    const { data: evts } = await supabaseChat
-      .from('conversation_events')
-      .select('id, created_at, event_type, customer_id, data')
-      .gte('created_at', start)
-      .lte('created_at', end)
-      .order('created_at', { ascending: false })
-      .limit(500);
-
-    res.json({ success: true, orders: evts ?? [] });
+    res.json({ success: true, orders: [] });
   } catch (err) {
     console.error('[GET /api/dashboard/wa-orders]', err.message);
     res.status(500).json({ error: err.message });
