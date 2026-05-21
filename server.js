@@ -1562,6 +1562,42 @@ app.get('/api/dashboard/cancel-stats', authenticateToken, getRestaurantId, async
 });
 
 // ============================================================================
+// PUBLIC RESTAURANT RESOLVER
+// Called by WalkInForm when no ?restaurant= param is in the URL.
+// Returns the single active restaurant_id, or errors if there are multiple.
+// ============================================================================
+
+app.get('/api/restaurant/default', async (req, res) => {
+  try {
+    const { data: restaurants, error } = await supabaseAdmin
+      .from('restaurants')
+      .select('id')
+      .eq('is_active', true)
+      .limit(2);
+
+    if (error) throw error;
+
+    if (!restaurants || restaurants.length === 0) {
+      return res.status(404).json({ error: 'No active restaurant found' });
+    }
+
+    if (restaurants.length > 1) {
+      // Multiple restaurants — cannot default, QR code must include ?restaurant=
+      return res.status(400).json({ 
+        error: 'Multiple restaurants found. QR code URL must include ?restaurant=<id>' 
+      });
+    }
+
+    res.json({ restaurant_id: restaurants[0].id });
+  } catch (err) {
+    console.error('[GET /api/restaurant/default]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+// ============================================================================
 // WEBSOCKET
 // ============================================================================
 
