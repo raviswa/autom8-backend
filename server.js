@@ -876,41 +876,45 @@ app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, re
 // ============================================================================
 
 async function generateTokenId(restaurantId) {
-  // Token IDs reset daily (T-001 each morning).
-  // Uses today's date as part of uniqueness check to avoid collisions
-  // with previous days' tokens that share the same T-00N format.
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
 
-  // Count only today's tokens for the sequence number
-  const { count: todayCount, error: countError } = await supabaseAdmin
+  // Get ALL tokens ever for this restaurant to find the true MAX sequence
+  const { data: allTokens } = await supabaseAdmin
     .from('walk_in_tokens')
-    .select('*', { count: 'exact', head: true })
-    .eq('restaurant_id', restaurantId)
-    .gte('arrived_at', todayStart.toISOString());
+    .select('id')
+    .eq('restaurant_id', restaurantId);
 
-  if (countError) console.error('[generateTokenId] count query failed:', countError.message);
+  // Find highest numeric suffix across all time
+  let maxSeq = 0;
+  for (const row of allTokens ?? []) {
+    const match = String(row.id).match(/^T-(\d+)$/);
+    if (match) {
+      const n = parseInt(match[1], 10);
+      if (n > maxSeq) maxSeq = n;
+    }
+  }
 
-  let attempts = 0;
-  while (attempts < 20) {
-    const seq = (todayCount ?? 0) + 1 + attempts;
+  // Try candidates from maxSeq+1
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const seq       = maxSeq + 1 + attempt;
     const candidate = `T-${String(seq).padStart(3, '0')}`;
 
-    // Verify uniqueness — only check today's tokens (yesterday's T-001 is fine to reuse tomorrow)
     const { data: existing } = await supabaseAdmin
       .from('walk_in_tokens')
       .select('id')
       .eq('id', candidate)
-      .gte('arrived_at', todayStart.toISOString())
       .maybeSingle();
 
     if (!existing) {
-      console.log(`[generateTokenId] Generated: ${candidate} for today (attempt ${attempts + 1})`);
+      console.log(`[generateTokenId] Generated: ${candidate}`);
       return candidate;
     }
-    console.warn(`[generateTokenId] ${candidate} already used today, trying next...`);
-    attempts++;
+    console.warn(`[generateTokenId] ${candidate} taken, trying next...`);
   }
+
+  return `T-${Date.now().toString().slice(-6)}`;
+}
   // Fallback: timestamp suffix
   return `T-${Date.now().toString().slice(-6)}`;
 }
