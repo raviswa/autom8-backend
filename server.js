@@ -1427,18 +1427,26 @@ app.get('/api/dashboard/wa-orders', authenticateToken, getRestaurantId, async (r
       : 'created_at'; // default attempt
 
     // Build select — include customer join only if foreign key likely exists
-    const hasCustomers = cols.includes('customer_id');
+    const hasCustomers    = cols.includes('customer_id');
+    const hasRestaurantId = cols.includes('restaurant_id');
     const selectStr = hasCustomers
       ? `id, ${dateCol}, service_type, status, total_amount, party_size, token_number, customer_id, customers(name, phone)`
       : `id, ${dateCol}, service_type, status, total_amount, party_size, token_number, customer_id`;
 
-    const { data, error } = await supabaseChat
+    let bookingsQuery = supabaseChat
       .from('bookings')
       .select(selectStr)
       .gte(dateCol, start)
       .lte(dateCol, end)
       .order(dateCol, { ascending: false })
       .limit(500);
+
+    // Filter by restaurant_id if the column exists in bookings
+    if (hasRestaurantId) {
+      bookingsQuery = bookingsQuery.eq('restaurant_id', req.restaurant_id);
+    }
+
+    const { data, error } = await bookingsQuery;
 
     if (!error && data) {
       console.log(`[wa-orders] Found ${data.length} bookings via ${dateCol}`);
