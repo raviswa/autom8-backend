@@ -1420,57 +1420,77 @@ app.get('/api/dashboard/wa-orders', authenticateToken, getRestaurantId, async (r
     const cols = sample ? Object.keys(sample) : [];
     console.log('[wa-orders] bookings columns:', cols.join(', ') || 'table empty or missing');
 
-    // Detect which date column to use
-    const dateCol = cols.includes('created_at') ? 'created_at'
-      : cols.includes('booking_time')           ? 'booking_time'
-      : cols.includes('inserted_at')            ? 'inserted_at'
-      : 'created_at'; // default attempt
+    // Use actual column names from bookings table (confirmed from schema inspection)
+    // total_amount does not exist — use token_advance instead
+    // restaurant_id exists — filter by it
+    const dateCol     = cols.includes('created_at')    ? 'created_at'
+                      : cols.includes('booking_datetime') ? 'booking_datetime'
+                      : 'created_at';
+    const amountCol   = cols.includes('token_advance') ? 'token_advance'
+                      : cols.includes('total_amount')  ? 'total_amount'
+                      : null;
+    const hasCustomer = cols.includes('customer_id');
+    const hasRestId   = cols.includes('restaurant_id');
 
-    // Build select — include customer join only if foreign key likely exists
-    const hasCustomers    = cols.includes('customer_id');
-    const hasRestaurantId = cols.includes('restaurant_id');
-    const selectStr = hasCustomers
-      ? `id, ${dateCol}, service_type, status, total_amount, party_size, token_number, customer_id, customers(name, phone)`
-      : `id, ${dateCol}, service_type, status, total_amount, party_size, token_number, customer_id`;
+    // Build select string with only columns that exist
+    const selectParts = [
+      'id', dateCol, 'service_type', 'status', 'party_size',
+      'token_number', 'payment_status', 'booking_datetime',
+    ];
+    if (amountCol)   selectParts.push(amountCol);
+    if (hasCustomer) selectParts.push('customer_id, customers(name, phone)');
 
-    let bookingsQuery = supabaseChat
+    let q = supabaseChat
       .from('bookings')
-      .select(selectStr)
+      .select(selectParts.join(', '))
       .gte(dateCol, start)
       .lte(dateCol, end)
       .order(dateCol, { ascending: false })
       .limit(500);
 
-    // Filter by restaurant_id if the column exists in bookings
-    if (hasRestaurantId) {
-      bookingsQuery = bookingsQuery.eq('restaurant_id', req.restaurant_id);
+    if (hasRestId) q = q.eq('restaurant_id', req.restaurant_id);
+
+    const { data, error } = await q;
+
+    if (error) {
+      console.error('[wa-orders] query failed:', error.message);
+      // Try minimal fallback without joins
+      const { data: minimal } = await supabaseChat
+        .from('bookings')
+        .select(`id, ${dateCol}, service_type, status, party_size, token_number`)
+        .gte(dateCol, start)
+        .lte(dateCol, end)
+        .order(dateCol, { ascending: false })
+        .limit(500);
+      const minData = minimal ?? [];
+      console.log(`[wa-orders] Minimal fallback: ${minData.length} rows`);
+      return res.json({ success: true, orders: minData.map(r => ({ ...r, created_at: r[dateCol] })) });
     }
 
-    const { data, error } = await bookingsQuery;
-
-    if (!error && data) {
-      console.log(`[wa-orders] Found ${data.length} bookings via ${dateCol}`);
-      // Normalize date field to created_at for frontend
-      const normalized = data.map(r => ({
-        ...r,
-        created_at: r[dateCol] ?? r.created_at,
-      }));
-      return res.json({ success: true, orders: normalized });
+    // If filtered by restaurant_id returned nothing, try without filter
+    // (Munafe Chat may use a different restaurant UUID than autom8)
+    let finalData = data ?? [];
+    if (finalData.length === 0 && hasRestId) {
+      console.log('[wa-orders] Restaurant filter returned 0 — trying without restaurant filter...');
+      const { data: allData } = await supabaseChat
+        .from('bookings')
+        .select(selectParts.join(', '))
+        .gte(dateCol, start)
+        .lte(dateCol, end)
+        .order(dateCol, { ascending: false })
+        .limit(500);
+      finalData = allData ?? [];
+      console.log(`[wa-orders] Without restaurant filter: ${finalData.length} bookings`);
     }
 
-    console.warn('[wa-orders] bookings query failed:', error?.message);
-
-    // Fallback: try without date filter to see if table has any data
-    const { data: all } = await supabaseChat
-      .from('bookings')
-      .select('id, service_type, status, total_amount, party_size, token_number, customer_id')
-      .limit(10);
-    console.log('[wa-orders] Unfiltered sample count:', all?.length ?? 0);
-    if (all?.length) {
-      console.log('[wa-orders] Sample row keys:', Object.keys(all[0]).join(', '));
-    }
-
-    res.json({ success: true, orders: [] });
+    // Normalize: map amountCol → total_amount and dateCol → created_at for frontend
+    const normalized = finalData.map(r => ({
+      ...r,
+      created_at:   r[dateCol]   ?? r.created_at,
+      total_amount: amountCol ? (r[amountCol] ?? null) : null,
+    }));
+    console.log(`[wa-orders] Returning ${normalized.length} bookings`);
+    return res.json({ success: true, orders: normalized });
   } catch (err) {
     console.error('[GET /api/dashboard/wa-orders]', err.message);
     res.status(500).json({ error: err.message });
