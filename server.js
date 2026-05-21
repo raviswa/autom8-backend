@@ -41,9 +41,13 @@ const supabaseAdmin = createClient(
 );
 
 // Munafe Chat Supabase (separate project — conversation/WABA data)
-const supabaseChat = process.env.MUNAFE_CHAT_SUPABASE_URL && process.env.MUNAFE_CHAT_SERVICE_ROLE_KEY
-  ? createClient(process.env.MUNAFE_CHAT_SUPABASE_URL, process.env.MUNAFE_CHAT_SERVICE_ROLE_KEY)
+// Support both naming conventions
+const _chatUrl = process.env.CHAT_SUPABASE_URL || process.env.MUNAFE_CHAT_SUPABASE_URL;
+const _chatKey = process.env.CHAT_SUPABASE_SERVICE_KEY || process.env.CHAT_SERVICE_ROLE_KEY || process.env.MUNAFE_CHAT_SERVICE_ROLE_KEY;
+const supabaseChat = _chatUrl && _chatKey
+  ? createClient(_chatUrl, _chatKey)
   : null;
+console.log(`[supabaseChat] ${_chatUrl ? '✅ configured: ' + _chatUrl : '❌ not configured — set CHAT_SUPABASE_URL and CHAT_SUPABASE_SERVICE_KEY'}`);
 
 app.use(cors({
   origin: [
