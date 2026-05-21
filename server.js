@@ -1342,6 +1342,25 @@ app.post('/api/kds/notify', async (req, res) => {
 });
 
 // ============================================================================
+// SUBSCRIPTION / FEATURE FLAGS
+// Returns all features enabled — stub until billing is implemented
+// ============================================================================
+
+app.get('/api/subscription', authenticateToken, getRestaurantId, async (req, res) => {
+  // All features enabled by default — replace with real billing logic later
+  res.json({
+    success: true,
+    plan: 'pro',
+    features: [
+      'dine_in', 'takeaway', 'delivery', 'reserve_table',
+      'token_management', 'kds', 'analytics', 'marketing',
+      'whatsapp_ordering', 'catalog_sync', 'reporting',
+    ],
+    valid_until: null,
+  });
+});
+
+// ============================================================================
 // OWNER DASHBOARD — MUNAFE CHAT PROXY ENDPOINTS
 // Proxies requests to Munafe Chat Supabase using service role key
 // so frontend doesn't need the chat anon key and bypasses RLS
