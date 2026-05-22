@@ -737,6 +737,73 @@ app.get('/api/kds/feed', authenticateToken, getRestaurantId, async (req, res) =>
   }
 });
 
+// ============================================================================
+// SHARED HELPER — notifyOrderReady
+// ──────────────────────────────────────────────────────────────────────────────
+// Single source of truth for the "order is ready" WhatsApp notification.
+// Called by both PUT /api/kds/:id/status (item-by-item path) and
+// POST /api/orders/:id/complete (bulk path).
+//
+// Guard: atomically updates orders.status to 'ready' only if it is currently
+// NOT already 'ready'. The update returns 0 rows if the status was already
+// set — meaning a concurrent call already won — so we skip the WhatsApp send.
+// This prevents duplicate notifications regardless of how many concurrent
+// requests arrive.
+// ============================================================================
+
+async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
+  try {
+    // Atomically claim the notification slot.
+    // .eq('status', 'pending') / in_progress / ready is tricky because
+    // the order may still be 'pending' at this point.
+    // Use .neq('status', 'ready') so only the FIRST caller sets it.
+    const { data: updated, error: updateErr } = await supabaseAdmin
+      .from('orders')
+      .update({ status: 'ready' })
+      .eq('id', orderId)
+      .neq('status', 'ready')        // ← only succeeds once
+      .neq('status', 'cancelled')
+      .select('order_number, table:table_id!left(table_number), walk_in_tokens(phone)')
+      .single();
+
+    if (updateErr || !updated) {
+      // Either already ready (duplicate call) or genuinely not found — skip
+      console.log(`[notifyOrderReady] Skipped for order ${orderId} — already ready or not found`);
+      return;
+    }
+
+    // Resolve phone: walk_in_token first, then kds_item fallback
+    const phone =
+      updated.walk_in_tokens?.[0]?.phone ??
+      kdsItem?.customer_phone ??
+      null;
+
+    if (phone) {
+      await sendWhatsAppMessage(
+        phone,
+        `✅ *Your order is ready!*\n\n` +
+        `Order: *${updated.order_number}*\n` +
+        (updated.table?.table_number ? `Table: *${updated.table.table_number}*\n` : '') +
+        `\nYour food will be served shortly. Enjoy! 🍽️`
+      );
+      console.log(`[notifyOrderReady] ✅ Notified ${phone} for order ${orderId}`);
+    } else {
+      console.log(`[notifyOrderReady] No phone for order ${orderId} — skipping WhatsApp`);
+    }
+
+    broadcastToRestaurant(restaurantId, {
+      type:         'ORDER_READY',
+      order_id:     orderId,
+      order_number: updated.order_number,
+      table_number: updated.table?.table_number ?? null,
+      timestamp:    new Date().toISOString(),
+    });
+
+  } catch (err) {
+    console.error('[notifyOrderReady] Error:', err.message);
+  }
+}
+
 app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const { status } = req.body;
@@ -748,50 +815,32 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
 
     if (status === 'ready') {
       try {
+        // Fetch the kds_item to resolve order_id and phone
         const { data: kdsItem } = await supabaseAdmin
           .from('kds_items')
           .select('order_item:order_item_id!left(order_id), token_number, customer_phone, service_type')
           .eq('id', req.params.id)
           .single();
 
-        const orderId     = kdsItem?.order_item?.order_id;
-        const directPhone = kdsItem?.customer_phone;
+        const orderId = kdsItem?.order_item?.order_id;
 
         if (orderId) {
+          // Check if ALL items for this order are now ready
           const { data: allItems } = await supabaseAdmin
             .from('kds_items')
             .select('status, order_item:order_item_id!left(order_id)')
             .eq('restaurant_id', req.restaurant_id);
 
-          const orderItems = allItems?.filter(i => i.order_item?.order_id === orderId) ?? [];
+          const orderItems = (allItems ?? []).filter(i => i.order_item?.order_id === orderId);
           const allReady   = orderItems.length > 0 && orderItems.every(i => i.status === 'ready');
 
           if (allReady) {
-            const { data: order } = await supabaseAdmin
-              .from('orders')
-              .select('order_number, table:table_id!left(table_number), walk_in_tokens(phone)')
-              .eq('id', orderId)
-              .single();
-
-            const phone = order?.walk_in_tokens?.[0]?.phone ?? directPhone;
-            if (phone) {
-              await sendWhatsAppMessage(
-                phone,
-                `✅ *Your order is ready!*\n\n` +
-                `Order: *${order?.order_number ?? kdsItem?.token_number ?? ''}*\n` +
-                (order?.table?.table_number ? `Table: *${order.table.table_number}*\n` : '') +
-                `\nYour food will be served shortly. Enjoy! 🍽️`
-              );
-            }
+            // Delegate to shared helper — atomically guards against duplicates
+            await notifyOrderReady({ orderId, restaurantId: req.restaurant_id, kdsItem });
           }
-        } else if (directPhone) {
-          await sendWhatsAppMessage(
-            directPhone,
-            `✅ *Your order is ready!*\n\n` +
-            `Token: *${kdsItem?.token_number ?? ''}*\n\n` +
-            `Your food is being served now. Enjoy! 🍽️`
-          );
         }
+        // Note: orphaned kds_items with no order_id (legacy data / kds/notify flow)
+        // do NOT send notifications here — they have no reliable order to check against.
       } catch (notifyErr) {
         console.error('[KDS ready notify] Failed:', notifyErr.message);
       }
@@ -872,50 +921,26 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
       if (bulkUpdateError) throw bulkUpdateError;
     }
 
-    // 4. Update order status to 'ready'
-    const { error: orderUpdateError } = await supabaseAdmin
-      .from('orders')
-      .update({ status: 'ready' })
-      .eq('id', orderId)
-      .eq('restaurant_id', req.restaurant_id);
-
-    if (orderUpdateError) throw orderUpdateError;
-
-    // 5. Send exactly ONE WhatsApp notification
-    const phone =
-      order.walk_in_tokens?.[0]?.phone ??
-      orderKdsItems.find(i => i.customer_phone)?.customer_phone ??
-      null;
-
-    if (phone) {
-      await sendWhatsAppMessage(
-        phone,
-        `✅ *Your order is ready!*\n\n` +
-        `Order: *${order.order_number}*\n` +
-        (order.table?.table_number ? `Table: *${order.table.table_number}*\n` : '') +
-        `\nYour food will be served shortly. Enjoy! 🍽️`
-      );
-    }
-
-    // 6. Broadcast WebSocket event
-    broadcastToRestaurant(req.restaurant_id, {
-      type:         'ORDER_READY',
-      order_id:     orderId,
-      order_number: order.order_number,
-      table_number: order.table?.table_number ?? null,
-      timestamp:    new Date().toISOString(),
+    // 4+5+6. Update order status, send WhatsApp, broadcast — all via shared
+    // notifyOrderReady() which atomically guards against duplicate sends.
+    // The .neq('status','ready') guard inside notifyOrderReady means only
+    // the first caller (PUT item or POST /complete) ever sends the message.
+    const firstKdsItem = orderKdsItems.find(i => i.customer_phone) ?? orderKdsItems[0];
+    await notifyOrderReady({
+      orderId,
+      restaurantId: req.restaurant_id,
+      kdsItem: firstKdsItem,
     });
 
     // 7. Audit log (non-fatal)
     await supabaseAdmin.from('audit_logs').insert({
       user_id:       req.user.sub,
       restaurant_id: req.restaurant_id,
-      action:        'Order marked ready',
+      action:        'Order marked ready via /complete',
       details: {
         order_id:          orderId,
         order_number:      order.order_number,
         kds_items_updated: alreadyAllDone ? 0 : activeItems.length,
-        notified_phone:    phone ?? null,
       },
     }).catch(() => {});
 
@@ -924,7 +949,6 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
       order_id:          orderId,
       order_number:      order.order_number,
       kds_items_updated: alreadyAllDone ? 0 : activeItems.length,
-      notified:          !!phone,
     });
 
   } catch (err) {
