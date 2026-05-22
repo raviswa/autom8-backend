@@ -418,11 +418,19 @@ async function syncCatalogFromMeta(restaurantId) {
     const errors = [];
     for (const product of allProducts) {
       try {
-        let price = 0;
+          let price = 0;
         if (product.price) {
-          price = typeof product.price === 'string'
-            ? parseFloat(product.price.replace(/[^0-9.]/g, '')) / 100
-            : product.price / 100;
+          if (typeof product.price === 'string') {
+            // "22000 INR" → strip non-numeric → 22000 → /100 = ₹220
+            const numeric = parseFloat(product.price.replace(/[^0-9.]/g, ''));
+            price = isNaN(numeric) ? 0 : numeric / 100;
+          } else if (typeof product.price === 'number') {
+            // If already a small number (≤100) it's in rupees, otherwise paise
+            price = product.price > 100 ? product.price / 100 : product.price;
+          }
+          console.log(`[price] raw=${product.price} → ₹${price}`);
+        }
+        
         }
         const SLOT_MAP = {
           'morning tiffin': 'morning_tiffin', 'lunch': 'lunch',
