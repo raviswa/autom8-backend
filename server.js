@@ -15,6 +15,10 @@
 //            in Railway logs with the reason
 //  Fix 8  — getRestaurantId: explicit 401 with reason when user not found
 //            instead of silent failure that left req.restaurant_id undefined
+//  Fix 9  — POST /api/orders/:id/complete: atomic "mark all ready" endpoint
+//            that bulk-updates all kds_items and fires exactly ONE WhatsApp
+//            notification, eliminating the duplicate-notify race condition
+//            from parallel PUT /api/kds/:id/status calls
 // ============================================================================
 
 const express   = require('express');
@@ -90,7 +94,6 @@ const getRestaurantId = async (req, res, next) => {
       .single();
 
     if (error) {
-      // Fix 8: log the actual error so it's visible in Railway logs
       console.error(`[getRestaurantId] DB error for user ${req.user.sub}:`, error.message);
       return res.status(401).json({ error: `User lookup failed: ${error.message}` });
     }
@@ -101,9 +104,7 @@ const getRestaurantId = async (req, res, next) => {
     }
 
     if (!data.restaurant_id) {
-      // Fix 6: fallback — try to find restaurant by matching the hardcoded portal restaurant
       console.warn(`[getRestaurantId] User ${req.user.sub} has no restaurant_id in users table`);
-      // Use the default restaurant if only one exists
       const { data: restaurants } = await supabaseAdmin
         .from('restaurants')
         .select('id')
@@ -418,19 +419,16 @@ async function syncCatalogFromMeta(restaurantId) {
     const errors = [];
     for (const product of allProducts) {
       try {
-          let price = 0;
+        let price = 0;
         if (product.price) {
           if (typeof product.price === 'string') {
-            // "22000 INR" → strip non-numeric → 22000 → /100 = ₹220
             const numeric = parseFloat(product.price.replace(/[^0-9.]/g, ''));
             price = isNaN(numeric) ? 0 : numeric / 100;
           } else if (typeof product.price === 'number') {
-            // If already a small number (≤100) it's in rupees, otherwise paise
             price = product.price > 100 ? product.price / 100 : product.price;
           }
           console.log(`[price] raw=${product.price} → ₹${price}`);
         }
-      
         const SLOT_MAP = {
           'morning tiffin': 'morning_tiffin', 'lunch': 'lunch',
           'evening snacks': 'evening_snacks', 'dinner tiffin': 'dinner_tiffin',
@@ -460,8 +458,6 @@ async function syncCatalogFromMeta(restaurantId) {
       }
     }
 
-    // Safety net: if any prices look wrong (< ₹1 for real food items),
-    // multiply back up — catches any future double-division
     const { data: badPrices } = await supabaseAdmin
       .from('menu_items')
       .select('id, price')
@@ -807,36 +803,22 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
   }
 });
 
-
-
 // ============================================================================
-// server.js — ADD THIS BLOCK
-//
-// Paste it directly after the existing PUT /api/kds/:id/status handler
-// (after the closing `});` of that route, around line ~460 in your file).
-//
-// WHAT THIS DOES
-// ──────────────
-// POST /api/orders/:id/complete
-//   • Atomically marks every kds_item for this order as 'ready'
-//   • Updates the parent order status to 'ready'
-//   • Fires exactly ONE WhatsApp "order ready" notification
+// Fix 9 — POST /api/orders/:id/complete
+// Atomic "mark all items ready" endpoint that:
+//   • Bulk-updates every kds_item for this order to 'ready' in one DB call
+//   • Updates the order status to 'ready'
+//   • Fires exactly ONE WhatsApp notification (no race condition)
 //   • Broadcasts one ORDER_READY WebSocket event
-//   • Safe to call even if some items were already 'ready' (idempotent)
-//
-// WHY THIS IS BETTER THAN PARALLEL PUT /api/kds/:id/status CALLS
-// ──────────────────────────────────────────────────────────────────
-// The old approach fired N parallel requests. Each one re-checked "are all
-// items ready?" against the DB. Depending on write ordering, 0 or 2+ of them
-// could win the race and send duplicate WhatsApp messages.
-// This endpoint does the whole thing in one server round-trip.
+//   • Is idempotent — safe to call if some items are already ready
+// Used by the KDS "Mark all ready" button instead of N parallel PUTs.
 // ============================================================================
 
 app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const orderId = req.params.id;
 
-    // ── 1. Verify order belongs to this restaurant ──────────────────────────
+    // 1. Verify order belongs to this restaurant
     const { data: order, error: orderFetchError } = await supabaseAdmin
       .from('orders')
       .select(`
@@ -859,8 +841,7 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
       return res.status(400).json({ error: `Order is already ${order.status}` });
     }
 
-    // ── 2. Fetch all kds_items for this order ───────────────────────────────
-    // We join through order_items to filter by order_id
+    // 2. Fetch all kds_items for this order via join
     const { data: kdsItems, error: kdsFetchError } = await supabaseAdmin
       .from('kds_items')
       .select('id, status, order_item:order_item_id!left(order_id), customer_phone, token_number')
@@ -876,12 +857,11 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
       return res.status(404).json({ error: 'No KDS items found for this order' });
     }
 
-    // Check whether any non-cancelled items are not yet ready
+    // 3. Bulk-update all non-cancelled items to 'ready'
     const activeItems    = orderKdsItems.filter(i => i.status !== 'cancelled');
     const alreadyAllDone = activeItems.every(i => i.status === 'ready');
 
     if (!alreadyAllDone) {
-      // ── 3. Bulk-update all active kds_items to 'ready' ───────────────────
       const itemIds = activeItems.map(i => i.id);
       const { error: bulkUpdateError } = await supabaseAdmin
         .from('kds_items')
@@ -892,7 +872,7 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
       if (bulkUpdateError) throw bulkUpdateError;
     }
 
-    // ── 4. Update order status to 'ready' ───────────────────────────────────
+    // 4. Update order status to 'ready'
     const { error: orderUpdateError } = await supabaseAdmin
       .from('orders')
       .update({ status: 'ready' })
@@ -901,10 +881,7 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
 
     if (orderUpdateError) throw orderUpdateError;
 
-    // ── 5. Send exactly ONE WhatsApp notification ───────────────────────────
-    // Phone resolution priority:
-    //   a) walk_in_tokens.phone (dine-in customer who checked in via WhatsApp)
-    //   b) customer_phone stored on any kds_item (WhatsApp order flow)
+    // 5. Send exactly ONE WhatsApp notification
     const phone =
       order.walk_in_tokens?.[0]?.phone ??
       orderKdsItems.find(i => i.customer_phone)?.customer_phone ??
@@ -920,7 +897,7 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
       );
     }
 
-    // ── 6. Broadcast WebSocket event ────────────────────────────────────────
+    // 6. Broadcast WebSocket event
     broadcastToRestaurant(req.restaurant_id, {
       type:         'ORDER_READY',
       order_id:     orderId,
@@ -929,7 +906,7 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
       timestamp:    new Date().toISOString(),
     });
 
-    // ── 7. Audit log ─────────────────────────────────────────────────────────
+    // 7. Audit log (non-fatal)
     await supabaseAdmin.from('audit_logs').insert({
       user_id:       req.user.sub,
       restaurant_id: req.restaurant_id,
@@ -940,7 +917,7 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
         kds_items_updated: alreadyAllDone ? 0 : activeItems.length,
         notified_phone:    phone ?? null,
       },
-    }).catch(() => {}); // non-fatal
+    }).catch(() => {});
 
     res.json({
       success:           true,
@@ -955,3 +932,838 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
     res.status(500).json({ error: err.message });
   }
 });
+
+// ============================================================================
+// TABLES ENDPOINTS
+// ============================================================================
+
+app.get('/api/tables', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin.from('tables').select('*')
+      .eq('restaurant_id', req.restaurant_id).order('table_number', { ascending: true });
+    if (error) throw error;
+    res.json({ success: true, tables: data });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put('/api/tables/:id/status', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const { data, error } = await supabaseAdmin.from('tables')
+      .update({ status }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
+      .select().single();
+    if (error) throw error;
+    res.json({ success: true, table: data });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// PAYMENTS ENDPOINTS
+// ============================================================================
+
+app.post('/api/payments', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'manager' && req.user_role !== 'owner')
+      return res.status(403).json({ error: 'Unauthorized' });
+    const { order_id, amount, payment_method } = req.body;
+    const { data, error } = await supabaseAdmin.from('payments')
+      .insert({ restaurant_id: req.restaurant_id, order_id, amount, payment_method, status: 'completed', processed_by: req.user.sub })
+      .select().single();
+    if (error) throw error;
+    await supabaseAdmin.from('orders').update({ payment_status: 'paid', status: 'completed' }).eq('id', order_id);
+    const { data: order } = await supabaseAdmin.from('orders').select('table_id').eq('id', order_id).single();
+    if (order.table_id) await supabaseAdmin.from('tables').update({ status: 'available' }).eq('id', order.table_id);
+    await supabaseAdmin.from('audit_logs').insert({
+      user_id: req.user.sub, restaurant_id: req.restaurant_id,
+      action: 'Payment processed', details: { order_id, amount, method: payment_method },
+    });
+    res.json({ success: true, payment: data });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// REPORTS ENDPOINTS
+// ============================================================================
+
+app.get('/api/reports/sales', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'owner' && req.user_role !== 'manager')
+      return res.status(403).json({ error: 'Unauthorized' });
+    const { date } = req.query;
+    const reportDate = date || new Date().toISOString().split('T')[0];
+    const { data, error } = await supabaseAdmin.from('orders')
+      .select('id, total_amount, status, created_at, order_items(menu_item:menu_item_id(category))')
+      .eq('restaurant_id', req.restaurant_id)
+      .gte('created_at', `${reportDate}T00:00:00`)
+      .lt('created_at',  `${reportDate}T23:59:59`)
+      .eq('status', 'completed');
+    if (error) throw error;
+    const totalRevenue  = data.reduce((sum, o) => sum + (o.total_amount || 0), 0);
+    const totalOrders   = data.length;
+    const avgOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
+    const categoryBreakdown = {};
+    data.forEach(order => {
+      order.order_items?.forEach(item => {
+        const cat = item.menu_item?.category || 'Other';
+        categoryBreakdown[cat] = (categoryBreakdown[cat] || 0) + 1;
+      });
+    });
+    res.json({ success: true, report: { date: reportDate, totalOrders, totalRevenue, avgOrderValue, categoryBreakdown } });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// WALK-IN TOKEN SYSTEM
+// ============================================================================
+
+async function generateTokenId(restaurantId) {
+  const { data: allTokens } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .select('id')
+    .eq('restaurant_id', restaurantId);
+
+  let maxSeq = 0;
+  for (const row of allTokens ?? []) {
+    const match = String(row.id).match(/^T-(\d+)$/);
+    if (match) {
+      const n = parseInt(match[1], 10);
+      if (n > maxSeq) maxSeq = n;
+    }
+  }
+
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const seq       = maxSeq + 1 + attempt;
+    const candidate = `T-${String(seq).padStart(3, '0')}`;
+
+    const { data: existing } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .select('id')
+      .eq('id', candidate)
+      .maybeSingle();
+
+    if (!existing) {
+      console.log(`[generateTokenId] Generated: ${candidate}`);
+      return candidate;
+    }
+    console.warn(`[generateTokenId] ${candidate} taken, trying next...`);
+  }
+
+  return `T-${Date.now().toString().slice(-6)}`;
+}
+
+app.post('/api/tokens', async (req, res) => {
+  try {
+    const { name, phone, type, pax, restaurant_id } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
+    if (!type)                 return res.status(400).json({ error: 'type is required (dinein or takeaway)' });
+    if (!restaurant_id)        return res.status(400).json({ error: 'restaurant_id is required' });
+    if (!['dinein', 'takeaway'].includes(type))
+      return res.status(400).json({ error: 'type must be dinein or takeaway' });
+
+    const tokenId = await generateTokenId(restaurant_id);
+    const status  = type === 'takeaway' ? 'takeaway' : 'waiting';
+    const tokenRecord = {
+      id: tokenId, restaurant_id, name: name.trim(),
+      phone: phone ? String(phone).replace(/\D/g, '') : null,
+      type, pax: type === 'takeaway' ? 1 : (parseInt(pax) || 1),
+      status, arrived_at: new Date().toISOString(),
+    };
+    const { data: token, error: insertError } = await supabaseAdmin
+      .from('walk_in_tokens').insert(tokenRecord).select().single();
+    if (insertError) throw insertError;
+
+    if (process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
+      const arrivalTime = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+      const typeLabel   = type === 'dinein' ? 'Dine-in' : 'Takeaway';
+      const paxLine     = type === 'dinein' ? `, ${token.pax} ${token.pax === 1 ? 'person' : 'people'}` : '';
+      const managerMsg  =
+        `🪑 *New Walk-in* — Token *${token.id}*\n` +
+        `👤 ${token.name}${paxLine}\n` +
+        `📋 ${typeLabel}\n` +
+        `🕐 ${arrivalTime}\n\n` +
+        `Open portal to assign table:\n${process.env.FRONTEND_URL || 'https://autom8-frontend-production.up.railway.app'}/dashboard/manager`;
+      sendWhatsAppMessage(process.env.MANAGER_WHATSAPP_NUMBER, managerMsg);
+    }
+
+    broadcastToRestaurant(restaurant_id, { type: 'NEW_TOKEN', token, timestamp: new Date().toISOString() });
+    res.status(201).json({ success: true, token });
+  } catch (err) {
+    console.error('[POST /api/tokens]', err);
+    res.status(500).json({ error: err.message || 'Failed to create token' });
+  }
+});
+
+app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { status } = req.query;
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    console.log(`[GET /api/tokens] restaurant_id=${req.restaurant_id} status=${status || 'all'} from=${todayStart.toISOString()}`);
+
+    let query;
+    if (status) {
+      query = supabaseAdmin.from('walk_in_tokens').select('*')
+        .eq('restaurant_id', req.restaurant_id)
+        .eq('status', status)
+        .gte('arrived_at', todayStart.toISOString())
+        .order('arrived_at', { ascending: true });
+    } else {
+      query = supabaseAdmin.from('walk_in_tokens').select('*')
+        .eq('restaurant_id', req.restaurant_id)
+        .or(`status.in.(waiting,seated,takeaway),and(status.eq.completed,arrived_at.gte.${todayStart.toISOString()})`)
+        .order('arrived_at', { ascending: true });
+    }
+
+    const { data, error } = await query;
+    if (error) {
+      console.error('[GET /api/tokens] Query error:', error.message);
+      throw error;
+    }
+
+    console.log(`[GET /api/tokens] Found ${data?.length ?? 0} token(s) for restaurant ${req.restaurant_id}`);
+    res.json({ success: true, tokens: data || [] });
+  } catch (err) {
+    console.error('[GET /api/tokens]', err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/tokens/:id', async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .select('id, name, phone, status, type, pax, table_number, table_id, arrived_at, seated_at')
+      .eq('id', req.params.id)
+      .single();
+    if (error || !data) return res.status(404).json({ error: 'Token not found' });
+    res.json({ success: true, token: data });
+  } catch (err) {
+    console.error('[GET /api/tokens/:id]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { table_id, table_number } = req.body;
+    if (!table_id || !table_number)
+      return res.status(400).json({ error: 'table_id and table_number are required' });
+
+    const { data: token, error: fetchError } = await supabaseAdmin
+      .from('walk_in_tokens').select('*')
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).single();
+    if (fetchError || !token) return res.status(404).json({ error: 'Token not found' });
+    if (token.status !== 'waiting')
+      return res.status(400).json({ error: `Token is already ${token.status}` });
+
+    const { data: updatedToken, error: updateError } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .update({ status: 'seated', table_id, table_number, seated_at: new Date().toISOString() })
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
+      .select().single();
+    if (updateError) throw updateError;
+
+    await supabaseAdmin.from('tables').update({ status: 'occupied' })
+      .eq('id', table_id).eq('restaurant_id', req.restaurant_id);
+
+    if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+      const customerMsg =
+        `✅ *Your table is ready!*\n\n` +
+        `Token: *${token.id}*\n` +
+        `Table: *Table ${table_number}*\n\n` +
+        `Please proceed to your table and browse our menu to place your order. Enjoy your meal! 🍽️`;
+      await sendWhatsAppMessage(token.phone, customerMsg);
+      console.log(`[assign] Sending catalog to ${token.phone}`);
+      await sendWhatsAppCatalogMessage(token.phone, req.restaurant_id);
+      console.log(`[assign] Catalog sent`);
+    }
+
+    broadcastToRestaurant(req.restaurant_id, {
+      type: 'TOKEN_ASSIGNED', token: updatedToken, timestamp: new Date().toISOString(),
+    });
+
+    await supabaseAdmin.from('audit_logs').insert({
+      user_id: req.user.sub, restaurant_id: req.restaurant_id,
+      action: 'Token assigned to table', details: { token_id: req.params.id, table_id, table_number },
+    });
+
+    res.json({ success: true, token: updatedToken });
+  } catch (err) {
+    console.error('[PUT /api/tokens/:id/assign]', err);
+    res.status(500).json({ error: err.message || 'Failed to assign table' });
+  }
+});
+
+app.put('/api/tokens/:id/complete', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { data: token, error: fetchError } = await supabaseAdmin
+      .from('walk_in_tokens').select('*')
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).single();
+    if (fetchError || !token) return res.status(404).json({ error: 'Token not found' });
+
+    const { data: updatedToken, error: updateError } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .update({ status: 'completed', completed_at: new Date().toISOString() })
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
+      .select().single();
+    if (updateError) throw updateError;
+
+    if (token.table_id) {
+      const { data: activeOrders } = await supabaseAdmin.from('orders').select('id')
+        .eq('table_id', token.table_id).in('status', ['pending', 'confirmed', 'in_progress']);
+      if (!activeOrders || activeOrders.length === 0)
+        await supabaseAdmin.from('tables').update({ status: 'available' })
+          .eq('id', token.table_id).eq('restaurant_id', req.restaurant_id);
+    }
+
+    broadcastToRestaurant(req.restaurant_id, {
+      type: 'TOKEN_COMPLETED', token: updatedToken, timestamp: new Date().toISOString(),
+    });
+    res.json({ success: true, token: updatedToken });
+  } catch (err) {
+    console.error('[PUT /api/tokens/:id/complete]', err);
+    res.status(500).json({ error: err.message || 'Failed to complete token' });
+  }
+});
+
+app.delete('/api/tokens/:id', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { error } = await supabaseAdmin.from('walk_in_tokens')
+      .delete().eq('id', req.params.id).eq('restaurant_id', req.restaurant_id);
+    if (error) throw error;
+    res.json({ success: true, message: 'Token dismissed' });
+  } catch (err) {
+    console.error('[DELETE /api/tokens/:id]', err);
+    res.status(500).json({ error: err.message || 'Failed to dismiss token' });
+  }
+});
+
+// ============================================================================
+// WHATSAPP ORDER WEBHOOK
+// ============================================================================
+
+app.get('/api/whatsapp/webhook', (req, res) => {
+  const mode      = req.query['hub.mode'];
+  const token     = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
+    console.log('✅ [WA Webhook] Verified');
+    return res.status(200).send(challenge);
+  }
+  console.warn('[WA Webhook] Verification failed — token mismatch');
+  res.status(403).json({ error: 'Forbidden' });
+});
+
+app.post('/api/whatsapp/webhook', async (req, res) => {
+  res.status(200).send('EVENT_RECEIVED');
+  try {
+    const body = req.body;
+    if (body.object !== 'whatsapp_business_account') return;
+    for (const entry of body.entry ?? []) {
+      for (const change of entry.changes ?? []) {
+        if (change.field !== 'messages') continue;
+        const value    = change.value;
+        const metadata = value.metadata;
+        for (const message of value.messages ?? []) {
+          console.log(`[WA Webhook] Message type: ${message.type} from ${message.from}`);
+          if (message.type === 'order') {
+            await handleWhatsAppOrder(message, metadata).catch(err =>
+              console.error('[WA Webhook] handleWhatsAppOrder failed:', err.message)
+            );
+          }
+          await supabaseAdmin.from('audit_logs').insert({
+            action: 'WhatsApp message received',
+            details: {
+              type: message.type, from: message.from,
+              phone_number_id: metadata?.phone_number_id, message_id: message.id,
+            },
+          }).catch(() => {});
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[WA Webhook] Top-level error:', err.message);
+  }
+});
+
+async function handleWhatsAppOrder(message, metadata) {
+  const customerPhone = message.from;
+  const productItems  = message.order?.product_items ?? [];
+  console.log(`[WA Order] 📦 From ${customerPhone}, items: ${productItems.length}`);
+  if (productItems.length === 0) { console.warn('[WA Order] Empty product_items — skipping'); return; }
+
+  let restaurantId = process.env.DEFAULT_RESTAURANT_ID || null;
+  if (metadata?.phone_number_id) {
+    const { data: restaurant } = await supabaseAdmin.from('restaurants').select('id')
+      .eq('whatsapp_phone_number_id', metadata.phone_number_id).eq('is_active', true).single();
+    if (restaurant) restaurantId = restaurant.id;
+  }
+  if (!restaurantId) { console.error('[WA Order] Could not resolve restaurant'); return; }
+
+  const normalizedPhone = String(customerPhone).replace(/\D/g, '');
+  const { data: token } = await supabaseAdmin.from('walk_in_tokens').select('*')
+    .eq('restaurant_id', restaurantId).eq('phone', normalizedPhone).eq('status', 'seated')
+    .order('seated_at', { ascending: false }).limit(1).maybeSingle();
+
+  if (!token) {
+    console.warn(`[WA Order] No seated token found for phone ${normalizedPhone}`);
+    await sendWhatsAppMessage(customerPhone, `⚠️ We couldn't find your table assignment.\nPlease ask a staff member for help.`);
+    return;
+  }
+
+  const orderNumber = `ORD-WA-${Date.now()}`;
+  const { data: orderData, error: orderError } = await supabaseAdmin.from('orders')
+    .insert({ restaurant_id: restaurantId, table_id: token.table_id, order_number: orderNumber, status: 'pending', source: 'whatsapp' })
+    .select().single();
+  if (orderError) { console.error('[WA Order] Failed to create order:', orderError.message); return; }
+
+  let subtotal = 0;
+  const kdsInserts = [];
+  for (const item of productItems) {
+    const { data: menuItem } = await supabaseAdmin.from('menu_items').select('id, name, price')
+      .eq('restaurant_id', restaurantId).eq('retailer_id', item.product_retailer_id).maybeSingle();
+    if (!menuItem) { console.warn(`[WA Order] ⚠️ No menu item for retailer_id: ${item.product_retailer_id}`); continue; }
+    subtotal += menuItem.price * item.quantity;
+    const { data: orderItem, error: itemError } = await supabaseAdmin.from('order_items')
+      .insert({ order_id: orderData.id, menu_item_id: menuItem.id, quantity: item.quantity, unit_price: menuItem.price })
+      .select().single();
+    if (itemError) { console.error(`[WA Order] order_item insert failed:`, itemError.message); continue; }
+    kdsInserts.push({ restaurant_id: restaurantId, order_item_id: orderItem.id, status: 'pending', priority: 'normal', item_name: menuItem.name });
+  }
+
+  if (kdsInserts.length > 0) {
+    const { error: kdsError } = await supabaseAdmin.from('kds_items').insert(kdsInserts);
+    if (kdsError) console.error('[WA Order] KDS insert failed:', kdsError.message);
+    else console.log(`[WA Order] ✅ ${kdsInserts.length} KDS item(s) created — kitchen notified`);
+  }
+
+  const tax = subtotal * 0.1, total = subtotal + tax;
+  await supabaseAdmin.from('orders').update({ subtotal, tax, total_amount: total }).eq('id', orderData.id);
+
+  broadcastToRestaurant(restaurantId, {
+    type: 'ORDER_NEW', order_id: orderData.id, order_number: orderNumber,
+    table_number: token.table_number, source: 'whatsapp',
+    item_count: kdsInserts.length, timestamp: new Date().toISOString(),
+  });
+
+  if (process.env.MANAGER_WHATSAPP_NUMBER) {
+    const itemLines = productItems.map(i => `• ${i.quantity}x ${i.product_retailer_id}`).join('\n');
+    await sendWhatsAppMessage(process.env.MANAGER_WHATSAPP_NUMBER,
+      `🍽️ *New WhatsApp Order*\nOrder: *${orderNumber}*\nTable: *${token.table_number}*\nCustomer: ${token.name}\n\n${itemLines}\n\nTotal: ₹${total.toFixed(2)}`
+    );
+  }
+
+  await sendWhatsAppMessage(customerPhone,
+    `✅ *Order received!*\n\nOrder: *${orderNumber}*\nTable: *Table ${token.table_number}*\nItems: ${kdsInserts.length}\n\nWe're preparing your food now. We'll notify you when it's ready! 🍳`
+  );
+  await supabaseAdmin.from('audit_logs').insert({
+    restaurant_id: restaurantId, action: 'WhatsApp order created',
+    details: { order_id: orderData.id, order_number: orderNumber, phone: normalizedPhone, item_count: kdsInserts.length },
+  }).catch(() => {});
+}
+
+// ============================================================================
+// KDS INTERNAL NOTIFY ENDPOINT
+// ============================================================================
+
+app.post('/api/kds/notify', async (req, res) => {
+  try {
+    const {
+      secret, restaurant_id, customer_name, customer_phone,
+      token_number, table_number, service_type, special_notes, items,
+    } = req.body;
+
+    const expected = process.env.AUTOM8_KDS_SECRET || 'munafe_kds_sync_2026';
+    if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+    if (!restaurant_id || !items || items.length === 0)
+      return res.status(400).json({ error: 'restaurant_id and items are required' });
+
+    const orderNumber = `ORD-WA-${Date.now()}`;
+
+    let tableId = null;
+    if (table_number) {
+      const { data: tableRow } = await supabaseAdmin.from('tables').select('id')
+        .eq('restaurant_id', restaurant_id).eq('table_number', String(table_number)).maybeSingle();
+      if (tableRow) tableId = tableRow.id;
+    }
+
+    const { data: orderData, error: orderError } = await supabaseAdmin.from('orders')
+      .insert({ restaurant_id, table_id: tableId, order_number: orderNumber, status: 'pending', source: 'whatsapp' })
+      .select().single();
+    if (orderError) {
+      console.error('[kds-notify] Order insert failed:', orderError.message);
+      return res.status(500).json({ error: orderError.message });
+    }
+
+    let subtotal   = 0;
+    let kdsCreated = 0;
+    const kdsInserts = [];
+
+    for (const item of items) {
+      let menuItemId    = null;
+      let resolvedPrice = item.unit_price || 0;
+
+      if (item.retailer_id && item.retailer_id !== 'manual') {
+        const { data: menuItem } = await supabaseAdmin.from('menu_items').select('id, price')
+          .eq('restaurant_id', restaurant_id).eq('retailer_id', item.retailer_id).maybeSingle();
+        if (menuItem) { menuItemId = menuItem.id; resolvedPrice = menuItem.price; }
+      }
+
+      subtotal += resolvedPrice * (item.qty || 1);
+
+      const { data: orderItem, error: itemError } = await supabaseAdmin.from('order_items')
+        .insert({
+          order_id: orderData.id, menu_item_id: menuItemId,
+          quantity: item.qty || 1, unit_price: resolvedPrice,
+          special_instructions: item.name,
+        })
+        .select().single();
+
+      if (itemError) { console.error(`[kds-notify] order_item insert failed for ${item.name}:`, itemError.message); continue; }
+
+      kdsInserts.push({
+        restaurant_id,
+        order_item_id:        orderItem.id,
+        status:               'pending',
+        priority:             'normal',
+        special_instructions: special_notes || null,
+        item_name:            item.name,
+        token_number:         token_number   || null,
+        customer_phone:       customer_phone || null,
+        service_type:         service_type   || null,
+      });
+    }
+
+    if (kdsInserts.length > 0) {
+      const { error: kdsError } = await supabaseAdmin.from('kds_items').insert(kdsInserts);
+      if (kdsError) {
+        console.error('[kds-notify] kds_items insert failed:', kdsError.message);
+      } else {
+        kdsCreated = kdsInserts.length;
+        console.log(`[kds-notify] ✅ ${kdsCreated} KDS item(s) created — order ${orderNumber}`);
+      }
+    }
+
+    const tax = subtotal * 0.1, total = subtotal + tax;
+    await supabaseAdmin.from('orders').update({ subtotal, tax, total_amount: total }).eq('id', orderData.id);
+
+    broadcastToRestaurant(restaurant_id, {
+      type: 'ORDER_NEW', order_id: orderData.id, order_number: orderNumber,
+      token_number, table_number: table_number || null, customer_name,
+      service_type: service_type || 'whatsapp', kds_items_count: kdsCreated,
+      special_notes: special_notes || null, source: 'whatsapp',
+      timestamp: new Date().toISOString(),
+    });
+
+    try {
+      await supabaseAdmin.from('audit_logs').insert({
+        restaurant_id, action: 'KDS notified via WhatsApp order',
+        details: { order_id: orderData.id, order_number: orderNumber, token_number, table_number, customer_phone, kds_items_created: kdsCreated, special_notes: special_notes || null },
+      });
+    } catch (_) { /* non-fatal */ }
+
+    res.json({ success: true, order_id: orderData.id, order_number: orderNumber, kds_items_created: kdsCreated });
+
+  } catch (err) {
+    console.error('[kds-notify] Unexpected error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// SUBSCRIPTION / FEATURE FLAGS
+// ============================================================================
+
+app.get('/api/subscription', authenticateToken, getRestaurantId, async (req, res) => {
+  res.json({
+    success: true,
+    plan: 'pro',
+    features: [
+      'dine_in', 'takeaway', 'delivery', 'reserve_table',
+      'token_management', 'kds', 'analytics', 'marketing',
+      'whatsapp_ordering', 'catalog_sync', 'reporting',
+    ],
+    valid_until: null,
+  });
+});
+
+// ============================================================================
+// OWNER DASHBOARD — MUNAFE CHAT PROXY ENDPOINTS
+// ============================================================================
+
+app.get('/api/dashboard/waba', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (!supabaseChat) {
+      return res.status(503).json({ error: 'Munafe Chat not configured. Add MUNAFE_CHAT_SUPABASE_URL and MUNAFE_CHAT_SERVICE_ROLE_KEY env vars.' });
+    }
+    let data = null;
+    const { data: byId } = await supabaseChat
+      .from('restaurants')
+      .select('id, name, whatsapp_number, manager_phone, timezone, dining_duration_minutes, payment_mode, waba_id')
+      .eq('id', req.restaurant_id)
+      .maybeSingle();
+    data = byId;
+
+    if (!data) {
+      const { data: first } = await supabaseChat
+        .from('restaurants')
+        .select('id, name, whatsapp_number, manager_phone, timezone, dining_duration_minutes, payment_mode, waba_id')
+        .limit(1)
+        .maybeSingle();
+      data = first;
+    }
+
+    res.json({ success: true, restaurant: data ?? null });
+  } catch (err) {
+    console.error('[GET /api/dashboard/waba]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/dashboard/wa-orders', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (!supabaseChat) {
+      return res.status(503).json({ error: 'Munafe Chat not configured.' });
+    }
+    const { start, end } = req.query;
+    if (!start || !end) return res.status(400).json({ error: 'start and end query params required' });
+
+    const { data: sample } = await supabaseChat
+      .from('bookings')
+      .select('*')
+      .limit(1)
+      .maybeSingle();
+
+    const cols = sample ? Object.keys(sample) : [];
+    console.log('[wa-orders] bookings columns:', cols.join(', ') || 'table empty or missing');
+
+    const dateCol     = cols.includes('created_at')    ? 'created_at'
+                      : cols.includes('booking_datetime') ? 'booking_datetime'
+                      : 'created_at';
+    const amountCol   = cols.includes('token_advance') ? 'token_advance'
+                      : cols.includes('total_amount')  ? 'total_amount'
+                      : null;
+    const hasCustomer = cols.includes('customer_id');
+    const hasRestId   = cols.includes('restaurant_id');
+
+    const selectParts = [
+      'id', dateCol, 'service_type', 'status', 'party_size',
+      'token_number', 'payment_status', 'booking_datetime',
+    ];
+    if (amountCol)   selectParts.push(amountCol);
+    if (hasCustomer) selectParts.push('customer_id, customers(name, phone)');
+
+    let q = supabaseChat
+      .from('bookings')
+      .select(selectParts.join(', '))
+      .gte(dateCol, start)
+      .lte(dateCol, end)
+      .order(dateCol, { ascending: false })
+      .limit(500);
+
+    if (hasRestId) q = q.eq('restaurant_id', req.restaurant_id);
+
+    const { data, error } = await q;
+
+    if (error) {
+      console.error('[wa-orders] query failed:', error.message);
+      const { data: minimal } = await supabaseChat
+        .from('bookings')
+        .select(`id, ${dateCol}, service_type, status, party_size, token_number`)
+        .gte(dateCol, start)
+        .lte(dateCol, end)
+        .order(dateCol, { ascending: false })
+        .limit(500);
+      const minData = minimal ?? [];
+      console.log(`[wa-orders] Minimal fallback: ${minData.length} rows`);
+      return res.json({ success: true, orders: minData.map(r => ({ ...r, created_at: r[dateCol] })) });
+    }
+
+    let finalData = data ?? [];
+    if (finalData.length === 0 && hasRestId) {
+      console.log('[wa-orders] Restaurant filter returned 0 — trying without restaurant filter...');
+      const { data: allData } = await supabaseChat
+        .from('bookings')
+        .select(selectParts.join(', '))
+        .gte(dateCol, start)
+        .lte(dateCol, end)
+        .order(dateCol, { ascending: false })
+        .limit(500);
+      finalData = allData ?? [];
+      console.log(`[wa-orders] Without restaurant filter: ${finalData.length} bookings`);
+    }
+
+    const normalized = finalData.map(r => ({
+      ...r,
+      created_at:   r[dateCol]   ?? r.created_at,
+      total_amount: amountCol ? (r[amountCol] ?? null) : null,
+    }));
+    console.log(`[wa-orders] Returning ${normalized.length} bookings`);
+    return res.json({ success: true, orders: normalized });
+  } catch (err) {
+    console.error('[GET /api/dashboard/wa-orders]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/dashboard/cancel-stats', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { start, end } = req.query;
+    if (!start || !end) return res.status(400).json({ error: 'start and end required' });
+
+    const [cancelRes, totalRes] = await Promise.all([
+      supabaseAdmin.from('orders')
+        .select('total_amount')
+        .eq('restaurant_id', req.restaurant_id)
+        .eq('status', 'cancelled')
+        .gte('created_at', start)
+        .lte('created_at', end),
+      supabaseAdmin.from('orders')
+        .select('*', { count: 'exact', head: true })
+        .eq('restaurant_id', req.restaurant_id)
+        .gte('created_at', start)
+        .lte('created_at', end),
+    ]);
+
+    const orderCancels  = cancelRes.data ?? [];
+    const totalOrders   = totalRes.count ?? 0;
+    const orderRevLost  = orderCancels.reduce((s, o) => s + (o.total_amount ?? 0), 0);
+
+    let bookingCancels = 0, totalBookings = 0;
+    if (supabaseChat) {
+      const [bcRes, btRes] = await Promise.all([
+        supabaseChat.from('bookings')
+          .select('id', { count: 'exact', head: true })
+          .eq('status', 'cancelled')
+          .gte('created_at', start)
+          .lte('created_at', end),
+        supabaseChat.from('bookings')
+          .select('id', { count: 'exact', head: true })
+          .gte('created_at', start)
+          .lte('created_at', end),
+      ]);
+      bookingCancels = bcRes.count ?? 0;
+      totalBookings  = btRes.count ?? 0;
+    }
+
+    res.json({
+      success: true,
+      orderCancels:  orderCancels.length,
+      orderRevLost,
+      totalOrders,
+      orderRate: totalOrders > 0 ? Math.round((orderCancels.length / totalOrders) * 100) : 0,
+      bookingCancels,
+      totalBookings,
+      bookingRate: totalBookings > 0 ? Math.round((bookingCancels / totalBookings) * 100) : 0,
+    });
+  } catch (err) {
+    console.error('[GET /api/dashboard/cancel-stats]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// PUBLIC RESTAURANT RESOLVER
+// ============================================================================
+
+app.get('/api/restaurant/default', async (req, res) => {
+  try {
+    const { data: restaurants, error } = await supabaseAdmin
+      .from('restaurants')
+      .select('id')
+      .eq('is_active', true)
+      .limit(2);
+
+    if (error) throw error;
+
+    if (!restaurants || restaurants.length === 0) {
+      return res.status(404).json({ error: 'No active restaurant found' });
+    }
+
+    if (restaurants.length > 1) {
+      return res.status(400).json({
+        error: 'Multiple restaurants found. QR code URL must include ?restaurant=<id>'
+      });
+    }
+
+    res.json({ restaurant_id: restaurants[0].id });
+  } catch (err) {
+    console.error('[GET /api/restaurant/default]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// WEBSOCKET
+// ============================================================================
+
+const clients = new Map();
+
+wss.on('connection', (ws) => {
+  console.log('WebSocket client connected');
+  let restaurantId = null;
+  ws.on('message', async (message) => {
+    try {
+      const data = JSON.parse(message);
+      if (data.type === 'SUBSCRIBE') {
+        restaurantId = data.restaurantId;
+        if (!clients.has(restaurantId)) clients.set(restaurantId, []);
+        clients.get(restaurantId).push(ws);
+        ws.send(JSON.stringify({ type: 'SUBSCRIBED', restaurantId, timestamp: new Date().toISOString() }));
+      }
+    } catch (err) {
+      console.error('WebSocket message error:', err);
+    }
+  });
+  ws.on('close', () => {
+    if (restaurantId && clients.has(restaurantId)) {
+      const list  = clients.get(restaurantId);
+      const index = list.indexOf(ws);
+      if (index > -1) list.splice(index, 1);
+    }
+    console.log('WebSocket client disconnected');
+  });
+  ws.on('error', (err) => {
+    console.error('WebSocket error:', err.message);
+  });
+});
+
+function broadcastToRestaurant(restaurantId, data) {
+  if (clients.has(restaurantId)) {
+    clients.get(restaurantId).forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify(data));
+      }
+    });
+  }
+}
+
+// ============================================================================
+// START SERVER
+// ============================================================================
+
+const PORT = process.env.PORT || 3001;
+
+server.listen(PORT, () => {
+  console.log(`\n🚀 Autom8 Backend Server running on port ${PORT}`);
+  console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🗄️  Database: ${process.env.SUPABASE_URL}\n`);
+  startSlotScheduler();
+  runStartupSync();
+});
+
+process.on('SIGTERM', () => {
+  console.log('SIGTERM signal received: closing HTTP server');
+  server.close(() => console.log('HTTP server closed'));
+});
+
+module.exports = { app, wss, broadcastToRestaurant };
