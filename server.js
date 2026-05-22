@@ -235,47 +235,82 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
       console.warn('[catalog-msg] META_CATALOG_ID not set');
       return;
     }
-    const { data: thumbItem, error: thumbError } = await supabaseAdmin
+
+    // Fetch all available items ordered by name so the thumbnail is deterministic.
+    // We try each one in order until Meta accepts it — this handles the case where
+    // some retailer_ids in our DB don't match Meta's catalog (e.g. after a partial
+    // sync or if Meta silently dropped a product).
+    const { data: availableItems, error: itemsError } = await supabaseAdmin
       .from('menu_items')
-      .select('retailer_id')
+      .select('retailer_id, name')
       .eq('restaurant_id', restaurantId)
       .eq('is_available', true)
-      .limit(1)
-      .single();
-    if (thumbError || !thumbItem?.retailer_id) {
+      .not('retailer_id', 'is', null)
+      .order('name', { ascending: true })
+      .limit(10);
+
+    if (itemsError || !availableItems || availableItems.length === 0) {
       console.warn('[catalog-msg] No available items found for thumbnail');
       return;
     }
-    const response = await fetch(
-      `${process.env.WHATSAPP_API_URL}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
-      {
-        method:  'POST',
-        headers: {
-          Authorization:  `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messaging_product: 'whatsapp',
-          to:   String(toNumber),
-          type: 'interactive',
-          interactive: {
-            type: 'catalog_message',
-            body:   { text: "🍽️ Browse today's menu and add items to your basket 🛒" },
-            footer: { text: 'Tap any item to see details and order' },
-            action: {
-              name: 'catalog_message',
-              parameters: { thumbnail_product_retailer_id: thumbItem.retailer_id },
-            },
+
+    // Try each retailer_id until one works
+    for (const item of availableItems) {
+      console.log(`[catalog-msg] Trying thumbnail retailer_id=${item.retailer_id} (${item.name})`);
+      const response = await fetch(
+        `${process.env.WHATSAPP_API_URL}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+        {
+          method:  'POST',
+          headers: {
+            Authorization:  `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+            'Content-Type': 'application/json',
           },
-        }),
+          body: JSON.stringify({
+            messaging_product: 'whatsapp',
+            to:   String(toNumber),
+            type: 'interactive',
+            interactive: {
+              type: 'catalog_message',
+              body:   { text: "🍽️ Browse today's menu and add items to your basket 🛒" },
+              footer: { text: 'Tap any item to see details and order' },
+              action: {
+                name: 'catalog_message',
+                parameters: { thumbnail_product_retailer_id: item.retailer_id },
+              },
+            },
+          }),
+        }
+      );
+
+      if (response.ok) {
+        console.log(`[catalog-msg] ✅ Sent to ${toNumber} using retailer_id=${item.retailer_id}`);
+        return; // success — stop trying
       }
-    );
-    if (!response.ok) {
+
       const err = await response.json().catch(() => ({}));
-      console.error('[catalog-msg] API error:', err);
-    } else {
-      console.log(`[catalog-msg] ✅ Sent to ${toNumber}`);
+      const errCode = err?.error?.code;
+      const errDetail = err?.error?.details ?? err?.error?.message ?? '';
+
+      // 131009 = "Products not found in FB Catalog" — this retailer_id isn't in Meta
+      // Try the next item. Any other error is unexpected — log and bail.
+      if (errCode === 131009 || errDetail.includes('not found')) {
+        console.warn(`[catalog-msg] retailer_id=${item.retailer_id} not in Meta catalog — trying next`);
+        continue;
+      }
+
+      // Unexpected error — log and stop
+      console.error('[catalog-msg] API error (unexpected):', err);
+      return;
     }
+
+    // All retailer_ids failed — the catalog message can't be sent right now.
+    // This usually means Meta's catalog is out of sync with our menu_items table.
+    // Trigger a background re-sync so next time it works.
+    console.warn('[catalog-msg] ⚠️  All retailer_ids rejected by Meta. Triggering background catalog re-sync...');
+    syncCatalogFromMeta(restaurantId).catch(e =>
+      console.error('[catalog-msg] Background re-sync failed:', e.message)
+    );
+
   } catch (err) {
     console.error('[catalog-msg] Failed:', err.message);
   }
@@ -422,9 +457,16 @@ async function syncCatalogFromMeta(restaurantId) {
         let price = 0;
         if (product.price) {
           if (typeof product.price === 'string') {
-            const numeric = parseFloat(product.price.replace(/[^0-9.]/g, ''));
-            price = isNaN(numeric) ? 0 : numeric / 100;
+            const raw = product.price.trim();
+            const hasRupeeSymbol = raw.includes('₹') || raw.toUpperCase().includes('INR');
+            const numeric = parseFloat(raw.replace(/[^0-9.]/g, ''));
+            if (!isNaN(numeric)) {
+              // If the string contains ₹ or INR it's already in rupees (e.g. "₹60.00")
+              // Otherwise it's in paise as returned by Meta's raw API (e.g. "6000" = ₹60)
+              price = hasRupeeSymbol ? numeric : numeric / 100;
+            }
           } else if (typeof product.price === 'number') {
+            // Numbers > 100 are almost certainly paise; small numbers are rupees
             price = product.price > 100 ? product.price / 100 : product.price;
           }
           console.log(`[price] raw=${product.price} → ₹${price}`);
@@ -458,18 +500,17 @@ async function syncCatalogFromMeta(restaurantId) {
       }
     }
 
-    const { data: badPrices } = await supabaseAdmin
+    // Price sanity check — log any items that still look wrong after sync
+    // (safety-net correction loop removed: the price parser now correctly
+    // handles both "₹60.00" rupee strings and "6000" paise integers)
+    const { data: suspectPrices } = await supabaseAdmin
       .from('menu_items')
-      .select('id, price')
+      .select('id, name, price')
       .eq('restaurant_id', restaurantId)
       .lt('price', 1);
-    if (badPrices && badPrices.length > 0) {
-      console.warn(`[catalog-sync] ⚠️ Found ${badPrices.length} items with price < ₹1 — correcting...`);
-      for (const item of badPrices) {
-        await supabaseAdmin.from('menu_items')
-          .update({ price: Math.round(item.price * 100 * 100) / 100 })
-          .eq('id', item.id);
-      }
+    if (suspectPrices && suspectPrices.length > 0) {
+      console.warn(`[catalog-sync] ⚠️ ${suspectPrices.length} item(s) still have price < ₹1 after sync — check Meta catalog prices:`);
+      suspectPrices.forEach(i => console.warn(`  • ${i.name}: ₹${i.price}`));
     }
 
     await applySlotAvailability(restaurantId, getCurrentSlotIST());
