@@ -460,6 +460,23 @@ async function syncCatalogFromMeta(restaurantId) {
         console.error(`  ⚠️  Skipped product ${product.id}:`, itemError.message);
       }
     }
+
+    // Safety net: if any prices look wrong (< ₹1 for real food items),
+    // multiply back up — catches any future double-division
+    const { data: badPrices } = await supabaseAdmin
+      .from('menu_items')
+      .select('id, price')
+      .eq('restaurant_id', restaurantId)
+      .lt('price', 1);
+    if (badPrices && badPrices.length > 0) {
+      console.warn(`[catalog-sync] ⚠️ Found ${badPrices.length} items with price < ₹1 — correcting...`);
+      for (const item of badPrices) {
+        await supabaseAdmin.from('menu_items')
+          .update({ price: Math.round(item.price * 100 * 100) / 100 })
+          .eq('id', item.id);
+      }
+    }
+
     await applySlotAvailability(restaurantId, getCurrentSlotIST());
     const result = { success: true, synced, skipped, total: allProducts.length, errors: errors.length > 0 ? errors : undefined };
     console.log(`  ✅ Sync complete:`, result);
