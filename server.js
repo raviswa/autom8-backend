@@ -304,21 +304,9 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
     }
 
     // All retailer_ids failed — the catalog message can't be sent right now.
-    // Send a self-serve catalog deep-link so the customer can browse themselves.
-    // Also trigger a background re-sync so next time the native catalog works.
-    console.warn('[catalog-msg] ⚠️  All retailer_ids rejected by Meta. Sending self-serve link + triggering re-sync...');
-    const wabaPhone = (process.env.WHATSAPP_PHONE_NUMBER || '').replace(/[^0-9]/g, '');
-    if (wabaPhone) {
-      try {
-        await sendWhatsAppMessage(
-          toNumber,
-          `Tap here to browse our full menu with photos and prices 👇\nhttps://wa.me/c/${wabaPhone}\n\nAdd items to your basket and send — we'll prepare your order right away! 🍽️`
-        );
-        console.log(`[catalog-msg] Self-serve link sent to ${toNumber}`);
-      } catch (linkErr) {
-        console.error('[catalog-msg] Failed to send self-serve link:', linkErr.message);
-      }
-    }
+    // This usually means Meta's catalog is out of sync with our menu_items table.
+    // Trigger a background re-sync so next time it works.
+    console.warn('[catalog-msg] ⚠️  All retailer_ids rejected by Meta. Triggering background catalog re-sync...');
     syncCatalogFromMeta(restaurantId).catch(e =>
       console.error('[catalog-msg] Background re-sync failed:', e.message)
     );
@@ -1157,8 +1145,17 @@ app.post('/api/tokens', async (req, res) => {
       .from('walk_in_tokens').insert(tokenRecord).select().single();
     if (insertError) throw insertError;
 
-    if (process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
-      const arrivalTime = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+    // Only send walk-in notification if NOT called by munafe bot.
+    // Munafe sends its own notification with IST time and better formatting.
+    // Pass ?notify=false from munafe's _sync_token_to_portal() to suppress this.
+    const skipNotify = req.query.notify === 'false';
+    if (!skipNotify && process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
+      // Use IST time for the notification
+      const arrivalTime = new Date().toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        hour: '2-digit', minute: '2-digit',
+        hour12: true,
+      });
       const typeLabel   = type === 'dinein' ? 'Dine-in' : 'Takeaway';
       const paxLine     = type === 'dinein' ? `, ${token.pax} ${token.pax === 1 ? 'person' : 'people'}` : '';
       const managerMsg  =
