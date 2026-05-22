@@ -430,8 +430,7 @@ async function syncCatalogFromMeta(restaurantId) {
           }
           console.log(`[price] raw=${product.price} → ₹${price}`);
         }
-        
-        }
+      
         const SLOT_MAP = {
           'morning tiffin': 'morning_tiffin', 'lunch': 'lunch',
           'evening snacks': 'evening_snacks', 'dinner tiffin': 'dinner_tiffin',
