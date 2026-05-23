@@ -916,6 +916,115 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
     res.status(400).json({ error: err.message });
   }
 });
+// ============================================================================
+// MENU UPLOAD ENDPOINT (Excel/CSV catalog upload)  — NEW ENDPOINT
+// ============================================================================
+// Accepts parsed menu items from frontend and upserts them into menu_items table.
+// Frontend (ManagerPortal) parses the Excel file client-side with SheetJS,
+// validates it, and POSTs the cleaned rows here.
+// Backend upserts into DB and applies current slot availability.
+ 
+app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'owner' && req.user_role !== 'manager')
+      return res.status(403).json({ error: 'Unauthorized' });
+ 
+    const { items } = req.body;
+    if (!items || !Array.isArray(items) || items.length === 0)
+      return res.status(400).json({ error: 'items array is required and must not be empty' });
+ 
+    let upserted = 0, skipped = 0;
+    const errors = [];
+ 
+    for (const item of items) {
+      try {
+        // Validate required fields
+        if (!item.id || !item.name) {
+          errors.push({ row_id: item.id, error: 'Missing id or name' });
+          skipped++;
+          continue;
+        }
+ 
+        // Ensure price is positive
+        const price = parseFloat(item.price) || 0;
+        if (price <= 0) {
+          errors.push({ row_id: item.id, error: `Invalid price: ${item.price}` });
+          skipped++;
+          continue;
+        }
+ 
+        // Prepare menu item for upsert
+        const menuItem = {
+          restaurant_id: req.restaurant_id,
+          id:            item.id,  // use id from Excel as unique identifier
+          name:          String(item.name).trim(),
+          description:   String(item.description || '').trim(),
+          price,
+          image_url:     item.image_url ? String(item.image_url).trim() : null,
+          time_slot:     item.time_slot || 'all',  // morning_tiffin, lunch, evening_snacks, dinner_tiffin, or 'all'
+          category:      item.category || 'General',
+          is_available:  true,  // newly uploaded items are available by default
+          updated_at:    new Date().toISOString(),
+        };
+ 
+        // Upsert with conflict on (restaurant_id, id) — update if exists, insert if new
+        const { error: upsertError } = await supabaseAdmin
+          .from('menu_items')
+          .upsert(menuItem, { onConflict: 'restaurant_id,id', ignoreDuplicates: false });
+ 
+        if (upsertError) {
+          errors.push({ row_id: item.id, error: upsertError.message });
+          skipped++;
+          continue;
+        }
+ 
+        upserted++;
+      } catch (itemError) {
+        errors.push({ row_id: item.id, error: itemError.message });
+        skipped++;
+      }
+    }
+ 
+    // Apply current slot availability to the uploaded items
+    try {
+      const currentSlot = getCurrentSlotIST();
+      if (currentSlot) {
+        // Activate uploaded items that match current slot or are marked 'all'
+        await supabaseAdmin
+          .from('menu_items')
+          .update({ is_available: true, updated_at: new Date().toISOString() })
+          .eq('restaurant_id', req.restaurant_id)
+          .in('time_slot', [currentSlot, 'all']);
+      }
+    } catch (slotErr) {
+      console.warn('[menu/upload] Failed to apply slot availability:', slotErr.message);
+      // Non-fatal — items were still upserted
+    }
+ 
+    await supabaseAdmin.from('audit_logs').insert({
+      user_id: req.user.sub,
+      restaurant_id: req.restaurant_id,
+      action: 'Menu items uploaded via Excel',
+      details: { upserted, skipped, total: items.length, error_count: errors.length },
+    }).catch(() => {});
+ 
+    const response = { success: true, upserted, skipped, total: items.length };
+    if (errors.length > 0) response.errors = errors;
+ 
+    console.log(`[menu/upload] ✅ Completed: ${upserted} upserted, ${skipped} skipped for restaurant ${req.restaurant_id}`);
+    res.json(response);
+ 
+  } catch (err) {
+    console.error('[menu/upload] Unexpected error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+ 
+// ============================================================================
+// END OF NEW ENDPOINT
+// ============================================================================
+// Insert the above endpoint in your server.js after the PUT /api/menu-items/:id/availability
+// endpoint (around line 920) and before the ORDERS ENDPOINTS section.
 
 // ============================================================================
 // Fix 9 — POST /api/orders/:id/complete
