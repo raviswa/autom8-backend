@@ -376,6 +376,30 @@ async function applySlotForAllRestaurants() {
   }
 }
 
+app.get('/api/internal/menu-items', async (req, res) => {
+  try {
+    const secret   = req.headers['x-internal-secret'];
+    const expected = process.env.AUTOM8_KDS_SECRET || 'munafe_kds_sync_2026';
+    if (secret !== expected)
+      return res.status(403).json({ error: 'Forbidden' });
+    const restaurantId = req.query.restaurant_id;
+    if (!restaurantId)
+      return res.status(400).json({ error: 'restaurant_id query param required' });
+    const { data, error } = await supabaseAdmin
+      .from('menu_items')
+      .select('id, name, description, price, image_url, time_slot, retailer_id, is_available, category')
+      .eq('restaurant_id', restaurantId)
+      .order('time_slot', { ascending: true })
+      .order('name',      { ascending: true });
+    if (error) throw error;
+    res.json({ success: true, count: data.length, items: data });
+  } catch (err) {
+    console.error('[GET /api/internal/menu-items]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 function startSlotScheduler() {
   setInterval(async () => {
     const cutoff = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
