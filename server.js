@@ -19,6 +19,13 @@
 //            that bulk-updates all kds_items and fires exactly ONE WhatsApp
 //            notification, eliminating the duplicate-notify race condition
 //            from parallel PUT /api/kds/:id/status calls
+//  Fix 10 — Large party approval flow:
+//            POST /api/tokens now accepts type='large_party' and
+//            status='pending_approval' with meta.combo table combination.
+//            PUT /api/tokens/:id/approve — manager approves, customer notified
+//            PUT /api/tokens/:id/reject  — manager rejects, customer offered
+//            reservation alternative. GET /api/tokens returns
+//            pending_approval tokens so portal can show them.
 // ============================================================================
 
 const express   = require('express');
@@ -44,8 +51,6 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// Munafe Chat Supabase (separate project — conversation/WABA data)
-// Support both naming conventions
 const _chatUrl = process.env.CHAT_SUPABASE_URL || process.env.MUNAFE_CHAT_SUPABASE_URL;
 const _chatKey = process.env.CHAT_SUPABASE_SERVICE_KEY || process.env.CHAT_SERVICE_ROLE_KEY || process.env.MUNAFE_CHAT_SERVICE_ROLE_KEY;
 const supabaseChat = _chatUrl && _chatKey
@@ -84,7 +89,6 @@ const authenticateToken = async (req, res, next) => {
   }
 };
 
-// Fix 6 + Fix 8: robust restaurant_id resolution with clear error messages
 const getRestaurantId = async (req, res, next) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -236,10 +240,6 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
       return;
     }
 
-    // Fetch all available items ordered by name so the thumbnail is deterministic.
-    // We try each one in order until Meta accepts it — this handles the case where
-    // some retailer_ids in our DB don't match Meta's catalog (e.g. after a partial
-    // sync or if Meta silently dropped a product).
     const { data: availableItems, error: itemsError } = await supabaseAdmin
       .from('menu_items')
       .select('retailer_id, name')
@@ -254,7 +254,6 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
       return;
     }
 
-    // Try each retailer_id until one works
     for (const item of availableItems) {
       console.log(`[catalog-msg] Trying thumbnail retailer_id=${item.retailer_id} (${item.name})`);
       const response = await fetch(
@@ -284,28 +283,22 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
 
       if (response.ok) {
         console.log(`[catalog-msg] ✅ Sent to ${toNumber} using retailer_id=${item.retailer_id}`);
-        return; // success — stop trying
+        return;
       }
 
       const err = await response.json().catch(() => ({}));
       const errCode = err?.error?.code;
       const errDetail = err?.error?.details ?? err?.error?.message ?? '';
 
-      // 131009 = "Products not found in FB Catalog" — this retailer_id isn't in Meta
-      // Try the next item. Any other error is unexpected — log and bail.
       if (errCode === 131009 || errDetail.includes('not found')) {
         console.warn(`[catalog-msg] retailer_id=${item.retailer_id} not in Meta catalog — trying next`);
         continue;
       }
 
-      // Unexpected error — log and stop
       console.error('[catalog-msg] API error (unexpected):', err);
       return;
     }
 
-    // All retailer_ids failed — the catalog message can't be sent right now.
-    // This usually means Meta's catalog is out of sync with our menu_items table.
-    // Trigger a background re-sync so next time it works.
     console.warn('[catalog-msg] ⚠️  All retailer_ids rejected by Meta. Triggering background catalog re-sync...');
     syncCatalogFromMeta(restaurantId).catch(e =>
       console.error('[catalog-msg] Background re-sync failed:', e.message)
@@ -399,7 +392,6 @@ app.get('/api/internal/menu-items', async (req, res) => {
   }
 });
 
-
 function startSlotScheduler() {
   setInterval(async () => {
     const cutoff = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
@@ -485,12 +477,9 @@ async function syncCatalogFromMeta(restaurantId) {
             const hasRupeeSymbol = raw.includes('₹') || raw.toUpperCase().includes('INR');
             const numeric = parseFloat(raw.replace(/[^0-9.]/g, ''));
             if (!isNaN(numeric)) {
-              // If the string contains ₹ or INR it's already in rupees (e.g. "₹60.00")
-              // Otherwise it's in paise as returned by Meta's raw API (e.g. "6000" = ₹60)
               price = hasRupeeSymbol ? numeric : numeric / 100;
             }
           } else if (typeof product.price === 'number') {
-            // Numbers > 100 are almost certainly paise; small numbers are rupees
             price = product.price > 100 ? product.price / 100 : product.price;
           }
           console.log(`[price] raw=${product.price} → ₹${price}`);
@@ -524,9 +513,6 @@ async function syncCatalogFromMeta(restaurantId) {
       }
     }
 
-    // Price sanity check — log any items that still look wrong after sync
-    // (safety-net correction loop removed: the price parser now correctly
-    // handles both "₹60.00" rupee strings and "6000" paise integers)
     const { data: suspectPrices } = await supabaseAdmin
       .from('menu_items')
       .select('id, name, price')
@@ -804,40 +790,24 @@ app.get('/api/kds/feed', authenticateToken, getRestaurantId, async (req, res) =>
 
 // ============================================================================
 // SHARED HELPER — notifyOrderReady
-// ──────────────────────────────────────────────────────────────────────────────
-// Single source of truth for the "order is ready" WhatsApp notification.
-// Called by both PUT /api/kds/:id/status (item-by-item path) and
-// POST /api/orders/:id/complete (bulk path).
-//
-// Guard: atomically updates orders.status to 'ready' only if it is currently
-// NOT already 'ready'. The update returns 0 rows if the status was already
-// set — meaning a concurrent call already won — so we skip the WhatsApp send.
-// This prevents duplicate notifications regardless of how many concurrent
-// requests arrive.
 // ============================================================================
 
 async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
   try {
-    // Atomically claim the notification slot.
-    // .eq('status', 'pending') / in_progress / ready is tricky because
-    // the order may still be 'pending' at this point.
-    // Use .neq('status', 'ready') so only the FIRST caller sets it.
     const { data: updated, error: updateErr } = await supabaseAdmin
       .from('orders')
       .update({ status: 'ready' })
       .eq('id', orderId)
-      .neq('status', 'ready')        // ← only succeeds once
+      .neq('status', 'ready')
       .neq('status', 'cancelled')
       .select('order_number, table:table_id!left(table_number), walk_in_tokens(phone)')
       .single();
 
     if (updateErr || !updated) {
-      // Either already ready (duplicate call) or genuinely not found — skip
       console.log(`[notifyOrderReady] Skipped for order ${orderId} — already ready or not found`);
       return;
     }
 
-    // Resolve phone: walk_in_token first, then kds_item fallback
     const phone =
       updated.walk_in_tokens?.[0]?.phone ??
       kdsItem?.customer_phone ??
@@ -880,7 +850,6 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
 
     if (status === 'ready') {
       try {
-        // Fetch the kds_item to resolve order_id and phone
         const { data: kdsItem } = await supabaseAdmin
           .from('kds_items')
           .select('order_item:order_item_id!left(order_id), token_number, customer_phone, service_type')
@@ -890,7 +859,6 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
         const orderId = kdsItem?.order_item?.order_id;
 
         if (orderId) {
-          // Check if ALL items for this order are now ready
           const { data: allItems } = await supabaseAdmin
             .from('kds_items')
             .select('status, order_item:order_item_id!left(order_id)')
@@ -900,12 +868,9 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
           const allReady   = orderItems.length > 0 && orderItems.every(i => i.status === 'ready');
 
           if (allReady) {
-            // Delegate to shared helper — atomically guards against duplicates
             await notifyOrderReady({ orderId, restaurantId: req.restaurant_id, kdsItem });
           }
         }
-        // Note: orphaned kds_items with no order_id (legacy data / kds/notify flow)
-        // do NOT send notifications here — they have no reliable order to check against.
       } catch (notifyErr) {
         console.error('[KDS ready notify] Failed:', notifyErr.message);
       }
@@ -916,80 +881,71 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
     res.status(400).json({ error: err.message });
   }
 });
+
 // ============================================================================
-// MENU UPLOAD ENDPOINT (Excel/CSV catalog upload)  — NEW ENDPOINT
+// MENU UPLOAD ENDPOINT
 // ============================================================================
-// Accepts parsed menu items from frontend and upserts them into menu_items table.
-// Frontend (ManagerPortal) parses the Excel file client-side with SheetJS,
-// validates it, and POSTs the cleaned rows here.
-// Backend upserts into DB and applies current slot availability.
- 
+
 app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     if (req.user_role !== 'owner' && req.user_role !== 'manager')
       return res.status(403).json({ error: 'Unauthorized' });
- 
+
     const { items } = req.body;
     if (!items || !Array.isArray(items) || items.length === 0)
       return res.status(400).json({ error: 'items array is required and must not be empty' });
- 
+
     let upserted = 0, skipped = 0;
     const errors = [];
- 
+
     for (const item of items) {
       try {
-        // Validate required fields
         if (!item.id || !item.name) {
           errors.push({ row_id: item.id, error: 'Missing id or name' });
           skipped++;
           continue;
         }
- 
-        // Ensure price is positive
+
         const price = parseFloat(item.price) || 0;
         if (price <= 0) {
           errors.push({ row_id: item.id, error: `Invalid price: ${item.price}` });
           skipped++;
           continue;
         }
- 
-        // Prepare menu item for upsert
+
         const menuItem = {
           restaurant_id: req.restaurant_id,
-          id:            item.id,  // use id from Excel as unique identifier
+          id:            item.id,
           name:          String(item.name).trim(),
           description:   String(item.description || '').trim(),
           price,
           image_url:     item.image_url ? String(item.image_url).trim() : null,
-          time_slot:     item.time_slot || 'all',  // morning_tiffin, lunch, evening_snacks, dinner_tiffin, or 'all'
+          time_slot:     item.time_slot || 'all',
           category:      item.category || 'General',
-          is_available:  true,  // newly uploaded items are available by default
+          is_available:  true,
           updated_at:    new Date().toISOString(),
         };
- 
-        // Upsert with conflict on (restaurant_id, id) — update if exists, insert if new
+
         const { error: upsertError } = await supabaseAdmin
           .from('menu_items')
           .upsert(menuItem, { onConflict: 'restaurant_id,id', ignoreDuplicates: false });
- 
+
         if (upsertError) {
           errors.push({ row_id: item.id, error: upsertError.message });
           skipped++;
           continue;
         }
- 
+
         upserted++;
       } catch (itemError) {
         errors.push({ row_id: item.id, error: itemError.message });
         skipped++;
       }
     }
- 
-    // Apply current slot availability to the uploaded items
+
     try {
       const currentSlot = getCurrentSlotIST();
       if (currentSlot) {
-        // Activate uploaded items that match current slot or are marked 'all'
         await supabaseAdmin
           .from('menu_items')
           .update({ is_available: true, updated_at: new Date().toISOString() })
@@ -998,60 +954,38 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
       }
     } catch (slotErr) {
       console.warn('[menu/upload] Failed to apply slot availability:', slotErr.message);
-      // Non-fatal — items were still upserted
     }
- 
+
     await supabaseAdmin.from('audit_logs').insert({
       user_id: req.user.sub,
       restaurant_id: req.restaurant_id,
       action: 'Menu items uploaded via Excel',
       details: { upserted, skipped, total: items.length, error_count: errors.length },
     }).catch(() => {});
- 
+
     const response = { success: true, upserted, skipped, total: items.length };
     if (errors.length > 0) response.errors = errors;
- 
+
     console.log(`[menu/upload] ✅ Completed: ${upserted} upserted, ${skipped} skipped for restaurant ${req.restaurant_id}`);
     res.json(response);
- 
+
   } catch (err) {
     console.error('[menu/upload] Unexpected error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
- 
-// ============================================================================
-// END OF NEW ENDPOINT
-// ============================================================================
-// Insert the above endpoint in your server.js after the PUT /api/menu-items/:id/availability
-// endpoint (around line 920) and before the ORDERS ENDPOINTS section.
 
 // ============================================================================
 // Fix 9 — POST /api/orders/:id/complete
-// Atomic "mark all items ready" endpoint that:
-//   • Bulk-updates every kds_item for this order to 'ready' in one DB call
-//   • Updates the order status to 'ready'
-//   • Fires exactly ONE WhatsApp notification (no race condition)
-//   • Broadcasts one ORDER_READY WebSocket event
-//   • Is idempotent — safe to call if some items are already ready
-// Used by the KDS "Mark all ready" button instead of N parallel PUTs.
 // ============================================================================
 
 app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const orderId = req.params.id;
 
-    // 1. Verify order belongs to this restaurant
     const { data: order, error: orderFetchError } = await supabaseAdmin
       .from('orders')
-      .select(`
-        id,
-        order_number,
-        status,
-        restaurant_id,
-        table:table_id!left(table_number),
-        walk_in_tokens(phone)
-      `)
+      .select(`id, order_number, status, restaurant_id, table:table_id!left(table_number), walk_in_tokens(phone)`)
       .eq('id', orderId)
       .eq('restaurant_id', req.restaurant_id)
       .single();
@@ -1064,7 +998,6 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
       return res.status(400).json({ error: `Order is already ${order.status}` });
     }
 
-    // 2. Fetch all kds_items for this order via join
     const { data: kdsItems, error: kdsFetchError } = await supabaseAdmin
       .from('kds_items')
       .select('id, status, order_item:order_item_id!left(order_id), customer_phone, token_number')
@@ -1072,15 +1005,12 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
 
     if (kdsFetchError) throw kdsFetchError;
 
-    const orderKdsItems = (kdsItems ?? []).filter(
-      i => i.order_item?.order_id === orderId
-    );
+    const orderKdsItems = (kdsItems ?? []).filter(i => i.order_item?.order_id === orderId);
 
     if (orderKdsItems.length === 0) {
       return res.status(404).json({ error: 'No KDS items found for this order' });
     }
 
-    // 3. Bulk-update all non-cancelled items to 'ready'
     const activeItems    = orderKdsItems.filter(i => i.status !== 'cancelled');
     const alreadyAllDone = activeItems.every(i => i.status === 'ready');
 
@@ -1095,33 +1025,18 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
       if (bulkUpdateError) throw bulkUpdateError;
     }
 
-    // 4+5+6. Update order status, send WhatsApp, broadcast — all via shared
-    // notifyOrderReady() which atomically guards against duplicate sends.
-    // The .neq('status','ready') guard inside notifyOrderReady means only
-    // the first caller (PUT item or POST /complete) ever sends the message.
     const firstKdsItem = orderKdsItems.find(i => i.customer_phone) ?? orderKdsItems[0];
-    await notifyOrderReady({
-      orderId,
-      restaurantId: req.restaurant_id,
-      kdsItem: firstKdsItem,
-    });
+    await notifyOrderReady({ orderId, restaurantId: req.restaurant_id, kdsItem: firstKdsItem });
 
-    // 7. Audit log (non-fatal)
     await supabaseAdmin.from('audit_logs').insert({
       user_id:       req.user.sub,
       restaurant_id: req.restaurant_id,
       action:        'Order marked ready via /complete',
-      details: {
-        order_id:          orderId,
-        order_number:      order.order_number,
-        kds_items_updated: alreadyAllDone ? 0 : activeItems.length,
-      },
+      details: { order_id: orderId, order_number: order.order_number, kds_items_updated: alreadyAllDone ? 0 : activeItems.length },
     }).catch(() => {});
 
     res.json({
-      success:           true,
-      order_id:          orderId,
-      order_number:      order.order_number,
+      success: true, order_id: orderId, order_number: order.order_number,
       kds_items_updated: alreadyAllDone ? 0 : activeItems.length,
     });
 
@@ -1257,47 +1172,69 @@ async function generateTokenId(restaurantId) {
   return `T-${Date.now().toString().slice(-6)}`;
 }
 
+// ============================================================================
+// Fix 10 — POST /api/tokens
+// Now accepts type='large_party' with status='pending_approval' and
+// a meta.combo array describing the proposed table split.
+// All other types work exactly as before.
+// ============================================================================
+
 app.post('/api/tokens', async (req, res) => {
   try {
-    const { name, phone, type, pax, restaurant_id } = req.body;
+    const { name, phone, type, pax, restaurant_id, meta } = req.body;
     if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
-    if (!type)                 return res.status(400).json({ error: 'type is required (dinein or takeaway)' });
+    if (!type)                 return res.status(400).json({ error: 'type is required' });
     if (!restaurant_id)        return res.status(400).json({ error: 'restaurant_id is required' });
-    if (!['dinein', 'takeaway'].includes(type))
-      return res.status(400).json({ error: 'type must be dinein or takeaway' });
+
+    const validTypes = ['dinein', 'takeaway', 'large_party'];
+    if (!validTypes.includes(type))
+      return res.status(400).json({ error: `type must be one of: ${validTypes.join(', ')}` });
 
     const tokenId = await generateTokenId(restaurant_id);
-    const status  = type === 'takeaway' ? 'takeaway' : 'waiting';
+
+    // Determine initial status
+    let status;
+    if (type === 'large_party') {
+      status = 'pending_approval';
+    } else if (type === 'takeaway') {
+      status = 'takeaway';
+    } else {
+      status = 'waiting';
+    }
+
     const tokenRecord = {
-      id: tokenId, restaurant_id, name: name.trim(),
-      phone: phone ? String(phone).replace(/\D/g, '') : null,
-      type, pax: type === 'takeaway' ? 1 : (parseInt(pax) || 1),
-      status, arrived_at: new Date().toISOString(),
+      id:          tokenId,
+      restaurant_id,
+      name:        name.trim(),
+      phone:       phone ? String(phone).replace(/\D/g, '') : null,
+      type,
+      pax:         type === 'takeaway' ? 1 : (parseInt(pax) || 1),
+      status,
+      arrived_at:  new Date().toISOString(),
+      meta:        meta || {},   // stores combo array for large_party tokens
     };
+
     const { data: token, error: insertError } = await supabaseAdmin
       .from('walk_in_tokens').insert(tokenRecord).select().single();
     if (insertError) throw insertError;
 
-    // Only send walk-in notification if NOT called by munafe bot.
-    // Munafe sends its own notification with IST time and better formatting.
-    // Pass ?notify=false from munafe's _sync_token_to_portal() to suppress this.
-    const skipNotify = req.query.notify === 'false';
-    if (!skipNotify && process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
-      // Use IST time for the notification
-      const arrivalTime = new Date().toLocaleString('en-IN', {
-        timeZone: 'Asia/Kolkata',
-        hour: '2-digit', minute: '2-digit',
-        hour12: true,
-      });
-      const typeLabel   = type === 'dinein' ? 'Dine-in' : 'Takeaway';
-      const paxLine     = type === 'dinein' ? `, ${token.pax} ${token.pax === 1 ? 'person' : 'people'}` : '';
-      const managerMsg  =
-        `🪑 *New Walk-in* — Token *${token.id}*\n` +
-        `👤 ${token.name}${paxLine}\n` +
-        `📋 ${typeLabel}\n` +
-        `🕐 ${arrivalTime}\n\n` +
-        `Open portal to assign table:\n${process.env.FRONTEND_URL || 'https://autom8-frontend-production.up.railway.app'}/dashboard/manager`;
-      sendWhatsAppMessage(process.env.MANAGER_WHATSAPP_NUMBER, managerMsg);
+    // For normal walk-ins, notify manager (suppressed for munafe bot via ?notify=false)
+    if (type !== 'large_party') {
+      const skipNotify = req.query.notify === 'false';
+      if (!skipNotify && process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
+        const arrivalTime = new Date().toLocaleString('en-IN', {
+          timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true,
+        });
+        const typeLabel = type === 'dinein' ? 'Dine-in' : 'Takeaway';
+        const paxLine   = type === 'dinein' ? `, ${token.pax} ${token.pax === 1 ? 'person' : 'people'}` : '';
+        const managerMsg =
+          `🪑 *New Walk-in* — Token *${token.id}*\n` +
+          `👤 ${token.name}${paxLine}\n` +
+          `📋 ${typeLabel}\n` +
+          `🕐 ${arrivalTime}\n\n` +
+          `Open portal to assign table:\n${process.env.FRONTEND_URL || 'https://autom8-frontend-production.up.railway.app'}/dashboard/manager`;
+        sendWhatsAppMessage(process.env.MANAGER_WHATSAPP_NUMBER, managerMsg);
+      }
     }
 
     broadcastToRestaurant(restaurant_id, { type: 'NEW_TOKEN', token, timestamp: new Date().toISOString() });
@@ -1307,6 +1244,11 @@ app.post('/api/tokens', async (req, res) => {
     res.status(500).json({ error: err.message || 'Failed to create token' });
   }
 });
+
+// ============================================================================
+// Fix 10 — GET /api/tokens
+// Now also returns pending_approval tokens so portal can display them.
+// ============================================================================
 
 app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
   try {
@@ -1324,9 +1266,13 @@ app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
         .gte('arrived_at', todayStart.toISOString())
         .order('arrived_at', { ascending: true });
     } else {
+      // Include pending_approval alongside the normal active statuses
       query = supabaseAdmin.from('walk_in_tokens').select('*')
         .eq('restaurant_id', req.restaurant_id)
-        .or(`status.in.(waiting,seated,takeaway),and(status.eq.completed,arrived_at.gte.${todayStart.toISOString()})`)
+        .or(
+          `status.in.(waiting,seated,takeaway,pending_approval),` +
+          `and(status.eq.completed,arrived_at.gte.${todayStart.toISOString()})`
+        )
         .order('arrived_at', { ascending: true });
     }
 
@@ -1348,7 +1294,7 @@ app.get('/api/tokens/:id', async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('walk_in_tokens')
-      .select('id, name, phone, status, type, pax, table_number, table_id, arrived_at, seated_at')
+      .select('id, name, phone, status, type, pax, table_number, table_id, arrived_at, seated_at, meta')
       .eq('id', req.params.id)
       .single();
     if (error || !data) return res.status(404).json({ error: 'Token not found' });
@@ -1356,6 +1302,129 @@ app.get('/api/tokens/:id', async (req, res) => {
   } catch (err) {
     console.error('[GET /api/tokens/:id]', err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// Fix 10 — PUT /api/tokens/:id/approve
+// Manager approves a large party request from the portal.
+// Transitions token from pending_approval → waiting so it appears in the
+// normal queue. Sends WhatsApp to customer confirming tables are reserved.
+// ============================================================================
+
+app.put('/api/tokens/:id/approve', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'owner' && req.user_role !== 'manager')
+      return res.status(403).json({ error: 'Unauthorized' });
+
+    const { data: token, error: fetchError } = await supabaseAdmin
+      .from('walk_in_tokens').select('*')
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).single();
+
+    if (fetchError || !token) return res.status(404).json({ error: 'Token not found' });
+    if (token.status !== 'pending_approval')
+      return res.status(400).json({ error: `Token is ${token.status}, not pending_approval` });
+
+    // Move to normal waiting queue
+    const { data: updatedToken, error: updateError } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .update({ status: 'waiting' })
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
+      .select().single();
+    if (updateError) throw updateError;
+
+    // Build table list from meta.combo for the customer message
+    const combo = token.meta?.combo ?? [];
+    const tableLines = combo.length > 0
+      ? combo.map(t => `Table ${t[0]} (${t[2]} seats)`).join(', ')
+      : 'multiple tables';
+
+    // Notify customer
+    if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+      await sendWhatsAppMessage(
+        token.phone,
+        `✅ *Great news! Your large party request has been approved.*\n\n` +
+        `Token: *${token.id}*\n` +
+        `Party of: *${token.pax} people*\n` +
+        `Tables reserved: *${tableLines}*\n\n` +
+        `Please head to the restaurant — our staff will seat your party shortly. 🍽️`
+      );
+    }
+
+    broadcastToRestaurant(req.restaurant_id, {
+      type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString(),
+    });
+
+    await supabaseAdmin.from('audit_logs').insert({
+      user_id: req.user.sub, restaurant_id: req.restaurant_id,
+      action: 'Large party token approved',
+      details: { token_id: req.params.id, pax: token.pax, combo },
+    }).catch(() => {});
+
+    console.log(`[approve] ✅ Token ${token.id} approved for ${token.pax} guests`);
+    res.json({ success: true, token: updatedToken });
+  } catch (err) {
+    console.error('[PUT /api/tokens/:id/approve]', err);
+    res.status(500).json({ error: err.message || 'Failed to approve token' });
+  }
+});
+
+// ============================================================================
+// Fix 10 — PUT /api/tokens/:id/reject
+// Manager rejects a large party request from the portal.
+// Transitions token to 'completed' (dismissed) and sends WhatsApp to customer
+// suggesting they make a reservation instead.
+// ============================================================================
+
+app.put('/api/tokens/:id/reject', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'owner' && req.user_role !== 'manager')
+      return res.status(403).json({ error: 'Unauthorized' });
+
+    const { reason } = req.body; // optional manager note
+
+    const { data: token, error: fetchError } = await supabaseAdmin
+      .from('walk_in_tokens').select('*')
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).single();
+
+    if (fetchError || !token) return res.status(404).json({ error: 'Token not found' });
+    if (token.status !== 'pending_approval')
+      return res.status(400).json({ error: `Token is ${token.status}, not pending_approval` });
+
+    const { data: updatedToken, error: updateError } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .update({ status: 'completed', completed_at: new Date().toISOString() })
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
+      .select().single();
+    if (updateError) throw updateError;
+
+    // Notify customer with reservation suggestion
+    if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+      const reasonLine = reason ? `\n\nReason: ${reason}` : '';
+      await sendWhatsAppMessage(
+        token.phone,
+        `😔 *We're sorry — we're unable to accommodate your party of ${token.pax} right now.*` +
+        reasonLine + `\n\n` +
+        `We'd love to host you! Please consider making a *reservation* for a future date so we can prepare properly.\n\n` +
+        `Reply *RESERVE* to book a table, or contact us directly for assistance. 🙏`
+      );
+    }
+
+    broadcastToRestaurant(req.restaurant_id, {
+      type: 'TOKEN_REJECTED', token: updatedToken, timestamp: new Date().toISOString(),
+    });
+
+    await supabaseAdmin.from('audit_logs').insert({
+      user_id: req.user.sub, restaurant_id: req.restaurant_id,
+      action: 'Large party token rejected',
+      details: { token_id: req.params.id, pax: token.pax, reason: reason || null },
+    }).catch(() => {});
+
+    console.log(`[reject] Token ${token.id} rejected for ${token.pax} guests`);
+    res.json({ success: true, token: updatedToken });
+  } catch (err) {
+    console.error('[PUT /api/tokens/:id/reject]', err);
+    res.status(500).json({ error: err.message || 'Failed to reject token' });
   }
 });
 
@@ -1744,77 +1813,37 @@ app.get('/api/dashboard/wa-orders', authenticateToken, getRestaurantId, async (r
     const { start, end } = req.query;
     if (!start || !end) return res.status(400).json({ error: 'start and end query params required' });
 
-    const { data: sample } = await supabaseChat
-      .from('bookings')
-      .select('*')
-      .limit(1)
-      .maybeSingle();
-
+    const { data: sample } = await supabaseChat.from('bookings').select('*').limit(1).maybeSingle();
     const cols = sample ? Object.keys(sample) : [];
     console.log('[wa-orders] bookings columns:', cols.join(', ') || 'table empty or missing');
 
-    const dateCol     = cols.includes('created_at')    ? 'created_at'
-                      : cols.includes('booking_datetime') ? 'booking_datetime'
-                      : 'created_at';
-    const amountCol   = cols.includes('token_advance') ? 'token_advance'
-                      : cols.includes('total_amount')  ? 'total_amount'
-                      : null;
+    const dateCol     = cols.includes('created_at') ? 'created_at' : cols.includes('booking_datetime') ? 'booking_datetime' : 'created_at';
+    const amountCol   = cols.includes('token_advance') ? 'token_advance' : cols.includes('total_amount') ? 'total_amount' : null;
     const hasCustomer = cols.includes('customer_id');
     const hasRestId   = cols.includes('restaurant_id');
 
-    const selectParts = [
-      'id', dateCol, 'service_type', 'status', 'party_size',
-      'token_number', 'payment_status', 'booking_datetime',
-    ];
+    const selectParts = ['id', dateCol, 'service_type', 'status', 'party_size', 'token_number', 'payment_status', 'booking_datetime'];
     if (amountCol)   selectParts.push(amountCol);
     if (hasCustomer) selectParts.push('customer_id, customers(name, phone)');
 
-    let q = supabaseChat
-      .from('bookings')
-      .select(selectParts.join(', '))
-      .gte(dateCol, start)
-      .lte(dateCol, end)
-      .order(dateCol, { ascending: false })
-      .limit(500);
-
+    let q = supabaseChat.from('bookings').select(selectParts.join(', ')).gte(dateCol, start).lte(dateCol, end).order(dateCol, { ascending: false }).limit(500);
     if (hasRestId) q = q.eq('restaurant_id', req.restaurant_id);
 
     const { data, error } = await q;
 
     if (error) {
       console.error('[wa-orders] query failed:', error.message);
-      const { data: minimal } = await supabaseChat
-        .from('bookings')
-        .select(`id, ${dateCol}, service_type, status, party_size, token_number`)
-        .gte(dateCol, start)
-        .lte(dateCol, end)
-        .order(dateCol, { ascending: false })
-        .limit(500);
-      const minData = minimal ?? [];
-      console.log(`[wa-orders] Minimal fallback: ${minData.length} rows`);
-      return res.json({ success: true, orders: minData.map(r => ({ ...r, created_at: r[dateCol] })) });
+      const { data: minimal } = await supabaseChat.from('bookings').select(`id, ${dateCol}, service_type, status, party_size, token_number`).gte(dateCol, start).lte(dateCol, end).order(dateCol, { ascending: false }).limit(500);
+      return res.json({ success: true, orders: (minimal ?? []).map(r => ({ ...r, created_at: r[dateCol] })) });
     }
 
     let finalData = data ?? [];
     if (finalData.length === 0 && hasRestId) {
-      console.log('[wa-orders] Restaurant filter returned 0 — trying without restaurant filter...');
-      const { data: allData } = await supabaseChat
-        .from('bookings')
-        .select(selectParts.join(', '))
-        .gte(dateCol, start)
-        .lte(dateCol, end)
-        .order(dateCol, { ascending: false })
-        .limit(500);
+      const { data: allData } = await supabaseChat.from('bookings').select(selectParts.join(', ')).gte(dateCol, start).lte(dateCol, end).order(dateCol, { ascending: false }).limit(500);
       finalData = allData ?? [];
-      console.log(`[wa-orders] Without restaurant filter: ${finalData.length} bookings`);
     }
 
-    const normalized = finalData.map(r => ({
-      ...r,
-      created_at:   r[dateCol]   ?? r.created_at,
-      total_amount: amountCol ? (r[amountCol] ?? null) : null,
-    }));
-    console.log(`[wa-orders] Returning ${normalized.length} bookings`);
+    const normalized = finalData.map(r => ({ ...r, created_at: r[dateCol] ?? r.created_at, total_amount: amountCol ? (r[amountCol] ?? null) : null }));
     return res.json({ success: true, orders: normalized });
   } catch (err) {
     console.error('[GET /api/dashboard/wa-orders]', err.message);
@@ -1828,17 +1857,8 @@ app.get('/api/dashboard/cancel-stats', authenticateToken, getRestaurantId, async
     if (!start || !end) return res.status(400).json({ error: 'start and end required' });
 
     const [cancelRes, totalRes] = await Promise.all([
-      supabaseAdmin.from('orders')
-        .select('total_amount')
-        .eq('restaurant_id', req.restaurant_id)
-        .eq('status', 'cancelled')
-        .gte('created_at', start)
-        .lte('created_at', end),
-      supabaseAdmin.from('orders')
-        .select('*', { count: 'exact', head: true })
-        .eq('restaurant_id', req.restaurant_id)
-        .gte('created_at', start)
-        .lte('created_at', end),
+      supabaseAdmin.from('orders').select('total_amount').eq('restaurant_id', req.restaurant_id).eq('status', 'cancelled').gte('created_at', start).lte('created_at', end),
+      supabaseAdmin.from('orders').select('*', { count: 'exact', head: true }).eq('restaurant_id', req.restaurant_id).gte('created_at', start).lte('created_at', end),
     ]);
 
     const orderCancels  = cancelRes.data ?? [];
@@ -1848,15 +1868,8 @@ app.get('/api/dashboard/cancel-stats', authenticateToken, getRestaurantId, async
     let bookingCancels = 0, totalBookings = 0;
     if (supabaseChat) {
       const [bcRes, btRes] = await Promise.all([
-        supabaseChat.from('bookings')
-          .select('id', { count: 'exact', head: true })
-          .eq('status', 'cancelled')
-          .gte('created_at', start)
-          .lte('created_at', end),
-        supabaseChat.from('bookings')
-          .select('id', { count: 'exact', head: true })
-          .gte('created_at', start)
-          .lte('created_at', end),
+        supabaseChat.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'cancelled').gte('created_at', start).lte('created_at', end),
+        supabaseChat.from('bookings').select('id', { count: 'exact', head: true }).gte('created_at', start).lte('created_at', end),
       ]);
       bookingCancels = bcRes.count ?? 0;
       totalBookings  = btRes.count ?? 0;
@@ -1864,12 +1877,9 @@ app.get('/api/dashboard/cancel-stats', authenticateToken, getRestaurantId, async
 
     res.json({
       success: true,
-      orderCancels:  orderCancels.length,
-      orderRevLost,
-      totalOrders,
+      orderCancels: orderCancels.length, orderRevLost, totalOrders,
       orderRate: totalOrders > 0 ? Math.round((orderCancels.length / totalOrders) * 100) : 0,
-      bookingCancels,
-      totalBookings,
+      bookingCancels, totalBookings,
       bookingRate: totalBookings > 0 ? Math.round((bookingCancels / totalBookings) * 100) : 0,
     });
   } catch (err) {
@@ -1884,24 +1894,10 @@ app.get('/api/dashboard/cancel-stats', authenticateToken, getRestaurantId, async
 
 app.get('/api/restaurant/default', async (req, res) => {
   try {
-    const { data: restaurants, error } = await supabaseAdmin
-      .from('restaurants')
-      .select('id')
-      .eq('is_active', true)
-      .limit(2);
-
+    const { data: restaurants, error } = await supabaseAdmin.from('restaurants').select('id').eq('is_active', true).limit(2);
     if (error) throw error;
-
-    if (!restaurants || restaurants.length === 0) {
-      return res.status(404).json({ error: 'No active restaurant found' });
-    }
-
-    if (restaurants.length > 1) {
-      return res.status(400).json({
-        error: 'Multiple restaurants found. QR code URL must include ?restaurant=<id>'
-      });
-    }
-
+    if (!restaurants || restaurants.length === 0) return res.status(404).json({ error: 'No active restaurant found' });
+    if (restaurants.length > 1) return res.status(400).json({ error: 'Multiple restaurants found. QR code URL must include ?restaurant=<id>' });
     res.json({ restaurant_id: restaurants[0].id });
   } catch (err) {
     console.error('[GET /api/restaurant/default]', err.message);
