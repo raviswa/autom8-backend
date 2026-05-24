@@ -1569,10 +1569,12 @@ app.put('/api/tokens/:id/approve', authenticateToken, getRestaurantId, async (re
       );
     }
     broadcastToRestaurant(req.restaurant_id, { type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString() });
-    await supabaseAdmin.from('audit_logs').insert({
-      user_id: req.user.sub, restaurant_id: req.restaurant_id,
-      action: 'Large party token approved', details: { token_id: req.params.id, pax: token.pax, combo },
-    }).catch(() => {});
+    try {
+      await supabaseAdmin.from('audit_logs').insert({
+        user_id: req.user.sub, restaurant_id: req.restaurant_id,
+        action: 'Large party token approved', details: { token_id: req.params.id, pax: token.pax, combo },
+      });
+    } catch (_) { /* audit log is non-fatal */ }
     console.log(`[approve] ✅ Token ${token.id} approved for ${token.pax} guests`);
     res.json({ success: true, token: updatedToken });
   } catch (err) {
@@ -1609,10 +1611,12 @@ app.put('/api/tokens/:id/reject', authenticateToken, getRestaurantId, async (req
       );
     }
     broadcastToRestaurant(req.restaurant_id, { type: 'TOKEN_REJECTED', token: updatedToken, timestamp: new Date().toISOString() });
-    await supabaseAdmin.from('audit_logs').insert({
-      user_id: req.user.sub, restaurant_id: req.restaurant_id,
-      action: 'Large party token rejected', details: { token_id: req.params.id, pax: token.pax, reason: reason || null },
-    }).catch(() => {});
+    try {
+      await supabaseAdmin.from('audit_logs').insert({
+        user_id: req.user.sub, restaurant_id: req.restaurant_id,
+        action: 'Large party token rejected', details: { token_id: req.params.id, pax: token.pax, reason: reason || null },
+      });
+    } catch (_) { /* audit log is non-fatal */ }
     console.log(`[reject] Token ${token.id} rejected for ${token.pax} guests`);
     res.json({ success: true, token: updatedToken });
   } catch (err) {
