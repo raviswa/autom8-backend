@@ -591,8 +591,13 @@ async function runStartupSync() {
 // ============================================================================
 
 app.get('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) => {
+  // ignore_slot=true  → manager portal view: returns ALL items across all slots
+  //                     and ALL stock states (in/out) so the toggle table is complete
+  // ignore_slot=false → customer/bot view: only is_available=true items in current slot
   try {
     const { category, ignore_slot } = req.query;
+    const isManagerView = ignore_slot === 'true';
+
     const now        = new Date();
     const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
     const istMinutes = (utcMinutes + 330) % (24 * 60);
@@ -603,12 +608,26 @@ app.get('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) 
     else if (istHour >= 15 && istHour < 19) currentSlot = 'evening_snacks';
     else if (istHour >= 19 && istHour < 23) currentSlot = 'dinner_tiffin';
     else                                    currentSlot = null;
+
     let query = supabaseAdmin.from('menu_items').select('*')
-      .eq('restaurant_id', req.restaurant_id).eq('is_available', true)
-      .order('category', { ascending: true }).order('name', { ascending: true });
+      .eq('restaurant_id', req.restaurant_id)
+      .order('time_slot', { ascending: true })
+      .order('name',      { ascending: true });
+
     if (category) query = query.eq('category', category);
-    if (currentSlot && ignore_slot !== 'true')
-      query = query.or(`time_slot.eq.${currentSlot},time_slot.eq.all`);
+
+    if (isManagerView) {
+      // Manager sees everything: all slots, all stock states.
+      // No is_available filter — out-of-stock items must remain visible
+      // so the manager can see and re-enable them via the toggle.
+      // Sort: in-stock first, then out-of-stock (greyed) at the bottom.
+      query = query.order('is_stocked', { ascending: false });
+    } else {
+      // Customer / bot view: only available items in the current slot
+      query = query.eq('is_available', true);
+      if (currentSlot) query = query.or(`time_slot.eq.${currentSlot},time_slot.eq.all`);
+    }
+
     const { data, error } = await query;
     if (error) throw error;
     res.json({ success: true, count: data.length, items: data, current_slot: currentSlot, ist_hour: istHour });
@@ -1655,11 +1674,19 @@ async function handleWhatsAppOrder(message, metadata) {
   if (orderError) { console.error('[WA Order] Failed to create order:', orderError.message); return; }
 
   let subtotal = 0;
-  const kdsInserts = [];
+  const kdsInserts  = [];
+  const skippedOos  = [];   // items rejected because is_stocked=false
   for (const item of productItems) {
-    const { data: menuItem } = await supabaseAdmin.from('menu_items').select('id, name, price')
+    const { data: menuItem } = await supabaseAdmin.from('menu_items').select('id, name, price, is_stocked, is_available')
       .eq('restaurant_id', restaurantId).eq('retailer_id', item.product_retailer_id).maybeSingle();
     if (!menuItem) { console.warn(`[WA Order] ⚠️ No menu item for retailer_id: ${item.product_retailer_id}`); continue; }
+    // Reject out-of-stock items — Meta catalog may still show them as orderable
+    // due to caching even after we pushed 'out of stock'. Enforce here at order time.
+    if (menuItem.is_stocked === false || menuItem.is_available === false) {
+      console.warn(`[WA Order] ⛔ ${menuItem.name} is out of stock — skipping`);
+      skippedOos.push(menuItem.name);
+      continue;
+    }
     subtotal += menuItem.price * item.quantity;
     const { data: orderItem, error: itemError } = await supabaseAdmin.from('order_items')
       .insert({ order_id: orderData.id, menu_item_id: menuItem.id, quantity: item.quantity, unit_price: menuItem.price })
@@ -1690,8 +1717,11 @@ async function handleWhatsAppOrder(message, metadata) {
     );
   }
 
+  const oosWarning = skippedOos.length > 0
+    ? `\n\n⚠️ *Sorry, the following items were out of stock and could not be added:*\n${skippedOos.map(n => `• ${n}`).join('\n')}`
+    : '';
   await sendWhatsAppMessage(customerPhone,
-    `✅ *Order received!*\n\nOrder: *${orderNumber}*\nTable: *Table ${token.table_number}*\nItems: ${kdsInserts.length}\n\nWe're preparing your food now. We'll notify you when it's ready! 🍳`
+    `✅ *Order received!*\n\nOrder: *${orderNumber}*\nTable: *Table ${token.table_number}*\nItems: ${kdsInserts.length}${oosWarning}\n\nWe're preparing your food now. We'll notify you when it's ready! 🍳`
   );
   await supabaseAdmin.from('audit_logs').insert({
     restaurant_id: restaurantId, action: 'WhatsApp order created',
