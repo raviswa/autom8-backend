@@ -2313,5 +2313,4 @@ process.on('SIGTERM', () => {
 });
 
 module.exports = { app, wss, broadcastToRestaurant };
-SERVEREOF
-echo "Written"
+//SERVEREOF
