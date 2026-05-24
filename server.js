@@ -633,16 +633,81 @@ app.post('/api/menu-items', authenticateToken, getRestaurantId, async (req, res)
 });
 
 app.put('/api/menu-items/:id/availability', authenticateToken, getRestaurantId, async (req, res) => {
+  // Real-time mid-service toggle — used when an item runs out during a slot.
+  // Updates is_stocked (permanent manager flag) + is_available immediately,
+  // then pushes to Meta catalog so WhatsApp shows the item greyed out at once.
+  // No need to wait for the next slot change or Excel upload.
   try {
     if (req.user_role !== 'owner' && req.user_role !== 'manager')
       return res.status(403).json({ error: 'Unauthorized' });
-    const { is_available } = req.body;
-    const { data, error } = await supabaseAdmin.from('menu_items')
-      .update({ is_available })
-      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
-      .select().single();
+
+    const { is_available } = req.body;  // boolean from portal toggle
+    const isStocked = Boolean(is_available);
+
+    // Update both columns atomically:
+    //   is_stocked — persists across slot changes (scheduler respects this)
+    //   is_available — immediately reflects current state in the portal/KDS
+    const { data, error } = await supabaseAdmin
+      .from('menu_items')
+      .update({
+        is_stocked:   isStocked,
+        is_available: isStocked,   // immediate effect; scheduler won't re-enable if false
+        updated_at:   new Date().toISOString(),
+      })
+      .eq('id', req.params.id)
+      .eq('restaurant_id', req.restaurant_id)
+      .select()
+      .single();
+
     if (error) throw error;
+
+    // Push to Meta catalog immediately (non-blocking) so WhatsApp reflects
+    // the change within seconds rather than waiting for the next Excel upload.
+    if (data?.retailer_id) {
+      const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+      const META_CATALOG_ID   = process.env.META_CATALOG_ID;
+      if (META_ACCESS_TOKEN && META_CATALOG_ID) {
+        fetch(
+          `https://graph.facebook.com/v20.0/${META_CATALOG_ID}/batch`,
+          {
+            method:  'POST',
+            headers: {
+              Authorization:  `Bearer ${META_ACCESS_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              allow_upsert: true,
+              requests: [{
+                method:      'UPDATE',
+                retailer_id: data.retailer_id,
+                data: {
+                  name:         data.name,
+                  description:  data.description || '',
+                  price:        Math.round((data.price || 0) * 100),
+                  currency:     'INR',
+                  availability: isStocked ? 'in stock' : 'out of stock',
+                  image_url:    data.image_url || '',
+                  url:          process.env.FRONTEND_URL || 'https://autom8.works/',
+                },
+              }],
+            }),
+          }
+        )
+        .then(r => r.json())
+        .then(result => {
+          if (result.error) {
+            console.error(`[avail-toggle] Meta push failed for ${data.retailer_id}:`, result.error?.message);
+          } else {
+            console.log(`[avail-toggle] ✅ Meta updated: ${data.name} → ${isStocked ? 'in stock' : 'out of stock'}`);
+          }
+        })
+        .catch(err => console.error('[avail-toggle] Meta push error:', err.message));
+      }
+    }
+
+    console.log(`[avail-toggle] ${data?.name} → is_stocked=${isStocked} by manager`);
     res.json({ success: true, item: data });
+
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
