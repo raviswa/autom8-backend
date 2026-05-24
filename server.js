@@ -1407,37 +1407,76 @@ async function generateTokenId(restaurantId) {
 }
 
 app.post('/api/tokens', async (req, res) => {
+  // Fix 10 — accepts type='large_party' with status='pending_approval'
+  // and a meta.combo array describing the proposed table split.
   try {
-    const { name, phone, type, pax, restaurant_id } = req.body;
+    const { name, phone, type, pax, restaurant_id, meta } = req.body;
     if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
-    if (!type)                 return res.status(400).json({ error: 'type is required (dinein or takeaway)' });
+    if (!type)                 return res.status(400).json({ error: 'type is required' });
     if (!restaurant_id)        return res.status(400).json({ error: 'restaurant_id is required' });
-    if (!['dinein', 'takeaway'].includes(type))
-      return res.status(400).json({ error: 'type must be dinein or takeaway' });
+
+    const validTypes = ['dinein', 'takeaway', 'large_party'];
+    if (!validTypes.includes(type))
+      return res.status(400).json({ error: `type must be one of: ${validTypes.join(', ')}` });
 
     const tokenId = await generateTokenId(restaurant_id);
-    const status  = type === 'takeaway' ? 'takeaway' : 'waiting';
+
+    let status;
+    if (type === 'large_party') status = 'pending_approval';
+    else if (type === 'takeaway') status = 'takeaway';
+    else status = 'waiting';
+
     const tokenRecord = {
-      id: tokenId, restaurant_id, name: name.trim(),
-      phone: phone ? String(phone).replace(/\D/g, '') : null,
-      type, pax: type === 'takeaway' ? 1 : (parseInt(pax) || 1),
-      status, arrived_at: new Date().toISOString(),
+      id:         tokenId,
+      restaurant_id,
+      name:       name.trim(),
+      phone:      phone ? String(phone).replace(/\D/g, '') : null,
+      type,
+      pax:        type === 'takeaway' ? 1 : (parseInt(pax) || 1),
+      status,
+      arrived_at: new Date().toISOString(),
+      meta:       meta || {},
     };
+
     const { data: token, error: insertError } = await supabaseAdmin
       .from('walk_in_tokens').insert(tokenRecord).select().single();
     if (insertError) throw insertError;
 
-    if (process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
-      const arrivalTime = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
-      const typeLabel   = type === 'dinein' ? 'Dine-in' : 'Takeaway';
-      const paxLine     = type === 'dinein' ? `, ${token.pax} ${token.pax === 1 ? 'person' : 'people'}` : '';
-      const managerMsg  =
-        `🪑 *New Walk-in* — Token *${token.id}*\n` +
-        `👤 ${token.name}${paxLine}\n` +
-        `📋 ${typeLabel}\n` +
-        `🕐 ${arrivalTime}\n\n` +
-        `Open portal to assign table:\n${process.env.FRONTEND_URL || 'https://autom8-frontend-production.up.railway.app'}/dashboard/manager`;
-      sendWhatsAppMessage(process.env.MANAGER_WHATSAPP_NUMBER, managerMsg);
+    const arrivalTime = new Date().toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true,
+    });
+
+    if (type === 'large_party') {
+      // Notify manager immediately — they must approve before customer is seated
+      if (process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
+        const combo      = meta?.combo ?? [];
+        const tableLines = combo.length > 0
+          ? combo.map(t => `Table ${t[0]} (${t[2]}/${t[1]} seats)`).join(' + ')
+          : `${token.pax} seats across multiple tables`;
+        const managerMsg =
+          `🟣 *Large Party Request* — Token *${token.id}*\n` +
+          `👥 ${token.name} · *${token.pax} people*\n` +
+          `🕐 ${arrivalTime}\n\n` +
+          `Proposed seating:\n${tableLines}\n\n` +
+          `⚠️ *Action required* — approve or reject in the portal:\n` +
+          `${process.env.FRONTEND_URL || 'https://autom8-frontend-production.up.railway.app'}/dashboard/manager`;
+        sendWhatsAppMessage(process.env.MANAGER_WHATSAPP_NUMBER, managerMsg);
+      }
+    } else {
+      // Normal walk-in — notify manager (suppressed for munafe bot via ?notify=false)
+      const skipNotify = req.query.notify === 'false';
+      if (!skipNotify && process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
+        const typeLabel = type === 'dinein' ? 'Dine-in' : 'Takeaway';
+        const paxLine   = type === 'dinein' ? `, ${token.pax} ${token.pax === 1 ? 'person' : 'people'}` : '';
+        const managerMsg =
+          `🪑 *New Walk-in* — Token *${token.id}*\n` +
+          `👤 ${token.name}${paxLine}\n` +
+          `📋 ${typeLabel}\n` +
+          `🕐 ${arrivalTime}\n\n` +
+          `Open portal to assign table:\n` +
+          `${process.env.FRONTEND_URL || 'https://autom8-frontend-production.up.railway.app'}/dashboard/manager`;
+        sendWhatsAppMessage(process.env.MANAGER_WHATSAPP_NUMBER, managerMsg);
+      }
     }
 
     broadcastToRestaurant(restaurant_id, { type: 'NEW_TOKEN', token, timestamp: new Date().toISOString() });
@@ -1466,7 +1505,7 @@ app.get('/api/tokens', authenticateToken, getRestaurantId, async (req, res) => {
     } else {
       query = supabaseAdmin.from('walk_in_tokens').select('*')
         .eq('restaurant_id', req.restaurant_id)
-        .or(`status.in.(waiting,seated,takeaway),and(status.eq.completed,arrived_at.gte.${todayStart.toISOString()})`)
+        .or(`status.in.(waiting,seated,takeaway,pending_approval),and(status.eq.completed,arrived_at.gte.${todayStart.toISOString()})`)
         .order('arrived_at', { ascending: true });
     }
 
@@ -1498,6 +1537,91 @@ app.get('/api/tokens/:id', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ============================================================================
+// Fix 10 — PUT /api/tokens/:id/approve
+// ============================================================================
+
+app.put('/api/tokens/:id/approve', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'owner' && req.user_role !== 'manager')
+      return res.status(403).json({ error: 'Unauthorized' });
+    const { data: token, error: fetchError } = await supabaseAdmin
+      .from('walk_in_tokens').select('*')
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).single();
+    if (fetchError || !token) return res.status(404).json({ error: 'Token not found' });
+    if (token.status !== 'pending_approval')
+      return res.status(400).json({ error: `Token is ${token.status}, not pending_approval` });
+    const { data: updatedToken, error: updateError } = await supabaseAdmin
+      .from('walk_in_tokens').update({ status: 'waiting' })
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).select().single();
+    if (updateError) throw updateError;
+    const combo = token.meta?.combo ?? [];
+    const tableLines = combo.length > 0
+      ? combo.map(t => `Table ${t[0]} (${t[2]} seats)`).join(', ')
+      : 'multiple tables';
+    if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+      await sendWhatsAppMessage(token.phone,
+        `✅ *Great news! Your large party request has been approved.*\n\n` +
+        `Token: *${token.id}*\nParty of: *${token.pax} people*\n` +
+        `Tables reserved: *${tableLines}*\n\n` +
+        `Please head to the restaurant — our staff will seat your party shortly. 🍽️`
+      );
+    }
+    broadcastToRestaurant(req.restaurant_id, { type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString() });
+    await supabaseAdmin.from('audit_logs').insert({
+      user_id: req.user.sub, restaurant_id: req.restaurant_id,
+      action: 'Large party token approved', details: { token_id: req.params.id, pax: token.pax, combo },
+    }).catch(() => {});
+    console.log(`[approve] ✅ Token ${token.id} approved for ${token.pax} guests`);
+    res.json({ success: true, token: updatedToken });
+  } catch (err) {
+    console.error('[PUT /api/tokens/:id/approve]', err);
+    res.status(500).json({ error: err.message || 'Failed to approve token' });
+  }
+});
+
+// ============================================================================
+// Fix 10 — PUT /api/tokens/:id/reject
+// ============================================================================
+
+app.put('/api/tokens/:id/reject', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'owner' && req.user_role !== 'manager')
+      return res.status(403).json({ error: 'Unauthorized' });
+    const { reason } = req.body;
+    const { data: token, error: fetchError } = await supabaseAdmin
+      .from('walk_in_tokens').select('*')
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).single();
+    if (fetchError || !token) return res.status(404).json({ error: 'Token not found' });
+    if (token.status !== 'pending_approval')
+      return res.status(400).json({ error: `Token is ${token.status}, not pending_approval` });
+    const { data: updatedToken, error: updateError } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .update({ status: 'completed', completed_at: new Date().toISOString() })
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).select().single();
+    if (updateError) throw updateError;
+    if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+      const reasonLine = reason ? `\n\nReason: ${reason}` : '';
+      await sendWhatsAppMessage(token.phone,
+        `😔 *We're sorry — we're unable to accommodate your party of ${token.pax} right now.*` +
+        reasonLine + `\n\nWe'd love to host you! Reply *RESERVE* to book for a future date. 🙏`
+      );
+    }
+    broadcastToRestaurant(req.restaurant_id, { type: 'TOKEN_REJECTED', token: updatedToken, timestamp: new Date().toISOString() });
+    await supabaseAdmin.from('audit_logs').insert({
+      user_id: req.user.sub, restaurant_id: req.restaurant_id,
+      action: 'Large party token rejected', details: { token_id: req.params.id, pax: token.pax, reason: reason || null },
+    }).catch(() => {});
+    console.log(`[reject] Token ${token.id} rejected for ${token.pax} guests`);
+    res.json({ success: true, token: updatedToken });
+  } catch (err) {
+    console.error('[PUT /api/tokens/:id/reject]', err);
+    res.status(500).json({ error: err.message || 'Failed to reject token' });
+  }
+});
+
+
 
 app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, async (req, res) => {
   try {
