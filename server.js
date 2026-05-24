@@ -724,43 +724,6 @@ app.put('/api/menu-items/:id/availability', authenticateToken, getRestaurantId, 
       }
     }
 
-    // Push single item to Meta catalog immediately (non-blocking)
-    if (data?.retailer_id) {
-      const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
-      const META_CATALOG_ID   = process.env.META_CATALOG_ID;
-      if (META_ACCESS_TOKEN && META_CATALOG_ID) {
-        fetch(
-          `https://graph.facebook.com/v20.0/${META_CATALOG_ID}/batch`,
-          {
-            method:  'POST',
-            headers: { Authorization: `Bearer ${META_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              allow_upsert: true,
-              requests: [{
-                method:      'UPDATE',
-                retailer_id: data.retailer_id,
-                data: {
-                  name:         data.name,
-                  description:  data.description || '',
-                  price:        Math.round((data.price || 0) * 100),
-                  currency:     'INR',
-                  availability: isStocked ? 'in stock' : 'out of stock',
-                  image_url:    data.image_url || '',
-                  url:          process.env.FRONTEND_URL || 'https://autom8.works/',
-                },
-              }],
-            }),
-          }
-        )
-        .then(r => r.json())
-        .then(result => {
-          if (result.error) console.error(`[avail-toggle] Meta push failed:`, result.error?.message);
-          else console.log(`[avail-toggle] ✅ Meta updated: ${data.name} → ${isStocked ? 'in stock' : 'out of stock'}`);
-        })
-        .catch(err => console.error('[avail-toggle] Meta push error:', err.message));
-      }
-    }
-
     console.log(`[avail-toggle] ${data?.name} → is_stocked=${isStocked} by manager`);
     res.json({ success: true, item: data });
 
