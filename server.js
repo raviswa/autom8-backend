@@ -240,19 +240,21 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
     // We try each one in order until Meta accepts it — this handles the case where
     // some retailer_ids in our DB don't match Meta's catalog (e.g. after a partial
     // sync or if Meta silently dropped a product).
-    // Fetch items for thumbnail — NOT filtering by is_available.
-    // The thumbnail is a visual anchor only; filtering by is_available caused
-    // the catalog to fail during closed hours when all items are unavailable.
+    // Thumbnail query does NOT filter by is_available — the slot scheduler sets
+    // all items to false during closed hours, which would silently break the
+    // catalog send. The thumbnail is only a visual anchor; availability shown
+    // to customers comes from Meta's own catalog, not this query.
     const { data: availableItems, error: itemsError } = await supabaseAdmin
       .from('menu_items')
       .select('retailer_id, name')
       .eq('restaurant_id', restaurantId)
+      .eq('is_stocked', true)          // only items actually in stock
       .not('retailer_id', 'is', null)
       .order('name', { ascending: true })
       .limit(10);
 
     if (itemsError || !availableItems || availableItems.length === 0) {
-      console.warn('[catalog-msg] No items found for thumbnail (menu may be empty)');
+      console.warn('[catalog-msg] No stocked items found for thumbnail (menu empty or all OOS)');
       return;
     }
 
@@ -349,10 +351,13 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
     console.log(`  ✅ All items set unavailable (closed hours)`);
     return { available: 0, unavailable: 'all' };
   }
+  // Only activate items that are in stock (is_stocked=true).
+  // Out-of-stock items stay is_available=false regardless of slot.
   const { data: activated, error: e1 } = await supabaseAdmin
     .from('menu_items')
     .update({ is_available: true, updated_at: new Date().toISOString() })
     .eq('restaurant_id', restaurantId)
+    .eq('is_stocked', true)
     .in('time_slot', [slotDbValue, 'all'])
     .select('id');
   if (e1) throw e1;
@@ -363,6 +368,14 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
     .not('time_slot', 'in', `("${slotDbValue}","all")`)
     .select('id');
   if (e2) throw e2;
+  // Also deactivate any in-slot items that are out of stock
+  const { error: e3 } = await supabaseAdmin
+    .from('menu_items')
+    .update({ is_available: false, updated_at: new Date().toISOString() })
+    .eq('restaurant_id', restaurantId)
+    .eq('is_stocked', false)
+    .in('time_slot', [slotDbValue, 'all']);
+  if (e3) throw e3;
   console.log(`  ✅ Activated: ${activated?.length ?? 0} | Deactivated: ${deactivated?.length ?? 0}`);
   return { slot: slotDbValue, available: activated?.length ?? 0, unavailable: deactivated?.length ?? 0 };
 }
@@ -926,12 +939,13 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
           continue;
         }
 
-        // is_available from Excel: TRUE/FALSE, 1/0, yes/no (case-insensitive).
-        // If column is absent, defaults to true and slot scheduler manages it.
-        let isAvailable = true;
+        // is_available column in Excel → maps to is_stocked in the DB.
+        // is_stocked is the permanent manager flag; is_available is slot-managed.
+        // Accepts: TRUE/FALSE, 1/0, yes/no (case-insensitive). Absent = true.
+        let isStocked = true;
         if (item.is_available !== undefined && item.is_available !== null && item.is_available !== '') {
           const raw = String(item.is_available).toLowerCase().trim();
-          isAvailable = raw === 'true' || raw === '1' || raw === 'yes';
+          isStocked = raw === 'true' || raw === '1' || raw === 'yes';
         }
 
         const menuItem = {
@@ -943,7 +957,10 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
           image_url:     item.image_url ? String(item.image_url).trim() : null,
           time_slot:     item.time_slot || 'all',
           category:      item.category || 'General',
-          is_available:  isAvailable,
+          is_stocked:    isStocked,
+          // is_available stays untouched — slot scheduler manages it.
+          // But if marking out of stock, immediately reflect it:
+          ...(isStocked === false ? { is_available: false } : {}),
           updated_at:    new Date().toISOString(),
         };
 
@@ -964,27 +981,12 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
       }
     }
 
-    // Apply slot availability only to items that didn't have an explicit
-    // is_available set in the Excel — those keep their uploaded value.
-    const explicitIds = items
-      .filter(i => i.is_available !== undefined && i.is_available !== null && i.is_available !== '')
-      .map(i => i.id);
-    const nonExplicitIds = items.filter(i => !explicitIds.includes(i.id)).map(i => i.id);
-
-    if (nonExplicitIds.length > 0) {
-      try {
-        const currentSlot = getCurrentSlotIST();
-        if (currentSlot) {
-          await supabaseAdmin
-            .from('menu_items')
-            .update({ is_available: true, updated_at: new Date().toISOString() })
-            .eq('restaurant_id', req.restaurant_id)
-            .in('id', nonExplicitIds)
-            .in('time_slot', [currentSlot, 'all']);
-        }
-      } catch (slotErr) {
-        console.warn('[menu/upload] Failed to apply slot availability:', slotErr.message);
-      }
+    // Re-apply current slot so newly stocked items activate immediately
+    try {
+      const currentSlot = getCurrentSlotIST();
+      if (currentSlot) await applySlotAvailability(req.restaurant_id, currentSlot);
+    } catch (slotErr) {
+      console.warn('[menu/upload] Slot re-apply failed (non-fatal):', slotErr.message);
     }
 
     await supabaseAdmin.from('audit_logs').insert({
@@ -997,9 +999,9 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
     const response = { success: true, upserted, skipped, total: items.length };
     if (errors.length > 0) response.errors = errors;
 
-    console.log(`[menu/upload] ✅ Completed: ${upserted} upserted, ${skipped} skipped for restaurant ${req.restaurant_id}`);
+    console.log(`[menu/upload] ✅ ${upserted} upserted, ${skipped} skipped for restaurant ${req.restaurant_id}`);
 
-    // Push updated items to Meta catalog (non-blocking — failure won't affect upload response)
+    // Push to Meta catalog in background so WhatsApp shows updated availability
     pushMenuToMeta(req.restaurant_id).catch(err =>
       console.error('[menu/upload] Meta push failed (non-fatal):', err.message)
     );
@@ -1015,16 +1017,15 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
 // ============================================================================
 // PUSH DB → META CATALOG
 //
-// Called automatically after /api/menu/upload so the WhatsApp catalog
-// stays in sync with the Supabase menu_items table.
+// Called after /api/menu/upload. Keeps the WhatsApp catalog in sync with DB.
 //
-// Availability mapping (visible to customers in WhatsApp catalog):
-//   is_available = true  → 'in stock'     item shown and orderable normally
-//   is_available = false → 'out of stock' item shown greyed out, not orderable
+// Availability mapping (what customers see in WhatsApp):
+//   is_stocked = true  → 'in stock'     shown and orderable normally
+//   is_stocked = false → 'out of stock' shown greyed out, cannot add to cart
 //
-// To mark an item unavailable: add is_available = FALSE in the Excel column.
-// The item will still appear in the catalog so customers see it exists,
-// but they cannot add it to cart. No column = defaults to available.
+// Excel column: is_available (TRUE/FALSE). Maps to is_stocked in DB.
+// The WhatsApp catalog always shows all items — out-of-stock ones are visible
+// with an "Unavailable" label so customers know the item exists.
 // ============================================================================
 
 async function pushMenuToMeta(restaurantId) {
@@ -1035,10 +1036,9 @@ async function pushMenuToMeta(restaurantId) {
     return { success: false };
   }
 
-  // Only push items that have a retailer_id (i.e. exist in Meta catalog)
   const { data: items, error } = await supabaseAdmin
     .from('menu_items')
-    .select('*')
+    .select('name, description, price, image_url, retailer_id, is_stocked')
     .eq('restaurant_id', restaurantId)
     .not('retailer_id', 'is', null);
 
@@ -1047,7 +1047,6 @@ async function pushMenuToMeta(restaurantId) {
     return { success: false };
   }
 
-  // Meta Batch Products API processes up to 1000 per call; use 100 for safety
   const BATCH_SIZE  = 100;
   let   totalPushed = 0;
 
@@ -1059,9 +1058,9 @@ async function pushMenuToMeta(restaurantId) {
       data: {
         name:         item.name,
         description:  item.description || '',
-        price:        Math.round((item.price || 0) * 100),  // paise (integer)
+        price:        Math.round((item.price || 0) * 100),  // paise
         currency:     'INR',
-        availability: item.is_available ? 'in stock' : 'out of stock',
+        availability: item.is_stocked ? 'in stock' : 'out of stock',
         image_url:    item.image_url || '',
         url:          process.env.FRONTEND_URL || 'https://autom8.works/',
       },
