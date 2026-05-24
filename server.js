@@ -19,6 +19,14 @@
 //            that bulk-updates all kds_items and fires exactly ONE WhatsApp
 //            notification, eliminating the duplicate-notify race condition
 //            from parallel PUT /api/kds/:id/status calls
+//  Fix 10 — applySlotAvailability: pushMenuToMeta() called after every slot
+//            change so Meta catalog availability reflects current time slot.
+//            Previously the slot scheduler updated is_available in the DB but
+//            never told Meta, so customers saw all items as "in stock" in
+//            WhatsApp regardless of the current serving slot.
+//  Fix 11 — pushMenuToMeta: uses is_available AND is_stocked to determine
+//            Meta availability. Previously only is_stocked was checked, so
+//            slot-managed is_available changes never propagated to Meta.
 // ============================================================================
 
 const express   = require('express');
@@ -349,8 +357,16 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
       .eq('restaurant_id', restaurantId);
     if (error) throw error;
     console.log(`  ✅ All items set unavailable (closed hours)`);
+
+    // Fix 10: push closed-hours state to Meta so customers see everything
+    // as out of stock in WhatsApp during closed hours.
+    pushMenuToMeta(restaurantId).catch(e =>
+      console.error(`[slot] Meta push failed for ${restaurantId} (closed):`, e.message)
+    );
+
     return { available: 0, unavailable: 'all' };
   }
+
   // Only activate items that are in stock (is_stocked=true).
   // Out-of-stock items stay is_available=false regardless of slot.
   const { data: activated, error: e1 } = await supabaseAdmin
@@ -361,6 +377,7 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
     .in('time_slot', [slotDbValue, 'all'])
     .select('id');
   if (e1) throw e1;
+
   const { data: deactivated, error: e2 } = await supabaseAdmin
     .from('menu_items')
     .update({ is_available: false, updated_at: new Date().toISOString() })
@@ -368,6 +385,7 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
     .not('time_slot', 'in', `("${slotDbValue}","all")`)
     .select('id');
   if (e2) throw e2;
+
   // Also deactivate any in-slot items that are out of stock
   const { error: e3 } = await supabaseAdmin
     .from('menu_items')
@@ -376,7 +394,15 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
     .eq('is_stocked', false)
     .in('time_slot', [slotDbValue, 'all']);
   if (e3) throw e3;
+
   console.log(`  ✅ Activated: ${activated?.length ?? 0} | Deactivated: ${deactivated?.length ?? 0}`);
+
+  // Fix 10: push updated availability to Meta so WhatsApp catalog reflects
+  // the current slot. Non-blocking — slot change must not fail if Meta is slow.
+  pushMenuToMeta(restaurantId).catch(e =>
+    console.error(`[slot] Meta push failed for ${restaurantId} (slot=${slotDbValue}):`, e.message)
+  );
+
   return { slot: slotDbValue, available: activated?.length ?? 0, unavailable: deactivated?.length ?? 0 };
 }
 
@@ -516,8 +542,6 @@ async function syncCatalogFromMeta(restaurantId) {
     }
 
     // Price sanity check — log any items that still look wrong after sync
-    // (safety-net correction loop removed: the price parser now correctly
-    // handles both "₹60.00" rupee strings and "6000" paise integers)
     const { data: suspectPrices } = await supabaseAdmin
       .from('menu_items')
       .select('id, name, price')
@@ -664,7 +688,7 @@ app.put('/api/menu-items/:id/availability', authenticateToken, getRestaurantId, 
     const isStocked = Boolean(is_available);
 
     // Update both columns atomically:
-    //   is_stocked — persists across slot changes (scheduler respects this)
+    //   is_stocked   — persists across slot changes (scheduler respects this)
     //   is_available — immediately reflects current state in the portal/KDS
     const { data, error } = await supabaseAdmin
       .from('menu_items')
@@ -879,40 +903,24 @@ app.get('/api/kds/feed', authenticateToken, getRestaurantId, async (req, res) =>
 
 // ============================================================================
 // SHARED HELPER — notifyOrderReady
-// ──────────────────────────────────────────────────────────────────────────────
-// Single source of truth for the "order is ready" WhatsApp notification.
-// Called by both PUT /api/kds/:id/status (item-by-item path) and
-// POST /api/orders/:id/complete (bulk path).
-//
-// Guard: atomically updates orders.status to 'ready' only if it is currently
-// NOT already 'ready'. The update returns 0 rows if the status was already
-// set — meaning a concurrent call already won — so we skip the WhatsApp send.
-// This prevents duplicate notifications regardless of how many concurrent
-// requests arrive.
 // ============================================================================
 
 async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
   try {
-    // Atomically claim the notification slot.
-    // .eq('status', 'pending') / in_progress / ready is tricky because
-    // the order may still be 'pending' at this point.
-    // Use .neq('status', 'ready') so only the FIRST caller sets it.
     const { data: updated, error: updateErr } = await supabaseAdmin
       .from('orders')
       .update({ status: 'ready' })
       .eq('id', orderId)
-      .neq('status', 'ready')        // ← only succeeds once
+      .neq('status', 'ready')
       .neq('status', 'cancelled')
       .select('order_number, table:table_id!left(table_number), walk_in_tokens(phone)')
       .single();
 
     if (updateErr || !updated) {
-      // Either already ready (duplicate call) or genuinely not found — skip
       console.log(`[notifyOrderReady] Skipped for order ${orderId} — already ready or not found`);
       return;
     }
 
-    // Resolve phone: walk_in_token first, then kds_item fallback
     const phone =
       updated.walk_in_tokens?.[0]?.phone ??
       kdsItem?.customer_phone ??
@@ -955,7 +963,6 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
 
     if (status === 'ready') {
       try {
-        // Fetch the kds_item to resolve order_id and phone
         const { data: kdsItem } = await supabaseAdmin
           .from('kds_items')
           .select('order_item:order_item_id!left(order_id), token_number, customer_phone, service_type')
@@ -965,7 +972,6 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
         const orderId = kdsItem?.order_item?.order_id;
 
         if (orderId) {
-          // Check if ALL items for this order are now ready
           const { data: allItems } = await supabaseAdmin
             .from('kds_items')
             .select('status, order_item:order_item_id!left(order_id)')
@@ -975,12 +981,9 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
           const allReady   = orderItems.length > 0 && orderItems.every(i => i.status === 'ready');
 
           if (allReady) {
-            // Delegate to shared helper — atomically guards against duplicates
             await notifyOrderReady({ orderId, restaurantId: req.restaurant_id, kdsItem });
           }
         }
-        // Note: orphaned kds_items with no order_id (legacy data / kds/notify flow)
-        // do NOT send notifications here — they have no reliable order to check against.
       } catch (notifyErr) {
         console.error('[KDS ready notify] Failed:', notifyErr.message);
       }
@@ -1023,9 +1026,6 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
           continue;
         }
 
-        // is_available column in Excel → maps to is_stocked in the DB.
-        // is_stocked is the permanent manager flag; is_available is slot-managed.
-        // Accepts: TRUE/FALSE, 1/0, yes/no (case-insensitive). Absent = true.
         let isStocked = true;
         if (item.is_available !== undefined && item.is_available !== null && item.is_available !== '') {
           const raw = String(item.is_available).toLowerCase().trim();
@@ -1042,8 +1042,6 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
           time_slot:     item.time_slot || 'all',
           category:      item.category || 'General',
           is_stocked:    isStocked,
-          // is_available stays untouched — slot scheduler manages it.
-          // But if marking out of stock, immediately reflect it:
           ...(isStocked === false ? { is_available: false } : {}),
           updated_at:    new Date().toISOString(),
         };
@@ -1085,7 +1083,10 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
 
     console.log(`[menu/upload] ✅ ${upserted} upserted, ${skipped} skipped for restaurant ${req.restaurant_id}`);
 
-    // Push to Meta catalog in background so WhatsApp shows updated availability
+    // Push to Meta catalog in background — applySlotAvailability above already
+    // called pushMenuToMeta via the slot re-apply, so this is a no-op safety net
+    // for the case where slot is null (closed hours) and applySlotAvailability
+    // skips the push path. Ensures Meta is always updated after an upload.
     pushMenuToMeta(req.restaurant_id).catch(err =>
       console.error('[menu/upload] Meta push failed (non-fatal):', err.message)
     );
@@ -1101,15 +1102,21 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
 // ============================================================================
 // PUSH DB → META CATALOG
 //
-// Called after /api/menu/upload. Keeps the WhatsApp catalog in sync with DB.
+// Fix 11: uses is_available AND is_stocked to determine what Meta sees.
 //
-// Availability mapping (what customers see in WhatsApp):
-//   is_stocked = true  → 'in stock'     shown and orderable normally
-//   is_stocked = false → 'out of stock' shown greyed out, cannot add to cart
+// Availability logic:
+//   is_available=true  AND is_stocked=true  → 'in stock'     (current slot, orderable)
+//   is_available=false OR  is_stocked=false → 'out of stock' (wrong slot OR manually OOS)
 //
-// Excel column: is_available (TRUE/FALSE). Maps to is_stocked in DB.
-// The WhatsApp catalog always shows all items — out-of-stock ones are visible
-// with an "Unavailable" label so customers know the item exists.
+// This means:
+//   - Morning Tiffin items at lunchtime → is_available=false → 'out of stock' in Meta ✅
+//   - Manually OOS items any time       → is_stocked=false   → 'out of stock' in Meta ✅
+//   - Current slot items in stock       → both true          → 'in stock' in Meta ✅
+//
+// Called from:
+//   - applySlotAvailability() — on every slot change (hourly)
+//   - POST /api/menu/upload   — after Excel upload
+//   (Individual toggle uses its own inline fetch for speed)
 // ============================================================================
 
 async function pushMenuToMeta(restaurantId) {
@@ -1120,9 +1127,12 @@ async function pushMenuToMeta(restaurantId) {
     return { success: false };
   }
 
+  // Fix 11: fetch is_available AND is_stocked so we can correctly determine
+  // what Meta should show. Previously only is_stocked was fetched, which meant
+  // slot-managed is_available changes were silently ignored.
   const { data: items, error } = await supabaseAdmin
     .from('menu_items')
-    .select('name, description, price, image_url, retailer_id, is_stocked')
+    .select('name, description, price, image_url, retailer_id, is_stocked, is_available')
     .eq('restaurant_id', restaurantId)
     .not('retailer_id', 'is', null);
 
@@ -1144,7 +1154,9 @@ async function pushMenuToMeta(restaurantId) {
         description:  item.description || '',
         price:        Math.round((item.price || 0) * 100),  // paise
         currency:     'INR',
-        availability: item.is_stocked ? 'in stock' : 'out of stock',
+        // Fix 11: item must be BOTH in the current slot (is_available)
+        // AND not manually marked OOS (is_stocked) to show as orderable.
+        availability: (item.is_available && item.is_stocked) ? 'in stock' : 'out of stock',
         image_url:    item.image_url || '',
         url:          process.env.FRONTEND_URL || 'https://autom8.works/',
       },
@@ -1177,20 +1189,12 @@ async function pushMenuToMeta(restaurantId) {
 
 // ============================================================================
 // Fix 9 — POST /api/orders/:id/complete
-// Atomic "mark all items ready" endpoint that:
-//   • Bulk-updates every kds_item for this order to 'ready' in one DB call
-//   • Updates the order status to 'ready'
-//   • Fires exactly ONE WhatsApp notification (no race condition)
-//   • Broadcasts one ORDER_READY WebSocket event
-//   • Is idempotent — safe to call if some items are already ready
-// Used by the KDS "Mark all ready" button instead of N parallel PUTs.
 // ============================================================================
 
 app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const orderId = req.params.id;
 
-    // 1. Verify order belongs to this restaurant
     const { data: order, error: orderFetchError } = await supabaseAdmin
       .from('orders')
       .select(`
@@ -1213,7 +1217,6 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
       return res.status(400).json({ error: `Order is already ${order.status}` });
     }
 
-    // 2. Fetch all kds_items for this order via join
     const { data: kdsItems, error: kdsFetchError } = await supabaseAdmin
       .from('kds_items')
       .select('id, status, order_item:order_item_id!left(order_id), customer_phone, token_number')
@@ -1229,7 +1232,6 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
       return res.status(404).json({ error: 'No KDS items found for this order' });
     }
 
-    // 3. Bulk-update all non-cancelled items to 'ready'
     const activeItems    = orderKdsItems.filter(i => i.status !== 'cancelled');
     const alreadyAllDone = activeItems.every(i => i.status === 'ready');
 
@@ -1244,10 +1246,6 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
       if (bulkUpdateError) throw bulkUpdateError;
     }
 
-    // 4+5+6. Update order status, send WhatsApp, broadcast — all via shared
-    // notifyOrderReady() which atomically guards against duplicate sends.
-    // The .neq('status','ready') guard inside notifyOrderReady means only
-    // the first caller (PUT item or POST /complete) ever sends the message.
     const firstKdsItem = orderKdsItems.find(i => i.customer_phone) ?? orderKdsItems[0];
     await notifyOrderReady({
       orderId,
@@ -1255,7 +1253,6 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
       kdsItem: firstKdsItem,
     });
 
-    // 7. Audit log (non-fatal)
     await supabaseAdmin.from('audit_logs').insert({
       user_id:       req.user.sub,
       restaurant_id: req.restaurant_id,
@@ -1447,7 +1444,6 @@ app.post('/api/tokens', async (req, res) => {
     });
 
     if (type === 'large_party') {
-      // Notify manager immediately — they must approve before customer is seated
       if (process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
         const combo      = meta?.combo ?? [];
         const tableLines = combo.length > 0
@@ -1463,7 +1459,6 @@ app.post('/api/tokens', async (req, res) => {
         sendWhatsAppMessage(process.env.MANAGER_WHATSAPP_NUMBER, managerMsg);
       }
     } else {
-      // Normal walk-in — notify manager (suppressed for munafe bot via ?notify=false)
       const skipNotify = req.query.notify === 'false';
       if (!skipNotify && process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
         const typeLabel = type === 'dinein' ? 'Dine-in' : 'Takeaway';
@@ -1538,17 +1533,7 @@ app.get('/api/tokens/:id', async (req, res) => {
   }
 });
 
-// ============================================================================
-// Fix 10 — PUT /api/tokens/:id/approve
-// ============================================================================
-
 app.put('/api/tokens/:id/approve', authenticateToken, getRestaurantId, async (req, res) => {
-  // Approve a large party request.
-  // 1. Moves token from pending_approval → seated (skip waiting — tables are
-  //    already known from meta.combo so no need for a separate assign step)
-  // 2. Marks all proposed tables as occupied in the tables table
-  // 3. Sends customer a WhatsApp confirmation with table details
-  // 4. Sends catalog message so customer can start ordering immediately
   try {
     if (req.user_role !== 'owner' && req.user_role !== 'manager')
       return res.status(403).json({ error: 'Unauthorized' });
@@ -1560,14 +1545,12 @@ app.put('/api/tokens/:id/approve', authenticateToken, getRestaurantId, async (re
     if (token.status !== 'pending_approval')
       return res.status(400).json({ error: `Token is ${token.status}, not pending_approval` });
 
-    // combo format: [[table_number, capacity, seats_used], ...]
-    const combo = token.meta?.combo ?? [];
+    const combo        = token.meta?.combo ?? [];
     const tableNumbers = combo.map(t => String(t[0]));
     const tableLines   = combo.length > 0
       ? combo.map(t => `Table ${t[0]} (${t[2]} seats)`).join(', ')
       : 'multiple tables';
 
-    // Look up actual table IDs from table numbers
     let tableIds = [];
     if (tableNumbers.length > 0) {
       const { data: tableRows } = await supabaseAdmin
@@ -1578,8 +1561,6 @@ app.put('/api/tokens/:id/approve', authenticateToken, getRestaurantId, async (re
       tableIds = (tableRows ?? []).map(t => t.id);
     }
 
-    // Move token to seated and record seating time
-    // Use the first table as the primary table_id for the token record
     const primaryTableId     = tableIds[0] ?? null;
     const primaryTableNumber = tableNumbers[0] ?? null;
 
@@ -1596,7 +1577,6 @@ app.put('/api/tokens/:id/approve', authenticateToken, getRestaurantId, async (re
       .select().single();
     if (updateError) throw updateError;
 
-    // Mark all proposed tables as occupied
     if (tableIds.length > 0) {
       await supabaseAdmin
         .from('tables')
@@ -1606,7 +1586,6 @@ app.put('/api/tokens/:id/approve', authenticateToken, getRestaurantId, async (re
       console.log(`[approve] Marked ${tableIds.length} table(s) occupied: ${tableNumbers.join(', ')}`);
     }
 
-    // Notify customer — approved + table details
     if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
       await sendWhatsAppMessage(token.phone,
         `✅ *Great news! Your table arrangement has been confirmed.*\n\n` +
@@ -1615,7 +1594,6 @@ app.put('/api/tokens/:id/approve', authenticateToken, getRestaurantId, async (re
         `Tables: *${tableLines}*\n\n` +
         `Please head to the restaurant — our staff will seat your party shortly. 🍽️`
       );
-      // Send catalog so they can start browsing the menu
       console.log(`[approve] Sending catalog to ${token.phone}`);
       await sendWhatsAppCatalogMessage(token.phone, req.restaurant_id);
     }
@@ -1639,10 +1617,6 @@ app.put('/api/tokens/:id/approve', authenticateToken, getRestaurantId, async (re
     res.status(500).json({ error: err.message || 'Failed to approve token' });
   }
 });
-
-// ============================================================================
-// Fix 10 — PUT /api/tokens/:id/reject
-// ============================================================================
 
 app.put('/api/tokens/:id/reject', authenticateToken, getRestaurantId, async (req, res) => {
   try {
@@ -1673,7 +1647,7 @@ app.put('/api/tokens/:id/reject', authenticateToken, getRestaurantId, async (req
         user_id: req.user.sub, restaurant_id: req.restaurant_id,
         action: 'Large party token rejected', details: { token_id: req.params.id, pax: token.pax, reason: reason || null },
       });
-    } catch (_) { /* audit log is non-fatal */ }
+    } catch (_) { /* non-fatal */ }
     console.log(`[reject] Token ${token.id} rejected for ${token.pax} guests`);
     res.json({ success: true, token: updatedToken });
   } catch (err) {
@@ -1681,8 +1655,6 @@ app.put('/api/tokens/:id/reject', authenticateToken, getRestaurantId, async (req
     res.status(500).json({ error: err.message || 'Failed to reject token' });
   }
 });
-
-
 
 app.put('/api/tokens/:id/assign', authenticateToken, getRestaurantId, async (req, res) => {
   try {
@@ -1860,13 +1832,11 @@ async function handleWhatsAppOrder(message, metadata) {
 
   let subtotal = 0;
   const kdsInserts  = [];
-  const skippedOos  = [];   // items rejected because is_stocked=false
+  const skippedOos  = [];
   for (const item of productItems) {
     const { data: menuItem } = await supabaseAdmin.from('menu_items').select('id, name, price, is_stocked, is_available')
       .eq('restaurant_id', restaurantId).eq('retailer_id', item.product_retailer_id).maybeSingle();
     if (!menuItem) { console.warn(`[WA Order] ⚠️ No menu item for retailer_id: ${item.product_retailer_id}`); continue; }
-    // Reject out-of-stock items — Meta catalog may still show them as orderable
-    // due to caching even after we pushed 'out of stock'. Enforce here at order time.
     if (menuItem.is_stocked === false || menuItem.is_available === false) {
       console.warn(`[WA Order] ⛔ ${menuItem.name} is out of stock — skipping`);
       skippedOos.push(menuItem.name);
@@ -2018,6 +1988,39 @@ app.post('/api/kds/notify', async (req, res) => {
 
   } catch (err) {
     console.error('[kds-notify] Unexpected error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// INTERNAL MENU ITEMS ENDPOINT (used by munafe chat bot)
+// Secret-key authenticated — no JWT required so the Python bot can call it
+// without a user session. Uses the same secret as /api/kds/notify.
+// ============================================================================
+
+app.get('/api/internal/menu-items', async (req, res) => {
+  try {
+    const secret   = req.headers['x-internal-secret'];
+    const expected = process.env.AUTOM8_KDS_SECRET || 'munafe_kds_sync_2026';
+    if (secret !== expected)
+      return res.status(403).json({ error: 'Forbidden' });
+
+    const restaurantId = req.query.restaurant_id;
+    if (!restaurantId)
+      return res.status(400).json({ error: 'restaurant_id query param required' });
+
+    const { data, error } = await supabaseAdmin
+      .from('menu_items')
+      .select('id, name, description, price, image_url, time_slot, retailer_id, is_available, is_stocked, category')
+      .eq('restaurant_id', restaurantId)
+      .order('time_slot', { ascending: true })
+      .order('name',      { ascending: true });
+
+    if (error) throw error;
+
+    res.json({ success: true, count: data.length, items: data });
+  } catch (err) {
+    console.error('[GET /api/internal/menu-items]', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -2310,3 +2313,5 @@ process.on('SIGTERM', () => {
 });
 
 module.exports = { app, wss, broadcastToRestaurant };
+SERVEREOF
+echo "Written"
