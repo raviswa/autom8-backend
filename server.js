@@ -1543,39 +1543,96 @@ app.get('/api/tokens/:id', async (req, res) => {
 // ============================================================================
 
 app.put('/api/tokens/:id/approve', authenticateToken, getRestaurantId, async (req, res) => {
+  // Approve a large party request.
+  // 1. Moves token from pending_approval → seated (skip waiting — tables are
+  //    already known from meta.combo so no need for a separate assign step)
+  // 2. Marks all proposed tables as occupied in the tables table
+  // 3. Sends customer a WhatsApp confirmation with table details
+  // 4. Sends catalog message so customer can start ordering immediately
   try {
     if (req.user_role !== 'owner' && req.user_role !== 'manager')
       return res.status(403).json({ error: 'Unauthorized' });
+
     const { data: token, error: fetchError } = await supabaseAdmin
       .from('walk_in_tokens').select('*')
       .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).single();
     if (fetchError || !token) return res.status(404).json({ error: 'Token not found' });
     if (token.status !== 'pending_approval')
       return res.status(400).json({ error: `Token is ${token.status}, not pending_approval` });
-    const { data: updatedToken, error: updateError } = await supabaseAdmin
-      .from('walk_in_tokens').update({ status: 'waiting' })
-      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).select().single();
-    if (updateError) throw updateError;
+
+    // combo format: [[table_number, capacity, seats_used], ...]
     const combo = token.meta?.combo ?? [];
-    const tableLines = combo.length > 0
+    const tableNumbers = combo.map(t => String(t[0]));
+    const tableLines   = combo.length > 0
       ? combo.map(t => `Table ${t[0]} (${t[2]} seats)`).join(', ')
       : 'multiple tables';
+
+    // Look up actual table IDs from table numbers
+    let tableIds = [];
+    if (tableNumbers.length > 0) {
+      const { data: tableRows } = await supabaseAdmin
+        .from('tables')
+        .select('id, table_number')
+        .eq('restaurant_id', req.restaurant_id)
+        .in('table_number', tableNumbers);
+      tableIds = (tableRows ?? []).map(t => t.id);
+    }
+
+    // Move token to seated and record seating time
+    // Use the first table as the primary table_id for the token record
+    const primaryTableId     = tableIds[0] ?? null;
+    const primaryTableNumber = tableNumbers[0] ?? null;
+
+    const { data: updatedToken, error: updateError } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .update({
+        status:       'seated',
+        table_id:     primaryTableId,
+        table_number: primaryTableNumber,
+        seated_at:    new Date().toISOString(),
+      })
+      .eq('id', req.params.id)
+      .eq('restaurant_id', req.restaurant_id)
+      .select().single();
+    if (updateError) throw updateError;
+
+    // Mark all proposed tables as occupied
+    if (tableIds.length > 0) {
+      await supabaseAdmin
+        .from('tables')
+        .update({ status: 'occupied' })
+        .in('id', tableIds)
+        .eq('restaurant_id', req.restaurant_id);
+      console.log(`[approve] Marked ${tableIds.length} table(s) occupied: ${tableNumbers.join(', ')}`);
+    }
+
+    // Notify customer — approved + table details
     if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
       await sendWhatsAppMessage(token.phone,
-        `✅ *Great news! Your large party request has been approved.*\n\n` +
-        `Token: *${token.id}*\nParty of: *${token.pax} people*\n` +
-        `Tables reserved: *${tableLines}*\n\n` +
+        `✅ *Great news! Your table arrangement has been confirmed.*\n\n` +
+        `Token: *${token.id}*\n` +
+        `Party of: *${token.pax} people*\n` +
+        `Tables: *${tableLines}*\n\n` +
         `Please head to the restaurant — our staff will seat your party shortly. 🍽️`
       );
+      // Send catalog so they can start browsing the menu
+      console.log(`[approve] Sending catalog to ${token.phone}`);
+      await sendWhatsAppCatalogMessage(token.phone, req.restaurant_id);
     }
-    broadcastToRestaurant(req.restaurant_id, { type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString() });
+
+    broadcastToRestaurant(req.restaurant_id, {
+      type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString(),
+    });
+
     try {
       await supabaseAdmin.from('audit_logs').insert({
         user_id: req.user.sub, restaurant_id: req.restaurant_id,
-        action: 'Large party token approved', details: { token_id: req.params.id, pax: token.pax, combo },
+        action: 'Large party token approved',
+        details: { token_id: req.params.id, pax: token.pax, combo, tables_occupied: tableNumbers },
       });
-    } catch (_) { /* audit log is non-fatal */ }
-    console.log(`[approve] ✅ Token ${token.id} approved for ${token.pax} guests`);
+    } catch (_) { /* non-fatal */ }
+
+    console.log(`[approve] ✅ Token ${token.id} approved — ${token.pax} guests seated across ${tableNumbers.join(', ')}`);
     res.json({ success: true, token: updatedToken });
   } catch (err) {
     console.error('[PUT /api/tokens/:id/approve]', err);
