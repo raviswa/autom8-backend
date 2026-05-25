@@ -418,20 +418,39 @@ async function applySlotForAllRestaurants() {
 }
 
 function startSlotScheduler() {
-  setInterval(async () => {
-    const cutoff = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
-    const { data } = await supabaseAdmin
+	setInterval(async () => {
+    const cutoff = new Date(Date.now() - 90 * 60 * 1000).toISOString();
+
+    // 1. Auto-complete stale seated tokens
+    const { data: staleTokens } = await supabaseAdmin
       .from('walk_in_tokens')
       .update({ status: 'completed', completed_at: new Date().toISOString() })
       .eq('status', 'seated')
       .lt('seated_at', cutoff)
       .select('table_id');
-    for (const token of data ?? []) {
+
+    for (const token of staleTokens ?? []) {
       if (token.table_id) {
         await supabaseAdmin.from('tables').update({ status: 'available' }).eq('id', token.table_id);
+        console.log(`[auto-release] Token freed table ${token.table_id} after 90 min`);
       }
     }
-  }, 60 * 60 * 1000);
+
+    // 2. Also auto-complete stale orders (tables occupied via order, no token)
+    const { data: staleOrders } = await supabaseAdmin
+      .from('orders')
+      .update({ status: 'completed' })
+      .in('status', ['pending', 'confirmed', 'in_progress'])
+      .lt('created_at', cutoff)
+      .select('table_id, id, order_number');
+
+    for (const order of staleOrders ?? []) {
+      if (!order.table_id) continue;
+      const { data: remaining } = await supabaseAdmin
+        .from('orders')
+        .select('id')
+        .eq('table_id', order.table_id)
+        .in('status', ['pending', 'confirmed', 'in_progress'
 
   let lastAppliedSlot = Symbol('init');
   applySlotForAllRestaurants();
