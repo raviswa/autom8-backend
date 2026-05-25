@@ -38,6 +38,13 @@
 //              • POST /api/orders/:id/complete audit_log insert
 //              • POST /api/menu/upload audit_log insert
 //            All replaced with proper try { await ... } catch (_) {} wrappers.
+//
+//  Fix 13 — POST /api/menu/upload: Excel template uses column names 'title'
+//            and 'image_link' but server was reading 'name' and 'image_url',
+//            causing every row to fail the !item.name guard and be skipped
+//            silently (0 upserted, N skipped). Also added mapTimeSlot() to
+//            normalise 'Morning Tiffin', 'Dinner' etc. from custom_label_0
+//            into the snake_case DB values the slot scheduler expects.
 // ============================================================================
 
 const express   = require('express');
@@ -989,7 +996,30 @@ app.put('/api/kds/:id/status', authenticateToken, getRestaurantId, async (req, r
 });
 
 // ============================================================================
-// MENU UPLOAD ENDPOINT
+// Fix 13 — mapTimeSlot helper
+// Normalises human-readable slot labels from the Excel template
+// (e.g. 'Morning Tiffin', 'Dinner') into the snake_case DB values
+// the slot scheduler expects.
+// ============================================================================
+
+function mapTimeSlot(raw) {
+  if (!raw) return 'all';
+  const SLOT_MAP = {
+    'morning tiffin':  'morning_tiffin',
+    'morning_tiffin':  'morning_tiffin',
+    'lunch':           'lunch',
+    'evening snacks':  'evening_snacks',
+    'evening_snacks':  'evening_snacks',
+    'dinner tiffin':   'dinner_tiffin',
+    'dinner_tiffin':   'dinner_tiffin',
+    'dinner':          'dinner_tiffin',
+    'all':             'all',
+  };
+  return SLOT_MAP[String(raw).toLowerCase().trim()] || 'all';
+}
+
+// ============================================================================
+// MENU UPLOAD ENDPOINT  (Fix 12 + Fix 13)
 // ============================================================================
 
 app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res) => {
@@ -1006,8 +1036,11 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
 
     for (const item of items) {
       try {
-        if (!item.id || !item.name) {
-          errors.push({ row_id: item.id, error: 'Missing id or name' });
+        // Fix 13: Excel template uses 'title' not 'name' — accept both
+        const itemName = item.name || item.title;
+
+        if (!item.id || !itemName) {
+          errors.push({ row_id: item.id, error: `Missing id or name/title (got id=${item.id}, name=${item.name}, title=${item.title})` });
           skipped++;
           continue;
         }
@@ -1028,11 +1061,16 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
         const menuItem = {
           restaurant_id: req.restaurant_id,
           id:            item.id,
-          name:          String(item.name).trim(),
+          name:          String(itemName).trim(),
           description:   String(item.description || '').trim(),
           price,
-          image_url:     item.image_url ? String(item.image_url).trim() : null,
-          time_slot:     item.time_slot || 'all',
+          // Fix 13: Excel template uses 'image_link' not 'image_url' — accept both
+          image_url:     (item.image_url || item.image_link)
+                           ? String(item.image_url || item.image_link).trim()
+                           : null,
+          // Fix 13: Excel template uses 'custom_label_0' for slot with human-readable
+          // labels like 'Morning Tiffin' — normalise to snake_case DB values
+          time_slot:     mapTimeSlot(item.time_slot || item.custom_label_0),
           category:      item.category || 'General',
           is_stocked:    isStocked,
           ...(isStocked === false ? { is_available: false } : {}),
