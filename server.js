@@ -470,6 +470,7 @@ function startSlotScheduler() {
     }
   }, 60 * 1000);
   console.log('⏰ Slot scheduler started — runs at 06:00, 11:00, 15:00, 19:00, 23:00 IST');
+  startFeedbackScheduler();
 }
 
 app.post('/api/catalog/slot-sync', authenticateToken, getRestaurantId, async (req, res) => {
@@ -1828,6 +1829,18 @@ app.post('/api/whatsapp/webhook', async (req, res) => {
 async function handleWhatsAppOrder(message, metadata) {
   const customerPhone = message.from;
   const productItems  = message.order?.product_items ?? [];
+
+  // Check if this is a feedback reply first
+  if (message.type === 'text') {
+    let restaurantId = process.env.DEFAULT_RESTAURANT_ID || null;
+    if (metadata?.phone_number_id) {
+      const { data: restaurant } = await supabaseAdmin.from('restaurants').select('id')
+        .eq('whatsapp_phone_number_id', metadata.phone_number_id).eq('is_active', true).single();
+      if (restaurant) restaurantId = restaurant.id;
+    }
+    const wasFeedback = await handleFeedbackReply(customerPhone, message.text?.body || '', restaurantId);
+    if (wasFeedback) return; // Handled as feedback — don't process as order
+  }
   console.log(`[WA Order] 📦 From ${customerPhone}, items: ${productItems.length}`);
   if (productItems.length === 0) { console.warn('[WA Order] Empty product_items — skipping'); return; }
 
@@ -2050,6 +2063,158 @@ app.get('/api/internal/menu-items', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+
+// ============================================================================
+// FEEDBACK SYSTEM
+// ============================================================================
+
+app.post('/api/feedback/queue', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { customer_phone, customer_name, token_number, table_number } = req.body;
+    if (!customer_phone) return res.status(400).json({ error: 'customer_phone required' });
+
+    const { error } = await supabaseAdmin
+      .from('feedback_pending')
+      .insert({
+        restaurant_id:  req.restaurant_id,
+        customer_phone: String(customer_phone).replace(/\D/g, ''),
+        customer_name:  customer_name || 'Guest',
+        token_number:   token_number || null,
+        table_number:   table_number || null,
+        freed_at:       new Date().toISOString(),
+      });
+
+    if (error) throw error;
+    console.log(`[feedback-queue] ✅ Queued for ${customer_phone}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[feedback-queue]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Receive feedback reply from customer (called from WhatsApp webhook handler)
+async function handleFeedbackReply(customerPhone, message, restaurantId) {
+  try {
+    const phone = String(customerPhone).replace(/\D/g, '');
+
+    // Find pending feedback record for this customer
+    const { data: record } = await supabaseAdmin
+      .from('feedback_pending')
+      .select('*')
+      .eq('customer_phone', phone)
+      .eq('restaurant_id', restaurantId)
+      .eq('manager_notified', false)
+      .not('feedback_sent', 'eq', false)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!record) return false; // Not a feedback reply
+
+    const text = message.trim();
+
+    // Try to extract rating (1–5 or star emojis)
+    const starMatch = text.match(/[1-5⭐★]/);
+    const rating    = starMatch
+      ? (parseInt(starMatch[0]) || (starMatch[0].match(/[⭐★]/g) || []).length || null)
+      : null;
+
+    // Store feedback
+    await supabaseAdmin
+      .from('feedback_pending')
+      .update({
+        feedback_text:        text,
+        feedback_rating:      rating,
+        feedback_received_at: new Date().toISOString(),
+        manager_notified:     true,
+      })
+      .eq('id', record.id);
+
+    // Thank customer
+    const thankMsg = rating && rating >= 4
+      ? `🙏 Thank you for the *${rating}⭐* rating, ${record.customer_name}!\n\nWe're so glad you enjoyed your visit. See you again soon! 😊`
+      : `🙏 Thank you for your feedback, ${record.customer_name}!\n\nWe appreciate your input and will use it to improve. Hope to see you again! 😊`;
+
+    await sendWhatsAppMessage(customerPhone, thankMsg);
+
+    // Notify manager
+    const ratingLine = rating ? `Rating: ${'⭐'.repeat(rating)} (${rating}/5)\n` : '';
+    await sendWhatsAppMessage(
+      process.env.MANAGER_WHATSAPP_NUMBER,
+      `📣 *Customer Feedback*\n` +
+      `────────────────────\n` +
+      `Customer: ${record.customer_name}\n` +
+      `Phone: +${phone}\n` +
+      `Token: ${record.token_number || '—'}\n` +
+      `Table: ${record.table_number || '—'}\n` +
+      `${ratingLine}` +
+      `Feedback: ${text}\n` +
+      `────────────────────`
+    );
+
+    console.log(`[feedback] ✅ Received from ${phone} — rating: ${rating}`);
+    return true;
+  } catch (err) {
+    console.error('[feedback-reply]', err.message);
+    return false;
+  }
+}
+
+// Background sender: runs every 10 minutes, sends feedback request 2 hours after freed_at
+function startFeedbackScheduler() {
+  setInterval(async () => {
+    try {
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+
+      const { data: pending } = await supabaseAdmin
+        .from('feedback_pending')
+        .select('*')
+        .eq('feedback_sent', false)
+        .lte('freed_at', twoHoursAgo)
+        .limit(20);
+
+      for (const record of pending ?? []) {
+        try {
+          await sendWhatsAppMessage(
+            record.customer_phone,
+            `Hi ${record.customer_name}! 😊\n\n` +
+            `Thank you for dining with us today` +
+            `${record.table_number ? ` (Table ${record.table_number})` : ''}.\n\n` +
+            `*How was your experience?* We'd love your feedback!\n\n` +
+            `⭐ Reply with a rating from *1 to 5*:\n` +
+            `5 ⭐ — Excellent\n` +
+            `4 ⭐ — Good\n` +
+            `3 ⭐ — Average\n` +
+            `2 ⭐ — Below average\n` +
+            `1 ⭐ — Poor\n\n` +
+            `You can also share any comments along with your rating. 🙏`
+          );
+
+          await supabaseAdmin
+            .from('feedback_pending')
+            .update({
+              feedback_sent:    true,
+              feedback_sent_at: new Date().toISOString(),
+            })
+            .eq('id', record.id);
+
+          console.log(`[feedback-sender] ✅ Sent to ${record.customer_phone} for token ${record.token_number}`);
+
+        } catch (innerErr) {
+          console.error(`[feedback-sender] Failed for ${record.customer_phone}:`, innerErr.message);
+        }
+      }
+    } catch (err) {
+      console.error('[feedback-sender] Scan error:', err.message);
+    }
+  }, 10 * 60 * 1000); // every 10 minutes
+
+  console.log('📣 Feedback scheduler started — sends 2 hours after table freed');
+}
+
+
 
 // ============================================================================
 // SUBSCRIPTION / FEATURE FLAGS
