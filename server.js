@@ -450,7 +450,14 @@ function startSlotScheduler() {
         .from('orders')
         .select('id')
         .eq('table_id', order.table_id)
-        .in('status', ['pending', 'confirmed', 'in_progress'
+		.in('status', ['pending', 'confirmed', 'in_progress']);
+      if (!remaining || remaining.length === 0) {
+        await supabaseAdmin.from('tables').update({ status: 'available' }).eq('id', order.table_id);
+        console.log(`[auto-release] Order ${order.order_number} freed table ${order.table_id} after 90 min`);
+      }
+    }
+
+  }, 5 * 60 * 1000); // runs every 5 minutes
 
   let lastAppliedSlot = Symbol('init');
   applySlotForAllRestaurants();
