@@ -27,6 +27,17 @@
 //  Fix 11 — pushMenuToMeta: uses is_available AND is_stocked to determine
 //            Meta availability. Previously only is_stocked was checked, so
 //            slot-managed is_available changes never propagated to Meta.
+//
+//  Fix 12 — MENU UPLOAD BUG: Supabase JS v2 PostgrestBuilder is thenable but
+//            does NOT expose .catch() as a standalone method. Chaining
+//            .catch(() => {}) directly on a query builder throws:
+//            "TypeError: supabaseAdmin.from(...).insert(...).catch is not a
+//            function", which surfaced as the "Upload failed" error in the
+//            manager portal. Fixed in three places:
+//              • handleWhatsAppOrder audit_log insert
+//              • POST /api/orders/:id/complete audit_log insert
+//              • POST /api/menu/upload audit_log insert
+//            All replaced with proper try { await ... } catch (_) {} wrappers.
 // ============================================================================
 
 const express   = require('express');
@@ -244,19 +255,11 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
       return;
     }
 
-    // Fetch all available items ordered by name so the thumbnail is deterministic.
-    // We try each one in order until Meta accepts it — this handles the case where
-    // some retailer_ids in our DB don't match Meta's catalog (e.g. after a partial
-    // sync or if Meta silently dropped a product).
-    // Thumbnail query does NOT filter by is_available — the slot scheduler sets
-    // all items to false during closed hours, which would silently break the
-    // catalog send. The thumbnail is only a visual anchor; availability shown
-    // to customers comes from Meta's own catalog, not this query.
     const { data: availableItems, error: itemsError } = await supabaseAdmin
       .from('menu_items')
       .select('retailer_id, name')
       .eq('restaurant_id', restaurantId)
-      .eq('is_stocked', true)          // only items actually in stock
+      .eq('is_stocked', true)
       .not('retailer_id', 'is', null)
       .order('name', { ascending: true })
       .limit(10);
@@ -266,7 +269,6 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
       return;
     }
 
-    // Try each retailer_id until one works
     for (const item of availableItems) {
       console.log(`[catalog-msg] Trying thumbnail retailer_id=${item.retailer_id} (${item.name})`);
       const response = await fetch(
@@ -296,28 +298,22 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
 
       if (response.ok) {
         console.log(`[catalog-msg] ✅ Sent to ${toNumber} using retailer_id=${item.retailer_id}`);
-        return; // success — stop trying
+        return;
       }
 
       const err = await response.json().catch(() => ({}));
-      const errCode = err?.error?.code;
+      const errCode   = err?.error?.code;
       const errDetail = err?.error?.details ?? err?.error?.message ?? '';
 
-      // 131009 = "Products not found in FB Catalog" — this retailer_id isn't in Meta
-      // Try the next item. Any other error is unexpected — log and bail.
       if (errCode === 131009 || errDetail.includes('not found')) {
         console.warn(`[catalog-msg] retailer_id=${item.retailer_id} not in Meta catalog — trying next`);
         continue;
       }
 
-      // Unexpected error — log and stop
       console.error('[catalog-msg] API error (unexpected):', err);
       return;
     }
 
-    // All retailer_ids failed — the catalog message can't be sent right now.
-    // This usually means Meta's catalog is out of sync with our menu_items table.
-    // Trigger a background re-sync so next time it works.
     console.warn('[catalog-msg] ⚠️  All retailer_ids rejected by Meta. Triggering background catalog re-sync...');
     syncCatalogFromMeta(restaurantId).catch(e =>
       console.error('[catalog-msg] Background re-sync failed:', e.message)
@@ -358,8 +354,6 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
     if (error) throw error;
     console.log(`  ✅ All items set unavailable (closed hours)`);
 
-    // Fix 10: push closed-hours state to Meta so customers see everything
-    // as out of stock in WhatsApp during closed hours.
     pushMenuToMeta(restaurantId).catch(e =>
       console.error(`[slot] Meta push failed for ${restaurantId} (closed):`, e.message)
     );
@@ -367,8 +361,6 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
     return { available: 0, unavailable: 'all' };
   }
 
-  // Only activate items that are in stock (is_stocked=true).
-  // Out-of-stock items stay is_available=false regardless of slot.
   const { data: activated, error: e1 } = await supabaseAdmin
     .from('menu_items')
     .update({ is_available: true, updated_at: new Date().toISOString() })
@@ -386,7 +378,6 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
     .select('id');
   if (e2) throw e2;
 
-  // Also deactivate any in-slot items that are out of stock
   const { error: e3 } = await supabaseAdmin
     .from('menu_items')
     .update({ is_available: false, updated_at: new Date().toISOString() })
@@ -397,8 +388,6 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
 
   console.log(`  ✅ Activated: ${activated?.length ?? 0} | Deactivated: ${deactivated?.length ?? 0}`);
 
-  // Fix 10: push updated availability to Meta so WhatsApp catalog reflects
-  // the current slot. Non-blocking — slot change must not fail if Meta is slow.
   pushMenuToMeta(restaurantId).catch(e =>
     console.error(`[slot] Meta push failed for ${restaurantId} (slot=${slotDbValue}):`, e.message)
   );
@@ -418,10 +407,9 @@ async function applySlotForAllRestaurants() {
 }
 
 function startSlotScheduler() {
-	setInterval(async () => {
+  setInterval(async () => {
     const cutoff = new Date(Date.now() - 90 * 60 * 1000).toISOString();
 
-    // 1. Auto-complete stale seated tokens
     const { data: staleTokens } = await supabaseAdmin
       .from('walk_in_tokens')
       .update({ status: 'completed', completed_at: new Date().toISOString() })
@@ -436,7 +424,6 @@ function startSlotScheduler() {
       }
     }
 
-    // 2. Also auto-complete stale orders (tables occupied via order, no token)
     const { data: staleOrders } = await supabaseAdmin
       .from('orders')
       .update({ status: 'completed' })
@@ -450,14 +437,14 @@ function startSlotScheduler() {
         .from('orders')
         .select('id')
         .eq('table_id', order.table_id)
-		.in('status', ['pending', 'confirmed', 'in_progress']);
+        .in('status', ['pending', 'confirmed', 'in_progress']);
       if (!remaining || remaining.length === 0) {
         await supabaseAdmin.from('tables').update({ status: 'available' }).eq('id', order.table_id);
         console.log(`[auto-release] Order ${order.order_number} freed table ${order.table_id} after 90 min`);
       }
     }
 
-  }, 5 * 60 * 1000); // runs every 5 minutes
+  }, 5 * 60 * 1000);
 
   let lastAppliedSlot = Symbol('init');
   applySlotForAllRestaurants();
@@ -529,12 +516,9 @@ async function syncCatalogFromMeta(restaurantId) {
             const hasRupeeSymbol = raw.includes('₹') || raw.toUpperCase().includes('INR');
             const numeric = parseFloat(raw.replace(/[^0-9.]/g, ''));
             if (!isNaN(numeric)) {
-              // If the string contains ₹ or INR it's already in rupees (e.g. "₹60.00")
-              // Otherwise it's in paise as returned by Meta's raw API (e.g. "6000" = ₹60)
               price = hasRupeeSymbol ? numeric : numeric / 100;
             }
           } else if (typeof product.price === 'number') {
-            // Numbers > 100 are almost certainly paise; small numbers are rupees
             price = product.price > 100 ? product.price / 100 : product.price;
           }
           console.log(`[price] raw=${product.price} → ₹${price}`);
@@ -568,7 +552,6 @@ async function syncCatalogFromMeta(restaurantId) {
       }
     }
 
-    // Price sanity check — log any items that still look wrong after sync
     const { data: suspectPrices } = await supabaseAdmin
       .from('menu_items')
       .select('id, name, price')
@@ -642,9 +625,6 @@ async function runStartupSync() {
 // ============================================================================
 
 app.get('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) => {
-  // ignore_slot=true  → manager portal view: returns ALL items across all slots
-  //                     and ALL stock states (in/out) so the toggle table is complete
-  // ignore_slot=false → customer/bot view: only is_available=true items in current slot
   try {
     const { category, ignore_slot } = req.query;
     const isManagerView = ignore_slot === 'true';
@@ -668,13 +648,8 @@ app.get('/api/menu-items', authenticateToken, getRestaurantId, async (req, res) 
     if (category) query = query.eq('category', category);
 
     if (isManagerView) {
-      // Manager sees everything: all slots, all stock states.
-      // No is_available filter — out-of-stock items must remain visible
-      // so the manager can see and re-enable them via the toggle.
-      // Sort: in-stock first, then out-of-stock (greyed) at the bottom.
       query = query.order('is_stocked', { ascending: false });
     } else {
-      // Customer / bot view: only available items in the current slot
       query = query.eq('is_available', true);
       if (currentSlot) query = query.or(`time_slot.eq.${currentSlot},time_slot.eq.all`);
     }
@@ -703,25 +678,18 @@ app.post('/api/menu-items', authenticateToken, getRestaurantId, async (req, res)
 });
 
 app.put('/api/menu-items/:id/availability', authenticateToken, getRestaurantId, async (req, res) => {
-  // Real-time mid-service toggle — used when an item runs out during a slot.
-  // Updates is_stocked (permanent manager flag) + is_available immediately,
-  // then pushes to Meta catalog so WhatsApp shows the item greyed out at once.
-  // No need to wait for the next slot change or Excel upload.
   try {
     if (req.user_role !== 'owner' && req.user_role !== 'manager')
       return res.status(403).json({ error: 'Unauthorized' });
 
-    const { is_available } = req.body;  // boolean from portal toggle
+    const { is_available } = req.body;
     const isStocked = Boolean(is_available);
 
-    // Update both columns atomically:
-    //   is_stocked   — persists across slot changes (scheduler respects this)
-    //   is_available — immediately reflects current state in the portal/KDS
     const { data, error } = await supabaseAdmin
       .from('menu_items')
       .update({
         is_stocked:   isStocked,
-        is_available: isStocked,   // immediate effect; scheduler won't re-enable if false
+        is_available: isStocked,
         updated_at:   new Date().toISOString(),
       })
       .eq('id', req.params.id)
@@ -731,8 +699,6 @@ app.put('/api/menu-items/:id/availability', authenticateToken, getRestaurantId, 
 
     if (error) throw error;
 
-    // Push to Meta catalog immediately (non-blocking) so WhatsApp reflects
-    // the change within seconds rather than waiting for the next Excel upload.
     if (data?.retailer_id) {
       const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
       const META_CATALOG_ID   = process.env.META_CATALOG_ID;
@@ -1098,22 +1064,23 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
       console.warn('[menu/upload] Slot re-apply failed (non-fatal):', slotErr.message);
     }
 
-    await supabaseAdmin.from('audit_logs').insert({
-      user_id: req.user.sub,
-      restaurant_id: req.restaurant_id,
-      action: 'Menu items uploaded via Excel',
-      details: { upserted, skipped, total: items.length, error_count: errors.length },
-    }).catch(() => {});
+    // Fix 12: replaced .catch(() => {}) on Supabase query builder with
+    // try-catch — PostgrestBuilder in Supabase JS v2 does not expose .catch()
+    // as a standalone method, causing a TypeError at runtime.
+    try {
+      await supabaseAdmin.from('audit_logs').insert({
+        user_id:       req.user.sub,
+        restaurant_id: req.restaurant_id,
+        action:        'Menu items uploaded via Excel',
+        details:       { upserted, skipped, total: items.length, error_count: errors.length },
+      });
+    } catch (_) { /* audit log failure is non-fatal */ }
 
     const response = { success: true, upserted, skipped, total: items.length };
     if (errors.length > 0) response.errors = errors;
 
     console.log(`[menu/upload] ✅ ${upserted} upserted, ${skipped} skipped for restaurant ${req.restaurant_id}`);
 
-    // Push to Meta catalog in background — applySlotAvailability above already
-    // called pushMenuToMeta via the slot re-apply, so this is a no-op safety net
-    // for the case where slot is null (closed hours) and applySlotAvailability
-    // skips the push path. Ensures Meta is always updated after an upload.
     pushMenuToMeta(req.restaurant_id).catch(err =>
       console.error('[menu/upload] Meta push failed (non-fatal):', err.message)
     );
@@ -1127,23 +1094,7 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
 });
 
 // ============================================================================
-// PUSH DB → META CATALOG
-//
-// Fix 11: uses is_available AND is_stocked to determine what Meta sees.
-//
-// Availability logic:
-//   is_available=true  AND is_stocked=true  → 'in stock'     (current slot, orderable)
-//   is_available=false OR  is_stocked=false → 'out of stock' (wrong slot OR manually OOS)
-//
-// This means:
-//   - Morning Tiffin items at lunchtime → is_available=false → 'out of stock' in Meta ✅
-//   - Manually OOS items any time       → is_stocked=false   → 'out of stock' in Meta ✅
-//   - Current slot items in stock       → both true          → 'in stock' in Meta ✅
-//
-// Called from:
-//   - applySlotAvailability() — on every slot change (hourly)
-//   - POST /api/menu/upload   — after Excel upload
-//   (Individual toggle uses its own inline fetch for speed)
+// PUSH DB → META CATALOG (Fix 11)
 // ============================================================================
 
 async function pushMenuToMeta(restaurantId) {
@@ -1154,9 +1105,6 @@ async function pushMenuToMeta(restaurantId) {
     return { success: false };
   }
 
-  // Fix 11: fetch is_available AND is_stocked so we can correctly determine
-  // what Meta should show. Previously only is_stocked was fetched, which meant
-  // slot-managed is_available changes were silently ignored.
   const { data: items, error } = await supabaseAdmin
     .from('menu_items')
     .select('name, description, price, image_url, retailer_id, is_stocked, is_available')
@@ -1179,10 +1127,8 @@ async function pushMenuToMeta(restaurantId) {
       data: {
         name:         item.name,
         description:  item.description || '',
-        price:        Math.round((item.price || 0) * 100),  // paise
+        price:        Math.round((item.price || 0) * 100),
         currency:     'INR',
-        // Fix 11: item must be BOTH in the current slot (is_available)
-        // AND not manually marked OOS (is_stocked) to show as orderable.
         availability: (item.is_available && item.is_stocked) ? 'in stock' : 'out of stock',
         image_url:    item.image_url || '',
         url:          process.env.FRONTEND_URL || 'https://autom8.works/',
@@ -1280,16 +1226,19 @@ app.post('/api/orders/:id/complete', authenticateToken, getRestaurantId, async (
       kdsItem: firstKdsItem,
     });
 
-    await supabaseAdmin.from('audit_logs').insert({
-      user_id:       req.user.sub,
-      restaurant_id: req.restaurant_id,
-      action:        'Order marked ready via /complete',
-      details: {
-        order_id:          orderId,
-        order_number:      order.order_number,
-        kds_items_updated: alreadyAllDone ? 0 : activeItems.length,
-      },
-    }).catch(() => {});
+    // Fix 12: replaced .catch(() => {}) with try-catch (Supabase v2 compatibility)
+    try {
+      await supabaseAdmin.from('audit_logs').insert({
+        user_id:       req.user.sub,
+        restaurant_id: req.restaurant_id,
+        action:        'Order marked ready via /complete',
+        details: {
+          order_id:          orderId,
+          order_number:      order.order_number,
+          kds_items_updated: alreadyAllDone ? 0 : activeItems.length,
+        },
+      });
+    } catch (_) { /* audit log failure is non-fatal */ }
 
     res.json({
       success:           true,
@@ -1431,8 +1380,6 @@ async function generateTokenId(restaurantId) {
 }
 
 app.post('/api/tokens', async (req, res) => {
-  // Fix 10 — accepts type='large_party' with status='pending_approval'
-  // and a meta.combo array describing the proposed table split.
   try {
     const { name, phone, type, pax, restaurant_id, meta } = req.body;
     if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
@@ -1811,13 +1758,16 @@ app.post('/api/whatsapp/webhook', async (req, res) => {
               console.error('[WA Webhook] handleWhatsAppOrder failed:', err.message)
             );
           }
-          await supabaseAdmin.from('audit_logs').insert({
-            action: 'WhatsApp message received',
-            details: {
-              type: message.type, from: message.from,
-              phone_number_id: metadata?.phone_number_id, message_id: message.id,
-            },
-          }).catch(() => {});
+          // Fix 12: replaced .catch(() => {}) with try-catch (Supabase v2 compatibility)
+          try {
+            await supabaseAdmin.from('audit_logs').insert({
+              action: 'WhatsApp message received',
+              details: {
+                type: message.type, from: message.from,
+                phone_number_id: metadata?.phone_number_id, message_id: message.id,
+              },
+            });
+          } catch (_) { /* non-fatal */ }
         }
       }
     }
@@ -1830,7 +1780,6 @@ async function handleWhatsAppOrder(message, metadata) {
   const customerPhone = message.from;
   const productItems  = message.order?.product_items ?? [];
 
-  // Check if this is a feedback reply first
   if (message.type === 'text') {
     let restaurantId = process.env.DEFAULT_RESTAURANT_ID || null;
     if (metadata?.phone_number_id) {
@@ -1839,7 +1788,7 @@ async function handleWhatsAppOrder(message, metadata) {
       if (restaurant) restaurantId = restaurant.id;
     }
     const wasFeedback = await handleFeedbackReply(customerPhone, message.text?.body || '', restaurantId);
-    if (wasFeedback) return; // Handled as feedback — don't process as order
+    if (wasFeedback) return;
   }
   console.log(`[WA Order] 📦 From ${customerPhone}, items: ${productItems.length}`);
   if (productItems.length === 0) { console.warn('[WA Order] Empty product_items — skipping'); return; }
@@ -1917,10 +1866,13 @@ async function handleWhatsAppOrder(message, metadata) {
   await sendWhatsAppMessage(customerPhone,
     `✅ *Order received!*\n\nOrder: *${orderNumber}*\nTable: *Table ${token.table_number}*\nItems: ${kdsInserts.length}${oosWarning}\n\nWe're preparing your food now. We'll notify you when it's ready! 🍳`
   );
-  await supabaseAdmin.from('audit_logs').insert({
-    restaurant_id: restaurantId, action: 'WhatsApp order created',
-    details: { order_id: orderData.id, order_number: orderNumber, phone: normalizedPhone, item_count: kdsInserts.length },
-  }).catch(() => {});
+  // Fix 12: replaced .catch(() => {}) with try-catch (Supabase v2 compatibility)
+  try {
+    await supabaseAdmin.from('audit_logs').insert({
+      restaurant_id: restaurantId, action: 'WhatsApp order created',
+      details: { order_id: orderData.id, order_number: orderNumber, phone: normalizedPhone, item_count: kdsInserts.length },
+    });
+  } catch (_) { /* non-fatal */ }
 }
 
 // ============================================================================
@@ -2033,8 +1985,6 @@ app.post('/api/kds/notify', async (req, res) => {
 
 // ============================================================================
 // INTERNAL MENU ITEMS ENDPOINT (used by munafe chat bot)
-// Secret-key authenticated — no JWT required so the Python bot can call it
-// without a user session. Uses the same secret as /api/kds/notify.
 // ============================================================================
 
 app.get('/api/internal/menu-items', async (req, res) => {
@@ -2063,7 +2013,6 @@ app.get('/api/internal/menu-items', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 
 // ============================================================================
 // FEEDBACK SYSTEM
@@ -2094,12 +2043,10 @@ app.post('/api/feedback/queue', authenticateToken, getRestaurantId, async (req, 
   }
 });
 
-// Receive feedback reply from customer (called from WhatsApp webhook handler)
 async function handleFeedbackReply(customerPhone, message, restaurantId) {
   try {
     const phone = String(customerPhone).replace(/\D/g, '');
 
-    // Find pending feedback record for this customer
     const { data: record } = await supabaseAdmin
       .from('feedback_pending')
       .select('*')
@@ -2111,17 +2058,15 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
       .limit(1)
       .maybeSingle();
 
-    if (!record) return false; // Not a feedback reply
+    if (!record) return false;
 
     const text = message.trim();
 
-    // Try to extract rating (1–5 or star emojis)
     const starMatch = text.match(/[1-5⭐★]/);
     const rating    = starMatch
       ? (parseInt(starMatch[0]) || (starMatch[0].match(/[⭐★]/g) || []).length || null)
       : null;
 
-    // Store feedback
     await supabaseAdmin
       .from('feedback_pending')
       .update({
@@ -2132,14 +2077,12 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
       })
       .eq('id', record.id);
 
-    // Thank customer
     const thankMsg = rating && rating >= 4
       ? `🙏 Thank you for the *${rating}⭐* rating, ${record.customer_name}!\n\nWe're so glad you enjoyed your visit. See you again soon! 😊`
       : `🙏 Thank you for your feedback, ${record.customer_name}!\n\nWe appreciate your input and will use it to improve. Hope to see you again! 😊`;
 
     await sendWhatsAppMessage(customerPhone, thankMsg);
 
-    // Notify manager
     const ratingLine = rating ? `Rating: ${'⭐'.repeat(rating)} (${rating}/5)\n` : '';
     await sendWhatsAppMessage(
       process.env.MANAGER_WHATSAPP_NUMBER,
@@ -2162,7 +2105,6 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
   }
 }
 
-// Background sender: runs every 10 minutes, sends feedback request 2 hours after freed_at
 function startFeedbackScheduler() {
   setInterval(async () => {
     try {
@@ -2209,12 +2151,10 @@ function startFeedbackScheduler() {
     } catch (err) {
       console.error('[feedback-sender] Scan error:', err.message);
     }
-  }, 10 * 60 * 1000); // every 10 minutes
+  }, 10 * 60 * 1000);
 
   console.log('📣 Feedback scheduler started — sends 2 hours after table freed');
 }
-
-
 
 // ============================================================================
 // SUBSCRIPTION / FEATURE FLAGS
