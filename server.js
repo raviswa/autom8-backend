@@ -78,6 +78,15 @@
 //              google_product_category: '5765' (Food Items)
 //            Also ensured description fallback is non-empty ('Freshly prepared')
 //            as Meta rejects blank description on App-source products.
+//  Fix 20 — pushMenuToMeta + avail-toggle: reverted method from 'CREATE' back
+//            to 'UPDATE' (Fix 17 caused regressions). method:'CREATE' with
+//            allow_upsert:true in the App-type data source creates a NEW product
+//            record on every batch push instead of updating the existing one,
+//            causing duplicate "issues" entries that accumulate (14→24→81).
+//            'UPDATE' correctly patches existing records in-place and silently
+//            skips any retailer_id not yet in the App source (no duplicates).
+//            The brand/gpc/condition fields from Fix 19 are retained so products
+//            that DO exist in the App source satisfy Meta's field validator.
 //  Fix 18 — POST /api/menu/upload: newly inserted rows defaulted to
 //            is_available=null/false because the menuItem payload only set
 //            is_available when isStocked===false. Fixed: always write
@@ -768,8 +777,8 @@ app.put('/api/menu-items/:id/availability', authenticateToken, getRestaurantId, 
             body: JSON.stringify({
               allow_upsert: true,
               requests: [{
-                // Fix 17: CREATE + allow_upsert:true = true upsert (creates if absent, updates if present)
-                method:      'CREATE',
+                // Fix 20: reverted to UPDATE — CREATE caused duplicate entries per push
+                method:      'UPDATE',
                 retailer_id: data.retailer_id,
                 data: {
                   name:         data.name,
@@ -1289,6 +1298,11 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
 // PUSH DB → META CATALOG (Fix 11)
 // ============================================================================
 
+// Throttle guard: at most one Meta push per restaurant per 60 seconds.
+// Prevents the slot scheduler (fires every 60s) + upload + avail-toggle from
+// all hammering the Meta batch API simultaneously and creating duplicates.
+const _metaPushLastRun = new Map(); // restaurantId → timestamp ms
+
 async function pushMenuToMeta(restaurantId) {
   const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
   const META_CATALOG_ID   = process.env.META_CATALOG_ID;
@@ -1296,6 +1310,15 @@ async function pushMenuToMeta(restaurantId) {
     console.warn('[meta-push] Skipped — META_ACCESS_TOKEN or META_CATALOG_ID not set');
     return { success: false };
   }
+
+  // Throttle: skip if last push for this restaurant was < 55 seconds ago
+  const lastRun = _metaPushLastRun.get(restaurantId) || 0;
+  const elapsed = Date.now() - lastRun;
+  if (elapsed < 55_000) {
+    console.log(`[meta-push] Throttled for ${restaurantId} — last push ${Math.round(elapsed/1000)}s ago, skipping`);
+    return { success: true, skipped: true };
+  }
+  _metaPushLastRun.set(restaurantId, Date.now());
 
   const { data: items, error } = await supabaseAdmin
     .from('menu_items')
@@ -1314,13 +1337,15 @@ async function pushMenuToMeta(restaurantId) {
   for (let i = 0; i < items.length; i += BATCH_SIZE) {
     const batch    = items.slice(i, i + BATCH_SIZE);
 
-    // Fix 17: use method:'CREATE' with allow_upsert:true — this is a true
-    // upsert at the Meta level: creates the product if it doesn't exist in the
-    // App catalog, updates it if it does. method:'UPDATE' alone silently fails
-    // for products not yet in the App source, causing "14 products have issues"
-    // in Commerce Manager even though the batch API returns 200.
+    // Fix 17 reverted (Fix 20): method:'CREATE' with allow_upsert:true created
+    // duplicate product entries in the Munafe App source on every push, causing
+    // the issue count to accumulate (14→24→81). Reverted to method:'UPDATE'
+    // which correctly updates existing products in-place. Products that genuinely
+    // don't exist in the App source will be silently skipped (not duplicated).
+    // brand + google_product_category + condition fields are kept from Fix 19
+    // to satisfy Meta's App source field validator for products that do exist.
     const requests = batch.map(item => ({
-      method:      'CREATE',
+      method:      'UPDATE',
       retailer_id: item.retailer_id,
       data: {
         name:         item.name,
