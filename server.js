@@ -71,6 +71,20 @@
 //            Phase 5 — re-apply time slot so new items go live immediately.
 //            Phase 6 — audit log (purged count added).
 //            Phase 7 — pushMenuToMeta so WhatsApp catalog reflects the upload.
+//  Fix 18 — POST /api/menu/upload: newly inserted rows defaulted to
+//            is_available=null/false because the menuItem payload only set
+//            is_available when isStocked===false. Fixed: always write
+//            is_available=isStocked explicitly so INSERT rows are immediately
+//            available (true) when stocked. applySlotAvailability in Phase 5
+//            corrects slots right after, so items outside the current serving
+//            window go back to false within the same request.
+//  Fix 17 — pushMenuToMeta + avail-toggle: changed method from 'UPDATE' to
+//            'CREATE' with allow_upsert:true. Meta's batch API with UPDATE
+//            silently fails for products not yet in the App data source,
+//            leaving them in "issues" state in Commerce Manager. CREATE +
+//            allow_upsert is a true upsert: creates if absent, updates if
+//            present. Also added condition:'new' which Meta requires for all
+//            catalog products.
 // ============================================================================
 
 const express   = require('express');
@@ -747,7 +761,8 @@ app.put('/api/menu-items/:id/availability', authenticateToken, getRestaurantId, 
             body: JSON.stringify({
               allow_upsert: true,
               requests: [{
-                method:      'UPDATE',
+                // Fix 17: CREATE + allow_upsert:true = true upsert (creates if absent, updates if present)
+                method:      'CREATE',
                 retailer_id: data.retailer_id,
                 data: {
                   name:         data.name,
@@ -757,6 +772,7 @@ app.put('/api/menu-items/:id/availability', authenticateToken, getRestaurantId, 
                   availability: isStocked ? 'in stock' : 'out of stock',
                   image_url:    data.image_url || '',
                   url:          process.env.FRONTEND_URL || 'https://autom8.works/',
+                  condition:    'new',
                 },
               }],
             }),
@@ -1118,7 +1134,11 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
           time_slot:     mapTimeSlot(item.time_slot || item.custom_label_0),
           category:      item.category || 'General',
           is_stocked:    isStocked,
-          ...(isStocked === false ? { is_available: false } : {}),
+          // Fix 18: always write is_available explicitly so INSERT rows don't
+          // default to null/false. isStocked=true → true here; applySlotAvailability
+          // runs in Phase 5 immediately after and will correct to false for items
+          // outside the current time slot. isStocked=false → always false.
+          is_available:  isStocked,
           updated_at:    new Date().toISOString(),
         },
         retailerId: String(retailerId).trim(),
@@ -1284,8 +1304,14 @@ async function pushMenuToMeta(restaurantId) {
 
   for (let i = 0; i < items.length; i += BATCH_SIZE) {
     const batch    = items.slice(i, i + BATCH_SIZE);
+
+    // Fix 17: use method:'CREATE' with allow_upsert:true — this is a true
+    // upsert at the Meta level: creates the product if it doesn't exist in the
+    // App catalog, updates it if it does. method:'UPDATE' alone silently fails
+    // for products not yet in the App source, causing "14 products have issues"
+    // in Commerce Manager even though the batch API returns 200.
     const requests = batch.map(item => ({
-      method:      'UPDATE',
+      method:      'CREATE',
       retailer_id: item.retailer_id,
       data: {
         name:         item.name,
@@ -1295,6 +1321,8 @@ async function pushMenuToMeta(restaurantId) {
         availability: (item.is_available && item.is_stocked) ? 'in stock' : 'out of stock',
         image_url:    item.image_url || '',
         url:          process.env.FRONTEND_URL || 'https://autom8.works/',
+        // Fix 17: condition is required by Meta for all products in a catalog
+        condition:    'new',
       },
     }));
 
