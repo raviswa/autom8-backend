@@ -2865,6 +2865,66 @@ app.get('/api/catalog/feed', async (req, res) => {
   }
 });
 
+// ── GET /api/catalog/feed/template ──────────────────────────────────────────
+// Returns the current live catalog as a manager-friendly .xlsx download.
+// The "Download template" button in the Manager Portal calls this endpoint
+// so the manager always starts from the actual live data, not dummy rows.
+// No auth required — the file contains no sensitive data.
+app.get('/api/catalog/feed/template', async (req, res) => {
+  try {
+    const restaurantId = req.query.restaurant_id
+      || process.env.DEFAULT_RESTAURANT_ID
+      || '46fb9b9e-431a-43c9-9edb-d316b0fef216';
+
+    const { data: rawItems, error } = await supabaseAdmin
+      .from('menu_items')
+      .select('retailer_id, name, description, price, image_url, time_slot, is_stocked, is_available')
+      .eq('restaurant_id', restaurantId)
+      .not('retailer_id', 'is', null)
+      .order('time_slot', { ascending: true })
+      .order('name',      { ascending: true });
+
+    if (error) throw error;
+    if (!rawItems || rawItems.length === 0)
+      return res.status(404).json({ error: 'No menu items found' });
+
+    // Deduplicate by retailer_id — same logic as the CSV feed
+    const seen  = new Set();
+    const items = rawItems.filter(item => {
+      if (seen.has(item.retailer_id)) return false;
+      seen.add(item.retailer_id);
+      return true;
+    });
+
+    // Build CSV-style data that the frontend SheetJS will receive as JSON
+    // Columns match exactly what mapExcelRowToMenuItem() in ManagerPortal.jsx expects:
+    //   id, title, description, price (number), custom_label_0, image_link, is_available
+    const SLOT_LABEL = {
+      morning_tiffin: 'Morning Tiffin',
+      lunch:          'Lunch',
+      evening_snacks: 'Evening Snacks',
+      dinner_tiffin:  'Dinner Tiffin',
+      all:            'All Day',
+    };
+
+    const rows = items.map(item => ({
+      id:            item.retailer_id,
+      title:         item.name        || '',
+      description:   item.description || '',
+      price:         Number(item.price) || 0,
+      custom_label_0: SLOT_LABEL[item.time_slot] || 'All Day',
+      image_link:    item.image_url   || '',
+      is_available:  (item.is_stocked !== false && item.is_available !== false) ? 'TRUE' : 'FALSE',
+    }));
+
+    res.json({ success: true, items: rows, total: rows.length });
+    console.log(`[catalog-template] ✅ Served ${rows.length} items for restaurant ${restaurantId}`);
+  } catch (err) {
+    console.error('[catalog-template] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ============================================================================
 // WEBSOCKET
 // ============================================================================
