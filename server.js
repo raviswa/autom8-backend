@@ -78,15 +78,37 @@
 //              google_product_category: '5765' (Food Items)
 //            Also ensured description fallback is non-empty ('Freshly prepared')
 //            as Meta rejects blank description on App-source products.
+//  Fix 22 — GET /api/catalog/feed: serves a Meta-compatible CSV product feed
+//            directly from the Supabase menu_items table. Point all Data file
+//            sources in Meta Commerce Manager to this URL:
+//              https://autom8-backend-production.up.railway.app/api/catalog/feed
+//            Meta crawls it hourly and updates the WhatsApp catalog customers
+//            see automatically. Columns: id, title, description, availability,
+//            condition, price (e.g. "50.00 INR"), link, image_link, brand,
+//            google_product_category (5765 = Food Items), custom_label_0 (slot).
+//            No auth — Meta's crawler cannot send Bearer tokens.
+//  Fix 21 — pushMenuToMeta disabled entirely: the batch API was updating the
+//            Munafe App data source, which is NOT what powers the WhatsApp
+//            catalog customers see. The customer-facing catalog is driven by
+//            6 Data file (scheduled upload) sources. Every pushMenuToMeta call
+//            created duplicate product entries in the App source with no
+//            customer benefit, inflating the issue count (14→24→81→162→219+).
+//            All 3 call sites (slot scheduler, menu upload, avail-toggle) are
+//            commented out. The function is kept for when the correct feed
+//            update mechanism is identified and re-enabled.
 //  Fix 20 — pushMenuToMeta + avail-toggle: reverted method from 'CREATE' back
 //            to 'UPDATE' (Fix 17 caused regressions). method:'CREATE' with
 //            allow_upsert:true in the App-type data source creates a NEW product
 //            record on every batch push instead of updating the existing one,
-//            causing duplicate "issues" entries that accumulate (14→24→81).
+//            causing duplicate "issues" entries that accumulate (14→24→81→162).
 //            'UPDATE' correctly patches existing records in-place and silently
 //            skips any retailer_id not yet in the App source (no duplicates).
 //            The brand/gpc/condition fields from Fix 19 are retained so products
 //            that DO exist in the App source satisfy Meta's field validator.
+//            Also added a 55-second in-process throttle guard (_metaPushLastRun
+//            Map) so rapid-fire callers (slot scheduler + upload + avail-toggle
+//            all within the same second) only result in one actual Meta API call
+//            per restaurant per minute.
 //  Fix 18 — POST /api/menu/upload: newly inserted rows defaulted to
 //            is_available=null/false because the menuItem payload only set
 //            is_available when isStocked===false. Fixed: always write
@@ -417,9 +439,13 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
     if (error) throw error;
     console.log(`  ✅ All items set unavailable (closed hours)`);
 
-    pushMenuToMeta(restaurantId).catch(e =>
-      console.error(`[slot] Meta push failed for ${restaurantId} (closed):`, e.message)
-    );
+    // Fix 21: pushMenuToMeta disabled — batch API targets the wrong data source.
+    // The WhatsApp catalog customers see is driven by the Data file feed URLs,
+    // not the Munafe App source. Calling pushMenuToMeta was creating duplicate
+    // product records in the App source (162→219 issues) with no customer impact.
+    // pushMenuToMeta(restaurantId).catch(e =>
+    //   console.error(`[slot] Meta push failed for ${restaurantId} (closed):`, e.message)
+    // );
 
     return { available: 0, unavailable: 'all' };
   }
@@ -451,9 +477,10 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
 
   console.log(`  ✅ Activated: ${activated?.length ?? 0} | Deactivated: ${deactivated?.length ?? 0}`);
 
-  pushMenuToMeta(restaurantId).catch(e =>
-    console.error(`[slot] Meta push failed for ${restaurantId} (slot=${slotDbValue}):`, e.message)
-  );
+  // Fix 21: pushMenuToMeta disabled — see comment above.
+  // pushMenuToMeta(restaurantId).catch(e =>
+  //   console.error(`[slot] Meta push failed for ${restaurantId} (slot=${slotDbValue}):`, e.message)
+  // );
 
   return { slot: slotDbValue, available: activated?.length ?? 0, unavailable: deactivated?.length ?? 0 };
 }
@@ -1281,10 +1308,13 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
 
     console.log(`[menu/upload] ✅ ${upserted} upserted, ${skipped} skipped, ${purged} purged for restaurant ${req.restaurant_id}`);
 
-    // ── Phase 7: Push full catalog to Meta WhatsApp ───────────────────────────
-    pushMenuToMeta(req.restaurant_id).catch(err =>
-      console.error('[menu/upload] Meta push failed (non-fatal):', err.message)
-    );
+    // ── Phase 7: Meta push disabled (Fix 21) ─────────────────────────────────
+    // pushMenuToMeta was updating the wrong data source (Munafe App source)
+    // instead of the Data file feeds that power the WhatsApp catalog.
+    // Re-enable once the correct feed URL update mechanism is implemented.
+    // pushMenuToMeta(req.restaurant_id).catch(err =>
+    //   console.error('[menu/upload] Meta push failed (non-fatal):', err.message)
+    // );
 
     res.json(response);
 
@@ -2604,6 +2634,113 @@ app.get('/api/restaurant/default', async (req, res) => {
     res.json({ restaurant_id: restaurants[0].id });
   } catch (err) {
     console.error('[GET /api/restaurant/default]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// META CATALOG FEED ENDPOINT  (Fix 22)
+// Serves a Meta-compatible CSV product feed from the Supabase menu_items table.
+// Point all Data file sources in Meta Commerce Manager to:
+//   https://autom8-backend-production.up.railway.app/api/catalog/feed?restaurant_id=<id>
+// Meta will crawl this URL on its scheduled interval (hourly) and update the
+// WhatsApp catalog customers see automatically.
+// No auth required — Meta's crawler has no way to send a Bearer token.
+// ============================================================================
+
+app.get('/api/catalog/feed', async (req, res) => {
+  try {
+    const restaurantId = req.query.restaurant_id
+      || process.env.DEFAULT_RESTAURANT_ID
+      || '46fb9b9e-431a-43c9-9edb-d316b0fef216';
+
+    const { data: items, error } = await supabaseAdmin
+      .from('menu_items')
+      .select('retailer_id, name, description, price, image_url, time_slot, is_stocked, is_available, category')
+      .eq('restaurant_id', restaurantId)
+      .not('retailer_id', 'is', null)
+      .order('time_slot', { ascending: true })
+      .order('name',      { ascending: true });
+
+    if (error) throw error;
+    if (!items || items.length === 0) {
+      return res.status(404).json({ error: 'No menu items found for this restaurant' });
+    }
+
+    const baseUrl = process.env.FRONTEND_URL || 'https://autom8.works/';
+
+    // Meta CSV feed format — required columns:
+    // id, title, description, availability, condition, price, link, image_link,
+    // brand, google_product_category
+    const csvHeader = [
+      'id',
+      'title',
+      'description',
+      'availability',
+      'condition',
+      'price',
+      'link',
+      'image_link',
+      'brand',
+      'google_product_category',
+      'custom_label_0',
+    ].join(',');
+
+    const escCsv = (val) => {
+      const s = String(val || '').replace(/"/g, '""');
+      return /[,"
+
+]/.test(s) ? `"${s}"` : s;
+    };
+
+    const rows = items.map(item => {
+      // Meta availability: must be exactly "in stock" or "out of stock"
+      const availability = (item.is_available && item.is_stocked)
+        ? 'in stock'
+        : 'out of stock';
+
+      // Price format for CSV feed: "50.00 INR" (amount + space + currency)
+      const priceFormatted = `${(item.price || 0).toFixed(2)} INR`;
+
+      // Use image_url if present, otherwise a placeholder that won't break Meta
+      const imageUrl = item.image_url || '';
+
+      // custom_label_0 = time slot (human-readable for Meta's custom label)
+      const slotLabel = {
+        morning_tiffin: 'Morning Tiffin',
+        lunch:          'Lunch',
+        evening_snacks: 'Evening Snacks',
+        dinner_tiffin:  'Dinner Tiffin',
+        all:            'All Day',
+      }[item.time_slot] || 'All Day';
+
+      return [
+        escCsv(item.retailer_id),
+        escCsv(item.name),
+        escCsv(item.description || 'Freshly prepared'),
+        escCsv(availability),
+        'new',
+        escCsv(priceFormatted),
+        escCsv(baseUrl),
+        escCsv(imageUrl),
+        'Munafe',
+        '5765',   // Food Items (Food, Beverages & Tobacco > Food Items)
+        escCsv(slotLabel),
+      ].join(',');
+    });
+
+    const csv = [csvHeader, ...rows].join('\n');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'inline; filename="catalog_feed.csv"');
+    // Allow Meta's crawler to cache for up to 1 hour
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.send(csv);
+
+    console.log(`[catalog-feed] ✅ Served ${items.length} items for restaurant ${restaurantId}`);
+
+  } catch (err) {
+    console.error('[catalog-feed] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
