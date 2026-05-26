@@ -53,6 +53,15 @@
 //              • mapping item.id → retailer_id in the inserted record
 //              • switching onConflict to 'restaurant_id,retailer_id'
 //              • logging per-row errors to Railway so skip reason is visible
+//  Fix 15 — POST /api/menu/upload: The table has NO unique constraint on
+//            (restaurant_id, retailer_id). The actual constraint is on
+//            (restaurant_id, meta_product_id). Changed from .upsert() to
+//            explicit lookup → update or insert strategy:
+//              • SELECT existing row by restaurant_id + retailer_id
+//              • If found → UPDATE by id
+//              • If not found → INSERT new row
+//            This eliminates the "violates unique constraint" error that
+//            caused 0 upserted / 29 skipped on every upload.
 // ============================================================================
 
 const express   = require('express');
@@ -1027,7 +1036,7 @@ function mapTimeSlot(raw) {
 }
 
 // ============================================================================
-// MENU UPLOAD ENDPOINT  (Fix 12 + Fix 13)
+// MENU UPLOAD ENDPOINT  (Fix 12 + Fix 13 + Fix 15)
 // ============================================================================
 
 app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res) => {
@@ -1048,8 +1057,7 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
         const itemName = item.name || item.title;
 
         // Fix 14: Excel 'id' column (M001, L001 etc.) is the retailer_id (catalog SKU),
-        // NOT the UUID primary key. The old code put 'M001' into the UUID id column,
-        // which Supabase rejected on every row — causing 0 upserted / 29 skipped.
+        // NOT the UUID primary key.
         const retailerId = item.retailer_id || item.id;
 
         if (!retailerId || !itemName) {
@@ -1075,7 +1083,7 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
           isStocked = raw === 'true' || raw === '1' || raw === 'yes';
         }
 
-        const menuItem = {
+        const menuItemData = {
           restaurant_id: req.restaurant_id,
           // Fix 14: store Excel 'id' as retailer_id (the catalog SKU), not as UUID pk
           retailer_id:   String(retailerId).trim(),
@@ -1095,20 +1103,57 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
           updated_at:    new Date().toISOString(),
         };
 
-        // Fix 14: conflict on restaurant_id + retailer_id (not the UUID id column)
-        const { error: upsertError } = await supabaseAdmin
-          .from('menu_items')
-          .upsert(menuItem, { onConflict: 'restaurant_id,retailer_id', ignoreDuplicates: false });
+        // Fix 15: NO unique constraint on (restaurant_id, retailer_id) exists.
+        // The actual constraint is (restaurant_id, meta_product_id).
+        // Strategy: lookup existing row by retailer_id, then UPDATE or INSERT.
 
-        if (upsertError) {
-          console.warn(`[menu/upload] SKIP ${retailerId}: upsert error — ${upsertError.message}`);
-          errors.push({ row_id: retailerId, error: upsertError.message });
+        const { data: existing, error: lookupError } = await supabaseAdmin
+          .from('menu_items')
+          .select('id')
+          .eq('restaurant_id', req.restaurant_id)
+          .eq('retailer_id', String(retailerId).trim())
+          .maybeSingle();
+
+        if (lookupError) {
+          console.warn(`[menu/upload] SKIP ${retailerId}: lookup error — ${lookupError.message}`);
+          errors.push({ row_id: retailerId, error: lookupError.message });
           skipped++;
           continue;
         }
 
-        console.log(`[menu/upload] ✅ upserted ${retailerId} — ${String(itemName).trim()}`);
-        upserted++;
+        if (existing) {
+          // Row exists — UPDATE by id
+          const { error: updateError } = await supabaseAdmin
+            .from('menu_items')
+            .update(menuItemData)
+            .eq('id', existing.id);
+
+          if (updateError) {
+            console.warn(`[menu/upload] SKIP ${retailerId}: update error — ${updateError.message}`);
+            errors.push({ row_id: retailerId, error: updateError.message });
+            skipped++;
+            continue;
+          }
+
+          console.log(`[menu/upload] ✅ updated ${retailerId} — ${String(itemName).trim()}`);
+          upserted++;
+        } else {
+          // Row does not exist — INSERT new
+          const { error: insertError } = await supabaseAdmin
+            .from('menu_items')
+            .insert(menuItemData);
+
+          if (insertError) {
+            console.warn(`[menu/upload] SKIP ${retailerId}: insert error — ${insertError.message}`);
+            errors.push({ row_id: retailerId, error: insertError.message });
+            skipped++;
+            continue;
+          }
+
+          console.log(`[menu/upload] ✅ inserted ${retailerId} — ${String(itemName).trim()}`);
+          upserted++;
+        }
+
       } catch (itemError) {
         console.warn(`[menu/upload] SKIP row (exception): ${itemError.message}`);
         errors.push({ row_id: item.id, error: itemError.message });
