@@ -2688,9 +2688,7 @@ app.get('/api/catalog/feed', async (req, res) => {
 
     const escCsv = (val) => {
       const s = String(val || '').replace(/"/g, '""');
-      return /[,"
-
-]/.test(s) ? `"${s}"` : s;
+      return /[,"\n\r]/.test(s) ? `"${s}"` : s;
     };
 
     const rows = items.map(item => {
