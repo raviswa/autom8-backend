@@ -45,6 +45,14 @@
 //            silently (0 upserted, N skipped). Also added mapTimeSlot() to
 //            normalise 'Morning Tiffin', 'Dinner' etc. from custom_label_0
 //            into the snake_case DB values the slot scheduler expects.
+//  Fix 14 — POST /api/menu/upload: Excel 'id' column (M001, L001 etc.) is the
+//            retailer_id (catalog SKU), NOT the UUID primary key. Upsert was
+//            using onConflict:'restaurant_id,id' which tried to insert 'M001'
+//            into the UUID id column — Supabase rejected every row with a type
+//            error, causing 0 upserted / 29 skipped. Fixed by:
+//              • mapping item.id → retailer_id in the inserted record
+//              • switching onConflict to 'restaurant_id,retailer_id'
+//              • logging per-row errors to Railway so skip reason is visible
 // ============================================================================
 
 const express   = require('express');
@@ -1039,15 +1047,24 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
         // Fix 13: Excel template uses 'title' not 'name' — accept both
         const itemName = item.name || item.title;
 
-        if (!item.id || !itemName) {
-          errors.push({ row_id: item.id, error: `Missing id or name/title (got id=${item.id}, name=${item.name}, title=${item.title})` });
+        // Fix 14: Excel 'id' column (M001, L001 etc.) is the retailer_id (catalog SKU),
+        // NOT the UUID primary key. The old code put 'M001' into the UUID id column,
+        // which Supabase rejected on every row — causing 0 upserted / 29 skipped.
+        const retailerId = item.retailer_id || item.id;
+
+        if (!retailerId || !itemName) {
+          const msg = `Missing retailer_id/id or name/title (id=${item.id}, retailer_id=${item.retailer_id}, name=${item.name}, title=${item.title})`;
+          console.warn(`[menu/upload] SKIP row: ${msg}`);
+          errors.push({ row_id: retailerId || item.id, error: msg });
           skipped++;
           continue;
         }
 
         const price = parseFloat(item.price) || 0;
         if (price <= 0) {
-          errors.push({ row_id: item.id, error: `Invalid price: ${item.price}` });
+          const msg = `Invalid price: ${item.price}`;
+          console.warn(`[menu/upload] SKIP ${retailerId}: ${msg}`);
+          errors.push({ row_id: retailerId, error: msg });
           skipped++;
           continue;
         }
@@ -1060,7 +1077,8 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
 
         const menuItem = {
           restaurant_id: req.restaurant_id,
-          id:            item.id,
+          // Fix 14: store Excel 'id' as retailer_id (the catalog SKU), not as UUID pk
+          retailer_id:   String(retailerId).trim(),
           name:          String(itemName).trim(),
           description:   String(item.description || '').trim(),
           price,
@@ -1077,18 +1095,22 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
           updated_at:    new Date().toISOString(),
         };
 
+        // Fix 14: conflict on restaurant_id + retailer_id (not the UUID id column)
         const { error: upsertError } = await supabaseAdmin
           .from('menu_items')
-          .upsert(menuItem, { onConflict: 'restaurant_id,id', ignoreDuplicates: false });
+          .upsert(menuItem, { onConflict: 'restaurant_id,retailer_id', ignoreDuplicates: false });
 
         if (upsertError) {
-          errors.push({ row_id: item.id, error: upsertError.message });
+          console.warn(`[menu/upload] SKIP ${retailerId}: upsert error — ${upsertError.message}`);
+          errors.push({ row_id: retailerId, error: upsertError.message });
           skipped++;
           continue;
         }
 
+        console.log(`[menu/upload] ✅ upserted ${retailerId} — ${String(itemName).trim()}`);
         upserted++;
       } catch (itemError) {
+        console.warn(`[menu/upload] SKIP row (exception): ${itemError.message}`);
         errors.push({ row_id: item.id, error: itemError.message });
         skipped++;
       }
