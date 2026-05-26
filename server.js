@@ -71,6 +71,13 @@
 //            Phase 5 — re-apply time slot so new items go live immediately.
 //            Phase 6 — audit log (purged count added).
 //            Phase 7 — pushMenuToMeta so WhatsApp catalog reflects the upload.
+//  Fix 19 — pushMenuToMeta + avail-toggle: Meta App source validator requires
+//            brand and google_product_category fields — omitting them causes
+//            "products have issues" in Commerce Manager. Added:
+//              brand: 'Munafe'
+//              google_product_category: '5765' (Food Items)
+//            Also ensured description fallback is non-empty ('Freshly prepared')
+//            as Meta rejects blank description on App-source products.
 //  Fix 18 — POST /api/menu/upload: newly inserted rows defaulted to
 //            is_available=null/false because the menuItem payload only set
 //            is_available when isStocked===false. Fixed: always write
@@ -766,13 +773,15 @@ app.put('/api/menu-items/:id/availability', authenticateToken, getRestaurantId, 
                 retailer_id: data.retailer_id,
                 data: {
                   name:         data.name,
-                  description:  data.description || '',
+                  description:  data.description || 'Freshly prepared',
                   price:        Math.round((data.price || 0) * 100),
                   currency:     'INR',
                   availability: isStocked ? 'in stock' : 'out of stock',
                   image_url:    data.image_url || '',
                   url:          process.env.FRONTEND_URL || 'https://autom8.works/',
                   condition:    'new',
+                  brand:                   'Munafe',
+                  google_product_category: '5765',
                 },
               }],
             }),
@@ -1315,14 +1324,18 @@ async function pushMenuToMeta(restaurantId) {
       retailer_id: item.retailer_id,
       data: {
         name:         item.name,
-        description:  item.description || '',
+        description:  item.description || 'Freshly prepared',
         price:        Math.round((item.price || 0) * 100),
         currency:     'INR',
         availability: (item.is_available && item.is_stocked) ? 'in stock' : 'out of stock',
         image_url:    item.image_url || '',
         url:          process.env.FRONTEND_URL || 'https://autom8.works/',
-        // Fix 17: condition is required by Meta for all products in a catalog
         condition:    'new',
+        // Fix 19: brand + google_product_category required by Meta App source
+        // validator — omitting them causes "products have issues" in Commerce Manager.
+        // 5765 = Food Items (Food, Beverages & Tobacco > Food Items)
+        brand:                   'Munafe',
+        google_product_category: '5765',
       },
     }));
 
