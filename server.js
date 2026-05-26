@@ -78,6 +78,15 @@
 //              google_product_category: '5765' (Food Items)
 //            Also ensured description fallback is non-empty ('Freshly prepared')
 //            as Meta rejects blank description on App-source products.
+//  Fix 23 — GET /api/catalog/feed: deduplicate by retailer_id in the feed
+//            response (first occurrence wins) so Meta doesn't reject the feed
+//            for duplicate ids. Also added triggerMetaFeedRefetch() which calls
+//            POST /{META_FEED_ID}/uploads to tell Meta to crawl the feed URL
+//            immediately after an Excel upload instead of waiting up to 1 hour.
+//            Requires META_FEED_ID env var (get from Commerce Manager feed URL).
+//            Also added Phase 0 to POST /api/menu/upload: removes duplicate
+//            retailer_id rows from Supabase (keeping the newest) before the
+//            main sync loop, so the DB stays clean after every upload.
 //  Fix 22 — GET /api/catalog/feed: serves a Meta-compatible CSV product feed
 //            directly from the Supabase menu_items table. Point all Data file
 //            sources in Meta Commerce Manager to this URL:
@@ -1121,6 +1130,44 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
     let upserted = 0, skipped = 0, purged = 0;
     const errors = [];
 
+    // ── Phase 0: Remove duplicate retailer_id rows already in DB ───────────────
+    // If the same retailer_id exists multiple times in menu_items (from previous
+    // buggy inserts), keep only the most recently updated row and delete the rest.
+    // This prevents the feed from serving duplicate ids that Meta rejects.
+    try {
+      const { data: allRows } = await supabaseAdmin
+        .from('menu_items')
+        .select('id, retailer_id, updated_at')
+        .eq('restaurant_id', req.restaurant_id)
+        .not('retailer_id', 'is', null)
+        .order('updated_at', { ascending: false });
+
+      if (allRows) {
+        const seen = new Map(); // retailer_id → first (newest) id
+        const dupIds = [];
+        for (const row of allRows) {
+          if (seen.has(row.retailer_id)) {
+            dupIds.push(row.id);  // older duplicate — mark for deletion
+          } else {
+            seen.set(row.retailer_id, row.id);
+          }
+        }
+        if (dupIds.length > 0) {
+          const { error: dupErr } = await supabaseAdmin
+            .from('menu_items')
+            .delete()
+            .in('id', dupIds);
+          if (dupErr) {
+            console.warn('[menu/upload] Phase 0 dedup failed (non-fatal):', dupErr.message);
+          } else {
+            console.log(`[menu/upload] 🧹 Phase 0: removed ${dupIds.length} duplicate retailer_id row(s)`);
+          }
+        }
+      }
+    } catch (dedupErr) {
+      console.warn('[menu/upload] Phase 0 dedup exception (non-fatal):', dedupErr.message);
+    }
+
     // ── Phase 1: Parse & validate every row first ─────────────────────────────
     // Build the list of valid retailer_ids BEFORE touching the DB.
     // This is the safety gate: if the spreadsheet is malformed and yields 0
@@ -1308,13 +1355,13 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
 
     console.log(`[menu/upload] ✅ ${upserted} upserted, ${skipped} skipped, ${purged} purged for restaurant ${req.restaurant_id}`);
 
-    // ── Phase 7: Meta push disabled (Fix 21) ─────────────────────────────────
-    // pushMenuToMeta was updating the wrong data source (Munafe App source)
-    // instead of the Data file feeds that power the WhatsApp catalog.
-    // Re-enable once the correct feed URL update mechanism is implemented.
-    // pushMenuToMeta(req.restaurant_id).catch(err =>
-    //   console.error('[menu/upload] Meta push failed (non-fatal):', err.message)
-    // );
+    // ── Phase 7: Trigger Meta to re-fetch the catalog feed immediately ──────────
+    // The /api/catalog/feed endpoint serves the live Supabase data.
+    // triggerMetaFeedRefetch() tells Meta to crawl it now rather than waiting
+    // for the next hourly scheduled crawl.
+    triggerMetaFeedRefetch().catch(err =>
+      console.warn('[menu/upload] Meta feed trigger failed (non-fatal):', err.message)
+    );
 
     res.json(response);
 
@@ -1327,6 +1374,68 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
 // ============================================================================
 // PUSH DB → META CATALOG (Fix 11)
 // ============================================================================
+
+// ── Meta feed re-fetch trigger (Fix 23) ─────────────────────────────────────
+// After an Excel upload, call this to tell Meta to immediately re-crawl
+// the /api/catalog/feed URL instead of waiting up to 1 hour.
+// Uses the Meta Product Feed API: POST /{feed_id}/uploads
+// META_FEED_ID must be set in Railway env vars (get it from Commerce Manager
+// → Data sources → click your feed → the URL contains the feed ID).
+async function triggerMetaFeedRefetch() {
+  try {
+    const META_ACCESS_TOKEN   = process.env.META_ACCESS_TOKEN;
+    // META_DATA_SOURCE_ID: the numeric ID of your Data file source in Commerce Manager.
+    // Find it in the URL when you click a Data source:
+    //   .../data_sources/936316552566754?... → use 936316552566754
+    // Can also be set as META_FEED_ID for backward compat.
+    const META_DATA_SOURCE_ID = process.env.META_DATA_SOURCE_ID
+                             || process.env.META_FEED_ID
+                             || '936316552566754';   // default from known URL
+
+    if (!META_ACCESS_TOKEN) {
+      console.log('[meta-feed-trigger] Skipped — META_ACCESS_TOKEN not set');
+      return;
+    }
+
+    // First get the feed id that belongs to this data source
+    const feedsResp = await fetch(
+      `https://graph.facebook.com/v20.0/${META_DATA_SOURCE_ID}/feeds?access_token=${META_ACCESS_TOKEN}`
+    );
+    const feedsData = await feedsResp.json();
+
+    if (!feedsResp.ok || !feedsData.data?.length) {
+      // Fall back: try triggering directly on the data source id
+      console.log('[meta-feed-trigger] No feeds found via API, trying direct upload trigger...');
+      const directResp = await fetch(
+        `https://graph.facebook.com/v20.0/${META_DATA_SOURCE_ID}/uploads`,
+        { method: 'POST', headers: { Authorization: `Bearer ${META_ACCESS_TOKEN}` } }
+      );
+      const directResult = await directResp.json();
+      if (directResp.ok) {
+        console.log(`[meta-feed-trigger] ✅ Direct trigger succeeded: ${JSON.stringify(directResult)}`);
+      } else {
+        console.warn('[meta-feed-trigger] Direct trigger failed:', JSON.stringify(directResult).slice(0, 200));
+      }
+      return;
+    }
+
+    const feedId = feedsData.data[0].id;
+    console.log(`[meta-feed-trigger] Found feed id: ${feedId}`);
+
+    const resp = await fetch(
+      `https://graph.facebook.com/v20.0/${feedId}/uploads`,
+      { method: 'POST', headers: { Authorization: `Bearer ${META_ACCESS_TOKEN}` } }
+    );
+    const result = await resp.json();
+    if (resp.ok) {
+      console.log(`[meta-feed-trigger] ✅ Meta feed re-fetch triggered: upload_id=${result.id}`);
+    } else {
+      console.warn('[meta-feed-trigger] Failed:', JSON.stringify(result).slice(0, 200));
+    }
+  } catch (err) {
+    console.warn('[meta-feed-trigger] Non-fatal error:', err.message);
+  }
+}
 
 // Throttle guard: at most one Meta push per restaurant per 60 seconds.
 // Prevents the slot scheduler (fires every 60s) + upload + avail-toggle from
@@ -2654,7 +2763,7 @@ app.get('/api/catalog/feed', async (req, res) => {
       || process.env.DEFAULT_RESTAURANT_ID
       || '46fb9b9e-431a-43c9-9edb-d316b0fef216';
 
-    const { data: items, error } = await supabaseAdmin
+    const { data: rawItems, error } = await supabaseAdmin
       .from('menu_items')
       .select('retailer_id, name, description, price, image_url, time_slot, is_stocked, is_available, category')
       .eq('restaurant_id', restaurantId)
@@ -2663,9 +2772,22 @@ app.get('/api/catalog/feed', async (req, res) => {
       .order('name',      { ascending: true });
 
     if (error) throw error;
-    if (!items || items.length === 0) {
+    if (!rawItems || rawItems.length === 0) {
       return res.status(404).json({ error: 'No menu items found for this restaurant' });
     }
+
+    // Deduplicate by retailer_id — keep the first occurrence (Fix 23).
+    // Duplicates can exist in the DB when the same SKU was inserted twice
+    // before the unique-constraint-free upsert logic was in place.
+    const seen = new Set();
+    const items = rawItems.filter(item => {
+      if (seen.has(item.retailer_id)) {
+        console.warn(`[catalog-feed] Duplicate retailer_id ${item.retailer_id} skipped`);
+        return false;
+      }
+      seen.add(item.retailer_id);
+      return true;
+    });
 
     const baseUrl = process.env.FRONTEND_URL || 'https://autom8.works/';
 
