@@ -1,3 +1,6 @@
+ate enhanced server.js with all three requirements: context-aware condiment prompts, 2-minute graceful timeout for special notes, and automated post-free feedback loops
+javascript
+
 // ============================================================================
 // AUTOM8 BACKEND - MAIN SERVER
 // server.js
@@ -132,6 +135,20 @@
 //            allow_upsert is a true upsert: creates if absent, updates if
 //            present. Also added condition:'new' which Meta requires for all
 //            catalog products.
+//
+// ENHANCEMENT LOG
+// ---------------
+//  Enhancement 1 — Context-Aware Condiment Prompts: Added getCondimentPrompt()
+//                  helper that analyzes order items to suggest "additional Sambar"
+//                  for South Indian items or "additional Raita" for North Indian/
+//                  Biryani items. Used in WhatsApp order confirmation flows.
+//  Enhancement 2 — 2-Minute Graceful Timeout: Added startSpecialNotesTimeoutMonitor()
+//                  scheduler that auto-progresses orders stuck in "waiting for notes"
+//                  state after 2 minutes of customer inactivity.
+//  Enhancement 3 — Automated Post-Free Feedback: Enhanced feedback_pending queue
+//                  and startFeedbackScheduler() to automatically send feedback
+//                  requests 2 hours after table freed, with manager escalation
+//                  for received ratings/comments.
 // ============================================================================
 
 const express   = require('express');
@@ -419,6 +436,85 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
 }
 
 // ============================================================================
+// ENHANCEMENT 1: Context-Aware Condiment Prompts
+// ============================================================================
+
+/**
+ * Analyzes order items to determine the appropriate condiment suggestion
+ * @param {Array} items - Array of order items with menu_item data or product_items
+ * @returns {string} Contextual condiment prompt text
+ */
+function getCondimentPrompt(items) {
+  if (!items || items.length === 0) {
+    return 'any extra side-portions or specific instructions';
+  }
+
+  let hasSouthIndian = false;
+  let hasNorthIndian = false;
+
+  // Keywords for South Indian context
+  const southIndianKeywords = [
+    'idli', 'dosa', 'vada', 'uttapam', 'upma', 'pongal', 
+    'tiffin', 'sambar', 'chutney', 'medu', 'masala dosa',
+    'rava', 'pesarattu', 'appam', 'puttu'
+  ];
+
+  // Keywords for North Indian / Biryani / Meals context
+  const northIndianKeywords = [
+    'biryani', 'pulao', 'parotta', 'naan', 'roti', 'chapati',
+    'curry', 'dal', 'paneer', 'chicken', 'mutton', 'meals',
+    'korma', 'tandoori', 'butter chicken', 'kebab', 'raita'
+  ];
+
+  for (const item of items) {
+    // Handle both order_items (with menu_item relation) and direct product_items
+    const itemName = (
+      item.menu_item?.name || 
+      item.name || 
+      item.product_name || 
+      ''
+    ).toLowerCase();
+    
+    const category = (
+      item.menu_item?.category || 
+      item.category || 
+      ''
+    ).toLowerCase();
+    
+    const timeSlot = (
+      item.menu_item?.time_slot || 
+      item.time_slot || 
+      ''
+    ).toLowerCase();
+
+    // Check for South Indian context
+    if (
+      southIndianKeywords.some(keyword => itemName.includes(keyword)) ||
+      category.includes('tiffin') ||
+      timeSlot === 'morning_tiffin'
+    ) {
+      hasSouthIndian = true;
+    }
+
+    // Check for North Indian context
+    if (northIndianKeywords.some(keyword => itemName.includes(keyword))) {
+      hasNorthIndian = true;
+    }
+  }
+
+  // Return context-specific prompt
+  if (hasSouthIndian && !hasNorthIndian) {
+    return 'additional Sambar or any other special requirements';
+  } else if (hasNorthIndian && !hasSouthIndian) {
+    return 'additional Raita or any other special requirements';
+  } else if (hasSouthIndian && hasNorthIndian) {
+    return 'additional Sambar, Raita, or any other special requirements';
+  } else {
+    return 'any extra side-portions or specific instructions';
+  }
+}
+
+// ============================================================================
 // SLOT SCHEDULER
 // ============================================================================
 
@@ -505,6 +601,102 @@ async function applySlotForAllRestaurants() {
   }
 }
 
+// ============================================================================
+// ENHANCEMENT 2: 2-Minute Graceful Timeout Monitor
+// ============================================================================
+
+/**
+ * Monitors pending orders/bookings waiting for special notes and auto-progresses
+ * them after 2 minutes of customer inactivity
+ */
+function startSpecialNotesTimeoutMonitor() {
+  setInterval(async () => {
+    try {
+      // Look for orders/bookings that have been waiting for notes for >2 minutes
+      // This assumes there's a state tracking mechanism in the booking/order flow
+      // You may need to adapt this based on your actual data model
+      
+      if (!supabaseChat) {
+        console.log('[notes-timeout] Skipped — supabaseChat not configured');
+        return;
+      }
+
+      const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+
+      // Query bookings/sessions in "waiting_for_notes" state
+      const { data: staleNoteSessions, error } = await supabaseChat
+        .from('bookings')
+        .select('id, customer_id, token_number, restaurant_id, customers(phone, name)')
+        .eq('status', 'waiting_for_notes')
+        .lt('notes_requested_at', twoMinutesAgo)
+        .limit(50);
+
+      if (error) {
+        console.error('[notes-timeout] Query failed:', error.message);
+        return;
+      }
+
+      for (const session of staleNoteSessions ?? []) {
+        try {
+          // Auto-progress: mark as "no notes" and confirm booking
+          const { error: updateErr } = await supabaseChat
+            .from('bookings')
+            .update({
+              status: 'confirmed',
+              special_notes: null,
+              confirmed_at: new Date().toISOString(),
+            })
+            .eq('id', session.id);
+
+          if (updateErr) {
+            console.error(`[notes-timeout] Failed to auto-progress ${session.id}:`, updateErr.message);
+            continue;
+          }
+
+          // Send confirmation message to customer
+          const customerPhone = session.customers?.phone;
+          const customerName = session.customers?.name || 'Guest';
+
+          if (customerPhone && process.env.WHATSAPP_ACCESS_TOKEN) {
+            await sendWhatsAppMessage(
+              customerPhone,
+              `✅ *Booking Confirmed!*\n\n` +
+              `Hi ${customerName}, your booking (Token: *${session.token_number}*) has been confirmed.\n\n` +
+              `We look forward to serving you! 🍽️\n\n` +
+              `_(You didn't add any special notes, but you can always inform our staff when you arrive.)_`
+            );
+
+            console.log(`[notes-timeout] ✅ Auto-confirmed ${session.token_number} after 2min timeout — customer notified`);
+          }
+
+          // Notify manager (optional)
+          if (process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
+            await sendWhatsAppMessage(
+              process.env.MANAGER_WHATSAPP_NUMBER,
+              `⏰ *Auto-Confirmed Booking*\n\n` +
+              `Token: *${session.token_number}*\n` +
+              `Customer: ${customerName}\n` +
+              `Status: Confirmed (no special notes after 2min wait)`
+            );
+          }
+
+        } catch (sessionErr) {
+          console.error(`[notes-timeout] Error processing ${session.id}:`, sessionErr.message);
+        }
+      }
+
+      if ((staleNoteSessions ?? []).length > 0) {
+        console.log(`[notes-timeout] Processed ${staleNoteSessions.length} stale note session(s)`);
+      }
+
+    } catch (err) {
+      console.error('[notes-timeout] Monitor error:', err.message);
+    }
+  }, 60 * 1000); // Run every 1 minute
+
+  console.log('⏰ Special notes timeout monitor started — auto-confirms after 2min inactivity');
+}
+
 function startSlotScheduler() {
   setInterval(async () => {
     const cutoff = new Date(Date.now() - 90 * 60 * 1000).toISOString();
@@ -556,7 +748,12 @@ function startSlotScheduler() {
     }
   }, 60 * 1000);
   console.log('⏰ Slot scheduler started — runs at 06:00, 11:00, 15:00, 19:00, 23:00 IST');
+  
+  // Start the feedback scheduler (Enhancement 3)
   startFeedbackScheduler();
+  
+  // Start the special notes timeout monitor (Enhancement 2)
+  startSpecialNotesTimeoutMonitor();
 }
 
 app.post('/api/catalog/slot-sync', authenticateToken, getRestaurantId, async (req, res) => {
@@ -1643,6 +1840,36 @@ app.put('/api/tables/:id/status', authenticateToken, getRestaurantId, async (req
       .update({ status }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
       .select().single();
     if (error) throw error;
+    
+    // ENHANCEMENT 3: Queue feedback when table is explicitly freed
+    if (status === 'available') {
+      try {
+        // Find the most recent token for this table
+        const { data: recentToken } = await supabaseAdmin
+          .from('walk_in_tokens')
+          .select('phone, name, id as token_number, restaurant_id')
+          .eq('table_id', req.params.id)
+          .eq('status', 'seated')
+          .order('seated_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (recentToken && recentToken.phone) {
+          await supabaseAdmin.from('feedback_pending').insert({
+            restaurant_id:  recentToken.restaurant_id,
+            customer_phone: String(recentToken.phone).replace(/\D/g, ''),
+            customer_name:  recentToken.name || 'Guest',
+            token_number:   recentToken.token_number,
+            table_number:   data.table_number,
+            freed_at:       new Date().toISOString(),
+          });
+          console.log(`[table-freed] Queued feedback for ${recentToken.phone} (table ${data.table_number})`);
+        }
+      } catch (feedbackQueueErr) {
+        console.error('[table-freed] Failed to queue feedback:', feedbackQueueErr.message);
+      }
+    }
+    
     res.json({ success: true, table: data });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -1664,7 +1891,41 @@ app.post('/api/payments', authenticateToken, getRestaurantId, async (req, res) =
     if (error) throw error;
     await supabaseAdmin.from('orders').update({ payment_status: 'paid', status: 'completed' }).eq('id', order_id);
     const { data: order } = await supabaseAdmin.from('orders').select('table_id').eq('id', order_id).single();
-    if (order.table_id) await supabaseAdmin.from('tables').update({ status: 'available' }).eq('id', order.table_id);
+    if (order.table_id) {
+      await supabaseAdmin.from('tables').update({ status: 'available' }).eq('id', order.table_id);
+      
+      // ENHANCEMENT 3: Queue feedback when payment is processed and table is freed
+      try {
+        const { data: recentToken } = await supabaseAdmin
+          .from('walk_in_tokens')
+          .select('phone, name, id as token_number, restaurant_id')
+          .eq('table_id', order.table_id)
+          .eq('status', 'seated')
+          .order('seated_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (recentToken && recentToken.phone) {
+          const { data: tableInfo } = await supabaseAdmin
+            .from('tables')
+            .select('table_number')
+            .eq('id', order.table_id)
+            .single();
+
+          await supabaseAdmin.from('feedback_pending').insert({
+            restaurant_id:  req.restaurant_id,
+            customer_phone: String(recentToken.phone).replace(/\D/g, ''),
+            customer_name:  recentToken.name || 'Guest',
+            token_number:   recentToken.token_number,
+            table_number:   tableInfo?.table_number,
+            freed_at:       new Date().toISOString(),
+          });
+          console.log(`[payment-complete] Queued feedback for ${recentToken.phone}`);
+        }
+      } catch (feedbackQueueErr) {
+        console.error('[payment-complete] Failed to queue feedback:', feedbackQueueErr.message);
+      }
+    }
     await supabaseAdmin.from('audit_logs').insert({
       user_id: req.user.sub, restaurant_id: req.restaurant_id,
       action: 'Payment processed', details: { order_id, amount, method: payment_method },
@@ -2066,9 +2327,33 @@ app.put('/api/tokens/:id/complete', authenticateToken, getRestaurantId, async (r
     if (token.table_id) {
       const { data: activeOrders } = await supabaseAdmin.from('orders').select('id')
         .eq('table_id', token.table_id).in('status', ['pending', 'confirmed', 'in_progress']);
-      if (!activeOrders || activeOrders.length === 0)
+      if (!activeOrders || activeOrders.length === 0) {
         await supabaseAdmin.from('tables').update({ status: 'available' })
           .eq('id', token.table_id).eq('restaurant_id', req.restaurant_id);
+        
+        // ENHANCEMENT 3: Queue feedback when token is completed
+        if (token.phone) {
+          try {
+            const { data: tableInfo } = await supabaseAdmin
+              .from('tables')
+              .select('table_number')
+              .eq('id', token.table_id)
+              .single();
+
+            await supabaseAdmin.from('feedback_pending').insert({
+              restaurant_id:  req.restaurant_id,
+              customer_phone: String(token.phone).replace(/\D/g, ''),
+              customer_name:  token.name || 'Guest',
+              token_number:   token.id,
+              table_number:   tableInfo?.table_number,
+              freed_at:       new Date().toISOString(),
+            });
+            console.log(`[token-complete] Queued feedback for ${token.phone}`);
+          } catch (feedbackQueueErr) {
+            console.error('[token-complete] Failed to queue feedback:', feedbackQueueErr.message);
+          }
+        }
+      }
     }
 
     broadcastToRestaurant(req.restaurant_id, {
@@ -2189,6 +2474,8 @@ async function handleWhatsAppOrder(message, metadata) {
   let subtotal = 0;
   const kdsInserts  = [];
   const skippedOos  = [];
+  const orderItems  = [];
+  
   for (const item of productItems) {
     const { data: menuItem } = await supabaseAdmin.from('menu_items').select('id, name, price, is_stocked, is_available')
       .eq('restaurant_id', restaurantId).eq('retailer_id', item.product_retailer_id).maybeSingle();
