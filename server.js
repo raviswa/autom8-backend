@@ -53,15 +53,24 @@
 //              • mapping item.id → retailer_id in the inserted record
 //              • switching onConflict to 'restaurant_id,retailer_id'
 //              • logging per-row errors to Railway so skip reason is visible
-//  Fix 15 — POST /api/menu/upload: The table has NO unique constraint on
-//            (restaurant_id, retailer_id). The actual constraint is on
-//            (restaurant_id, meta_product_id). Changed from .upsert() to
-//            explicit lookup → update or insert strategy:
-//              • SELECT existing row by restaurant_id + retailer_id
-//              • If found → UPDATE by id
-//              • If not found → INSERT new row
-//            This eliminates the "violates unique constraint" error that
-//            caused 0 upserted / 29 skipped on every upload.
+//  Fix 15 — POST /api/menu/upload: no unique constraint exists on
+//            (restaurant_id, retailer_id) in the Supabase menu_items table, so
+//            .upsert() with any onConflict value throws:
+//            "there is no unique or exclusion constraint matching the ON CONFLICT
+//            specification". Fixed by replacing upsert with explicit
+//            SELECT → UPDATE (if row exists) or INSERT (if new), keyed on
+//            restaurant_id + retailer_id. No DB migration required.
+//  Fix 16 — POST /api/menu/upload: full catalog sync strategy:
+//            Phase 1 — parse & validate all rows, collect every retailer_id.
+//            Phase 2 — single SELECT fetches all existing rows (avoids N SELECTs).
+//            Phase 3 — INSERT or UPDATE each valid row (Fix 15 pattern).
+//            Phase 4 — single bulk DELETE for retailer_ids absent from the
+//                       spreadsheet (stale purge). Safety guard: aborts if
+//                       0 valid rows parsed so an empty/corrupt upload never
+//                       wipes the live catalog.
+//            Phase 5 — re-apply time slot so new items go live immediately.
+//            Phase 6 — audit log (purged count added).
+//            Phase 7 — pushMenuToMeta so WhatsApp catalog reflects the upload.
 // ============================================================================
 
 const express   = require('express');
@@ -1036,7 +1045,7 @@ function mapTimeSlot(raw) {
 }
 
 // ============================================================================
-// MENU UPLOAD ENDPOINT  (Fix 12 + Fix 13 + Fix 15)
+// MENU UPLOAD ENDPOINT  (Fix 12 + Fix 13)
 // ============================================================================
 
 app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res) => {
@@ -1048,120 +1057,168 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
     if (!items || !Array.isArray(items) || items.length === 0)
       return res.status(400).json({ error: 'items array is required and must not be empty' });
 
-    let upserted = 0, skipped = 0;
+    let upserted = 0, skipped = 0, purged = 0;
     const errors = [];
 
+    // ── Phase 1: Parse & validate every row first ─────────────────────────────
+    // Build the list of valid retailer_ids BEFORE touching the DB.
+    // This is the safety gate: if the spreadsheet is malformed and yields 0
+    // valid rows, we abort entirely rather than wiping the live catalog.
+    const validRows   = [];   // fully-parsed, ready-to-write records
+    const payloadIds  = [];   // all retailer_ids seen in the payload (valid or not)
+
     for (const item of items) {
-      try {
-        // Fix 13: Excel template uses 'title' not 'name' — accept both
-        const itemName = item.name || item.title;
+      // Fix 13: Excel template uses 'title' not 'name' — accept both
+      const itemName   = item.name || item.title;
+      // Fix 14: Excel 'id' column (M001, L001…) is the catalog SKU / retailer_id,
+      // NOT the Supabase UUID primary key.
+      const retailerId = item.retailer_id || item.id;
 
-        // Fix 14: Excel 'id' column (M001, L001 etc.) is the retailer_id (catalog SKU),
-        // NOT the UUID primary key.
-        const retailerId = item.retailer_id || item.id;
+      if (!retailerId || !itemName) {
+        const msg = `Missing retailer_id/id or name/title (id=${item.id}, retailer_id=${item.retailer_id}, name=${item.name}, title=${item.title})`;
+        console.warn(`[menu/upload] SKIP row: ${msg}`);
+        errors.push({ row_id: retailerId || item.id, error: msg });
+        skipped++;
+        continue;
+      }
 
-        if (!retailerId || !itemName) {
-          const msg = `Missing retailer_id/id or name/title (id=${item.id}, retailer_id=${item.retailer_id}, name=${item.name}, title=${item.title})`;
-          console.warn(`[menu/upload] SKIP row: ${msg}`);
-          errors.push({ row_id: retailerId || item.id, error: msg });
-          skipped++;
-          continue;
-        }
+      // Track every retailer_id in the payload (even if price is bad) so the
+      // purge step never deletes a row that was intentionally included.
+      payloadIds.push(String(retailerId).trim());
 
-        const price = parseFloat(item.price) || 0;
-        if (price <= 0) {
-          const msg = `Invalid price: ${item.price}`;
-          console.warn(`[menu/upload] SKIP ${retailerId}: ${msg}`);
-          errors.push({ row_id: retailerId, error: msg });
-          skipped++;
-          continue;
-        }
+      const price = parseFloat(item.price) || 0;
+      if (price <= 0) {
+        const msg = `Invalid price: ${item.price}`;
+        console.warn(`[menu/upload] SKIP ${retailerId}: ${msg}`);
+        errors.push({ row_id: retailerId, error: msg });
+        skipped++;
+        continue;
+      }
 
-        let isStocked = true;
-        if (item.is_available !== undefined && item.is_available !== null && item.is_available !== '') {
-          const raw = String(item.is_available).toLowerCase().trim();
-          isStocked = raw === 'true' || raw === '1' || raw === 'yes';
-        }
+      let isStocked = true;
+      if (item.is_available !== undefined && item.is_available !== null && item.is_available !== '') {
+        const raw = String(item.is_available).toLowerCase().trim();
+        isStocked = raw === 'true' || raw === '1' || raw === 'yes';
+      }
 
-        const menuItemData = {
+      validRows.push({
+        // DB record
+        menuItem: {
           restaurant_id: req.restaurant_id,
-          // Fix 14: store Excel 'id' as retailer_id (the catalog SKU), not as UUID pk
+          // Fix 14: retailer_id stores the catalog SKU (M001 etc.), never the UUID pk
           retailer_id:   String(retailerId).trim(),
           name:          String(itemName).trim(),
           description:   String(item.description || '').trim(),
           price,
-          // Fix 13: Excel template uses 'image_link' not 'image_url' — accept both
+          // Fix 13: Excel uses 'image_link'; also accept 'image_url'
           image_url:     (item.image_url || item.image_link)
                            ? String(item.image_url || item.image_link).trim()
                            : null,
-          // Fix 13: Excel template uses 'custom_label_0' for slot with human-readable
-          // labels like 'Morning Tiffin' — normalise to snake_case DB values
+          // Fix 13: Excel uses human-readable slot labels — normalise to snake_case
           time_slot:     mapTimeSlot(item.time_slot || item.custom_label_0),
           category:      item.category || 'General',
           is_stocked:    isStocked,
           ...(isStocked === false ? { is_available: false } : {}),
           updated_at:    new Date().toISOString(),
-        };
+        },
+        retailerId: String(retailerId).trim(),
+      });
+    }
 
-        // Fix 15: NO unique constraint on (restaurant_id, retailer_id) exists.
-        // The actual constraint is (restaurant_id, meta_product_id).
-        // Strategy: lookup existing row by retailer_id, then UPDATE or INSERT.
+    // Safety guard: if zero rows survived validation, abort — do NOT purge.
+    if (validRows.length === 0) {
+      console.warn('[menu/upload] ABORT: 0 valid rows after parse — catalog unchanged');
+      return res.status(400).json({
+        error:   'No valid rows found in spreadsheet. Catalog unchanged.',
+        skipped,
+        errors,
+      });
+    }
 
-        const { data: existing, error: lookupError } = await supabaseAdmin
-          .from('menu_items')
-          .select('id')
-          .eq('restaurant_id', req.restaurant_id)
-          .eq('retailer_id', String(retailerId).trim())
-          .maybeSingle();
+    // ── Phase 2: SELECT existing retailer_ids for this restaurant ────────────
+    // Single query — avoids N SELECT calls inside the write loop.
+    const { data: existingRows, error: selectErr } = await supabaseAdmin
+      .from('menu_items')
+      .select('id, retailer_id')
+      .eq('restaurant_id', req.restaurant_id);
 
-        if (lookupError) {
-          console.warn(`[menu/upload] SKIP ${retailerId}: lookup error — ${lookupError.message}`);
-          errors.push({ row_id: retailerId, error: lookupError.message });
+    if (selectErr) {
+      console.error('[menu/upload] Failed to fetch existing rows:', selectErr.message);
+      return res.status(500).json({ error: selectErr.message });
+    }
+
+    const existingMap = new Map(
+      (existingRows ?? []).map(r => [r.retailer_id, r.id])
+    );
+
+    // ── Phase 3: INSERT or UPDATE each valid row ──────────────────────────────
+    // Fix 15: no unique constraint on (restaurant_id, retailer_id) in the DB,
+    // so .upsert() with onConflict throws. Use explicit UPDATE or INSERT keyed
+    // on the UUID pk retrieved in Phase 2.
+    for (const { menuItem, retailerId } of validRows) {
+      try {
+        const existingId = existingMap.get(retailerId);
+        let dbError;
+
+        if (existingId) {
+          // Row exists — UPDATE by its Supabase UUID primary key
+          const { error } = await supabaseAdmin
+            .from('menu_items')
+            .update(menuItem)
+            .eq('id', existingId);
+          dbError = error;
+        } else {
+          // New SKU — INSERT (Supabase auto-generates UUID)
+          const { error } = await supabaseAdmin
+            .from('menu_items')
+            .insert(menuItem);
+          dbError = error;
+        }
+
+        if (dbError) {
+          console.warn(`[menu/upload] SKIP ${retailerId}: db error — ${dbError.message}`);
+          errors.push({ row_id: retailerId, error: dbError.message });
           skipped++;
           continue;
         }
 
-        if (existing) {
-          // Row exists — UPDATE by id
-          const { error: updateError } = await supabaseAdmin
-            .from('menu_items')
-            .update(menuItemData)
-            .eq('id', existing.id);
-
-          if (updateError) {
-            console.warn(`[menu/upload] SKIP ${retailerId}: update error — ${updateError.message}`);
-            errors.push({ row_id: retailerId, error: updateError.message });
-            skipped++;
-            continue;
-          }
-
-          console.log(`[menu/upload] ✅ updated ${retailerId} — ${String(itemName).trim()}`);
-          upserted++;
-        } else {
-          // Row does not exist — INSERT new
-          const { error: insertError } = await supabaseAdmin
-            .from('menu_items')
-            .insert(menuItemData);
-
-          if (insertError) {
-            console.warn(`[menu/upload] SKIP ${retailerId}: insert error — ${insertError.message}`);
-            errors.push({ row_id: retailerId, error: insertError.message });
-            skipped++;
-            continue;
-          }
-
-          console.log(`[menu/upload] ✅ inserted ${retailerId} — ${String(itemName).trim()}`);
-          upserted++;
-        }
-
+        console.log(`[menu/upload] ✅ ${existingId ? 'updated' : 'inserted'} ${retailerId} — ${menuItem.name}`);
+        upserted++;
       } catch (itemError) {
-        console.warn(`[menu/upload] SKIP row (exception): ${itemError.message}`);
-        errors.push({ row_id: item.id, error: itemError.message });
+        console.warn(`[menu/upload] SKIP ${retailerId} (exception): ${itemError.message}`);
+        errors.push({ row_id: retailerId, error: itemError.message });
         skipped++;
       }
     }
 
-    // Re-apply current slot so newly stocked items activate immediately
+    // ── Phase 4: PURGE stale rows not present in the spreadsheet ─────────────
+    // A single bulk DELETE for all retailer_ids that exist in the DB but are
+    // absent from the payload. payloadIds includes every retailer_id seen in
+    // the spreadsheet (even rows that failed price validation) so we never
+    // accidentally delete an item the manager intended to keep.
+    if (payloadIds.length > 0) {
+      try {
+        const { data: purgedRows, error: purgeErr } = await supabaseAdmin
+          .from('menu_items')
+          .delete()
+          .eq('restaurant_id', req.restaurant_id)
+          .not('retailer_id', 'in', `(${payloadIds.map(id => `"${id}"`).join(',')})`)
+          .select('retailer_id, name');
+
+        if (purgeErr) {
+          console.warn('[menu/upload] Purge failed (non-fatal):', purgeErr.message);
+        } else {
+          purged = purgedRows?.length ?? 0;
+          if (purged > 0) {
+            console.log(`[menu/upload] 🗑️  Purged ${purged} stale item(s): ${(purgedRows ?? []).map(r => r.retailer_id).join(', ')}`);
+          }
+        }
+      } catch (purgeEx) {
+        console.warn('[menu/upload] Purge exception (non-fatal):', purgeEx.message);
+      }
+    }
+
+    // ── Phase 5: Re-apply slot so new/updated items activate immediately ──────
     try {
       const currentSlot = getCurrentSlotIST();
       if (currentSlot) await applySlotAvailability(req.restaurant_id, currentSlot);
@@ -1169,23 +1226,24 @@ app.post('/api/menu/upload', authenticateToken, getRestaurantId, async (req, res
       console.warn('[menu/upload] Slot re-apply failed (non-fatal):', slotErr.message);
     }
 
-    // Fix 12: replaced .catch(() => {}) on Supabase query builder with
-    // try-catch — PostgrestBuilder in Supabase JS v2 does not expose .catch()
-    // as a standalone method, causing a TypeError at runtime.
+    // ── Phase 6: Audit log ────────────────────────────────────────────────────
+    // Fix 12: replaced .catch(() => {}) with try-catch — Supabase JS v2
+    // PostgrestBuilder does not expose .catch() as a standalone method.
     try {
       await supabaseAdmin.from('audit_logs').insert({
         user_id:       req.user.sub,
         restaurant_id: req.restaurant_id,
         action:        'Menu items uploaded via Excel',
-        details:       { upserted, skipped, total: items.length, error_count: errors.length },
+        details:       { upserted, skipped, purged, total: items.length, error_count: errors.length },
       });
     } catch (_) { /* audit log failure is non-fatal */ }
 
-    const response = { success: true, upserted, skipped, total: items.length };
+    const response = { success: true, upserted, skipped, purged, total: items.length };
     if (errors.length > 0) response.errors = errors;
 
-    console.log(`[menu/upload] ✅ ${upserted} upserted, ${skipped} skipped for restaurant ${req.restaurant_id}`);
+    console.log(`[menu/upload] ✅ ${upserted} upserted, ${skipped} skipped, ${purged} purged for restaurant ${req.restaurant_id}`);
 
+    // ── Phase 7: Push full catalog to Meta WhatsApp ───────────────────────────
     pushMenuToMeta(req.restaurant_id).catch(err =>
       console.error('[menu/upload] Meta push failed (non-fatal):', err.message)
     );
