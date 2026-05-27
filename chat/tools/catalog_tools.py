@@ -54,6 +54,15 @@ FIX LOG
     - 60-second in-process cache prevents hammering the API on every message.
     - Stale cache is returned on network failure so the bot never crashes.
     - MENU_ITEMS alias kept so all existing imports work without changes.
+
+  Fix (out-of-stock items):
+    - schedule_daily_catalog_sync() previously only registered a cron job at
+      05:55 AM. On a fresh deploy or restart the catalog was never pushed,
+      so Facebook defaulted every item to "out of stock".
+    - Fix: an additional "date" (run-once-immediately) job is now registered
+      alongside the daily cron, triggering sync within seconds of app startup.
+    - Empty-items guard log level upgraded from WARNING to ERROR so Railway
+      surfaces it clearly when the backend fetch is the root cause.
 """
 
 from __future__ import annotations
@@ -235,7 +244,12 @@ async def sync_catalog_to_facebook() -> dict[str, Any]:
     # Ensure cache is warm before syncing
     items = await fetch_menu_items()
     if not items:
-        logger.warning("[catalog-sync] MENU_ITEMS is empty — skipping Facebook sync")
+        # Upgraded from WARNING to ERROR — surface clearly in Railway logs when
+        # the backend fetch is the root cause of items showing as out of stock.
+        logger.error(
+            "[catalog-sync] MENU_ITEMS is empty — skipping Facebook sync. "
+            "Check AUTOM8_BACKEND_URL, AUTOM8_KDS_SECRET, and PORTAL_RESTAURANT_ID."
+        )
         return {"uploaded": 0, "errors": ["No items to sync"]}
 
     batch_url = f"{_BASE_URL}/{_CATALOG_ID}/batch"
@@ -501,6 +515,12 @@ def schedule_daily_catalog_sync() -> None:
     Register a daily catalog sync job using APScheduler.
     Call this once from your app startup (e.g. main.py or app.py).
 
+    FIX (out-of-stock items): In addition to the 05:55 AM daily cron, a
+    run-once "date" job is now registered to fire immediately on startup.
+    Previously the catalog was never pushed on a fresh deploy or restart,
+    causing Facebook to default every item to "out of stock" until 05:55 AM
+    the following morning.
+
     Requires:  pip install apscheduler
     """
     try:
@@ -512,6 +532,7 @@ def schedule_daily_catalog_sync() -> None:
         return
 
     scheduler = AsyncIOScheduler()
+
     # Run every day at 5:55 AM IST so catalog is fresh before Morning Tiffin
     scheduler.add_job(
         sync_catalog_to_facebook,
@@ -521,5 +542,18 @@ def schedule_daily_catalog_sync() -> None:
         id="daily_catalog_sync",
         replace_existing=True,
     )
+
+    # FIX: Also run once immediately on startup so the catalog is populated
+    # straight after every deploy / restart, not just at 05:55 AM.
+    scheduler.add_job(
+        sync_catalog_to_facebook,
+        trigger="date",          # run-once trigger fires as soon as scheduler starts
+        id="startup_catalog_sync",
+        replace_existing=True,
+    )
+
     scheduler.start()
-    logger.info("Daily catalog sync scheduled at 05:55 AM.")
+    logger.info(
+        "Daily catalog sync scheduled at 05:55 AM. "
+        "Startup sync triggered immediately."
+    )
