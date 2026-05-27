@@ -431,112 +431,151 @@ function buildSpecialNotesPrompt(context, customerName = 'there') {
 // REQ 2 — 2-MINUTE GRACEFUL TIMEOUT FOR SPECIAL NOTES (Auto-Close)
 // ============================================================================
 //
-// startSpecialNotesTimeoutMonitor() runs on a 60-second heartbeat.
+// ARCHITECTURE NOTE — where the wait state actually lives:
+//   The Python ADK booking_agent writes the wait state into
+//   conversation_states.context (a JSONB column) and sets
+//   conversation_states.current_state = 'awaiting_special_notes'.
+//   Specifically it stores:
+//     context->>'booking_step'            = 'awaiting_special_notes'
+//     context->>'special_notes_asked_at'  = Unix epoch float (time.time())
+//     context->>'booking_id'              = UUID of the bookings row
+//     context->>'customer_name'           = display name
 //
-// It queries `bookings` rows where:
-//   status = 'waiting_for_notes'
-//   notes_requested_at < now() - 120 seconds
+//   The `bookings` table status enum is:
+//     pending | confirmed | rejected | cancelled | completed | no_show
+//   'waiting_for_notes' is NOT a valid enum value — never write it there.
 //
-// For each stale row it:
-//   1. Atomically flips status → 'confirmed', clears special_notes,
-//      stamps confirmed_at with an ISO timestamp.
-//   2. Sends a booking-confirmation WhatsApp to the customer.
-//   3. Optionally pings the manager so they know an auto-confirm fired.
-//
-// Every DB write and every WhatsApp dispatch is wrapped in its own try/catch
-// so a single network blip cannot abort the entire batch iteration, and
-// nothing propagates to crash the Node event-loop.
+// WHAT THIS MONITOR DOES:
+//   1. Queries conversation_states WHERE current_state='awaiting_special_notes'
+//      AND (context->>'special_notes_asked_at')::float < epoch_now - 120
+//   2. For each stale session:
+//      a. Updates bookings.status → 'confirmed' using the booking_id from context
+//         (bookings.status 'confirmed' IS a valid enum value ✅)
+//      b. Clears the conversation state back to 'visit_complete' so the Python
+//         agent doesn't re-enter the notes loop on the next message
+//      c. Sends booking confirmation WA message to the customer
+//      d. Fires a non-blocking manager ping
 // ============================================================================
 
 function startSpecialNotesTimeoutMonitor() {
   setInterval(async () => {
     try {
-      // Use ISO string arithmetic — avoids timezone drift between server and DB
-      const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+      // Unix epoch seconds — matches Python's time.time() stored in context
+      const epochNowMinus2Min = (Date.now() / 1000) - (2 * 60);
 
-      const { data: staleNoteSessions, error } = await supabaseAdmin
-        .from('bookings')
-        .select('id, customer_id, token_number, restaurant_id, customers(phone, name)')
-        .eq('status', 'waiting_for_notes')
-        .lt('notes_requested_at', twoMinutesAgo)
+      // Query conversation_states — the only table that tracks this wait state
+      // Supabase PostgREST filter syntax for JSONB cast:
+      //   .filter('column->>key', 'lt', value)  doesn't support cast,
+      // so we use a raw Postgres filter via .filter() with the cast expression.
+      const { data: staleSessions, error } = await supabaseAdmin
+        .from('conversation_states')
+        .select('id, restaurant_id, customer_phone, current_state, context')
+        .eq('current_state', 'awaiting_special_notes')
+        .filter('context->>special_notes_asked_at', 'lt', String(epochNowMinus2Min))
         .limit(50);
 
       if (error) {
-        console.error('[notes-timeout] Query failed:', error.message);
-        return; // Non-fatal — try again on the next 60-second tick
+        console.error('[notes-timeout] conversation_states query failed:', error.message);
+        return;
       }
 
-      for (const session of staleNoteSessions ?? []) {
+      for (const session of staleSessions ?? []) {
         try {
-          // ── Step 1: Auto-progress the booking row ──────────────────────────
-          const { error: updateErr } = await supabaseAdmin
-            .from('bookings')
-            .update({
-              status:        'confirmed',
-              special_notes: null,                      // No notes provided
-              confirmed_at:  new Date().toISOString(),  // ISO for DB ordering
-            })
-            .eq('id', session.id)
-            .eq('status', 'waiting_for_notes');         // Idempotency guard — only
-                                                        // update if still pending
+          const ctx          = session.context || {};
+          const bookingId    = ctx.booking_id   || null;
+          const customerPhone = session.customer_phone;
+          const customerName  = ctx.customer_name || ctx.name || 'Guest';
+          const tokenNumber   = ctx.token_number  || null;
 
-          if (updateErr) {
-            console.error(
-              `[notes-timeout] Failed to auto-progress booking ${session.id}:`,
-              updateErr.message
-            );
-            continue; // Skip WhatsApp dispatch if DB update failed
+          // ── Step 1: Confirm the bookings row (only if booking_id present) ──
+          if (bookingId) {
+            const { error: bookingErr } = await supabaseAdmin
+              .from('bookings')
+              .update({
+                status:               'confirmed',    // Valid enum value ✅
+                table_confirmed_at:   new Date().toISOString(),
+              })
+              .eq('id', bookingId)
+              .eq('status', 'pending');               // Idempotency guard
+
+            if (bookingErr) {
+              // Log but don't abort — the booking may already be confirmed
+              console.warn(
+                `[notes-timeout] bookings update for ${bookingId}: ${bookingErr.message}`
+              );
+            }
           }
 
-          const customerPhone = session.customers?.phone;
-          const customerName  = session.customers?.name || 'Guest';
+          // ── Step 2: Clear the conversation state so Python doesn't re-enter ─
+          const { error: stateErr } = await supabaseAdmin
+            .from('conversation_states')
+            .update({
+              current_state: 'visit_complete',
+              context: {
+                ...ctx,
+                booking_step:             'visit_complete',
+                special_notes:            null,
+                special_notes_asked_at:   null,
+                auto_confirmed_at:        new Date().toISOString(),
+              },
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', session.id)
+            .eq('current_state', 'awaiting_special_notes'); // Idempotency guard
 
-          // ── Step 2: Send confirmation to customer ──────────────────────────
+          if (stateErr) {
+            console.error(
+              `[notes-timeout] State clear failed for session ${session.id}:`,
+              stateErr.message
+            );
+            continue; // Skip WA if we couldn't clear state
+          }
+
+          // ── Step 3: Confirm to customer via WhatsApp ───────────────────────
           if (customerPhone && process.env.WHATSAPP_ACCESS_TOKEN) {
             await sendWhatsAppMessage(
               customerPhone,
               `✅ *Booking Confirmed!*\n\n` +
-              `Hi ${customerName}, your booking (Token: *${session.token_number}*) ` +
-              `has been confirmed with no special notes.\n\n` +
+              `Hi ${customerName}, your booking` +
+              (tokenNumber ? ` (Token: *${tokenNumber}*)` : '') +
+              ` has been confirmed — no special notes needed.\n\n` +
               `We look forward to serving you! 🍽️`
             );
           }
 
-          // ── Step 3: Notify manager (informational only, non-blocking) ──────
+          // ── Step 4: Manager ping (fire-and-forget) ─────────────────────────
           if (process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
-            // Fire-and-forget — a manager alert failure must not surface to caller
             sendWhatsAppMessage(
               process.env.MANAGER_WHATSAPP_NUMBER,
-              `⏰ *Auto-Confirmed Booking (Notes Timeout)*\n` +
+              `⏰ *Auto-Confirmed (Notes Timeout)*\n` +
               `────────────────────\n` +
-              `Token: *${session.token_number}*\n` +
-              `Customer: ${customerName}\n` +
-              `Status: Confirmed — no special notes after 2-min idle\n` +
-              `Time: ${new Date().toISOString()}`
-            ).catch(e => console.error('[notes-timeout] Manager notify failed:', e.message));
+              `Customer: ${customerName} (+${String(customerPhone).replace(/\D/g, '')})\n` +
+              `Token:    ${tokenNumber || '—'}\n` +
+              `Booking:  ${bookingId   || '—'}\n` +
+              `Reason:   No reply to special notes prompt for 2 min\n` +
+              `Time:     ${new Date().toISOString()}`
+            ).catch(e => console.error('[notes-timeout] Manager ping failed:', e.message));
           }
 
           console.log(
-            `[notes-timeout] ✅ Auto-confirmed booking ${session.id} ` +
-            `(token ${session.token_number}, customer ${customerName})`
+            `[notes-timeout] ✅ Auto-confirmed session ${session.id} ` +
+            `(phone ${customerPhone}, booking ${bookingId})`
           );
 
         } catch (sessionErr) {
-          // Per-row isolation — one bad session does not abort the rest
           console.error(
-            `[notes-timeout] Unexpected error for booking ${session.id}:`,
+            `[notes-timeout] Error for session ${session.id}:`,
             sessionErr.message
           );
         }
       }
 
     } catch (err) {
-      // Top-level catch — monitor crashes are logged but never re-thrown
       console.error('[notes-timeout] Monitor scan error:', err.message);
     }
-  }, 60 * 1000); // Poll every 60 seconds
+  }, 60 * 1000);
 
-  console.log('⏰ Special notes timeout monitor started (2-min idle auto-confirm)');
+  console.log('⏰ Special notes timeout monitor started (polls conversation_states, 2-min idle auto-confirm)');
 }
 
 // ============================================================================
@@ -2484,8 +2523,8 @@ async function pushInvoiceToAccounting(invoice) {
 //     from the kdsInserts array (which now carries item_name).
 //   • Run detectCondimentContext() against those items.
 //   • Send buildSpecialNotesPrompt() as the follow-up message to the customer.
-//   • Record status='waiting_for_notes' + notes_requested_at on the booking
-//     so the REQ 2 timeout monitor can pick it up if the customer goes idle.
+//   • Upsert conversation_states with current_state='awaiting_special_notes'
+//     and special_notes_asked_at=epoch so REQ 2 monitor picks it up if idle.
 // ============================================================================
 
 async function handleWhatsAppOrder(message, metadata) {
@@ -2638,8 +2677,8 @@ async function handleWhatsAppOrder(message, metadata) {
   //   1. "✅ Order received!"
   //   2. "📝 Any special notes? (e.g., extra Sambar)"
   //
-  // We also stamp the booking / walk_in_token row so REQ 2's monitor can
-  // auto-close this if the customer goes idle for 2 minutes.
+  // We also upsert the conversation_states row so REQ 2's monitor can
+  // detect the idle session and auto-confirm after 2 minutes.
   // ──────────────────────────────────────────────────────────────────────────
 
   if (kdsInserts.length > 0) {
@@ -2658,20 +2697,39 @@ async function handleWhatsAppOrder(message, metadata) {
       // Send the context-aware notes prompt
       await sendWhatsAppMessage(customerPhone, notesPrompt);
 
-      // Stamp the token so the REQ 2 timeout monitor can track idle state.
-      // We reuse walk_in_tokens.meta as a lightweight state bag rather than
-      // requiring a schema migration on the bookings table.
-      await supabaseAdmin
-        .from('walk_in_tokens')
-        .update({
-          meta: {
-            ...(token.meta || {}),
-            awaiting_special_notes: true,
-            notes_requested_at:     new Date().toISOString(),
-            notes_order_id:         orderData.id,
-          },
-        })
-        .eq('id', token.id);
+      // Stamp the conversation_states row so REQ 2's monitor can detect
+      // this session as idle if the customer doesn't reply within 2 minutes.
+      // conversation_states is the canonical state store for the Python ADK
+      // agent — keyed by (restaurant_id, customer_phone).
+      // We upsert so it works whether or not a prior conversation row exists.
+      try {
+        const epochNow = Math.floor(Date.now() / 1000); // Unix epoch float matches Python
+        const sessionKey = `${restaurantId}:${normalizedPhone}`;
+        await supabaseAdmin
+          .from('conversation_states')
+          .upsert({
+            restaurant_id:  restaurantId,
+            customer_phone: normalizedPhone,
+            adk_session_id: sessionKey,
+            current_state:  'awaiting_special_notes',
+            context: {
+              booking_step:             'awaiting_special_notes',
+              special_notes_asked_at:   epochNow,         // float epoch — matches Python time.time()
+              notes_order_id:           orderData.id,
+              customer_name:            token.name || 'Guest',
+              token_number:             token.id,
+              // booking_id: not available at this point in the catalog-order flow;
+              // the Python agent will have set it if this is a hybrid session.
+            },
+            updated_at: new Date().toISOString(),
+          }, {
+            onConflict: 'restaurant_id,customer_phone',
+            ignoreDuplicates: false,
+          });
+      } catch (stampErr) {
+        // Non-fatal — monitor will simply not find this session; order is safe
+        console.warn('[WA Order] conversation_states stamp failed:', stampErr.message);
+      }
 
       console.log(
         `[WA Order] 📝 Condiment nudge sent (context: ${condimentContext}) ` +
