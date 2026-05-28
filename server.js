@@ -85,10 +85,12 @@ app.use(require('./src/middleware/region'));
 // ROUTES — extracted modules
 // ============================================================================
 
-app.use('/api/auth',       require('./src/routes/auth'));
-app.use('/api',            require('./src/routes/pos'));
-app.use('/api/onboarding', require('./src/routes/onboarding'));
-app.use('/api/whatsapp',   require('./src/routes/webhook'));
+app.use('/api/auth',        require('./src/routes/auth'));
+app.use('/api/marketing',   require('./src/routes/marketing'));   // ← ADD
+app.use('/api/restaurants', require('./src/routes/marketing'));   // ← ADD (for WABAStrip)
+app.use('/api',             require('./src/routes/pos'));
+app.use('/api/onboarding',  require('./src/routes/onboarding'));
+app.use('/api/whatsapp',    require('./src/routes/webhook'));
 
 // ============================================================================
 // HEALTH CHECK
