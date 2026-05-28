@@ -3150,6 +3150,47 @@ wss.on('connection', (ws) => {
 // ============================================================================
 
 async function runStartupSync() {
+
+  // ============================================================================
+// STARTUP — ensure required DB constraints exist
+// ============================================================================
+
+async function ensureDbConstraints() {
+  const constraints = [
+    {
+      name:  'menu_items_restaurant_id_retailer_id_key',
+      sql:   'ALTER TABLE menu_items ADD CONSTRAINT menu_items_restaurant_id_retailer_id_key UNIQUE (restaurant_id, retailer_id)',
+      desc:  'menu_items (restaurant_id, retailer_id)',
+    },
+    {
+      name:  'menu_items_restaurant_id_meta_product_id_key',
+      sql:   'ALTER TABLE menu_items ADD CONSTRAINT menu_items_restaurant_id_meta_product_id_key UNIQUE (restaurant_id, meta_product_id)',
+      desc:  'menu_items (restaurant_id, meta_product_id)',
+    },
+  ];
+
+  for (const c of constraints) {
+    try {
+      // Check if constraint already exists
+      const { data, error } = await supabaseAdmin
+        .from('information_schema.table_constraints')
+        .select('constraint_name')
+        .eq('constraint_name', c.name)
+        .maybeSingle();
+
+      // PostgREST can't query information_schema directly — use rpc instead
+      const { data: exists } = await supabaseAdmin.rpc('constraint_exists', { p_name: c.name }).maybeSingle();
+
+      if (!exists) {
+        const { error: alterErr } = await supabaseAdmin.rpc('run_sql', { sql: c.sql });
+        if (alterErr) console.warn(`[db-constraints] Could not create ${c.desc}:`, alterErr.message);
+        else console.log(`[db-constraints] ✅ Created constraint: ${c.desc}`);
+      }
+    } catch (_) {}
+  }
+}
+
+  
   console.log('🚀 Running startup checks...');
   try {
     const { data: restaurants, error } = await supabaseAdmin
