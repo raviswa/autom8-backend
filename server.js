@@ -815,10 +815,25 @@ app.post('/api/menu/upload', async (req, res) => {
         const raw = String(item.is_available).toLowerCase().trim();
         isStocked = raw === 'true' || raw === '1' || raw === 'yes';
       }
+        const now = new Date().toISOString();
       validRows.push({
-        menuItem: { restaurant_id: restaurantId, retailer_id: String(retailerId).trim(), name: String(itemName).trim(), description: String(item.description || '').trim(), price, image_url: (item.image_url || item.image_link) ? String(item.image_url || item.image_link).trim() : null, time_slot: mapTimeSlot(item.time_slot || item.custom_label_0), category: item.category || 'General', is_stocked: isStocked, is_available: isStocked, updated_at: new Date().toISOString() },
+        menuItem: {
+          restaurant_id: restaurantId,
+          retailer_id:   String(retailerId).trim(),
+          name:          String(itemName).trim(),
+          description:   String(item.description || '').trim(),
+          price,
+          image_url:     (item.image_url || item.image_link) ? String(item.image_url || item.image_link).trim() : null,
+          time_slot:     mapTimeSlot(item.time_slot || item.custom_label_0),
+          category:      item.category || 'General',
+          is_stocked:    isStocked,
+          is_available:  isStocked,
+          created_at:    now,   // FIX 1: was missing — caused NOT NULL violations on fresh insert
+          updated_at:    now,
+        },
         retailerId: String(retailerId).trim(),
       });
+ 
     }
     if (validRows.length === 0) return res.status(400).json({ error: 'No valid rows found. Catalog unchanged.', skipped, errors });
 
@@ -826,25 +841,60 @@ app.post('/api/menu/upload', async (req, res) => {
     const { data: existingRows } = await supabaseAdmin.from('menu_items').select('id, retailer_id').eq('restaurant_id', restaurantId);
     const existingMap = new Map((existingRows ?? []).map(r => [r.retailer_id, r.id]));
 
-    // Phase 3: insert or update
+    // ── FIX 2: Phase 3 — single upsert on (restaurant_id, retailer_id)
+    //    Avoids double round-trip and handles partial rows from prior failed inserts.
     for (const { menuItem, retailerId } of validRows) {
       try {
-        const existingId = existingMap.get(retailerId);
-        const { error: dbError } = existingId
-          ? await supabaseAdmin.from('menu_items').update(menuItem).eq('id', existingId)
-          : await supabaseAdmin.from('menu_items').insert(menuItem);
-        if (dbError) { errors.push({ row_id: retailerId, error: dbError.message }); skipped++; continue; }
+        const { error: dbError } = await supabaseAdmin
+          .from('menu_items')
+          .upsert(menuItem, { onConflict: 'restaurant_id,retailer_id', ignoreDuplicates: false });
+        if (dbError) {
+          errors.push({ row_id: retailerId, error: dbError.message });
+          skipped++;
+          console.error(`[menu/upload] Phase 3 upsert failed for ${retailerId}:`, dbError.message);
+          continue;
+        }
         upserted++;
-      } catch (itemError) { errors.push({ row_id: retailerId, error: itemError.message }); skipped++; }
+      } catch (itemError) {
+        errors.push({ row_id: retailerId, error: itemError.message });
+        skipped++;
+      }
     }
 
-    // Phase 4: purge stale
+     // ── FIX 3: Phase 4 — reliable JS-side set-difference purge.
+    //    The old PostgREST .not('retailer_id','in',string) construction was
+    //    unreliable for large sets and multi-tenant unsafe.
+    //    1. Fetch all existing retailer_ids for this restaurant (non-null only).
+    //    2. Compute the diff in JS using a Set.
+    //    3. Delete orphans by primary key — tenant-safe and atomic.
     if (payloadIds.length > 0) {
       try {
-        const { data: purgedRows } = await supabaseAdmin.from('menu_items').delete().eq('restaurant_id', restaurantId).not('retailer_id', 'in', `(${payloadIds.map(id => `"${id}"`).join(',')})`).select('retailer_id, name');
-        purged = purgedRows?.length ?? 0;
-        if (purged > 0) console.log(`[menu/upload] 🗑️ Purged ${purged} stale item(s)`);
-      } catch (purgeEx) { console.warn('[menu/upload] Purge failed (non-fatal):', purgeEx.message); }
+        const payloadSet = new Set(payloadIds);
+ 
+        const { data: existingForPurge, error: purgeQueryErr } = await supabaseAdmin
+          .from('menu_items')
+          .select('id, retailer_id, name')
+          .eq('restaurant_id', restaurantId)
+          .not('retailer_id', 'is', null);  // never purge items with NULL retailer_id
+ 
+        if (purgeQueryErr) {
+          console.warn('[menu/upload] Phase 4 purge query failed (non-fatal):', purgeQueryErr.message);
+        } else {
+          const toDelete = (existingForPurge ?? []).filter(r => !payloadSet.has(r.retailer_id));
+          if (toDelete.length > 0) {
+            const deleteIds = toDelete.map(r => r.id);
+            const { error: deleteErr } = await supabaseAdmin.from('menu_items').delete().in('id', deleteIds);
+            if (deleteErr) {
+              console.warn('[menu/upload] Phase 4 delete failed (non-fatal):', deleteErr.message);
+            } else {
+              purged = toDelete.length;
+              console.log(`[menu/upload] 🗑️ Purged ${purged} stale item(s):`, toDelete.map(r => r.name || r.retailer_id).join(', '));
+            }
+          }
+        }
+      } catch (purgeEx) {
+        console.warn('[menu/upload] Phase 4 purge threw (non-fatal):', purgeEx.message);
+      }
     }
 
     // Phase 5: re-apply slot
@@ -864,6 +914,147 @@ app.post('/api/menu/upload', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 5a HELPER — pushSingleItemToMetaCatalog
+// Sends a one-item availability patch to Meta Catalog Batch API immediately
+// after a manager toggle. No bulk feed re-fetch latency.
+// ─────────────────────────────────────────────────────────────────────────────
+async function pushSingleItemToMetaCatalog({ retailerId, isAvailable, restaurantId }) {
+  const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+  const META_CATALOG_ID   = process.env.META_CATALOG_ID;
+  if (!META_ACCESS_TOKEN || !META_CATALOG_ID) {
+    console.warn('[meta-single-push] Skipped — META_ACCESS_TOKEN or META_CATALOG_ID not set');
+    return;
+  }
+ 
+  // Fetch full item data so Meta doesn't wipe fields on a partial update
+  const { data: item } = await supabaseAdmin
+    .from('menu_items')
+    .select('name, description, price, image_url, time_slot')
+    .eq('retailer_id', retailerId)
+    .eq('restaurant_id', restaurantId)
+    .maybeSingle();
+ 
+  const SLOT_LABEL = {
+    morning_tiffin: 'Morning Tiffin', lunch: 'Lunch',
+    evening_snacks: 'Evening Snacks', dinner_tiffin: 'Dinner Tiffin', all: 'All Day',
+  };
+ 
+  const batchPayload = {
+    allow_upsert: true,
+    requests: [{
+      method:      'UPDATE',
+      retailer_id: retailerId,
+      data: {
+        availability: isAvailable ? 'in stock' : 'out of stock',
+        ...(item ? {
+          name:           item.name        || '',
+          description:    item.description || '',
+          price:          Math.round((parseFloat(item.price) || 0) * 100), // paise
+          currency:       'INR',
+          image_url:      item.image_url   || '',
+          custom_label_0: SLOT_LABEL[item.time_slot] || 'All Day',
+          url:            process.env.FRONTEND_URL   || 'https://autom8.works/',
+          brand:          'Hotel Munafe',
+          category:       'FOOD_AND_DRINK',
+        } : {}),
+      },
+    }],
+  };
+ 
+  const resp = await fetch(
+    `https://graph.facebook.com/v20.0/${META_CATALOG_ID}/batch`,
+    {
+      method:  'POST',
+      headers: { Authorization: `Bearer ${META_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+      body:    JSON.stringify(batchPayload),
+    }
+  );
+  const result = await resp.json();
+  if (!resp.ok || result.error) throw new Error(JSON.stringify(result.error || result));
+  console.log(`[meta-single-push] ✅ ${retailerId} → ${isAvailable ? 'in stock' : 'out of stock'}`);
+}
+ 
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 5b ROUTE — PUT /api/menu-items/:id/availability
+//
+// Was completely absent from server.js. The frontend toggle calls this route.
+// Writes is_stocked + is_available to Supabase, responds to client immediately,
+// then fire-and-forgets a single-item Meta Catalog Batch API push.
+// ─────────────────────────────────────────────────────────────────────────────
+app.put('/api/menu-items/:id/availability', async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const authToken  = authHeader?.split(' ')[1];
+    if (!authToken) return res.status(401).json({ error: 'No token' });
+ 
+    const { data: { user } } = await supabase.auth.getUser(authToken);
+    if (!user) return res.status(403).json({ error: 'Invalid token' });
+ 
+    const { data: userData } = await supabaseAdmin
+      .from('users').select('role, restaurant_id').eq('id', user.id).single();
+    if (userData?.role !== 'owner' && userData?.role !== 'manager')
+      return res.status(403).json({ error: 'Unauthorized' });
+ 
+    const { is_available } = req.body;
+    if (typeof is_available !== 'boolean')
+      return res.status(400).json({ error: 'is_available (boolean) required' });
+ 
+    const restaurantId = userData.restaurant_id;
+ 
+    // Fetch item first — need retailer_id for Meta push
+    const { data: item, error: fetchErr } = await supabaseAdmin
+      .from('menu_items')
+      .select('id, retailer_id, name, is_stocked')
+      .eq('id', req.params.id)
+      .eq('restaurant_id', restaurantId)
+      .single();
+ 
+    if (fetchErr || !item) return res.status(404).json({ error: 'Menu item not found' });
+ 
+    // Update both is_stocked (permanent decision) and is_available (current gate)
+    const { error: updateErr } = await supabaseAdmin
+      .from('menu_items')
+      .update({
+        is_stocked:   is_available,
+        is_available: is_available,
+        updated_at:   new Date().toISOString(),
+      })
+      .eq('id', req.params.id)
+      .eq('restaurant_id', restaurantId);
+ 
+    if (updateErr) throw updateErr;
+ 
+    // Audit log (non-fatal)
+    supabaseAdmin.from('audit_logs').insert({
+      user_id: user.id, restaurant_id: restaurantId,
+      action:   `Menu item ${is_available ? 'marked in stock' : 'marked out of stock'}`,
+      details:  { item_id: req.params.id, item_name: item.name, is_available },
+    }).catch(() => {});
+ 
+    // Respond to client immediately — don't block on Meta API latency
+    res.json({ success: true, id: req.params.id, is_available, name: item.name });
+ 
+    // Fire-and-forget: push single-item availability to Meta Catalog
+    if (item.retailer_id && process.env.META_ACCESS_TOKEN && process.env.META_CATALOG_ID) {
+      pushSingleItemToMetaCatalog({
+        retailerId:   item.retailer_id,
+        isAvailable:  is_available,
+        restaurantId,
+      }).catch(e => {
+        console.error(`[toggle-meta-sync] Failed for ${item.name} (${item.retailer_id}):`, e.message);
+      });
+    } else {
+      console.warn(`[toggle-meta-sync] Skipped — retailer_id=${item.retailer_id}, META_ACCESS_TOKEN=${!!process.env.META_ACCESS_TOKEN}, META_CATALOG_ID=${!!process.env.META_CATALOG_ID}`);
+    }
+ 
+  } catch (err) {
+    console.error('[menu-item-availability]', err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+});
+ 
 
 // ============================================================================
 // CATALOG FEED ENDPOINTS
@@ -887,7 +1078,10 @@ app.get('/api/catalog/feed', async (req, res) => {
     const csvHeader  = 'id,title,description,availability,condition,price,link,image_link,brand,google_product_category,custom_label_0';
     const rows = items.map(item => [
       escCsv(item.retailer_id), escCsv(item.name), escCsv(item.description || 'Freshly prepared'),
-      (item.is_available && item.is_stocked) ? 'in stock' : 'out of stock',
+      // FIX 4: Use is_stocked only. is_available is toggled false every hour
+      // by the slot scheduler for off-slot items — using it here means Meta
+      // sees everything as "out of stock" during off-slot hours.
+      (item.is_stocked !== false) ? 'in stock' : 'out of stock',
       'new', escCsv(`${(item.price || 0).toFixed(2)} INR`), escCsv(baseUrl),
       escCsv(item.image_url || ''), 'Munafe', '5765', escCsv(SLOT_LABEL[item.time_slot] || 'All Day'),
     ].join(','));
