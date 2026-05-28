@@ -28,6 +28,13 @@ FIX LOG
   Fix 24 — visit_complete episode boundary
   Fix 25 — special_notes_nudge inlined as stubs
   Fix 26 — Dine-in catalog time-slot filtering
+  Fix 27 — Takeaway/Delivery catalog fallback loop: booking_step set to
+            awaiting_category_selection after send_category_list so the main
+            router (not the sub-flow) handles CAT:/ITEM:/cart interactions.
+            Also corrected awaiting_service_selection branch to set the step
+            BEFORE returning, ensuring the sub-flow receives the right state.
+  Fix 28 — Copy/UX rewrites: special-notes footer, greeting messages,
+            service-menu body text, dine-in check-in message.
 """
 
 from datetime import datetime
@@ -565,6 +572,12 @@ def _is_placeholder_payment_link(link: str) -> bool:
 async def _send_catalog_with_fallback(
     customer_phone: str, restaurant_id: str, session_state: Dict[str, Any],
 ) -> None:
+    """
+    Fix 27: Try WhatsApp catalog first. On failure, fall back to the interactive
+    category list (sets booking_step → awaiting_category_selection so the MAIN
+    router — not the sub-flow — handles all subsequent CAT:/ITEM:/cart messages).
+    Plain-text fallback sets booking_step → awaiting_numbered_order as before.
+    """
     catalog_sent = False
     try:
         catalog_sent = await send_whatsapp_catalog_message(customer_phone, restaurant_id)
@@ -576,6 +589,8 @@ async def _send_catalog_with_fallback(
         try:
             ok = await send_category_list(customer_phone, session_state)
             if ok:
+                # ← FIX 27: hand off to main router's category/item/cart handlers
+                session_state["booking_step"] = "awaiting_category_selection"
                 logger.info(f"[catalog-fallback] Category list sent to {customer_phone}")
                 return
         except Exception as e:
@@ -651,12 +666,13 @@ async def _do_reset(
 async def _send_service_menu(customer_phone: str, restaurant_id: str, greeting: str) -> None:
     rows = await build_service_menu_rows(restaurant_id)
     _header_text = greeting[:57] + "..." if len(greeting) > 60 else greeting
+    # Fix 28: body text no longer repeats the name; cleaner CTA
     ok = await _send_interactive(customer_phone, {
         "interactive": {
             "type": "list",
             "header": {"type": "text", "text": _header_text},
-            "body":   {"text": "How can we help you today?"},
-            "footer": {"text": "Tap to choose a service"},
+            "body":   {"text": "What would you like to do today?"},
+            "footer": {"text": "Tap below to choose"},
             "action": {
                 "button": "View options",
                 "sections": [{"title": "Our services", "rows": rows}],
@@ -667,7 +683,7 @@ async def _send_service_menu(customer_phone: str, restaurant_id: str, greeting: 
         lines = "\n".join(f"{r['id']}. {r['title']}" for r in rows)
         await send_whatsapp_message(
             customer_phone,
-            f"{greeting}\n\nHow can we help you today?\n\n{lines}\n\nReply with a number.",
+            f"{greeting}\n\nWhat would you like to do today?\n\n{lines}\n\nReply with a number.",
             restaurant_id,
         )
 
@@ -699,7 +715,9 @@ async def _send_menu(
     if session_state is None: session_state = {}
     try:
         ok = await send_category_list(customer_phone, session_state)
-        if ok: return
+        if ok:
+            session_state["booking_step"] = "awaiting_category_selection"
+            return
     except Exception as e:
         logger.warning(f"Interactive category list failed for {customer_phone}: {e}")
     try:
@@ -872,17 +890,31 @@ async def handle_booking_flow(
             session_state["booking_step"] = "awaiting_party_size"
             session_state["table_number"] = table_number
         elif service_type == "takeaway":
-            await send_whatsapp_message(customer_phone, "Great! You've selected Takeaway now 🛍️\n\nBrowse today's menu below and add items to your basket 🛒", restaurant_id)
+            await send_whatsapp_message(
+                customer_phone,
+                "Great! You've selected Takeaway 🛍️\n\nBrowse today's menu and add items to your basket 🛒",
+                restaurant_id,
+            )
             clear_cart(session_state)
-            await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+            # Fix 27: set step BEFORE calling fallback so it cannot be overwritten
+            # back to awaiting_order if catalog succeeds; fallback sets its own step.
             session_state["booking_step"] = "awaiting_order"
+            await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
         elif service_type == "delivery":
             sent = await send_location_request(customer_phone, restaurant_id)
             if not sent:
-                await send_whatsapp_message(customer_phone, "Great! You've selected Delivery now 🛵\n\nPlease share your delivery address.", restaurant_id)
+                await send_whatsapp_message(
+                    customer_phone,
+                    "Great! You've selected Delivery 🛵\n\nPlease share your delivery address.",
+                    restaurant_id,
+                )
             session_state["booking_step"] = "awaiting_address"
         elif service_type == "reserve_table":
-            await send_whatsapp_message(customer_phone, "Great! You've selected Reserve a Table (for future booking) 📅\n\nHow many people will be dining?", restaurant_id)
+            await send_whatsapp_message(
+                customer_phone,
+                "Great! You've selected Reserve a Table 📅\n\nHow many people will be dining?",
+                restaurant_id,
+            )
             session_state["booking_step"] = "awaiting_party_size"
 
         return {"status": f"awaiting_{session_state['booking_step'].replace('awaiting_', '')}"}
@@ -989,6 +1021,8 @@ async def handle_booking_flow(
             if not ok:
                 await send_whatsapp_message(customer_phone, plain_text_menu(), restaurant_id)
                 session_state["booking_step"] = "awaiting_numbered_order"
+            else:
+                session_state["booking_step"] = "awaiting_category_selection"
             return {"status": session_state.get("booking_step", "awaiting_category_selection")}
         elif action in ("CART:CLEAR","CLEAR","RESET CART"):
             clear_cart(session_state)
@@ -997,6 +1031,8 @@ async def handle_booking_flow(
             if not ok:
                 await send_whatsapp_message(customer_phone, plain_text_menu(), restaurant_id)
                 session_state["booking_step"] = "awaiting_numbered_order"
+            else:
+                session_state["booking_step"] = "awaiting_category_selection"
             return {"status": session_state.get("booking_step", "awaiting_category_selection")}
         else:
             await send_cart_summary_buttons(customer_phone, session_state)
@@ -1141,13 +1177,14 @@ async def handle_dine_in_flow(
                 f"Open portal to assign table:\n{MANAGER_PORTAL_URL}",
                 restaurant_id,
             )
+            # Fix 28: reworded dine-in check-in message — shorter wait hint + catalog tip
             await send_whatsapp_message(
                 customer_phone,
-                f"Great! You've selected Dine-in now 🍽️\n\n"
-                f"✅ You're checked in!\n*Token: {display_token}*\n\n"
-                f"The table manager has been notified and will assign your table shortly.\n"
-                f"You'll receive a WhatsApp message with your table number once confirmed.\n\n"
-                f"If you don't hear back within 5 minutes, please speak to our staff directly. 😊",
+                f"You're all checked in! 🍽️\n\n"
+                f"*Token: {display_token}*\n\n"
+                f"We're assigning your table now — usually takes just a minute or two. "
+                f"You'll get a WhatsApp message the moment it's confirmed.\n\n"
+                f"While you wait, feel free to browse the menu using the 🛍️ Shop icon at the top of this chat. 😊",
                 restaurant_id,
             )
             session_state["booking_step"] = "awaiting_table_assignment"
@@ -1280,16 +1317,17 @@ async def handle_dine_in_flow(
             if suggestion: confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
 
+            # Fix 28: reworded special-notes prompt — warmer, removes cold "2-minute" footer
             notes_hint = _build_notes_hint(order_text)
             await _send_interactive(customer_phone, {
                 "interactive": {
                     "type": "button",
                     "body": {"text": (
-                        f"📝 Any special instructions for the kitchen? (<500 characters)\n\n"
+                        f"👨‍🍳 Any requests for the kitchen? (optional)\n\n"
                         f"{notes_hint}\n\n"
-                        "Or tap below if you have none 👇\n"
-                        "_No reply needed — we'll proceed in 2 minutes if we don't hear from you._"
+                        "Just type it out, or tap below to skip 👇"
                     )},
+                    "footer": {"text": "Your order is already being prepared!"},
                     "action": {"buttons": [
                         {"type": "reply", "reply": {"id": "SKIP", "title": "⏭️ No notes"}},
                     ]},
@@ -1363,7 +1401,6 @@ async def handle_dine_in_flow(
                 restaurant_id,
             )
 
-        # Change 1: both lines at 8 spaces (inside elif block)
         session_state["special_notes"] = special_notes
         session_state["booking_step"]  = "awaiting_payment"
 
@@ -1522,9 +1559,11 @@ async def handle_delivery_flow(
             restaurant_id,
         )
         clear_cart(session_state)
-        await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+        # Fix 27: set step to awaiting_order; _send_catalog_with_fallback will
+        # override to awaiting_category_selection if it needs the fallback path.
         session_state["booking_step"] = "awaiting_order"
-        return {"status": "awaiting_order"}
+        await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+        return {"status": session_state["booking_step"]}
 
     elif booking_step == "awaiting_order":
         order_text = message.strip()
