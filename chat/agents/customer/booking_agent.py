@@ -568,41 +568,49 @@ def _is_placeholder_payment_link(link: str) -> bool:
 # ─────────────────────────────────────────────
 # CATALOG FALLBACK
 # ─────────────────────────────────────────────
-
+"""
+Fix 29 — Catalog fallback loop: removed time-slot category-list fallback
+            (send_category_list → items_for_slot) since all items are now in
+            a single bucket; loop caused by 0 results at non-morning hours.
+            Fallback now retries catalog once then drops to plain_text_menu()
+            with no slot argument, bypassing slot filtering entirely."""
+              
 async def _send_catalog_with_fallback(
     customer_phone: str, restaurant_id: str, session_state: Dict[str, Any],
 ) -> None:
     """
-    Fix 27: Try WhatsApp catalog first. On failure, fall back to the interactive
-    category list (sets booking_step → awaiting_category_selection so the MAIN
-    router — not the sub-flow — handles all subsequent CAT:/ITEM:/cart messages).
-    Plain-text fallback sets booking_step → awaiting_numbered_order as before.
+    Fix 29 — Removed time-slot category-list fallback.
+    Root cause: all items live in a single time-slot bucket ("Morning Tiffin").
+    The old fallback path → send_category_list → send_item_list → items_for_slot()
+    returned 0 results at evening/night time, triggering the "not available" loop.
+
+    New behaviour:
+      1. Try WhatsApp catalog API (retry once on failure).
+      2. If both attempts fail → plain-text menu, no slot filtering.
+    The interactive category/item path is skipped entirely until items are
+    re-tagged with correct time slots.
     """
     catalog_sent = False
-    try:
-        catalog_sent = await send_whatsapp_catalog_message(customer_phone, restaurant_id)
-    except Exception as e:
-        logger.warning(f"[catalog] send_whatsapp_catalog_message raised (non-fatal): {e}")
+    for attempt in range(2):                          # retry once
+        try:
+            catalog_sent = await send_whatsapp_catalog_message(customer_phone, restaurant_id)
+            if catalog_sent:
+                break
+            logger.warning(f"[catalog] attempt {attempt + 1}: send_whatsapp_catalog_message returned False")
+        except Exception as e:
+            logger.warning(f"[catalog] attempt {attempt + 1} raised (non-fatal): {e}")
 
     if not catalog_sent:
-        logger.warning(f"[catalog] Catalog did not launch for {customer_phone} — falling back")
+        logger.warning(
+            f"[catalog] Both catalog attempts failed for {customer_phone} "
+            f"— falling back to plain-text menu (no slot filter)"
+        )
         try:
-            ok = await send_category_list(customer_phone, session_state)
-            if ok:
-                # ← FIX 27: hand off to main router's category/item/cart handlers
-                session_state["booking_step"] = "awaiting_category_selection"
-                logger.info(f"[catalog-fallback] Category list sent to {customer_phone}")
-                return
-        except Exception as e:
-            logger.warning(f"[catalog-fallback] Category list also failed: {e}")
-        try:
-            menu_text = plain_text_menu()
+            menu_text = plain_text_menu()             # no category arg → all items
             await send_whatsapp_message(customer_phone, menu_text, restaurant_id)
             session_state["booking_step"] = "awaiting_numbered_order"
         except Exception as e:
             logger.error(f"[catalog-fallback] Plain-text menu also failed for {customer_phone}: {e}")
-
-
 # ─────────────────────────────────────────────
 # RESET HELPERS
 # ─────────────────────────────────────────────
