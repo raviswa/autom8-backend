@@ -63,6 +63,8 @@ const app    = express();
 const server = http.createServer(app);
 const wss    = new WebSocket.Server({ server });
 
+const { clients, broadcastToRestaurant } = require('./src/websocket');
+
 app.use(cors({
   origin: [
     'http://localhost:3000',
@@ -3116,8 +3118,6 @@ app.get('/api/restaurant/default', async (req, res) => {
 // WEBSOCKET
 // ============================================================================
 
-const clients = new Map();
-
 wss.on('connection', (ws) => {
   let restaurantId = null;
   ws.on('message', async (message) => {
@@ -3140,14 +3140,6 @@ wss.on('connection', (ws) => {
   });
   ws.on('error', (err) => console.error('WebSocket error:', err.message));
 });
-
-function broadcastToRestaurant(restaurantId, data) {
-  if (clients.has(restaurantId)) {
-    clients.get(restaurantId).forEach(client => {
-      if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(data));
-    });
-  }
-}
 
 // ============================================================================
 // START SERVER
