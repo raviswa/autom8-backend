@@ -850,10 +850,14 @@ app.post('/api/menu/upload', async (req, res) => {
         const { error: dbError } = await supabaseAdmin
           .from('menu_items')
           .upsert(menuItem, { onConflict: 'restaurant_id,retailer_id', ignoreDuplicates: false });
-        if (dbError) {
-          errors.push({ row_id: retailerId, error: dbError.message });
+          if (dbError) {
+          const isFkViolation = dbError.message?.includes('restaurant_id_fkey');
+          const friendlyMsg = isFkViolation
+            ? `Restaurant ID ${restaurantId} does not exist in the restaurants table — run seed SQL first`
+            : dbError.message;
+          errors.push({ row_id: retailerId, error: friendlyMsg });
           skipped++;
-          console.error(`[menu/upload] Phase 3 upsert failed for ${retailerId}:`, dbError.message);
+          console.error(`[menu/upload] SKIP ${retailerId}: db error — ${friendlyMsg}`);
           continue;
         }
         upserted++;
@@ -3146,11 +3150,28 @@ wss.on('connection', (ws) => {
 // ============================================================================
 
 async function runStartupSync() {
-  console.log('🚀 Running startup catalog sync...');
+  console.log('🚀 Running startup checks...');
   try {
-    const { data: restaurants } = await supabaseAdmin.from('restaurants').select('id').eq('is_active', true);
-    for (const r of restaurants ?? []) await syncCatalogFromMeta(r.id);
-  } catch (err) { console.error('Startup sync error:', err); }
+    const { data: restaurants, error } = await supabaseAdmin
+      .from('restaurants')
+      .select('id, name')
+      .eq('is_active', true);
+
+    if (error) throw error;
+
+    if (!restaurants || restaurants.length === 0) {
+      console.error('🚨 STARTUP WARNING: No active restaurants found in DB.');
+      console.error('   Menu uploads and catalog sync will fail until a restaurant row exists.');
+      console.error('   Run the seed SQL or insert a row into the restaurants table.');
+    } else {
+      console.log(`✅ Found ${restaurants.length} active restaurant(s): ${restaurants.map(r => r.name).join(', ')}`);
+      for (const r of restaurants) {
+        await syncCatalogFromMeta(r.id);
+      }
+    }
+  } catch (err) {
+    console.error('Startup check error:', err);
+  }
 }
 
 const PORT = process.env.PORT || 3001;
