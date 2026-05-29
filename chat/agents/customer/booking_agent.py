@@ -40,6 +40,7 @@ FIX LOG
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Dict, Any
+import asyncio
 import logging
 import re
 import time
@@ -568,49 +569,65 @@ def _is_placeholder_payment_link(link: str) -> bool:
 # ─────────────────────────────────────────────
 # CATALOG FALLBACK
 # ─────────────────────────────────────────────
-"""
-Fix 29 — Catalog fallback loop: removed time-slot category-list fallback
-            (send_category_list → items_for_slot) since all items are now in
-            a single bucket; loop caused by 0 results at non-morning hours.
-            Fallback now retries catalog once then drops to plain_text_menu()
-            with no slot argument, bypassing slot filtering entirely."""
-              
+
 async def _send_catalog_with_fallback(
     customer_phone: str, restaurant_id: str, session_state: Dict[str, Any],
 ) -> None:
     """
-    Fix 29 — Removed time-slot category-list fallback.
-    Root cause: all items live in a single time-slot bucket ("Morning Tiffin").
-    The old fallback path → send_category_list → send_item_list → items_for_slot()
-    returned 0 results at evening/night time, triggering the "not available" loop.
+    Fix 30 — Time-slot-safe catalog fallback.
 
-    New behaviour:
-      1. Try WhatsApp catalog API (retry once on failure).
-      2. If both attempts fail → plain-text menu, no slot filtering.
-    The interactive category/item path is skipped entirely until items are
-    re-tagged with correct time slots.
+    Attempt 1: native WhatsApp Catalog API.
+    Attempt 2: one automatic retry after a short pause (handles transient failures).
+    Hard fallback: plain-text numbered menu — NO send_category_list / send_item_list /
+      items_for_slot anywhere in this path.  Those helpers filter by current_time_slot()
+      which returns 0 items when all 28 items share a single slot tag ("Morning Tiffin")
+      and the customer is ordering at dinner time, causing the infinite-loop bug.
+
+    booking_step after this call:
+      • catalog sent (attempt 1 or 2) → unchanged (caller owns the step, usually "awaiting_order")
+      • hard fallback                 → "awaiting_numbered_order"
     """
+    # ── Attempt 1 ──────────────────────────────────────────────────────────────
     catalog_sent = False
-    for attempt in range(2):                          # retry once
-        try:
-            catalog_sent = await send_whatsapp_catalog_message(customer_phone, restaurant_id)
-            if catalog_sent:
-                break
-            logger.warning(f"[catalog] attempt {attempt + 1}: send_whatsapp_catalog_message returned False")
-        except Exception as e:
-            logger.warning(f"[catalog] attempt {attempt + 1} raised (non-fatal): {e}")
+    try:
+        catalog_sent = await send_whatsapp_catalog_message(customer_phone, restaurant_id)
+    except Exception as e:
+        logger.warning(f"[catalog] attempt-1 raised (non-fatal): {e}")
 
-    if not catalog_sent:
-        logger.warning(
-            f"[catalog] Both catalog attempts failed for {customer_phone} "
-            f"— falling back to plain-text menu (no slot filter)"
+    if catalog_sent:
+        logger.info(f"[catalog] Sent on attempt 1 to {customer_phone}")
+        return
+
+    # ── Attempt 2: single retry after 1.5 s ───────────────────────────────────
+    logger.warning(f"[catalog] attempt-1 failed for {customer_phone} — retrying in 1.5 s")
+    await asyncio.sleep(1.5)
+    try:
+        catalog_sent = await send_whatsapp_catalog_message(customer_phone, restaurant_id)
+    except Exception as e:
+        logger.warning(f"[catalog] attempt-2 raised (non-fatal): {e}")
+
+    if catalog_sent:
+        logger.info(f"[catalog] Sent on attempt 2 to {customer_phone}")
+        return
+
+    # ── Hard fallback: plain-text numbered menu ────────────────────────────────
+    # Deliberately bypasses send_category_list / send_item_list / items_for_slot.
+    # plain_text_menu() iterates MENU_ITEMS directly with no time-slot filtering.
+    logger.warning(f"[catalog] Both attempts failed for {customer_phone} — hard fallback to plain-text menu")
+    try:
+        menu_text = plain_text_menu()
+        await send_whatsapp_message(customer_phone, menu_text, restaurant_id)
+        session_state["booking_step"] = "awaiting_numbered_order"
+        logger.info(f"[catalog-fallback] Plain-text menu delivered to {customer_phone}")
+    except Exception as e:
+        logger.error(f"[catalog-fallback] Plain-text menu also failed for {customer_phone}: {e}")
+        await send_whatsapp_message(
+            customer_phone,
+            "Our menu is loading — please ask our staff or try again in a moment!",
+            restaurant_id,
         )
-        try:
-            menu_text = plain_text_menu()             # no category arg → all items
-            await send_whatsapp_message(customer_phone, menu_text, restaurant_id)
-            session_state["booking_step"] = "awaiting_numbered_order"
-        except Exception as e:
-            logger.error(f"[catalog-fallback] Plain-text menu also failed for {customer_phone}: {e}")
+
+
 # ─────────────────────────────────────────────
 # RESET HELPERS
 # ─────────────────────────────────────────────
@@ -656,15 +673,24 @@ async def _do_reset(
         session_state["identity_step"] = "initial"
         return
 
-    _cid = session_state.get("customer_id")
-    _cname = session_state.get("customer_name")
-    _mphone = session_state.get("manager_phone")
+    _cid     = session_state.get("customer_id")
+    _cname   = session_state.get("customer_name")
+    _mphone  = session_state.get("manager_phone")
+    _last    = session_state.get("last_order_summary")
+    _ret     = session_state.get("is_returning_customer")
+    _visits  = session_state.get("visit_count", 0)
     session_state.clear()
-    if _cid:    session_state["customer_id"]   = _cid
-    if _cname:  session_state["customer_name"] = _cname
-    if _mphone: session_state["manager_phone"] = _mphone
+    if _cid:    session_state["customer_id"]          = _cid
+    if _cname:  session_state["customer_name"]        = _cname
+    if _mphone: session_state["manager_phone"]        = _mphone
+    if _last:   session_state["last_order_summary"]   = _last
+    if _ret:    session_state["is_returning_customer"]= _ret
+    if _visits: session_state["visit_count"]          = _visits
     session_state["booking_step"] = "awaiting_service_selection"
-    await _send_service_menu(customer_phone, restaurant_id, f"Welcome back, {customer_name}! 😊")
+    session_state["is_returning_customer"] = True
+    raw_greeting = await _safe_build_greeting(customer_id, restaurant_id) if customer_id else ""
+    reset_greeting = _build_smart_greeting(customer_name, raw_greeting, session_state)
+    await _send_service_menu(customer_phone, restaurant_id, reset_greeting)
 
 
 # ─────────────────────────────────────────────
@@ -720,24 +746,15 @@ def _parse_booking_datetime(text: str) -> datetime | None:
 async def _send_menu(
     customer_phone: str, restaurant_id: str, session_state: Dict[str, Any] | None = None,
 ) -> None:
-    if session_state is None: session_state = {}
-    try:
-        ok = await send_category_list(customer_phone, session_state)
-        if ok:
-            session_state["booking_step"] = "awaiting_category_selection"
-            return
-    except Exception as e:
-        logger.warning(f"Interactive category list failed for {customer_phone}: {e}")
-    try:
-        await send_whatsapp_message(customer_phone, plain_text_menu(), restaurant_id)
-        session_state["booking_step"] = "awaiting_numbered_order"
-    except Exception as e:
-        logger.error(f"Plain-text menu fallback also failed for {customer_phone}: {e}")
-        await send_whatsapp_message(
-            customer_phone,
-            "Our menu is loading — please ask our staff or try again in a moment!",
-            restaurant_id,
-        )
+    """
+    Fix 30: Catalog-first, no time-slot filtering.
+    Delegates entirely to _send_catalog_with_fallback so the retry logic and
+    plain-text hard fallback are in one place. send_category_list / send_item_list /
+    items_for_slot are never called here.
+    """
+    if session_state is None:
+        session_state = {}
+    await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
 
 
 # ─────────────────────────────────────────────
@@ -778,6 +795,127 @@ async def _safe_build_order_suggestion(customer_id: str, restaurant_id: str) -> 
     try: return await build_order_suggestion(customer_id, restaurant_id)
     except TypeError as e: logger.debug(f"build_order_suggestion AsyncSession issue: {e}"); return ""
     except Exception as e: logger.debug(f"build_order_suggestion failed: {e}"); return ""
+
+
+# ─────────────────────────────────────────────
+# SMART GREETING BUILDER  (Fix 29)
+# ─────────────────────────────────────────────
+
+def _time_of_day_label() -> str:
+    hour = datetime.now(ZoneInfo("Asia/Kolkata")).hour
+    if 5  <= hour < 12: return "morning"
+    if 12 <= hour < 17: return "afternoon"
+    if 17 <= hour < 21: return "evening"
+    return "night"
+
+
+def _first_name(full_name: str) -> str:
+    """Return first token of name, capitalised."""
+    return full_name.strip().split()[0].capitalize() if full_name.strip() else full_name
+
+
+# Warm returning-customer variants — keyed by (time_of_day, index % 4)
+_RETURNING_VARIANTS: dict[str, list[str]] = {
+    "morning": [
+        "Good morning, {first}! ☀️ Starting the day with us — we love that.",
+        "Morning, {first}! 🌅 Great to see you back.",
+        "Rise and dine, {first}! ☕ Welcome back.",
+        "Good morning, {first}! 😊 Always a pleasure having you here.",
+    ],
+    "afternoon": [
+        "Good afternoon, {first}! 🌤️ Perfect time for a great meal.",
+        "Hey {first}! 😊 Afternoon visit — glad you're back.",
+        "Welcome back, {first}! 🌞 Ready for something delicious?",
+        "Good afternoon, {first}! Great to see you again.",
+    ],
+    "evening": [
+        "Good evening, {first}! 🌙 The perfect way to end the day.",
+        "Evening, {first}! ✨ Glad you're back with us tonight.",
+        "Welcome back, {first}! 🌆 Great evening for a meal.",
+        "Good evening, {first}! 😊 Always lovely seeing you here.",
+    ],
+    "night": [
+        "Late-night craving, {first}? 🌙 We've got you covered.",
+        "Night visit, {first}! 🌟 Great to have you back.",
+        "Welcome back, {first}! The kitchen is ready whenever you are. 🍽️",
+        "Good to see you, {first}! 😊 What are we having tonight?",
+    ],
+}
+
+# Variants that mention the last order — appended when last_order is known
+_LAST_ORDER_SUFFIXES = [
+    " Your {last_order} last time was a great choice — want to go again?",
+    " Loved the {last_order} on your last visit?",
+    " The {last_order} was popular last time — it's on the menu again today! 😋",
+    " Coming back for the {last_order} again? 😄",
+]
+
+# Variants for first-time customers
+_FIRST_TIME_VARIANTS: dict[str, list[str]] = {
+    "morning": [
+        "Good morning, {first}! ☀️ Welcome to Munafe — so glad you're here.",
+        "Morning, {first}! 🌅 First time? You're in for a treat.",
+    ],
+    "afternoon": [
+        "Good afternoon, {first}! 🌤️ Welcome to Munafe!",
+        "Hey {first}! 😊 First time here? We hope you enjoy every bite.",
+    ],
+    "evening": [
+        "Good evening, {first}! 🌙 Welcome to Munafe — great choice for tonight.",
+        "Evening, {first}! ✨ First time with us? You picked a good night.",
+    ],
+    "night": [
+        "Hey {first}! 🌟 Welcome to Munafe — glad you found us.",
+        "Good evening, {first}! 😊 First visit? The kitchen is ready for you.",
+    ],
+}
+
+
+def _build_smart_greeting(
+    customer_name: str,
+    raw_greeting: str,
+    session_state: Dict[str, Any],
+) -> str:
+    """
+    Build a contextual greeting.
+
+    Priority:
+      1. If build_personalised_greeting returned a non-generic string → use it as-is.
+      2. If session carries last_order/last_service → inject into returning variant.
+      3. If session marks customer as returning → returning variant (no order hint).
+      4. First-time / unknown → first-time variant or plain welcome.
+
+    Greeting is capped at 60 chars for the WhatsApp list header; longer strings
+    are used in full for plain-text fallback (header truncation handled elsewhere).
+    """
+    # Priority 1: trust personalisation_tools if it gave us something real
+    if raw_greeting and raw_greeting.strip().lower() not in _GENERIC_GREETINGS:
+        return raw_greeting
+
+    tod   = _time_of_day_label()
+    first = _first_name(customer_name)
+
+    # Seed a stable-ish index from customer name length (no randomness = reproducible)
+    idx = (len(customer_name) + len(first)) % 4
+
+    last_order   = session_state.get("last_order_summary", "")   # e.g. "Chicken Biryani"
+    is_returning = session_state.get("is_returning_customer", False)
+    visit_count  = session_state.get("visit_count", 0)
+
+    if is_returning or visit_count > 1:
+        base = _RETURNING_VARIANTS.get(tod, _RETURNING_VARIANTS["evening"])[idx]
+        greeting = base.format(first=first)
+        if last_order:
+            suffix_idx = idx % len(_LAST_ORDER_SUFFIXES)
+            suffix = _LAST_ORDER_SUFFIXES[suffix_idx].format(last_order=last_order)
+            # Keep total under 300 chars for WhatsApp body comfort
+            if len(greeting) + len(suffix) <= 300:
+                greeting += suffix
+    else:
+        variants = _FIRST_TIME_VARIANTS.get(tod, _FIRST_TIME_VARIANTS["evening"])
+        greeting = variants[idx % len(variants)].format(first=first)
+
+    return greeting
 
 
 # ─────────────────────────────────────────────
@@ -840,7 +978,11 @@ async def handle_booking_flow(
             if _cid:    session_state["customer_id"]   = _cid
             if _cname:  session_state["customer_name"] = _cname
             if _mphone: session_state["manager_phone"] = _mphone
-            await _send_service_menu(customer_phone, restaurant_id, f"Welcome back, {customer_name}! 😊")
+            raw_greeting = await _safe_build_greeting(customer_id, restaurant_id)
+            # Mark as returning so smart greeting picks the right variant
+            session_state["is_returning_customer"] = True
+            ret_greeting = _build_smart_greeting(customer_name, raw_greeting, session_state)
+            await _send_service_menu(customer_phone, restaurant_id, ret_greeting)
             session_state["booking_step"] = "awaiting_service_selection"
             return {"status": "awaiting_service_selection"}
         summary = session_state.get("order_confirmed_summary",
@@ -861,8 +1003,7 @@ async def handle_booking_flow(
     if current_step == "ask_service":
         if not session_state.get("_menu_sent"):
             raw_greeting = await _safe_build_greeting(customer_id, restaurant_id)
-            greeting = (raw_greeting if raw_greeting and raw_greeting.strip().lower() not in _GENERIC_GREETINGS
-                        else f"Welcome, {customer_name}! 😊")
+            greeting = _build_smart_greeting(customer_name, raw_greeting, session_state)
             await _send_service_menu(customer_phone, restaurant_id, greeting)
             session_state["_menu_sent"]   = True
             session_state["booking_step"] = "awaiting_service_selection"
@@ -935,9 +1076,10 @@ async def handle_booking_flow(
             session_state["booking_step"] = restored_step
             if restored_step in ("awaiting_order","awaiting_category_selection",
                                  "awaiting_item_selection","awaiting_cart_action",
-                                 "awaiting_quantity","awaiting_item_qty"):
-                await send_whatsapp_message(customer_phone, "No problem, let's continue! 😊\n\nBrowse the menu below and add items to your basket 🛒", restaurant_id)
-                await _send_menu(customer_phone, restaurant_id, session_state)
+                                 "awaiting_quantity","awaiting_item_qty","awaiting_numbered_order"):
+                await send_whatsapp_message(customer_phone, "No problem, let's continue! 😊\n\nHere's the menu — tap to add items to your basket 🛒", restaurant_id)
+                session_state["booking_step"] = "awaiting_order"
+                await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
             else:
                 await send_whatsapp_message(customer_phone, "No problem, let's continue! 😊\n\nPlease tell us what you'd like to order.\nType *MENU* to see today's full menu.", restaurant_id)
             return {"status": restored_step}
@@ -954,8 +1096,9 @@ async def handle_booking_flow(
         cart = session_state.get("cart", {})
         if not cart:
             await send_whatsapp_message(customer_phone, "Your cart is empty. Please add items first.", restaurant_id)
-            await _send_menu(customer_phone, restaurant_id, session_state)
-            return {"status": "awaiting_category_selection"}
+            session_state["booking_step"] = "awaiting_order"
+            await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+            return {"status": session_state.get("booking_step", "awaiting_order")}
         session_state["order_from_cart"] = True
         session_state["booking_step"]    = "awaiting_order"
         svc = session_state.get("service_type")
@@ -971,38 +1114,15 @@ async def handle_booking_flow(
             await send_whatsapp_message(customer_phone, "Sorry, something went wrong. Please start again.", restaurant_id)
             return {"status": "error"}
 
-    # Cart: awaiting_category_selection
-    if current_step == "awaiting_category_selection":
-        cat = None
-        if message.startswith("CAT:"):
-            cat = message[4:]
-        elif ":" not in message:
-            from tools.catalog_tools import MENU_ITEMS as _MI
-            slots = list(dict.fromkeys(i["time_slot"] for i in _MI))
-            for s in slots:
-                if s.lower() in message.lower(): cat = s; break
-        if not cat:
-            await send_whatsapp_message(customer_phone, "Please tap one of the category options to browse the menu.", restaurant_id)
-            return {"status": "awaiting_category_selection"}
-        ok = await send_item_list(customer_phone, cat, session_state)
-        if not ok:
-            from tools.cart_tools import plain_text_menu as _ptm
-            await send_whatsapp_message(customer_phone, _ptm(cat), restaurant_id)
-            session_state["booking_step"] = "awaiting_numbered_order"
-            session_state["current_category"] = cat
-        return {"status": "awaiting_item_selection"}
-
-    # Cart: awaiting_item_selection
-    if current_step == "awaiting_item_selection":
-        item_id = message[5:] if message.startswith("ITEM:") else None
-        if item_id:
-            from tools.catalog_tools import MENU_ITEMS as _MI
-            item = next((i for i in _MI if i["id"] == item_id), None)
-            if item:
-                await send_quantity_prompt(customer_phone, item, session_state)
-                return {"status": "awaiting_quantity"}
-        await send_item_list(customer_phone, session_state.get("current_category", current_time_slot()), session_state)
-        return {"status": "awaiting_item_selection"}
+    # Cart: awaiting_category_selection / awaiting_item_selection
+    # Fix 30: These steps are now dead-paths — the catalog API is the only entry
+    # point for browsing. If the customer somehow lands here (e.g. stale session),
+    # re-send the catalog. Never call send_item_list / items_for_slot / current_time_slot.
+    if current_step in ("awaiting_category_selection", "awaiting_item_selection"):
+        logger.info(f"[router] stale step {current_step} for {customer_phone} — re-sending catalog")
+        session_state["booking_step"] = "awaiting_order"
+        await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+        return {"status": session_state.get("booking_step", "awaiting_order")}
 
     # Cart: awaiting_cart_action
     if current_step == "awaiting_cart_action":
@@ -1011,8 +1131,9 @@ async def handle_booking_flow(
             cart = session_state.get("cart", {})
             if not cart:
                 await send_whatsapp_message(customer_phone, "Your cart is empty. Please add items first.", restaurant_id)
-                await _send_menu(customer_phone, restaurant_id, session_state)
-                return {"status": "awaiting_category_selection"}
+                session_state["booking_step"] = "awaiting_order"
+                await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+                return {"status": session_state.get("booking_step", "awaiting_order")}
             session_state["order_from_cart"] = True
             session_state["booking_step"]    = "awaiting_order"
             svc = session_state.get("service_type")
@@ -1025,23 +1146,17 @@ async def handle_booking_flow(
             elif svc == "delivery":
                 return await handle_delivery_flow(restaurant_id, customer_id, customer_name, customer_phone, mp, ot, session_state)
         elif action in ("CART:ADD_MORE","ADD MORE","ADD","MORE"):
-            ok = await send_category_list(customer_phone, session_state)
-            if not ok:
-                await send_whatsapp_message(customer_phone, plain_text_menu(), restaurant_id)
-                session_state["booking_step"] = "awaiting_numbered_order"
-            else:
-                session_state["booking_step"] = "awaiting_category_selection"
-            return {"status": session_state.get("booking_step", "awaiting_category_selection")}
+            # Fix 30: catalog-first, no send_category_list / items_for_slot
+            session_state["booking_step"] = "awaiting_order"
+            await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+            return {"status": session_state.get("booking_step", "awaiting_order")}
         elif action in ("CART:CLEAR","CLEAR","RESET CART"):
             clear_cart(session_state)
             await send_whatsapp_message(customer_phone, "Cart cleared! 🗑️ Let's start fresh.", restaurant_id)
-            ok = await send_category_list(customer_phone, session_state)
-            if not ok:
-                await send_whatsapp_message(customer_phone, plain_text_menu(), restaurant_id)
-                session_state["booking_step"] = "awaiting_numbered_order"
-            else:
-                session_state["booking_step"] = "awaiting_category_selection"
-            return {"status": session_state.get("booking_step", "awaiting_category_selection")}
+            # Fix 30: catalog-first, no send_category_list / items_for_slot
+            session_state["booking_step"] = "awaiting_order"
+            await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+            return {"status": session_state.get("booking_step", "awaiting_order")}
         else:
             await send_cart_summary_buttons(customer_phone, session_state)
             return {"status": "awaiting_cart_action"}
@@ -1357,6 +1472,11 @@ async def handle_dine_in_flow(
                 f"Dine-in Token *{token}* — {order_text} "
                 f"({session_state.get('party_size')} guests, ₹{total:.0f})"
             )
+            # Fix 29: persist for smart greeting on next visit
+            _first_item = order_text.split(",")[0].strip()[:40]
+            session_state["last_order_summary"]    = _first_item
+            session_state["is_returning_customer"] = True
+            session_state["visit_count"]           = session_state.get("visit_count", 0) + 1
             session_state["_kds_cart_snapshot"] = cart_snapshot
             session_state["_kds_order_text"]    = order_text
             session_state["booking_step"] = "awaiting_special_notes"
@@ -1518,6 +1638,11 @@ async def handle_takeaway_flow(
             session_state["order_confirmed_summary"] = (
                 f"Takeaway Token *{display_token}* — {order_text} (₹{total:.0f})"
             )
+            # Fix 29: persist for smart greeting on next visit
+            _first_item = order_text.split(",")[0].strip()[:40]
+            session_state["last_order_summary"]    = _first_item
+            session_state["is_returning_customer"] = True
+            session_state["visit_count"]           = session_state.get("visit_count", 0) + 1
             session_state["booking_step"] = "awaiting_payment"
             clear_cart(session_state)
 
@@ -1623,6 +1748,11 @@ async def handle_delivery_flow(
                 f"Delivery Token *{token}* — {order_text} "
                 f"to {session_state.get('delivery_address', '')[:40]} (₹{total:.0f})"
             )
+            # Fix 29: persist for smart greeting on next visit
+            _first_item = order_text.split(",")[0].strip()[:40]
+            session_state["last_order_summary"]    = _first_item
+            session_state["is_returning_customer"] = True
+            session_state["visit_count"]           = session_state.get("visit_count", 0) + 1
             session_state["booking_step"] = "awaiting_payment"
             clear_cart(session_state)
 
