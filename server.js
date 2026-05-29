@@ -3298,7 +3298,7 @@ app.get('/api/dashboard/wa-orders', async (req, res) => {
     if (!start || !end) return res.status(400).json({ error: 'start and end required' });
 
     const { data, error } = await supabaseAdmin
-      .from('bookings')
+        .from('walk_in_tokens')
       .select('id, created_at, service_type, status, party_size, token_number, payment_status, booking_datetime, token_advance, customer_id, customers(name, phone)')
       .eq('restaurant_id', userData.restaurant_id)
       .gte('created_at', start)
@@ -3331,8 +3331,8 @@ app.get('/api/dashboard/cancel-stats', async (req, res) => {
     const [cancelRes, totalRes, bcRes, btRes] = await Promise.all([
       supabaseAdmin.from('orders').select('total_amount').eq('restaurant_id', restaurantId).eq('status', 'cancelled').gte('created_at', start).lte('created_at', end),
       supabaseAdmin.from('orders').select('*', { count: 'exact', head: true }).eq('restaurant_id', restaurantId).gte('created_at', start).lte('created_at', end),
-      supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('restaurant_id', restaurantId).eq('status', 'cancelled').gte('created_at', start).lte('created_at', end),
-      supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('restaurant_id', restaurantId).gte('created_at', start).lte('created_at', end),
+      supabaseAdmin.from('walk_in_tokens').select('id', { count: 'exact', head: true }).eq('restaurant_id', restaurantId).eq('status', 'cancelled').gte('created_at', start).lte('created_at', end),
+      supabaseAdmin.from('walk_in_tokens').select('id', { count: 'exact', head: true }).eq('restaurant_id', restaurantId).gte('created_at', start).lte('created_at', end),
     ]);
 
     const orderCancels   = cancelRes.data ?? [];
