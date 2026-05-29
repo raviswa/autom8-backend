@@ -86,6 +86,7 @@ app.use(require('./src/middleware/region'));
 // ============================================================================
 
 app.use('/api/auth',        require('./src/routes/auth'));
+app.use('/api/dashboard',   require('./src/routes/dashboard'));
 app.use('/api/marketing',   require('./src/routes/marketing'));   // ← ADD
 app.use('/api/restaurants', require('./src/routes/marketing'));   // ← ADD (for WABAStrip)
 app.use('/api',             require('./src/routes/pos'));
