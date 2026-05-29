@@ -1524,14 +1524,20 @@ app.post('/api/kds/notify', async (req, res) => {
       }
 
       // ── 3d: Queue the kds_item for bulk insert ───────────────────────────────
-      kdsInserts.push({
-        restaurant_id,
-        order_item_id: orderItem.id,
-        status:        'pending',
-        priority:      'normal',
-        created_at:    new Date().toISOString(),
-        updated_at:    new Date().toISOString(),
-      });
+kdsInserts.push({
+  restaurant_id,
+  order_item_id:        orderItem.id,
+  status:               'pending',
+  priority:             'normal',
+  item_name:            item.name     || 'Item',
+  token_number:         token_number  || null,
+  customer_phone:       cleanPhone,
+  service_type:         service_type  || null,
+  special_instructions: special_notes || null,
+  item_category:        item.category || '',
+  created_at:           new Date().toISOString(),
+  updated_at:           new Date().toISOString(),
+});
     }
 
     // ── Step 4: Bulk-insert kds_items ──────────────────────────────────────────
