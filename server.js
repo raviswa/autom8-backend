@@ -3389,141 +3389,143 @@ app.get('/api/dashboard/cancel-stats', async (req, res) => {
 });
 
 // ============================================================================
-// PUBLIC RESTAURANT RESOLVER
+// DASHBOARD ENDPOINTS PATCH
+// Replace the entire "OWNER DASHBOARD ENDPOINTS" section in server.js with this.
+// This fixes:
+//   1. Duplicate /api/dashboard/wa-orders route (was causing Express to use
+//      the first definition which queried non-existent 'bookings' columns)
+//   2. wa-orders now correctly reads walk_in_tokens (merged DB — no bookings table)
+//   3. All three endpoints use consistent auth pattern
 // ============================================================================
 
-app.get('/api/restaurant/default', async (req, res) => {
+// ============================================================================
+// OWNER DASHBOARD ENDPOINTS
+// All data is in the single merged Supabase DB via supabaseAdmin.
+// wa-orders reads walk_in_tokens — bookings table is not used here.
+// ============================================================================
+
+app.get('/api/dashboard/waba', async (req, res) => {
   try {
-    const { data: restaurants, error } = await supabaseAdmin.from('restaurants').select('id').eq('is_active', true).limit(2);
-    if (error) throw error;
-    if (!restaurants?.length) return res.status(404).json({ error: 'No active restaurant found' });
-    if (restaurants.length > 1) return res.status(400).json({ error: 'Multiple restaurants found. QR code URL must include ?restaurant=<id>' });
-    res.json({ restaurant_id: restaurants[0].id });
+    const authHeader = req.headers['authorization'];
+    const authToken  = authHeader?.split(' ')[1];
+    if (!authToken) return res.status(401).json({ error: 'No token' });
+    const { data: { user }, error: authErr } = await supabase.auth.getUser(authToken);
+    if (authErr || !user) return res.status(403).json({ error: 'Invalid token' });
+    const { data: userData } = await supabaseAdmin
+      .from('users').select('restaurant_id').eq('id', user.id).single();
+
+    const { data, error } = await supabaseAdmin
+      .from('restaurants')
+      .select('id, name, whatsapp_number, manager_phone, timezone, dining_duration_minutes, payment_mode, waba_id')
+      .eq('id', userData.restaurant_id)
+      .maybeSingle();
+
+    if (error) console.error('[/api/dashboard/waba]', error.message);
+    res.json({ success: true, restaurant: data ?? null });
   } catch (err) {
+    console.error('[/api/dashboard/waba]', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ============================================================================
-// WEBSOCKET
-// ============================================================================
-
-wss.on('connection', (ws) => {
-  let restaurantId = null;
-  ws.on('message', async (message) => {
-    try {
-      const data = JSON.parse(message);
-      if (data.type === 'SUBSCRIBE') {
-        restaurantId = data.restaurantId;
-        if (!clients.has(restaurantId)) clients.set(restaurantId, []);
-        clients.get(restaurantId).push(ws);
-        ws.send(JSON.stringify({ type: 'SUBSCRIBED', restaurantId, timestamp: new Date().toISOString() }));
-      }
-    } catch (err) { console.error('WebSocket message error:', err); }
-  });
-  ws.on('close', () => {
-    if (restaurantId && clients.has(restaurantId)) {
-      const list = clients.get(restaurantId);
-      const index = list.indexOf(ws);
-      if (index > -1) list.splice(index, 1);
-    }
-  });
-  ws.on('error', (err) => console.error('WebSocket error:', err.message));
-});
-
-// ============================================================================
-// START SERVER
-// ============================================================================
-
-async function runStartupSync() {
-
-  // ============================================================================
-// STARTUP — ensure required DB constraints exist
-// ============================================================================
-
-async function ensureDbConstraints() {
-  const constraints = [
-    {
-      name:  'menu_items_restaurant_id_retailer_id_key',
-      sql:   'ALTER TABLE menu_items ADD CONSTRAINT menu_items_restaurant_id_retailer_id_key UNIQUE (restaurant_id, retailer_id)',
-      desc:  'menu_items (restaurant_id, retailer_id)',
-    },
-    {
-      name:  'menu_items_restaurant_id_meta_product_id_key',
-      sql:   'ALTER TABLE menu_items ADD CONSTRAINT menu_items_restaurant_id_meta_product_id_key UNIQUE (restaurant_id, meta_product_id)',
-      desc:  'menu_items (restaurant_id, meta_product_id)',
-    },
-  ];
-
-  for (const c of constraints) {
-    try {
-      // Check if constraint already exists
-      const { data, error } = await supabaseAdmin
-        .from('information_schema.table_constraints')
-        .select('constraint_name')
-        .eq('constraint_name', c.name)
-        .maybeSingle();
-
-      // PostgREST can't query information_schema directly — use rpc instead
-      const { data: exists } = await supabaseAdmin.rpc('constraint_exists', { p_name: c.name }).maybeSingle();
-
-      if (!exists) {
-        const { error: alterErr } = await supabaseAdmin.rpc('run_sql', { sql: c.sql });
-        if (alterErr) console.warn(`[db-constraints] Could not create ${c.desc}:`, alterErr.message);
-        else console.log(`[db-constraints] ✅ Created constraint: ${c.desc}`);
-      }
-    } catch (_) {}
-  }
-}
-
-  
-  console.log('🚀 Running startup checks...');
+app.get('/api/dashboard/wa-orders', async (req, res) => {
   try {
-    const { data: restaurants, error } = await supabaseAdmin
-      .from('restaurants')
-      .select('id, name')
-      .eq('is_active', true);
+    const authHeader = req.headers['authorization'];
+    const authToken  = authHeader?.split(' ')[1];
+    if (!authToken) return res.status(401).json({ error: 'No token' });
+    const { data: { user }, error: authErr } = await supabase.auth.getUser(authToken);
+    if (authErr || !user) return res.status(403).json({ error: 'Invalid token' });
+    const { data: userData } = await supabaseAdmin
+      .from('users').select('restaurant_id').eq('id', user.id).single();
 
-    if (error) throw error;
+    const { start, end } = req.query;
+    if (!start || !end) return res.status(400).json({ error: 'start and end required' });
 
-    if (!restaurants || restaurants.length === 0) {
-      console.error('🚨 STARTUP WARNING: No active restaurants found in DB.');
-      console.error('   Menu uploads and catalog sync will fail until a restaurant row exists.');
-      console.error('   Run the seed SQL or insert a row into the restaurants table.');
-    } else {
-      console.log(`✅ Found ${restaurants.length} active restaurant(s): ${restaurants.map(r => r.name).join(', ')}`);
-      for (const r of restaurants) {
-        await syncCatalogFromMeta(r.id);
-      }
+    const { data, error } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .select('id, arrived_at, status, type, pax, name, phone, table_number')
+      .eq('restaurant_id', userData.restaurant_id)
+      .gte('arrived_at', start)
+      .lte('arrived_at', end)
+      .order('arrived_at', { ascending: false })
+      .limit(500);
+
+    if (error) {
+      console.error('[wa-orders]', error.message);
+      return res.status(500).json({ error: error.message });
     }
+
+    const orders = (data ?? []).map(t => ({
+      id:           t.id,
+      created_at:   t.arrived_at,
+      service_type: t.type,
+      status:       t.status,
+      party_size:   t.pax,
+      token_number: t.id,
+      total_amount: null,
+      customers:    { name: t.name, phone: t.phone },
+    }));
+
+    console.log(`[wa-orders] ${orders.length} tokens in range`);
+    res.json({ success: true, orders });
   } catch (err) {
-    console.error('Startup check error:', err);
+    console.error('[wa-orders]', err.message);
+    res.status(500).json({ error: err.message });
   }
-}
-
-const PORT = process.env.PORT || 3001;
-
-server.listen(PORT, () => {
-  console.log(`\n🚀 Autom8 Backend running on port ${PORT}`);
-  console.log(`📍 Region: ${process.env.REGION || 'IN'}`);
-  console.log(`🗄️  Database: ${process.env.SUPABASE_URL}\n`);
-  startSlotScheduler();   // Starts slot rotation + feedback scheduler + notes timeout monitor
-  runStartupSync();
 });
 
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received — closing server');
-  server.close(() => console.log('HTTP server closed'));
-});
+app.get('/api/dashboard/cancel-stats', async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const authToken  = authHeader?.split(' ')[1];
+    if (!authToken) return res.status(401).json({ error: 'No token' });
+    const { data: { user }, error: authErr } = await supabase.auth.getUser(authToken);
+    if (authErr || !user) return res.status(403).json({ error: 'Invalid token' });
+    const { data: userData } = await supabaseAdmin
+      .from('users').select('restaurant_id').eq('id', user.id).single();
+    const restaurantId = userData.restaurant_id;
 
-// Single export object — includes app/wss/WebSocket helpers AND the business-logic
-// functions imported by src/routes/webhook.js.
-module.exports = {
-  app,
-  wss,
-  broadcastToRestaurant,
-  handleWhatsAppOrder,
-  handleFeedbackReply,
-  queueFeedbackForTable,
-  validateReferralCode,
-};
+    const { start, end } = req.query;
+    if (!start || !end) return res.status(400).json({ error: 'start and end required' });
+
+    const [cancelRes, totalRes, bcRes, btRes] = await Promise.all([
+      supabaseAdmin.from('orders').select('total_amount')
+        .eq('restaurant_id', restaurantId).eq('status', 'cancelled')
+        .gte('created_at', start).lte('created_at', end),
+      supabaseAdmin.from('orders')
+        .select('*', { count: 'exact', head: true })
+        .eq('restaurant_id', restaurantId)
+        .gte('created_at', start).lte('created_at', end),
+      // Walk-in tokens completed in period = served customers (proxy for bookings)
+      supabaseAdmin.from('walk_in_tokens')
+        .select('id', { count: 'exact', head: true })
+        .eq('restaurant_id', restaurantId)
+        .in('status', ['completed', 'cancelled'])
+        .gte('arrived_at', start).lte('arrived_at', end),
+      supabaseAdmin.from('walk_in_tokens')
+        .select('id', { count: 'exact', head: true })
+        .eq('restaurant_id', restaurantId)
+        .gte('arrived_at', start).lte('arrived_at', end),
+    ]);
+
+    const orderCancels   = cancelRes.data ?? [];
+    const totalOrders    = totalRes.count ?? 0;
+    const orderRevLost   = orderCancels.reduce((s, o) => s + (o.total_amount ?? 0), 0);
+    const bookingCancels = bcRes.count ?? 0;
+    const totalBookings  = btRes.count ?? 0;
+
+    res.json({
+      success:       true,
+      orderCancels:  orderCancels.length,
+      orderRevLost,
+      totalOrders,
+      orderRate:     totalOrders > 0 ? Math.round((orderCancels.length / totalOrders) * 100) : 0,
+      bookingCancels,
+      totalBookings,
+      bookingRate:   totalBookings > 0 ? Math.round((bookingCancels / totalBookings) * 100) : 0,
+    });
+  } catch (err) {
+    console.error('[cancel-stats]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
