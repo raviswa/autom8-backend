@@ -41,7 +41,7 @@ const WA_TOKEN      = process.env.WHATSAPP_ACCESS_TOKEN;
 // META_ACCESS_TOKEN is used for WABA management APIs (templates, media).
 // Falls back to WA_TOKEN if not separately configured.
 const META_TOKEN    = process.env.META_ACCESS_TOKEN || WA_TOKEN;
-const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+const XAI_KEY = process.env.XAI_API_KEY;
 
 const SEGMENT_KEYS = ['all', 'recent', 'lapsed', 'takeaway', 'high_value', 'never_returned'];
 
@@ -556,9 +556,9 @@ router.post('/ai-suggest', async (req, res) => {
     const { goal } = req.body;
     if (!goal?.trim()) return res.status(400).json({ error: 'goal is required' });
 
-    if (!ANTHROPIC_KEY) {
+    if (!XAI_KEY) {
       return res.status(503).json({
-        error: 'AI not configured — add ANTHROPIC_API_KEY to your environment',
+        error: 'AI not configured — add XAI_API_KEY to your environment',
       });
     }
 
@@ -584,30 +584,30 @@ Given a marketing goal, respond ONLY with a valid JSON object (no markdown fence
   "suggested_message": "<a friendly WhatsApp message under 200 characters — use {{name}} for personalisation>"
 }`;
 
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
+    const r = await fetch('https://api.x.ai/v1/chat/completions', {
       method:  'POST',
       headers: {
-        'x-api-key':         ANTHROPIC_KEY,
-        'anthropic-version': '2023-06-01',
-        'Content-Type':      'application/json',
+        Authorization:  `Bearer ${XAI_KEY}`,
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model:      'claude-sonnet-4-20250514',
+        model:      'grok-3-latest',
         max_tokens: 400,
-        system:     systemPrompt,
-        messages:   [{ role: 'user', content: `Goal: ${goal.trim()}` }],
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user',   content: `Goal: ${goal.trim()}` },
+        ],
       }),
     });
 
     const aiData = await r.json();
-    if (!r.ok) throw new Error(aiData.error?.message || 'Anthropic API request failed');
+    if (!r.ok) throw new Error(aiData.error?.message || 'xAI API request failed');
 
-    const raw = aiData.content?.[0]?.text || '{}';
+    const raw = aiData.choices?.[0]?.message?.content || '{}';
     let parsed;
     try {
       parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
     } catch {
-      // Fallback: return the text as reasoning with a safe default segment
       parsed = { segment: 'lapsed', reasoning: raw, suggested_message: '' };
     }
 
@@ -639,43 +639,34 @@ router.post('/ai-rewrite', async (req, res) => {
     const { text, category = 'MARKETING' } = req.body;
     if (!text?.trim()) return res.status(400).json({ error: 'text is required' });
 
-    if (!ANTHROPIC_KEY) {
+    if (!XAI_KEY) {
       return res.status(503).json({
-        error: 'AI not configured — add ANTHROPIC_API_KEY to your environment',
+        error: 'AI not configured — add XAI_API_KEY to your environment',
       });
     }
 
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
+    const r = await fetch('https://api.x.ai/v1/chat/completions', {
       method:  'POST',
       headers: {
-        'x-api-key':         ANTHROPIC_KEY,
-        'anthropic-version': '2023-06-01',
-        'Content-Type':      'application/json',
+        Authorization:  `Bearer ${XAI_KEY}`,
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model:      'claude-sonnet-4-20250514',
+        model:      'grok-3-latest',
         max_tokens: 300,
-        system: `You are a WhatsApp marketing copy editor for an Indian restaurant. 
-Rewrite the provided message to be more concise, warm, and engaging.
-Rules:
-- Keep all {{variable}} placeholders exactly as they are
-- Use *bold* sparingly for key info (dish names, offers, times)
-- Maximum 200 characters
-- Sound human, not corporate
-- Respond with ONLY the rewritten message — no explanation, no quotes`,
-        messages: [{
-          role:    'user',
-          content: `Category: ${category}\nMessage: ${text.trim()}`,
-        }],
+        messages: [
+          { role: 'system', content: `You are a WhatsApp marketing copy editor for an Indian restaurant. Rewrite the provided message to be more concise, warm, and engaging. Keep all {{variable}} placeholders intact. Use *bold* sparingly. Max 200 characters. Sound human, not corporate. Respond with ONLY the rewritten message — no explanation, no quotes.` },
+          { role: 'user',   content: `Category: ${category}\nMessage: ${text.trim()}` },
+        ],
       }),
     });
 
     const aiData = await r.json();
-    if (!r.ok) throw new Error(aiData.error?.message || 'Anthropic API request failed');
+    if (!r.ok) throw new Error(aiData.error?.message || 'xAI API request failed');
 
     res.json({
       success:   true,
-      rewritten: aiData.content?.[0]?.text?.trim() || text,
+      rewritten: aiData.choices?.[0]?.message?.content?.trim() || text,
     });
   } catch (err) {
     console.error('[marketing/ai-rewrite]', err.message);
