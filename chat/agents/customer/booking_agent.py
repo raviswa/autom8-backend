@@ -35,6 +35,14 @@ FIX LOG
             BEFORE returning, ensuring the sub-flow receives the right state.
   Fix 28 — Copy/UX rewrites: special-notes footer, greeting messages,
             service-menu body text, dine-in check-in message.
+  Fix 31 — Takeaway/Delivery silent-stall fix:
+            (a) _send_catalog_with_fallback: full diagnostic logging, last-resort
+                static prompt guarantees customer never sees silence;
+            (b) awaiting_order + awaiting_address + confirming_order added to
+                _STEPS_ALLOWING_SHORT_REPLY so catalog order messages are never
+                swallowed by the greeting guard;
+            (c) empty-cart + short-message guard in takeaway & delivery
+                awaiting_order re-sends catalog instead of creating ₹0 booking.
 """
 
 from datetime import datetime
@@ -551,6 +559,9 @@ _STEPS_ALLOWING_SHORT_REPLY = {
     "awaiting_numbered_order","awaiting_payment","awaiting_special_notes",
     "awaiting_flow_datetime","awaiting_table_assignment",
     "awaiting_large_party_response","awaiting_manager_approval","visit_complete",
+    # Fix 31: order-related steps must allow structured/short messages so that
+    # WhatsApp catalog order submissions are never swallowed by the greeting guard.
+    "awaiting_order","awaiting_address","confirming_order","awaiting_cart_action",
 }
 _GENERIC_GREETINGS = {"welcome!","welcome","hi!","hi","hello!","hello",""}
 
@@ -574,58 +585,72 @@ async def _send_catalog_with_fallback(
     customer_phone: str, restaurant_id: str, session_state: Dict[str, Any],
 ) -> None:
     """
-    Fix 30 — Time-slot-safe catalog fallback.
+    Fix 30/31 — Catalog-first, time-slot-safe, guaranteed delivery.
 
-    Attempt 1: native WhatsApp Catalog API.
-    Attempt 2: one automatic retry after a short pause (handles transient failures).
-    Hard fallback: plain-text numbered menu — NO send_category_list / send_item_list /
-      items_for_slot anywhere in this path.  Those helpers filter by current_time_slot()
-      which returns 0 items when all 28 items share a single slot tag ("Morning Tiffin")
-      and the customer is ordering at dinner time, causing the infinite-loop bug.
+    Attempt 1 : native WhatsApp Catalog API
+    Attempt 2 : single retry after 2 s (handles transient Meta API blips)
+    Hard fallback : plain-text numbered menu from MENU_ITEMS with NO time-slot
+                    filtering (no send_category_list / send_item_list / items_for_slot)
+    Last resort   : static prompt — customer is NEVER left with silence
 
     booking_step after this call:
-      • catalog sent (attempt 1 or 2) → unchanged (caller owns the step, usually "awaiting_order")
-      • hard fallback                 → "awaiting_numbered_order"
+      catalog delivered        → unchanged  (caller already set "awaiting_order")
+      plain-text delivered     → "awaiting_numbered_order"
+      last-resort static sent  → "awaiting_order" (re-attempt on next message)
     """
+    logger.info(f"[catalog] _send_catalog_with_fallback called for {customer_phone}")
+
     # ── Attempt 1 ──────────────────────────────────────────────────────────────
     catalog_sent = False
     try:
         catalog_sent = await send_whatsapp_catalog_message(customer_phone, restaurant_id)
+        logger.info(f"[catalog] attempt-1 result={catalog_sent} for {customer_phone}")
     except Exception as e:
-        logger.warning(f"[catalog] attempt-1 raised (non-fatal): {e}")
+        logger.warning(f"[catalog] attempt-1 raised: {e}")
 
     if catalog_sent:
-        logger.info(f"[catalog] Sent on attempt 1 to {customer_phone}")
         return
 
-    # ── Attempt 2: single retry after 1.5 s ───────────────────────────────────
-    logger.warning(f"[catalog] attempt-1 failed for {customer_phone} — retrying in 1.5 s")
-    await asyncio.sleep(1.5)
+    # ── Attempt 2: retry after 2 s ────────────────────────────────────────────
+    logger.warning(f"[catalog] attempt-1 failed for {customer_phone} — retrying in 2 s")
+    await asyncio.sleep(2)
     try:
         catalog_sent = await send_whatsapp_catalog_message(customer_phone, restaurant_id)
+        logger.info(f"[catalog] attempt-2 result={catalog_sent} for {customer_phone}")
     except Exception as e:
-        logger.warning(f"[catalog] attempt-2 raised (non-fatal): {e}")
+        logger.warning(f"[catalog] attempt-2 raised: {e}")
 
     if catalog_sent:
-        logger.info(f"[catalog] Sent on attempt 2 to {customer_phone}")
         return
 
     # ── Hard fallback: plain-text numbered menu ────────────────────────────────
-    # Deliberately bypasses send_category_list / send_item_list / items_for_slot.
-    # plain_text_menu() iterates MENU_ITEMS directly with no time-slot filtering.
-    logger.warning(f"[catalog] Both attempts failed for {customer_phone} — hard fallback to plain-text menu")
+    logger.warning(f"[catalog] both attempts failed for {customer_phone} — plain-text fallback")
     try:
-        menu_text = plain_text_menu()
-        await send_whatsapp_message(customer_phone, menu_text, restaurant_id)
-        session_state["booking_step"] = "awaiting_numbered_order"
-        logger.info(f"[catalog-fallback] Plain-text menu delivered to {customer_phone}")
+        menu_text = plain_text_menu()   # no time-slot filtering
+        if menu_text and menu_text.strip():
+            await send_whatsapp_message(customer_phone, menu_text, restaurant_id)
+            session_state["booking_step"] = "awaiting_numbered_order"
+            logger.info(f"[catalog-fallback] plain-text menu delivered to {customer_phone}")
+            return
+        logger.error(f"[catalog-fallback] plain_text_menu() returned empty for {customer_phone}")
     except Exception as e:
-        logger.error(f"[catalog-fallback] Plain-text menu also failed for {customer_phone}: {e}")
+        logger.error(f"[catalog-fallback] plain_text_menu() raised: {e}")
+
+    # ── Last resort: static prompt — NEVER leave the customer in silence ───────
+    logger.error(f"[catalog-fallback] last-resort static prompt for {customer_phone}")
+    try:
         await send_whatsapp_message(
             customer_phone,
-            "Our menu is loading — please ask our staff or try again in a moment!",
+            (
+                "🍽️ Our full menu is ready for you!\n\n"
+                "Please type what you'd like to order, or reply *MENU* to see today's items.\n\n"
+                "You can also tap the 🛍️ Shop icon at the top of this chat to browse and add items."
+            ),
             restaurant_id,
         )
+        session_state["booking_step"] = session_state.get("booking_step", "awaiting_order")
+    except Exception as e:
+        logger.critical(f"[catalog-fallback] even last-resort message failed for {customer_phone}: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -1111,8 +1136,12 @@ async def handle_booking_flow(
         elif svc == "delivery":
             return await handle_delivery_flow(restaurant_id, customer_id, customer_name, customer_phone, mp, ot, session_state)
         else:
-            await send_whatsapp_message(customer_phone, "Sorry, something went wrong. Please start again.", restaurant_id)
-            return {"status": "error"}
+            # service_type unknown — re-send service menu cleanly
+            raw_g = await _safe_build_greeting(customer_id, restaurant_id)
+            greet = _build_smart_greeting(customer_name, raw_g, session_state)
+            await _send_service_menu(customer_phone, restaurant_id, greet)
+            session_state["booking_step"] = "awaiting_service_selection"
+            return {"status": "awaiting_service_selection"}
 
     # Cart: awaiting_category_selection / awaiting_item_selection
     # Fix 30: These steps are now dead-paths — the catalog API is the only entry
@@ -1162,28 +1191,57 @@ async def handle_booking_flow(
             return {"status": "awaiting_cart_action"}
 
     # Cart: awaiting_numbered_order
+    # Emergency plain-text path — only reached when the catalog API failed twice.
+    # Primary goal: get customer back onto the catalog ASAP, or submit their order.
     if current_step == "awaiting_numbered_order":
         text = message.strip()
         cat  = session_state.get("current_category")
-        if text.upper() == "DONE":
+
+        # "DONE" or "CONFIRM" — submit whatever is in the cart
+        if text.upper() in ("DONE", "CONFIRM"):
             cart = session_state.get("cart", {})
             if not cart:
-                await send_whatsapp_message(customer_phone, "Cart is empty — please pick at least one item.", restaurant_id)
-                await send_whatsapp_message(customer_phone, plain_text_menu(cat), restaurant_id)
-                return {"status": "awaiting_numbered_order"}
-            await send_cart_summary_buttons(customer_phone, session_state)
-            return {"status": "awaiting_cart_action"}
+                # Cart empty — retry the catalog so they can pick items properly
+                await send_whatsapp_message(customer_phone, "Your cart is empty. Retrying the menu for you...", restaurant_id)
+                session_state["booking_step"] = "awaiting_order"
+                await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+                return {"status": session_state.get("booking_step", "awaiting_order")}
+            # Cart has items — forward directly to the right sub-flow
+            session_state["order_from_cart"] = True
+            session_state["booking_step"]    = "awaiting_order"
+            svc = session_state.get("service_type")
+            mp  = session_state.get("manager_phone", manager_phone)
+            ot  = cart_to_order_text(cart)
+            if svc == "dine_in":
+                return await handle_dine_in_flow(restaurant_id, customer_id, customer_name, customer_phone, mp, ot, session_state, table_number)
+            elif svc == "takeaway":
+                return await handle_takeaway_flow(restaurant_id, customer_id, customer_name, customer_phone, mp, ot, session_state)
+            elif svc == "delivery":
+                return await handle_delivery_flow(restaurant_id, customer_id, customer_name, customer_phone, mp, ot, session_state)
+
+        # "MENU" — re-attempt the catalog (primary channel) instead of re-sending plain text
         if text.upper() == "MENU":
-            await send_whatsapp_message(customer_phone, plain_text_menu(cat), restaurant_id)
-            return {"status": "awaiting_numbered_order"}
+            session_state["booking_step"] = "awaiting_order"
+            await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+            return {"status": session_state.get("booking_step", "awaiting_order")}
+
+        # Numbered item selection (plain-text fallback ordering)
         matched = parse_numbered_order(text, cat, session_state)
         if matched:
             for item in matched:
                 add_to_cart(session_state, item["id"], item["title"], float(item["price"] // 100))
             summary = cart_summary_text(session_state.get("cart", {}))
-            await send_whatsapp_message(customer_phone, f"✅ Added!\n\n{summary}\n\nReply with more numbers to add items, or *DONE* to confirm.", restaurant_id)
+            await send_whatsapp_message(
+                customer_phone,
+                f"✅ Added!\n\n{summary}\n\nReply with more item numbers, *DONE* to place your order, or *MENU* to reopen the full menu.",
+                restaurant_id,
+            )
         else:
-            await send_whatsapp_message(customer_phone, "Reply with item number(s), e.g. *1 3* — or *DONE* to confirm your cart.", restaurant_id)
+            await send_whatsapp_message(
+                customer_phone,
+                "Reply with item number(s) e.g. *1 3*, *DONE* to confirm your order, or *MENU* to reopen the full menu.",
+                restaurant_id,
+            )
         return {"status": "awaiting_numbered_order"}
 
     # Step 3: delegate to sub-flow
@@ -1585,7 +1643,14 @@ async def handle_takeaway_flow(
             await _send_menu(customer_phone, restaurant_id, session_state)
             return {"status": session_state.get("booking_step", "awaiting_order")}
 
-        cart          = session_state.get("cart", {})
+        cart = session_state.get("cart", {})
+
+        # Fix 31: empty cart + noise message → re-send catalog, don't create ₹0 booking
+        if not cart and len(order_text) < 3:
+            logger.info(f"[takeaway] empty cart + short message '{order_text}' — re-sending catalog")
+            await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+            return {"status": session_state.get("booking_step", "awaiting_order")}
+
         cart_snapshot = dict(cart)
         total         = cart_total(cart) if cart else 0.0
         token         = await get_next_token_number(restaurant_id)
@@ -1704,7 +1769,14 @@ async def handle_delivery_flow(
             await _send_menu(customer_phone, restaurant_id, session_state)
             return {"status": session_state.get("booking_step", "awaiting_order")}
 
-        cart          = session_state.get("cart", {})
+        cart = session_state.get("cart", {})
+
+        # Fix 31: empty cart + noise message → re-send catalog, don't create ₹0 booking
+        if not cart and len(order_text) < 3:
+            logger.info(f"[delivery] empty cart + short message '{order_text}' — re-sending catalog")
+            await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+            return {"status": session_state.get("booking_step", "awaiting_order")}
+
         cart_snapshot = dict(cart)
         items_total   = cart_total(cart) if cart else 0.0
         total         = items_total + DELIVERY_CHARGE
