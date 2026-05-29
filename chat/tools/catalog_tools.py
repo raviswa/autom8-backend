@@ -63,6 +63,22 @@ FIX LOG
       alongside the daily cron, triggering sync within seconds of app startup.
     - Empty-items guard log level upgraded from WARNING to ERROR so Railway
       surfaces it clearly when the backend fetch is the root cause.
+
+  Fix (time-slot standardisation — all flows):
+    - send_whatsapp_catalog_message() was filtering items by current_time_slot()
+      and using the slot name ("Morning Tiffin", "Lunch" etc.) as the catalog
+      section header and WhatsApp message header. With all 28 items currently
+      tagged "Morning Tiffin" in the DB, this caused:
+        (a) The catalog header to always read "Munafe Menu — Morning Tiffin"
+            regardless of time of day or service type.
+        (b) items_for_slot() returning 0 results outside morning hours,
+            silently failing the catalog send and triggering the fallback loop.
+    - Fix: time-slot filtering removed from send_whatsapp_catalog_message().
+      ALL items are shown in a single section titled "Today's Menu".
+      current_time_slot() and items_for_slot() are no longer called here.
+      This standardises the catalog across dine-in, takeaway, and delivery.
+    - current_time_slot() and items_for_slot() are kept in the module for
+      use by other callers (cart_tools, scheduling logic etc.).
 """
 
 from __future__ import annotations
@@ -201,6 +217,10 @@ def current_time_slot() -> str:
 
     NOTE: Uses ZoneInfo("Asia/Kolkata") — always correct IST regardless of
     where the server is hosted (UTC, US, EU etc.).
+
+    NOTE: send_whatsapp_catalog_message() no longer calls this function.
+    It is kept here for use by other callers (cart_tools, scheduling etc.)
+    and for when time-slot segregation is restored in the MENU_ITEMS table.
     """
     ist_now = datetime.now(ZoneInfo("Asia/Kolkata"))
     hour    = ist_now.hour  # 0-23 in IST
@@ -224,6 +244,9 @@ def items_for_slot(slot: str | None = None) -> list[dict]:
     Synchronous — safe to call anywhere. Cache is populated by the first
     await fetch_menu_items() call (which happens on every incoming message
     via send_category_list).
+
+    NOTE: send_whatsapp_catalog_message() no longer calls this function.
+    Kept for cart_tools and any other callers that need slot-filtered lists.
     """
     slot = slot or current_time_slot()
     return [i for i in MENU_ITEMS if i["time_slot"] == slot]
@@ -369,15 +392,22 @@ async def _get_catalog_credentials(restaurant_id: str | None = None) -> dict[str
 async def send_whatsapp_catalog_message(
     customer_phone: str,
     restaurant_id: str | None = None,
-    slot: str | None = None,
 ) -> bool:
     """
-    Send an interactive multi-product WhatsApp message for the current time slot.
-    The customer sees items with photos, prices and an Add-to-basket button.
+    Send an interactive multi-product WhatsApp catalog message showing ALL
+    menu items in a single "Today's Menu" section.
 
-    FIX: Now uses per-restaurant WhatsApp credentials (from database integration)
-    instead of only global environment variables. This ensures the catalog message
-    is sent using the correct WhatsApp Business Account for each restaurant.
+    Time-slot standardisation fix:
+      Previously this function called current_time_slot() to filter items
+      and set section/header labels, producing "Munafe Menu — Morning Tiffin"
+      on every flow at every hour (since all 28 items share the Morning Tiffin
+      tag). This also caused items_for_slot() to return 0 items outside morning
+      hours, silently failing the catalog send.
+
+      Now: ALL items are shown, no time-slot filtering, neutral section title.
+      The slot parameter is removed. current_time_slot() / items_for_slot()
+      are not called here. Re-introduce slot filtering only when real time-slot
+      segregation is restored in the MENU_ITEMS table.
 
     Returns True on success, False on failure.
     """
@@ -389,7 +419,6 @@ async def send_whatsapp_catalog_message(
         )
         return False
 
-    # Validate that we have a token for catalog access
     if not credentials.get("access_token"):
         if not _TOKEN:
             raise EnvironmentError(
@@ -398,24 +427,18 @@ async def send_whatsapp_catalog_message(
             )
         logger.warning("Using global META_GRAPH_API_TOKEN for catalog access")
 
-    # Warm the cache then filter by slot
-    await fetch_menu_items()
-    slot  = slot or current_time_slot()
-    items = items_for_slot(slot)
+    # Warm the cache — ALL items, no slot filter
+    items = await fetch_menu_items()
 
     if not items:
-        logger.warning(f"No items found for slot '{slot}'")
+        logger.error(
+            f"[catalog] MENU_ITEMS is empty for {customer_phone} — "
+            "cannot send catalog. Check backend /api/internal/menu-items."
+        )
         return False
 
-    product_items = [{"product_retailer_id": i["id"]} for i in items]
-
-    slot_emoji = {
-        "Morning Tiffin":  "🌅",
-        "Lunch":           "☀️",
-        "Evening Snacks":  "🍵",
-        "Dinner Tiffin":   "🌙",
-    }.get(slot, "🍽️")
-
+    product_items   = [{"product_retailer_id": i["id"]} for i in items]
+    thumbnail_id    = items[0]["id"]
     access_token    = credentials.get("access_token") or _TOKEN
     phone_number_id = credentials.get("phone_number_id") or _PHONE_ID
 
@@ -426,7 +449,11 @@ async def send_whatsapp_catalog_message(
         "type":              "interactive",
         "interactive": {
             "type": "product_list",
-            "header": {"type": "text", "text": f"{slot_emoji} Munafe Menu — {slot}"},
+            "header": {
+                "type": "text",
+                # Neutral header — no time-slot name, consistent across all flows
+                "text": "🍽️ Munafe Menu",
+            },
             "body": {
                 "text": (
                     "Browse today's items below 👇\n"
@@ -437,12 +464,18 @@ async def send_whatsapp_catalog_message(
             "footer": {"text": "Prices include taxes • Hotel Munafe, Chennai"},
             "action": {
                 "catalog_id": _CATALOG_ID,
-                "sections": [{"title": slot, "product_items": product_items}],
+                "sections": [
+                    {
+                        # Neutral section title — no "Morning Tiffin" / slot name
+                        "title": "Today's Menu",
+                        "product_items": product_items,
+                    }
+                ],
             },
         },
     }
 
-    url = f"{credentials['api_endpoint']}/{phone_number_id}/messages"
+    url     = f"{credentials['api_endpoint']}/{phone_number_id}/messages"
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type":  "application/json",
@@ -454,14 +487,14 @@ async def send_whatsapp_catalog_message(
 
     if resp.status_code == 200:
         logger.info(
-            f"Catalog message sent to {customer_phone} for slot '{slot}' "
-            f"(restaurant={restaurant_id})"
+            f"[catalog] Sent to {customer_phone} — {len(items)} items, "
+            f"1 section 'Today's Menu' (restaurant={restaurant_id})"
         )
         return True
     else:
         logger.error(
-            f"Failed to send catalog message to {customer_phone}: "
-            f"{resp.status_code} - {data}"
+            f"[catalog] Failed for {customer_phone}: "
+            f"{resp.status_code} — {data}"
         )
         return False
 
