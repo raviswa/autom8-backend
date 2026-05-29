@@ -3306,12 +3306,47 @@ app.get('/api/dashboard/wa-orders', async (req, res) => {
       .order('created_at', { ascending: false })
       .limit(500);
 
+app.get('/api/dashboard/wa-orders', async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const authToken = authHeader?.split(' ')[1];
+    const { data: { user } } = await supabase.auth.getUser(authToken);
+    const { data: userData } = await supabaseAdmin
+      .from('users').select('restaurant_id').eq('id', user.id).single();
+
+    const { start, end } = req.query;
+    if (!start || !end) return res.status(400).json({ error: 'start and end required' });
+
+    const { data, error } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .select('id, arrived_at, status, type, pax, name, phone, table_number')
+      .eq('restaurant_id', userData.restaurant_id)
+      .gte('arrived_at', start)
+      .lte('arrived_at', end)
+      .order('arrived_at', { ascending: false })
+      .limit(500);
+
     if (error) {
       console.error('[wa-orders] query failed:', error.message);
       return res.status(500).json({ error: error.message });
     }
 
-    res.json({ success: true, orders: data ?? [] });
+    const orders = (data ?? []).map(t => ({
+      id:           t.id,
+      created_at:   t.arrived_at,
+      service_type: t.type,
+      status:       t.status,
+      party_size:   t.pax,
+      token_number: t.id,
+      total_amount: null,
+      customers: { name: t.name, phone: t.phone },
+    }));
+
+    res.json({ success: true, orders });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
