@@ -3416,5 +3416,4 @@ app.listen(PORT, () => {
   console.log(`📍 Region: ${process.env.REGION || 'IN'}`);
   console.log(`🗄️  Database: ${process.env.SUPABASE_URL}`);
   startSlotScheduler();
-  runStartupSync();
 });
