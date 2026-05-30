@@ -48,7 +48,8 @@
 //             /api/whatsapp  → src/routes/webhook.js
 // ============================================================================
 
-process.on('uncaughtException', err => { console.error('CRASH:', err); process.exit(1); });
+process.on('uncaughtException',  err => { console.error('CRASH:', err.stack); process.exit(1); });
+process.on('unhandledRejection', (reason) => { console.error('REJECTION:', reason); process.exit(1); });
 
 const express   = require('express');
 const cors      = require('cors');
