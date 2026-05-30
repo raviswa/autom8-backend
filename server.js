@@ -3408,3 +3408,13 @@ app.get('/api/dashboard/cancel-stats', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ── HTTP server ───────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.log(`🚀 Autom8 Backend running on port ${PORT}`);
+  console.log(`📍 Region: ${process.env.REGION || 'IN'}`);
+  console.log(`🗄️  Database: ${process.env.SUPABASE_URL}`);
+  startSlotScheduler();
+  runStartupSync();
+});
