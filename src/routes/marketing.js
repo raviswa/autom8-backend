@@ -210,10 +210,23 @@ router.post('/templates/create', async (req, res) => {
       .from('restaurants').select('waba_id').eq('id', auth.restaurantId).single();
     const wabaId = rest?.waba_id;
     if (!wabaId || !META_TOKEN) return res.status(400).json({ error: 'WhatsApp Business Account not configured' });
+    // Sanitize components: Meta rejects 'text' on COPY_CODE buttons
+    const sanitizedComponents = (components || []).map(comp => {
+      if (comp.type !== 'BUTTONS') return comp;
+      return {
+        ...comp,
+        buttons: (comp.buttons || []).map(btn => {
+          if (btn.type !== 'COPY_CODE') return btn;
+          const { text, ...rest } = btn; // strip 'text' — Meta sets it automatically
+          return rest;
+        }),
+      };
+    });
+
     const r = await fetch(`${WA_API_URL}/${wabaId}/message_templates`, {
       method:  'POST',
       headers: { Authorization: `Bearer ${META_TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, category: category || 'MARKETING', language: language || 'en', components }),
+      body: JSON.stringify({ name, category: category || 'MARKETING', language: language || 'en', components: sanitizedComponents }),
     });
     const data = await r.json();
     if (!r.ok || data.error) return res.status(400).json({ error: data.error?.message || 'Template creation failed' });
