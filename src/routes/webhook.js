@@ -23,11 +23,8 @@ const { broadcastToRestaurant } = require('../websocket');
 // server.js registers module.exports BEFORE requiring this route file
 // (routes are loaded inside the server.listen callback), so the
 // circular reference is safe at runtime.
-const {
-  handleWhatsAppOrder,
-  handleFeedbackReply,
-  validateReferralCode,
-} = require('../../server');
+
+const { handleWhatsAppOrder, handleFeedbackReply, validateReferralCode } = require('../handlers/waHandlers');
 
 // Internal Python chat service URL — same Railway deployment, different process
 const CHAT_SERVICE_URL = process.env.CHAT_SERVICE_URL || 'http://localhost:8001';
