@@ -1492,6 +1492,26 @@ kdsInserts.push({
       timestamp:      new Date().toISOString(),
     });
 
+	  // ── Step 5: Broadcast ORDER_NEW ───────────────────────────────────────────
+    broadcastToRestaurant(restaurant_id, {
+      type:         'ORDER_NEW',
+      order_id:     orderRow.id,
+      order_number: orderRow.order_number,
+      // ...rest of existing payload unchanged...
+    });
+
+    // BEGIN: QR Receipt — send receipt URL to customer
+    if (cleanPhone && kdsItemsCreated > 0) {
+      const receiptUrl = `${process.env.API_BASE_URL ?? 'https://api.autom8.works'}/verify/${orderRow.id}`;
+      sendWhatsAppMessage(
+        cleanPhone,
+        `🧾 *Your receipt is ready!*\n\n` +
+        `Order: *${orderRow.order_number}*\n` +
+        `Tap to view your itemised bill:\n${receiptUrl}`
+      ).catch(e => console.error('[kds-notify] Receipt send failed (non-fatal):', e.message));
+    }
+    // END: QR Receipt
+
     // ── Step 6: Audit log (non-fatal) ──────────────────────────────────────────
     supabaseAdmin.from('audit_logs').insert({
       restaurant_id,
