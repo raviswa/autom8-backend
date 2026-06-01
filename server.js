@@ -68,6 +68,32 @@ const wss    = new WebSocket.Server({ server });
 
 const { clients, broadcastToRestaurant } = require('./src/websocket');
 
+// BEGIN: Separated/Resilient Architecture Updates — waHandlers import
+// validateReferralCode and generateReferralSharePrompt are used directly
+// by /api/referrals/validate and /api/referrals/generate routes in this file.
+// handleWhatsAppOrder and handleFeedbackReply are used only by webhook.js —
+// they are imported there directly from waHandlers and do not need to be
+// re-imported here.
+
+let _waHandlers = {};
+try {
+  _waHandlers = require('./src/handlers/waHandlers');
+  console.log('[server] ✅ waHandlers loaded');
+} catch (err) {
+  console.error('[server] ⚠️ waHandlers failed to load — referral routes will use fallbacks:', err.message);
+}
+
+const {
+  validateReferralCode = async () => {
+    console.error('[server] validateReferralCode unavailable — waHandlers not loaded');
+    return false;
+  },
+  generateReferralSharePrompt = async () => {
+    console.error('[server] generateReferralSharePrompt unavailable — waHandlers not loaded');
+  },
+} = _waHandlers;
+// END: Separated/Resilient Architecture Updates — waHandlers import
+
 app.use(cors({
   origin: [
     'http://localhost:3000',
@@ -317,143 +343,7 @@ app.post('/api/catalog/slot-sync', async (req, res) => {
   }
 });
 
-// ============================================================================
-// REQ 1 — CONTEXT-AWARE CONDIMENT PROMPTS ("Sambar / Raita Nudge")
-// ============================================================================
-//
-// These keyword sets are defined once as module-level constants so they can be
-// maintained or expanded without touching the detection logic.
-//
-// Matching strategy: every item name + category string is lower-cased before
-// the check, making all comparisons case-insensitive regardless of how the
-// manager entered the menu data.
-// ============================================================================
 
-// South-Indian tiffin item keywords and slot/category labels
-const SOUTH_INDIAN_ITEM_KEYWORDS = [
-  'idli', 'idly', 'dosa', 'dosai', 'vada', 'vadai', 'pongal',
-  'uttapam', 'upma', 'rava', 'appam', 'puttu', 'pesarattu',
-  'medu', 'uthapam', 'paniyaram',
-];
-const SOUTH_INDIAN_CATEGORY_KEYWORDS = [
-  'morning tiffin', 'morning_tiffin', 'tiffin', 'south indian',
-  'south_indian', 'southindian',
-];
-
-// North-Indian / heavy-meal keywords
-const NORTH_INDIAN_ITEM_KEYWORDS = [
-  'biryani', 'biriyani', 'pulao', 'pulav', 'parotta', 'paratha',
-  'fried rice', 'meals', 'curry', 'korma', 'masala', 'paneer',
-  'dal makhani', 'naan', 'roti', 'thali', 'kofta',
-];
-const NORTH_INDIAN_CATEGORY_KEYWORDS = [
-  'north indian', 'north_indian', 'northindian', 'biryani',
-  'main course', 'main_course', 'meals',
-];
-
-/**
- * detectCondimentContext
- *
- * Inspects an array of order/cart items and returns a string tag indicating
- * which condiment nudge applies:
- *   'south_indian' → mention Sambar
- *   'north_indian' → mention Raita
- *   'default'      → generic extra sides prompt
- *
- * Accepts either the raw `productItems` array straight from a WhatsApp catalog
- * order payload OR a resolved `order_items` array from the DB — both shapes are
- * handled through optional-chaining so a missing field never throws.
- *
- * @param {Array}  items  - Array of product/order items (may be undefined/null)
- * @returns {'south_indian'|'north_indian'|'default'}
- */
-function detectCondimentContext(items) {
-  // Safely guard against undefined or non-array input
-  if (!Array.isArray(items) || items.length === 0) return 'default';
-
-  let hasSouthIndian = false;
-  let hasNorthIndian = false;
-
-  for (const item of items) {
-    // Support both raw catalog payloads and DB-resolved shapes:
-    //   productItem  → { product_retailer_id, item_name? }
-    //   order_item   → { menu_item: { name, category } }
-    //   plain object → { name, category }
-    const rawName     = (item?.menu_item?.name ?? item?.item_name ?? item?.name ?? '').toLowerCase();
-    const rawCategory = (item?.menu_item?.category ?? item?.category ?? '').toLowerCase();
-
-    // South Indian check — match on name first, then category label
-    const matchesSouthName     = SOUTH_INDIAN_ITEM_KEYWORDS.some(kw => rawName.includes(kw));
-    const matchesSouthCategory = SOUTH_INDIAN_CATEGORY_KEYWORDS.some(kw => rawCategory.includes(kw));
-    if (matchesSouthName || matchesSouthCategory) hasSouthIndian = true;
-
-    // North Indian / Biryani / Meals check
-    const matchesNorthName     = NORTH_INDIAN_ITEM_KEYWORDS.some(kw => rawName.includes(kw));
-    const matchesNorthCategory = NORTH_INDIAN_CATEGORY_KEYWORDS.some(kw => rawCategory.includes(kw));
-    if (matchesNorthName || matchesNorthCategory) hasNorthIndian = true;
-  }
-
-  // When both contexts appear in the same order (e.g., a family ordering
-  // both Idli and Biryani), prefer the South Indian nudge because Sambar
-  // is the more universal accompaniment risk to miss.
-  if (hasSouthIndian) return 'south_indian';
-  if (hasNorthIndian) return 'north_indian';
-  return 'default';
-}
-
-/**
- * buildSpecialNotesPrompt
- *
- * Constructs the WhatsApp text that asks the customer for special notes.
- * The condiment hint is woven naturally into the copy so it reads as a
- * helpful suggestion rather than an upsell.
- *
- * @param {string} context - Output of detectCondimentContext()
- * @param {string} customerName - First name for personalisation (optional)
- * @returns {string} Ready-to-send WhatsApp message body
- */
-function buildSpecialNotesPrompt(context, customerName = 'there') {
-  const greeting = `Hi ${customerName}! 😊\n\n`;
-  const closer   = `\n\nOr reply *"No notes"* / *"Skip"* to confirm as-is.`;
-
-  switch (context) {
-    case 'south_indian':
-      return (
-        greeting +
-        `📝 *Any special requirements for your order?*\n\n` +
-        `For example:\n` +
-        `• Extra *Sambar* on the side 🍲\n` +
-        `• Less spice / more spice\n` +
-        `• Allergy or dietary notes\n` +
-        `• Specific cooking instructions` +
-        closer
-      );
-
-    case 'north_indian':
-      return (
-        greeting +
-        `📝 *Any special requirements for your order?*\n\n` +
-        `For example:\n` +
-        `• Extra *Raita* on the side 🥣\n` +
-        `• Less spice / extra gravy\n` +
-        `• Allergy or dietary notes\n` +
-        `• Specific cooking instructions` +
-        closer
-      );
-
-    default:
-      return (
-        greeting +
-        `📝 *Any special requirements for your order?*\n\n` +
-        `For example:\n` +
-        `• Extra side portions\n` +
-        `• Spice adjustments\n` +
-        `• Allergy or dietary notes\n` +
-        `• Specific cooking instructions` +
-        closer
-      );
-  }
-}
 
 // ============================================================================
 // REQ 2 — 2-MINUTE GRACEFUL TIMEOUT FOR SPECIAL NOTES (Auto-Close)
@@ -1747,115 +1637,6 @@ app.post('/api/feedback/queue', async (req, res) => {
   }
 });
 
-// ============================================================================
-// REQ 3 — handleFeedbackReply
-// ============================================================================
-//
-// Called from src/routes/webhook.js when an inbound WhatsApp message matches
-// an open feedback_pending record for that phone + restaurant.
-//
-// Flow:
-//   1. Look up the most recent unsettled feedback_pending row for this phone
-//   2. Parse a numeric 1-5 rating from the reply text (handles digit or star glyphs)
-//   3. Persist the text + rating to the DB row
-//   4. Send a personalised thank-you to the customer
-//   5. Dispatch a manager escalation alert to MANAGER_WHATSAPP_NUMBER
-//      — The alert explicitly includes the rating stars, score/5, table details,
-//        customer name, and verbatim note text for QC monitoring
-//
-// @param  {string}  customerPhone  - Raw phone from the WA webhook
-// @param  {string}  message        - Full text body of the inbound message
-// @param  {string}  restaurantId   - Resolved from phone_number_id
-// @returns {boolean} true if the message was handled as a feedback reply
-// ============================================================================
-
-async function handleFeedbackReply(customerPhone, message, restaurantId) {
-  try {
-    const phone = String(customerPhone).replace(/\D/g, '');
-
-    // Find the most recent feedback record that has been SENT but not yet replied
-    const { data: record } = await supabaseAdmin
-      .from('feedback_pending')
-      .select('*')
-      .eq('customer_phone', phone)
-      .eq('restaurant_id', restaurantId)
-      .eq('feedback_sent', true)       // Invitation already dispatched
-      .eq('manager_notified', false)   // Not yet processed this reply
-      .order('freed_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (!record) return false; // This is not a feedback reply — let normal flow handle it
-
-    const text      = (message || '').trim();
-
-    // Extract numeric rating: plain digit (1-5) or star glyphs (⭐ / ★)
-    const digitMatch = text.match(/\b([1-5])\b/);
-    const starMatch  = text.match(/([⭐★]+)/);
-    let rating = null;
-    if (digitMatch) {
-      rating = parseInt(digitMatch[1], 10);
-    } else if (starMatch) {
-      rating = Math.min((starMatch[1].match(/[⭐★]/g) || []).length, 5) || null;
-    }
-
-    // ── Step 1: Persist the customer's reply ──────────────────────────────────
-    await supabaseAdmin
-      .from('feedback_pending')
-      .update({
-        feedback_text:        text,
-        feedback_rating:      rating,
-        feedback_received_at: new Date().toISOString(),
-        manager_notified:     true, // Mark as fully processed
-      })
-      .eq('id', record.id);
-
-    // ── Step 2: Thank-you message back to the customer ─────────────────────────
-    const thankYou = rating && rating >= 4
-      ? `🙏 Thank you for the *${rating}⭐* rating, ${record.customer_name}!\n\nWe're so glad you enjoyed your visit. See you again soon! 😊`
-      : `🙏 Thank you for your honest feedback, ${record.customer_name}!\n\nWe'll use it to make things better. Hope to see you again! 😊`;
-
-    await sendWhatsAppMessage(customerPhone, thankYou);
-
-    // ── Step 3: Manager escalation alert ──────────────────────────────────────
-    //
-    // Always send regardless of rating — the manager needs to see all feedback,
-    // not just negative scores, for accurate QC monitoring.
-    //
-    if (process.env.MANAGER_WHATSAPP_NUMBER) {
-      const starBar    = rating ? '⭐'.repeat(rating) + ` (${rating}/5)` : 'No rating given';
-      const tableLabel = record.table_number ? `Table ${record.table_number}` : 'Unknown table';
-      const tokenLabel = record.token_number || '—';
-      const noteText   = text || '(no text provided)';
-
-      // High-priority flag for low scores so the manager can act quickly
-      const urgencyFlag = rating && rating <= 2
-        ? '🚨 *LOW SCORE — Immediate follow-up recommended*\n'
-        : '';
-
-      await sendWhatsAppMessage(
-        process.env.MANAGER_WHATSAPP_NUMBER,
-        `📣 *Customer Feedback Alert*\n` +
-        `────────────────────\n` +
-        `${urgencyFlag}` +
-        `Customer: *${record.customer_name}*\n` +
-        `Phone:    +${phone}\n` +
-        `Token:    ${tokenLabel}\n` +
-        `Table:    ${tableLabel}\n` +
-        `Rating:   ${starBar}\n` +
-        `────────────────────\n` +
-        `*Notes:*\n${noteText}\n` +
-        `────────────────────\n` +
-        `Received: ${new Date().toISOString()}`
-      );
-    }
-
-    return true; // Consumed as a feedback reply
-  } catch (err) {
-    console.error('[feedback-reply] Error:', err.message);
-    return false; // Let the caller decide what to do with the message
-  }
-}
 
 // ============================================================================
 // REQ 3 — startFeedbackScheduler
@@ -1960,220 +1741,6 @@ function startFeedbackScheduler() {
 //   C) POST /api/referrals/validate  — manual/dashboard trigger
 //   D) POST /api/referrals/generate  — create a new code for a customer
 // ============================================================================
-
-/**
- * validateReferralCode
- *
- * Validates a referral code entered by a first-time customer.
- * Guards:
- *   1. Customer must have zero prior COMPLETED orders (is_first_order check).
- *   2. Code must exist in referral_codes, be active, and not exceed max_uses.
- *   3. Customer must not have already applied a referral code.
- *
- * Side-effects on success:
- *   - Inserts a `referral_uses` row linking referrer → referee.
- *   - Writes pending_referral_discount to the customer row so checkout
- *     can deduct it when the order is finalised.
- *   - Sends a WhatsApp confirmation to the referee.
- *   - Sends a WhatsApp nudge to the referrer so they know their code was used.
- *
- * @param {string} customerPhone  - Phone of the person entering the code
- * @param {string} code           - The referral code string
- * @param {string} restaurantId
- * @returns {boolean}  true if handled as a referral validation attempt
- */
-async function validateReferralCode(customerPhone, code, restaurantId) {
-  try {
-    const cleanPhone = String(customerPhone).replace(/\D/g, '');
-
-    // ── Guard 1: only first-time customers can redeem a referral code ─────────
-    const { count: priorOrders } = await supabaseAdmin
-      .from('orders')
-      .select('id', { count: 'exact', head: true })
-      .eq('restaurant_id', restaurantId)
-      .eq('customer_phone', cleanPhone)
-      .eq('status', 'completed');
-
-    if ((priorOrders ?? 0) > 0) {
-      await sendWhatsAppMessage(
-        customerPhone,
-        `🎁 Referral codes are only for first-time orders!\n\n` +
-        `Welcome back — we hope you enjoy your meal. 😊`
-      );
-      return true; // Consumed — don't forward to Python
-    }
-
-    // ── Guard 2: check if this customer already redeemed a code ──────────────
-    const { data: existingUse } = await supabaseAdmin
-      .from('referral_uses')
-      .select('id')
-      .eq('referee_phone', cleanPhone)
-      .eq('restaurant_id', restaurantId)
-      .maybeSingle();
-
-    if (existingUse) {
-      await sendWhatsAppMessage(
-        customerPhone,
-        `🎁 You've already applied a referral code to your account.\n\n` +
-        `The discount will be applied automatically at checkout. 😊`
-      );
-      return true;
-    }
-
-    // ── Guard 3: look up the referral code ────────────────────────────────────
-    const upperCode = String(code).toUpperCase().trim();
-    const { data: referralRecord } = await supabaseAdmin
-      .from('referral_codes')
-      .select('id, owner_phone, referee_discount, referrer_reward, max_uses, use_count, expires_at, is_active')
-      .eq('code', upperCode)
-      .eq('restaurant_id', restaurantId)
-      .maybeSingle();
-
-    if (!referralRecord || !referralRecord.is_active) {
-      await sendWhatsAppMessage(
-        customerPhone,
-        `❌ *"${upperCode}"* is not a valid referral code.\n\n` +
-        `Please check the code and try again, or place your order without a code.`
-      );
-      return true;
-    }
-
-    // Guard: max usage cap
-    if (referralRecord.max_uses && referralRecord.use_count >= referralRecord.max_uses) {
-      await sendWhatsAppMessage(
-        customerPhone,
-        `😔 Referral code *"${upperCode}"* has already reached its usage limit.\n\n` +
-        `Place your order and enjoy the menu! 🍽️`
-      );
-      return true;
-    }
-
-    // Guard: expiry
-    if (referralRecord.expires_at && new Date(referralRecord.expires_at) < new Date()) {
-      await sendWhatsAppMessage(
-        customerPhone,
-        `😔 Referral code *"${upperCode}"* has expired.\n\n` +
-        `Place your order and enjoy the menu! 🍽️`
-      );
-      return true;
-    }
-
-    // ── Apply: create referral_uses record ────────────────────────────────────
-    const { error: useErr } = await supabaseAdmin
-      .from('referral_uses')
-      .insert({
-        restaurant_id:    restaurantId,
-        referral_code_id: referralRecord.id,
-        referrer_phone:   referralRecord.owner_phone,
-        referee_phone:    cleanPhone,
-        referee_discount: referralRecord.referee_discount,
-        referrer_reward:  referralRecord.referrer_reward,
-        status:           'pending',   // Moves to 'rewarded' after first order completes
-        applied_at:       new Date().toISOString(),
-      });
-
-    if (useErr) throw useErr;
-
-    // Increment use_count on the code
-    await supabaseAdmin
-      .from('referral_codes')
-      .update({ use_count: (referralRecord.use_count ?? 0) + 1 })
-      .eq('id', referralRecord.id);
-
-    // ── Confirm to referee ────────────────────────────────────────────────────
-    await sendWhatsAppMessage(
-      customerPhone,
-      `🎉 *Referral code applied!*\n\n` +
-      `You'll get *${referralRecord.referee_discount}* off your first order.\n\n` +
-      `Your discount will be deducted automatically at checkout. Enjoy! 😊`
-    );
-
-    // ── Notify referrer that their code was just used ─────────────────────────
-    if (referralRecord.owner_phone) {
-      sendWhatsAppMessage(
-        referralRecord.owner_phone,
-        `🎁 *Great news!* Someone just used your referral code *${upperCode}*!\n\n` +
-        `You'll receive *${referralRecord.referrer_reward}* once they complete their first order. 🙌`
-      ).catch(e => console.error('[referral] Referrer notify failed:', e.message));
-    }
-
-    console.log(`[referral] ✅ Code ${upperCode} applied for ${cleanPhone}`);
-    return true;
-
-  } catch (err) {
-    console.error('[referral-validate] Error:', err.message);
-    return false;
-  }
-}
-
-/**
- * generateReferralSharePrompt
- *
- * Sends the post-order WhatsApp share prompt to the customer.
- * Pulls the customer's unique referral code from `referral_codes`.
- * If the customer doesn't have a code yet, generates one on the fly.
- *
- * Non-fatal — a failure here must never surface to the order flow.
- *
- * @param {string} customerPhone
- * @param {string} restaurantId
- * @param {string} customerName
- */
-async function generateReferralSharePrompt(customerPhone, restaurantId, customerName = 'there') {
-  try {
-    const cleanPhone = String(customerPhone).replace(/\D/g, '');
-
-    // Fetch or create the customer's referral code
-    let { data: codeRecord } = await supabaseAdmin
-      .from('referral_codes')
-      .select('code, referee_discount, referrer_reward')
-      .eq('owner_phone', cleanPhone)
-      .eq('restaurant_id', restaurantId)
-      .eq('is_active', true)
-      .maybeSingle();
-
-    if (!codeRecord) {
-      // Auto-generate a unique 6-char alphanumeric code
-      const newCode = cleanPhone.slice(-4).toUpperCase() +
-        Math.random().toString(36).substring(2, 4).toUpperCase();
-
-      const { data: created, error: createErr } = await supabaseAdmin
-        .from('referral_codes')
-        .insert({
-          restaurant_id:    restaurantId,
-          owner_phone:      cleanPhone,
-          code:             newCode,
-          referee_discount: process.env.DEFAULT_REFEREE_DISCOUNT  || '₹50',
-          referrer_reward:  process.env.DEFAULT_REFERRER_REWARD   || '₹30',
-          is_active:        true,
-          use_count:        0,
-          created_at:       new Date().toISOString(),
-        })
-        .select('code, referee_discount, referrer_reward')
-        .single();
-
-      if (createErr) throw createErr;
-      codeRecord = created;
-    }
-
-    const firstName = (customerName || 'there').split(' ')[0];
-
-    await sendWhatsAppMessage(
-      customerPhone,
-      `Loved your meal, ${firstName}? 🎁 *Share the food love!*\n\n` +
-      `Pass your unique code *${codeRecord.code}* to a friend.\n\n` +
-      `They get *${codeRecord.referee_discount}* off their first order, and you get ` +
-      `*${codeRecord.referrer_reward}* credited to your account when they order!\n\n` +
-      `Tap to copy code: \`${codeRecord.code}\``
-    );
-
-    console.log(`[referral] 📤 Share prompt sent to ${cleanPhone} (code: ${codeRecord.code})`);
-
-  } catch (err) {
-    // Entirely non-fatal — order is complete, referral prompt is optional
-    console.error('[referral-share] Failed (non-fatal):', err.message);
-  }
-}
 
 // ── REST endpoints for referral management ────────────────────────────────────
 
@@ -2985,318 +2552,6 @@ async function pushInvoiceToAccounting(invoice) {
 }
 
 // ============================================================================
-// REQ 1 — handleWhatsAppOrder (enhanced with Sambar/Raita nudge)
-// ============================================================================
-//
-// This replaces the original handleWhatsAppOrder that lived in
-// src/routes/webhook.js.  Moving it here keeps all business logic in
-// server.js and gives it access to detectCondimentContext() /
-// buildSpecialNotesPrompt() without introducing a circular require.
-//
-// Changes vs baseline:
-//   • After creating the order and KDS items, resolve the full item names
-//     from the kdsInserts array (which now carries item_name).
-//   • Run detectCondimentContext() against those items.
-//   • Send buildSpecialNotesPrompt() as the follow-up message to the customer.
-//   • Upsert conversation_states with current_state='awaiting_special_notes'
-//     and special_notes_asked_at=epoch so REQ 2 monitor picks it up if idle.
-// ============================================================================
-
-async function handleWhatsAppOrder(message, metadata) {
-  const customerPhone = message.from;
-  const productItems  = message.order?.product_items ?? [];
-
-  if (productItems.length === 0) {
-    console.warn('[WA Order] Empty product_items — skipping');
-    return;
-  }
-
-  // ── Resolve restaurant from phone_number_id ────────────────────────────────
-  let restaurantId = process.env.DEFAULT_RESTAURANT_ID || null;
-  if (metadata?.phone_number_id) {
-    const { data: restaurant } = await supabaseAdmin
-      .from('restaurants').select('id')
-      .eq('whatsapp_phone_number_id', metadata.phone_number_id)
-      .eq('is_active', true).single();
-    if (restaurant) restaurantId = restaurant.id;
-  }
-  if (!restaurantId) { console.error('[WA Order] Could not resolve restaurant'); return; }
-
-  // ── Check for feedback reply before treating this as a new order ───────────
-  const wasFeedback = await handleFeedbackReply(
-    customerPhone,
-    message.text?.body || '',
-    restaurantId
-  );
-  if (wasFeedback) return;
-
-  const normalizedPhone = String(customerPhone).replace(/\D/g, '');
-  const { data: token } = await supabaseAdmin
-    .from('walk_in_tokens').select('*')
-    .eq('restaurant_id', restaurantId).eq('phone', normalizedPhone).eq('status', 'seated')
-    .order('seated_at', { ascending: false }).limit(1).maybeSingle();
-
-  if (!token) {
-    console.warn(`[WA Order] No seated token for phone ${normalizedPhone}`);
-    await sendWhatsAppMessage(
-      customerPhone,
-      `⚠️ We couldn't find your table assignment.\nPlease ask a staff member for help.`
-    );
-    return;
-  }
-
-
-// BEGIN: Updated Table Integrations — customers
-  // Upsert a customers row so the Python ADK agent can recognise
-  // returning visitors and update visit history without a separate sync.
-  // ignoreDuplicates:true means we never overwrite a name the agent already set.
-  supabaseAdmin
-    .from('customers')
-    .upsert({
-      restaurant_id:      restaurantId,
-      phone:              normalizedPhone,
-      name:               token.name || 'Guest',
-      visit_count:        1,
-      opted_in_marketing: true,
-      created_at:         new Date().toISOString(),
-    }, {
-      onConflict:       'restaurant_id,phone',
-      ignoreDuplicates: true,
-    })
-    .catch(e => console.warn('[WA Order] customers upsert (non-fatal):', e.message));
-  // END: Updated Table Integrations — customers
-  
-  // ── Create the order header ────────────────────────────────────────────────
-  const orderNumber = `ORD-WA-${Date.now()}`;
-  const { data: orderData, error: orderError } = await supabaseAdmin
-    .from('orders')
-    .insert({
-      restaurant_id: restaurantId,
-      table_id:      token.table_id,
-      order_number:  orderNumber,
-      status:        'pending',
-      source:        'whatsapp',
-    })
-    .select().single();
-  if (orderError) { console.error('[WA Order] Failed to create order:', orderError.message); return; }
-
-  // ── Insert order items + build KDS batch ──────────────────────────────────
-  let subtotal = 0;
-  const kdsInserts = [], skippedOos = [];
-
-  for (const item of productItems) {
-    const { data: menuItem } = await supabaseAdmin
-      .from('menu_items')
-      .select('id, name, price, is_stocked, is_available, category')
-      .eq('restaurant_id', restaurantId)
-      .eq('retailer_id', item.product_retailer_id)
-      .maybeSingle();
-
-    if (!menuItem) {
-      console.warn(`[WA Order] No menu item for retailer_id: ${item.product_retailer_id}`);
-      continue;
-    }
-    if (!menuItem.is_stocked || !menuItem.is_available) {
-      skippedOos.push(menuItem.name);
-      continue;
-    }
-
-    subtotal += menuItem.price * item.quantity;
-    const { data: orderItem, error: itemError } = await supabaseAdmin
-      .from('order_items')
-      .insert({
-        order_id:    orderData.id,
-        menu_item_id: menuItem.id,
-        quantity:    item.quantity,
-        unit_price:  menuItem.price,
-      })
-      .select().single();
-    if (itemError) { console.error('[WA Order] order_item insert failed:', itemError.message); continue; }
-
-    kdsInserts.push({
-      restaurant_id: restaurantId,
-      order_item_id: orderItem.id,
-      status:        'pending',
-      priority:      'normal',
-      item_name:     menuItem.name,
-      // Store category on the KDS item so REQ 1 detection can use it
-      // without a second DB round-trip
-      item_category: menuItem.category || '',
-    });
-  }
-
-  // ── Flush KDS batch ────────────────────────────────────────────────────────
-  if (kdsInserts.length > 0) {
-    const { error: kdsError } = await supabaseAdmin.from('kds_items').insert(kdsInserts);
-    if (kdsError) console.error('[WA Order] KDS insert failed:', kdsError.message);
-  }
-
-  // ── Finalise order totals ─────────────────────────────────────────────────
-  const tax = subtotal * 0.1, total = subtotal + tax;
-  await supabaseAdmin.from('orders').update({ subtotal, tax, total_amount: total }).eq('id', orderData.id);
-
-  // ── Broadcast to dashboard WebSocket ──────────────────────────────────────
-  broadcastToRestaurant(restaurantId, {
-    type:         'ORDER_NEW',
-    order_id:     orderData.id,
-    order_number: orderNumber,
-    table_number: token.table_number,
-    source:       'whatsapp',
-    item_count:   kdsInserts.length,
-    timestamp:    new Date().toISOString(),
-  });
-
-  // ── Manager notification ──────────────────────────────────────────────────
-  if (process.env.MANAGER_WHATSAPP_NUMBER) {
-    const itemLines = productItems.map(i => `• ${i.quantity}x ${i.product_retailer_id}`).join('\n');
-    await sendWhatsAppMessage(
-      process.env.MANAGER_WHATSAPP_NUMBER,
-      `🍽️ *New WhatsApp Order*\nOrder: *${orderNumber}*\nTable: *${token.table_number}*\nCustomer: ${token.name}\n\n${itemLines}\n\nTotal: ₹${total.toFixed(2)}`
-    );
-  }
-
-  // ── Order-received confirmation to customer ───────────────────────────────
-  const oosWarning = skippedOos.length > 0
-    ? `\n\n⚠️ *Out of stock:*\n${skippedOos.map(n => `• ${n}`).join('\n')}`
-    : '';
-  await sendWhatsAppMessage(
-    customerPhone,
-    `✅ *Order received!*\n\nOrder: *${orderNumber}*\nTable: *Table ${token.table_number}*\nItems: ${kdsInserts.length}${oosWarning}\n\nWe're preparing your food now! 🍳`
-  );
-
-  // ── REQ 1: Context-aware condiment nudge ──────────────────────────────────
-  //
-  // Build a normalised item list from kdsInserts (which carries both
-  // item_name and item_category populated above) and run the detector.
-  // The prompt is sent as a follow-up message immediately after the
-  // order-received confirmation so the UX reads as:
-  //   1. "✅ Order received!"
-  //   2. "📝 Any special notes? (e.g., extra Sambar)"
-  //
-  // We also upsert the conversation_states row so REQ 2's monitor can
-  // detect the idle session and auto-confirm after 2 minutes.
-  // ──────────────────────────────────────────────────────────────────────────
-
-  if (kdsInserts.length > 0) {
-    try {
-      // Shape kdsInserts into the format detectCondimentContext() expects:
-      // [{ name: '...', category: '...' }, ...]
-      const itemsForDetection = kdsInserts.map(k => ({
-        name:     k.item_name     || '',
-        category: k.item_category || '',
-      }));
-
-      const condimentContext  = detectCondimentContext(itemsForDetection);
-      const customerFirstName = (token.name || 'there').split(' ')[0];
-      const notesPrompt       = buildSpecialNotesPrompt(condimentContext, customerFirstName);
-
-      // Send the context-aware notes prompt
-      await sendWhatsAppMessage(customerPhone, notesPrompt);
-
-      // Stamp the conversation_states row so REQ 2's monitor can detect
-      // this session as idle if the customer doesn't reply within 2 minutes.
-      // conversation_states is the canonical state store for the Python ADK
-      // agent — keyed by (restaurant_id, customer_phone).
-      // We upsert so it works whether or not a prior conversation row exists.
-      try {
-        const epochNow = Math.floor(Date.now() / 1000); // Unix epoch float matches Python
-        const sessionKey = `${restaurantId}:${normalizedPhone}`;
-        await supabaseAdmin
-          .from('conversation_states')
-          .upsert({
-            restaurant_id:  restaurantId,
-            customer_phone: normalizedPhone,
-            adk_session_id: sessionKey,
-            current_state:  'awaiting_special_notes',
-            context: {
-              booking_step:             'awaiting_special_notes',
-              special_notes_asked_at:   epochNow,         // float epoch — matches Python time.time()
-              notes_order_id:           orderData.id,
-              customer_name:            token.name || 'Guest',
-              token_number:             token.id,
-              // booking_id: not available at this point in the catalog-order flow;
-              // the Python agent will have set it if this is a hybrid session.
-            },
-            updated_at: new Date().toISOString(),
-          }, {
-            onConflict: 'restaurant_id,customer_phone',
-            ignoreDuplicates: false,
-          });
-      } catch (stampErr) {
-        // Non-fatal — monitor will simply not find this session; order is safe
-        console.warn('[WA Order] conversation_states stamp failed:', stampErr.message);
-      }
-
-      console.log(
-        `[WA Order] 📝 Condiment nudge sent (context: ${condimentContext}) ` +
-        `for order ${orderNumber}`
-      );
-
-    } catch (nudgeErr) {
-      // Non-fatal — order is already placed; a nudge failure is just cosmetic
-      console.error('[WA Order] Condiment nudge failed (non-fatal):', nudgeErr.message);
-    }
-  }
-
-  // ── Audit log ─────────────────────────────────────────────────────────────
-  try {
-    await supabaseAdmin.from('audit_logs').insert({
-      restaurant_id: restaurantId,
-      action:        'WhatsApp order created',
-      details: {
-        order_id:     orderData.id,
-        order_number: orderNumber,
-        phone:        normalizedPhone,
-        item_count:   kdsInserts.length,
-      },
-    });
-  } catch (_) {}
-
-  // ── REQ 7: Auto-generate GST invoice for this order ───────────────────────
-  // Fire-and-forget — invoice generation must never block or fail the order flow
-  try {
-    const { data: restaurant } = await supabaseAdmin
-      .from('restaurants')
-      .select('id, name, gstin, brand_id')
-      .eq('id', restaurantId)
-      .maybeSingle();
-
-    // Fetch the order_items we just created so buildInvoicePayload has line items
-    const { data: orderWithItems } = await supabaseAdmin
-      .from('orders')
-      .select('*, order_items(quantity, unit_price, menu_item:menu_item_id(name, category))')
-      .eq('id', orderData.id)
-      .single();
-
-    if (orderWithItems && restaurant) {
-      const invoicePayload = buildInvoicePayload(orderWithItems, restaurant, GST_RATES.default);
-      await supabaseAdmin
-        .from('invoices')
-        .upsert({
-          restaurant_id:          restaurantId,
-          order_id:               orderData.id,
-          payload:                invoicePayload,
-          gst_rate:               GST_RATES.default,
-          grand_total:            invoicePayload.financial_breakdown.grand_total,
-          accounting_sync_status: 'PENDING_DAILY_ROLLUP_ZOHO_TALLY',
-          generated_at:           new Date().toISOString(),
-        }, { onConflict: 'order_id', ignoreDuplicates: false });
-      console.log(`[WA Order] 🧾 Invoice queued for order ${orderNumber}`);
-    }
-  } catch (invoiceErr) {
-    console.error('[WA Order] Invoice generation failed (non-fatal):', invoiceErr.message);
-  }
-
-  // ── REQ 4: Post-order referral share prompt ────────────────────────────────
-  // Sent last so it appears after the order-confirmation flow completes.
-  // Non-fatal — a referral prompt failure never affects the order.
-  generateReferralSharePrompt(customerPhone, restaurantId, token.name)
-    .catch(e => console.error('[WA Order] Referral share prompt failed:', e.message));
-}
-
-// Named exports for src/routes/webhook.js — merged into the bottom export object.
-
-// ============================================================================
 // SUBSCRIPTION / FEATURE FLAGS
 // ============================================================================
 
@@ -3469,3 +2724,27 @@ app.listen(PORT, () => {
   console.log(`🗄️  Database: ${process.env.SUPABASE_URL}`);
   startSlotScheduler();
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
