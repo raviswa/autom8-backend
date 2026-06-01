@@ -555,7 +555,7 @@ _RESET_KEYWORDS: set[str] = {
 }
 _STEPS_ALLOWING_SHORT_REPLY = {
     "ask_service","awaiting_service_selection","awaiting_reset_confirmation",
-    "awaiting_advance_confirmation","awaiting_quantity","awaiting_item_qty",
+    "awaiting__confirmation","awaiting_quantity","awaiting_item_qty",
     "awaiting_numbered_order","awaiting_payment","awaiting_special_notes",
     "awaiting_flow_datetime","awaiting_table_assignment",
     "awaiting_large_party_response","awaiting_manager_approval","visit_complete",
@@ -1940,7 +1940,7 @@ async def handle_reserve_table_flow(
                     f"Great choice! Here's your reservation summary:\n────────────────────\n"
                     f"Name: {customer_name}\nDate & Time: {formatted_dt}\n"
                     f"Guests: {session_state.get('party_size')}\n────────────────────\n\n"
-                    f"A token advance of ₹{advance_amount:.0f} is required to confirm your table."
+                    f"A token advance of ₹{advance_amount:.0f} is required to confirm your table. This amount will be adjusted during your visit"
                 )},
                 "footer": {"text": "Tap to confirm or cancel"},
                 "action": {"buttons": [
