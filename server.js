@@ -113,14 +113,34 @@ app.get('/health', (req, res) => {
 // WHATSAPP HELPERS
 // ============================================================================
 
-async function sendWhatsAppMessage(toNumber, message) {
+// BEGIN: Updated Table Integrations — restaurant_integrations
+async function sendWhatsAppMessage(toNumber, message, restaurantId = null) {
   try {
+    // Default to global env vars; override per-restaurant if credentials exist
+    let accessToken   = process.env.WHATSAPP_ACCESS_TOKEN;
+    let phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+    let apiUrl        = process.env.WHATSAPP_API_URL;
+
+    if (restaurantId) {
+      const { data: integration } = await supabaseAdmin
+        .from('restaurant_integrations')
+        .select('access_token, phone_number_id, api_endpoint')
+        .eq('restaurant_id', restaurantId)
+        .eq('provider', 'whatsapp')
+        .eq('is_active', true)
+        .maybeSingle();
+      if (integration?.access_token)    accessToken   = integration.access_token;
+      if (integration?.phone_number_id) phoneNumberId = integration.phone_number_id;
+      if (integration?.api_endpoint)    apiUrl        = integration.api_endpoint;
+    }
+    // END: Updated Table Integrations — restaurant_integrations
+
     const response = await fetch(
-      `${process.env.WHATSAPP_API_URL}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+      `${apiUrl}/${phoneNumberId}/messages`,
       {
         method:  'POST',
         headers: {
-          Authorization:  `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+          Authorization:  `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -3025,6 +3045,27 @@ async function handleWhatsAppOrder(message, metadata) {
     return;
   }
 
+
+// BEGIN: Updated Table Integrations — customers
+  // Upsert a customers row so the Python ADK agent can recognise
+  // returning visitors and update visit history without a separate sync.
+  // ignoreDuplicates:true means we never overwrite a name the agent already set.
+  supabaseAdmin
+    .from('customers')
+    .upsert({
+      restaurant_id:      restaurantId,
+      phone:              normalizedPhone,
+      name:               token.name || 'Guest',
+      visit_count:        1,
+      opted_in_marketing: true,
+      created_at:         new Date().toISOString(),
+    }, {
+      onConflict:       'restaurant_id,phone',
+      ignoreDuplicates: true,
+    })
+    .catch(e => console.warn('[WA Order] customers upsert (non-fatal):', e.message));
+  // END: Updated Table Integrations — customers
+  
   // ── Create the order header ────────────────────────────────────────────────
   const orderNumber = `ORD-WA-${Date.now()}`;
   const { data: orderData, error: orderError } = await supabaseAdmin
@@ -3293,12 +3334,23 @@ app.get('/api/dashboard/waba', async (req, res) => {
     const { data: userData } = await supabaseAdmin
       .from('users').select('restaurant_id').eq('id', user.id).single();
 
+ // BEGIN: Updated Table Integrations — restaurant_details
     const { data, error } = await supabaseAdmin
       .from('restaurants')
-      .select('id, name, whatsapp_number, manager_phone, timezone, dining_duration_minutes, payment_mode, waba_id')
+      .select(`
+        id, name, whatsapp_number, manager_phone, timezone,
+        dining_duration_minutes, payment_mode, waba_id,
+        restaurant_details (
+          display_name, city, state, country,
+          cuisine_type, opening_hours,
+          contact_phone, contact_email,
+          website_url, google_maps_url, address_line1
+        )
+      `)
       .eq('id', userData.restaurant_id)
       .maybeSingle();
-
+    // END: Updated Table Integrations — restaurant_details
+	
     if (error) console.error('[/api/dashboard/waba]', error.message);
     res.json({ success: true, restaurant: data ?? null });
   } catch (err) {
