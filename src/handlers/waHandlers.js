@@ -707,6 +707,8 @@ async function handleWhatsAppOrder(message, metadata) {
     const oosWarning = skippedOos.length > 0
       ? `\n\n⚠️ *Out of stock:*\n${skippedOos.map(n => `• ${n}`).join('\n')}`
       : '';
+    const receiptUrl = `${process.env.API_BASE_URL ?? 'https://api.autom8.works'}/verify/${orderData.id}`;
+    
     await sendWhatsAppMessage(customerPhone,
       `✅ *Order received!*\n\nOrder: *${orderNumber}*\nTable: *Table ${token.table_number}*\n` +
       `Items: ${kdsInserts.length}${oosWarning}\n\nWe're preparing your food now! 🍳`
