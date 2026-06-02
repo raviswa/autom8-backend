@@ -1488,12 +1488,15 @@ async def handle_dine_in_flow(
                             if _is_placeholder_payment_link(payment_link)
                             else f"Pay here: {payment_link}")
 
+          receipt_url = f"{os.getenv('API_BASE_URL', 'https://api.autom8.works')}/verify/{order_id}"
+      
             confirmation = (
                 f"Your order has been placed! 🎉\n"
                 f"────────────────────\n"
                 f"Token: {token}\nOrder: {order_text}\n"
                 f"────────────────────\n"
                 f"Total: ₹{total:.0f}\n\n{payment_line}"
+                f"🧾 *Receipt:* {receipt_url}"   # ← add this line
             )
             if suggestion: confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
@@ -1683,11 +1686,14 @@ async def handle_takeaway_flow(
                             if _is_placeholder_payment_link(payment_link)
                             else f"Pay here: {payment_link}")
 
+receipt_url = f"{os.getenv('API_BASE_URL', 'https://api.autom8.works')}/verify/{order_id}"
+
             confirmation = (
                 f"Your order has been placed! 🎉\n────────────────────\n"
                 f"Token: {display_token}\nBooking Time: {booking_time}\n"
                 f"Order: {order_text}\n────────────────────\n"
                 f"Total: ₹{total:.0f}\n\n{payment_line}"
+                f"🧾 *Receipt:* {receipt_url}"   # ← add this line
             )
             if suggestion: confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
@@ -1797,12 +1803,15 @@ async def handle_delivery_flow(
             payment_line = ("💳 Payment can be made on delivery."
                             if _is_placeholder_payment_link(payment_link)
                             else f"Pay here: {payment_link}")
+          
+receipt_url = f"{os.getenv('API_BASE_URL', 'https://api.autom8.works')}/verify/{order_id}"
 
             confirmation = (
                 f"Your order has been placed! 🎉\n────────────────────\n"
                 f"Token: {token}\nBooking Time: {booking_time}\nOrder: {order_text}\n"
                 f"Items: ₹{items_total:.0f}\nDelivery charge: ₹{DELIVERY_CHARGE:.0f}\n"
                 f"────────────────────\nTotal: ₹{total:.0f}\n\n{payment_line}"
+                f"🧾 *Receipt:* {receipt_url}"   # ← add this line
             )
             if suggestion: confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
