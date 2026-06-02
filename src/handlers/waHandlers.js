@@ -709,11 +709,13 @@ async function handleWhatsAppOrder(message, metadata) {
       : '';
     const receiptUrl = `${process.env.API_BASE_URL ?? 'https://api.autom8.works'}/verify/${orderData.id}`;
     
-    await sendWhatsAppMessage(customerPhone,
-      `✅ *Order received!*\n\nOrder: *${orderNumber}*\nTable: *Table ${token.table_number}*\n` +
-      `Items: ${kdsInserts.length}${oosWarning}\n\nWe're preparing your food now! 🍳`
-    );
-
+  await sendWhatsAppMessage(customerPhone,
+  `✅ *Order received!*\n\nOrder: *${orderNumber}*\nTable: *Table ${token.table_number}*\n` +
+  `Items: ${kdsInserts.length}${oosWarning}\n\n` +
+  `🧾 *Receipt:* ${receiptUrl}\n\n` +
+  `We're preparing your food now! 🍳`
+  );
+    
     // ── REQ 1: Condiment nudge + conversation state stamp ─────────────────────
     if (kdsInserts.length > 0) {
       try {
