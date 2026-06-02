@@ -1488,6 +1488,10 @@ async def handle_dine_in_flow(
                             if _is_placeholder_payment_link(payment_link)
                             else f"Pay here: {payment_link}")
 
+
+          kds_response = requests.post(f"{api_base}/api/kds/notify", json=payload)
+          kds_data = kds_response.json()
+          order_id = kds_data.get("order_id")   # ← this is the UUID needed
           receipt_url = f"{os.getenv('API_BASE_URL', 'https://api.autom8.works')}/verify/{order_id}"
       
             confirmation = (
@@ -1686,6 +1690,10 @@ async def handle_takeaway_flow(
                             if _is_placeholder_payment_link(payment_link)
                             else f"Pay here: {payment_link}")
 
+kds_response = requests.post(f"{api_base}/api/kds/notify", json=payload)
+kds_data = kds_response.json()
+order_id = kds_data.get("order_id")   # ← this is the UUID needed
+
 receipt_url = f"{os.getenv('API_BASE_URL', 'https://api.autom8.works')}/verify/{order_id}"
 
             confirmation = (
@@ -1803,7 +1811,11 @@ async def handle_delivery_flow(
             payment_line = ("💳 Payment can be made on delivery."
                             if _is_placeholder_payment_link(payment_link)
                             else f"Pay here: {payment_link}")
-          
+
+kds_response = requests.post(f"{api_base}/api/kds/notify", json=payload)
+kds_data = kds_response.json()
+order_id = kds_data.get("order_id")   # ← this is the UUID needed
+
 receipt_url = f"{os.getenv('API_BASE_URL', 'https://api.autom8.works')}/verify/{order_id}"
 
             confirmation = (
