@@ -43,6 +43,7 @@ This prevents a button tap from a previous turn corrupting a later step
 (the "cart corruption" problem for sequential identity flows).
 """
 
+import asyncio
 from datetime import datetime
 from typing import Dict, Any
 import logging
@@ -456,11 +457,13 @@ async def _finalise_returning_customer(
 ) -> Dict[str, Any]:
     """Persist any name change, update last visit, send confirmation."""
     if name_changed:
-        await update_customer_name(
-            customer["id"], final_name, reason="customer_corrected"
+        # Perf: name update and visit update are independent — run concurrently
+        await asyncio.gather(
+            update_customer_name(customer["id"], final_name, reason="customer_corrected"),
+            update_last_visit(customer["id"]),
         )
-
-    await update_last_visit(customer["id"])
+    else:
+        await update_last_visit(customer["id"])
 
     await send_whatsapp_message(
         customer_phone,
