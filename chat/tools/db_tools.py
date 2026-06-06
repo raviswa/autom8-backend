@@ -7,6 +7,8 @@ from uuid import UUID
 import logging
 import hashlib
 import time
+import os as _os
+import httpx as _httpx
 from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
@@ -62,7 +64,9 @@ async def init_db():
         engine = None
         AsyncSessionLocal = None
 
-#__________________ Feature Gate___________________
+
+# ─── Feature Gate ─────────────────────────────────────────────────────────────
+
 async def get_restaurant_features(restaurant_id: str) -> list[str]:
     """Return the subscribed_features list for a restaurant by ID."""
     try:
@@ -93,12 +97,12 @@ def get_session() -> AsyncSession:
 _RESTAURANT_CACHE: dict[str, tuple[dict, float]] = {}
 _INTEGRATION_CACHE: dict[tuple, tuple[dict | None, float]] = {}
 _MENU_CACHE: dict[str, tuple[list, float]] = {}
-_TABLES_CACHE: dict[str, tuple[list, float]] = {}   # ← NEW
+_TABLES_CACHE: dict[str, tuple[list, float]] = {}
 
 _RESTAURANT_TTL = 300
 _INTEGRATION_TTL = 300
 _MENU_TTL = 300
-_TABLES_TTL = 30    # ← 30 seconds — tables change frequently during service
+_TABLES_TTL = 30    # tables change frequently during service
 
 
 # ─── Advisory lock helpers ────────────────────────────────────────────────────
@@ -284,96 +288,306 @@ async def get_restaurant_integration(
         return cached
 
 
+# ─── autom8 Supabase helpers ──────────────────────────────────────────────────
+# Shared by customer tools (and menu/tables already inline below).
+
+def _a8_base() -> str:
+    return _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
+
+
+def _a8_headers() -> dict:
+    key = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
+    return {
+        "apikey":        key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type":  "application/json",
+        "Prefer":        "return=representation",
+    }
+
+
+def _row_to_customer(r: dict) -> Dict[str, Any]:
+    """Normalise a Supabase customers row to the shape the rest of the code expects."""
+    return {
+        "id":                    r["id"],
+        "restaurant_id":         r["restaurant_id"],
+        "phone":                 r["phone"],
+        "name":                  r.get("name") or "",
+        "whatsapp_profile_name": r.get("whatsapp_profile_name"),
+        "last_visit_date":       r.get("last_visit_date"),
+        "visit_count":           int(r.get("visit_count") or 1),
+        "opted_in_marketing":    bool(r.get("opted_in_marketing", True)),
+        "created_at":            r.get("created_at"),
+    }
+
+
 # ─── Customer tools ───────────────────────────────────────────────────────────
+#
+# WHY DUAL-WRITE:
+#   autom8 Supabase  → primary / source-of-truth → portal dashboard shows customers
+#   local Railway DB → mirror                    → SQLAlchemy relationship joins in
+#                                                  get_todays_bookings, find_customer_booking,
+#                                                  get_bookings_needing_menu_prompt, etc.
+#                                                  still return .customer.name/.phone
+#
+# READ always comes from autom8 Supabase (freshest data).
+# WRITES go to Supabase first; local mirror is best-effort (non-fatal on failure).
+
 
 async def get_customer(restaurant_id: str, phone: str) -> Dict[str, Any] | None:
-    """Look up customer."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Customer).where(
-                and_(
-                    Customer.restaurant_id == UUID(restaurant_id),
-                    Customer.phone == phone,
-                )
+    """Look up customer — reads from autom8 Supabase."""
+    base = _a8_base()
+    if not base:
+        logger.warning("[get_customer] AUTOM8_SUPABASE_URL not set")
+        return None
+    try:
+        async with _httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                f"{base}/rest/v1/customers",
+                params={
+                    "select":        "id,restaurant_id,phone,name,whatsapp_profile_name,"
+                                     "last_visit_date,visit_count,opted_in_marketing,created_at",
+                    "restaurant_id": f"eq.{restaurant_id}",
+                    "phone":         f"eq.{phone}",
+                    "limit":         "1",
+                },
+                headers=_a8_headers(),
             )
-        )
-        customer = result.scalar_one_or_none()
-        if customer:
-            return {
-                "id": str(customer.id),
-                "restaurant_id": str(customer.restaurant_id),
-                "phone": customer.phone,
-                "name": customer.name,
-                "whatsapp_profile_name": customer.whatsapp_profile_name,
-                "last_visit_date": customer.last_visit_date,
-                "visit_count": customer.visit_count,
-                "opted_in_marketing": customer.opted_in_marketing,
-                "created_at": customer.created_at.isoformat() if customer.created_at else None,
-            }
+        if resp.status_code == 200:
+            rows = resp.json()
+            return _row_to_customer(rows[0]) if rows else None
+        logger.warning(f"[get_customer] Supabase {resp.status_code}: {resp.text}")
+        return None
+    except Exception as e:
+        logger.error(f"[get_customer] failed for {phone}: {e}")
         return None
 
 
 async def create_customer(
-    restaurant_id: str, phone: str, name: str, profile_name: str | None = None
+    restaurant_id: str,
+    phone: str,
+    name: str,
+    profile_name: str | None = None,
 ) -> Dict[str, Any]:
-    """Create a new customer record."""
-    async with AsyncSessionLocal() as session:
-        customer = Customer(
-            restaurant_id=UUID(restaurant_id),
-            phone=phone,
-            name=name,
-            whatsapp_profile_name=profile_name,
-            visit_count=1,
+    """
+    Create a new customer.
+
+    1. Writes to autom8 Supabase (portal visibility — primary).
+    2. Mirrors to local Railway DB (SQLAlchemy relationship joins — best-effort).
+
+    Returns the customer dict using the UUID assigned by Supabase so that
+    both databases carry the same customer ID.
+    """
+    base = _a8_base()
+    created_data: Dict[str, Any] | None = None
+
+    # ── 1. autom8 Supabase (primary) ──────────────────────────────────────────
+    if base:
+        try:
+            async with _httpx.AsyncClient(timeout=5) as client:
+                resp = await client.post(
+                    f"{base}/rest/v1/customers",
+                    json={
+                        "restaurant_id":         restaurant_id,
+                        "phone":                 phone,
+                        "name":                  name,
+                        "whatsapp_profile_name": profile_name,
+                        "visit_count":           1,
+                        "opted_in_marketing":    True,
+                    },
+                    headers=_a8_headers(),
+                )
+            if resp.status_code in (200, 201):
+                rows = resp.json()
+                row = rows[0] if isinstance(rows, list) else rows
+                created_data = _row_to_customer(row)
+                logger.info(
+                    f"[create_customer] Supabase: {phone} → {created_data['id']}"
+                )
+            else:
+                logger.error(
+                    f"[create_customer] Supabase {resp.status_code}: {resp.text}"
+                )
+        except Exception as e:
+            logger.error(f"[create_customer] Supabase write failed for {phone}: {e}")
+    else:
+        logger.warning("[create_customer] AUTOM8_SUPABASE_URL not set — skipping Supabase write")
+
+    # ── 2. Local Railway DB mirror (best-effort) ───────────────────────────────
+    # Use the UUID from Supabase so both DBs share the same customer ID.
+    if AsyncSessionLocal is not None:
+        try:
+            supabase_uuid = UUID(created_data["id"]) if created_data else None
+            async with AsyncSessionLocal() as session:
+                customer = Customer(
+                    restaurant_id=UUID(restaurant_id),
+                    phone=phone,
+                    name=name,
+                    whatsapp_profile_name=profile_name,
+                    visit_count=1,
+                )
+                # Inject the Supabase-assigned UUID when available
+                if supabase_uuid:
+                    customer.id = supabase_uuid
+                session.add(customer)
+                await session.commit()
+                await session.refresh(customer)
+
+                # Fall back to local data only if Supabase write failed
+                if created_data is None:
+                    created_data = {
+                        "id":                    str(customer.id),
+                        "restaurant_id":         str(customer.restaurant_id),
+                        "phone":                 customer.phone,
+                        "name":                  customer.name,
+                        "whatsapp_profile_name": customer.whatsapp_profile_name,
+                        "visit_count":           customer.visit_count,
+                        "last_visit_date":       None,
+                        "opted_in_marketing":    True,
+                        "created_at":            None,
+                    }
+                logger.debug(f"[create_customer] local mirror OK for {phone}")
+        except Exception as e:
+            logger.warning(f"[create_customer] local mirror failed (non-fatal): {e}")
+
+    if created_data is None:
+        raise RuntimeError(
+            f"[create_customer] all write targets failed for {phone}"
         )
-        session.add(customer)
-        await session.commit()
-        await session.refresh(customer)
-        return {
-            "id": str(customer.id),
-            "restaurant_id": str(customer.restaurant_id),
-            "phone": customer.phone,
-            "name": customer.name,
-            "whatsapp_profile_name": customer.whatsapp_profile_name,
-            "visit_count": customer.visit_count,
-        }
+
+    return created_data
 
 
-async def update_customer_name(customer_id: str, new_name: str, reason: str = "") -> Dict[str, Any]:
-    """Update customer name and log the change."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Customer).where(Customer.id == UUID(customer_id)))
-        customer = result.scalar_one_or_none()
+async def update_customer_name(
+    customer_id: str,
+    new_name: str,
+    reason: str = "",
+) -> Dict[str, Any]:
+    """
+    Update customer name.
 
-        if not customer:
-            raise ValueError(f"Customer {customer_id} not found")
+    1. PATCHes autom8 Supabase (primary).
+    2. Updates local Railway DB mirror.
+    3. Appends a NameChangeLog entry in local DB (best-effort).
+    """
+    base = _a8_base()
+    old_name: str | None = None
 
-        old_name = customer.name
-        customer.name = new_name
+    # ── 1. Fetch old name from Supabase ───────────────────────────────────────
+    if base:
+        try:
+            async with _httpx.AsyncClient(timeout=5) as client:
+                r = await client.get(
+                    f"{base}/rest/v1/customers",
+                    params={"select": "name", "id": f"eq.{customer_id}", "limit": "1"},
+                    headers=_a8_headers(),
+                )
+            if r.status_code == 200 and r.json():
+                old_name = r.json()[0].get("name")
+        except Exception as e:
+            logger.warning(f"[update_customer_name] couldn't fetch old name: {e}")
 
-        log_entry = NameChangeLog(
-            customer_id=UUID(customer_id),
-            old_name=old_name,
-            new_name=new_name,
-            reason=reason,
-        )
-        session.add(log_entry)
-        session.add(customer)
-        await session.commit()
+    # ── 2. PATCH Supabase ──────────────────────────────────────────────────────
+        try:
+            async with _httpx.AsyncClient(timeout=5) as client:
+                resp = await client.patch(
+                    f"{base}/rest/v1/customers",
+                    params={"id": f"eq.{customer_id}"},
+                    json={"name": new_name},
+                    headers=_a8_headers(),
+                )
+            if resp.status_code not in (200, 204):
+                logger.error(
+                    f"[update_customer_name] Supabase {resp.status_code}: {resp.text}"
+                )
+        except Exception as e:
+            logger.error(f"[update_customer_name] Supabase PATCH failed: {e}")
 
-        return {"id": str(customer.id), "old_name": old_name, "new_name": new_name}
+    # ── 3. Mirror update to local DB ──────────────────────────────────────────
+    if AsyncSessionLocal is not None:
+        try:
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    update(Customer)
+                    .where(Customer.id == UUID(customer_id))
+                    .values(name=new_name)
+                )
+                await session.commit()
+        except Exception as e:
+            logger.warning(f"[update_customer_name] local mirror update failed (non-fatal): {e}")
+
+    # ── 4. NameChangeLog (local DB, best-effort) ───────────────────────────────
+    if AsyncSessionLocal is not None and old_name is not None:
+        try:
+            async with AsyncSessionLocal() as session:
+                log_entry = NameChangeLog(
+                    customer_id=UUID(customer_id),
+                    old_name=old_name,
+                    new_name=new_name,
+                    reason=reason,
+                )
+                session.add(log_entry)
+                await session.commit()
+        except Exception as e:
+            logger.warning(f"[update_customer_name] NameChangeLog write failed (non-fatal): {e}")
+
+    return {"id": customer_id, "old_name": old_name, "new_name": new_name}
 
 
 async def update_last_visit(customer_id: str) -> bool:
-    """Update customer last_visit_date to today."""
-    async with AsyncSessionLocal() as session:
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-        await session.execute(
-            update(Customer)
-            .where(Customer.id == UUID(customer_id))
-            .values(last_visit_date=today, visit_count=Customer.visit_count + 1)
-        )
-        await session.commit()
-        return True
+    """
+    Update last_visit_date to today and increment visit_count.
+
+    1. Fetches current count from Supabase then PATCHes (Supabase REST doesn't
+       support column = column + 1 natively).
+    2. Mirrors the same values to local Railway DB.
+    """
+    base = _a8_base()
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    new_count = 2  # safe default if fetch fails
+
+    # ── 1. Supabase read-then-patch ────────────────────────────────────────────
+    if base:
+        try:
+            async with _httpx.AsyncClient(timeout=5) as client:
+                r = await client.get(
+                    f"{base}/rest/v1/customers",
+                    params={"select": "visit_count", "id": f"eq.{customer_id}", "limit": "1"},
+                    headers=_a8_headers(),
+                )
+            if r.status_code == 200 and r.json():
+                new_count = int(r.json()[0].get("visit_count") or 1) + 1
+
+            async with _httpx.AsyncClient(timeout=5) as client:
+                resp = await client.patch(
+                    f"{base}/rest/v1/customers",
+                    params={"id": f"eq.{customer_id}"},
+                    json={"last_visit_date": today, "visit_count": new_count},
+                    headers=_a8_headers(),
+                )
+            if resp.status_code not in (200, 204):
+                logger.warning(
+                    f"[update_last_visit] Supabase {resp.status_code}: {resp.text}"
+                )
+        except Exception as e:
+            logger.error(f"[update_last_visit] Supabase update failed: {e}")
+
+    # ── 2. Mirror to local Railway DB ─────────────────────────────────────────
+    if AsyncSessionLocal is not None:
+        try:
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    update(Customer)
+                    .where(Customer.id == UUID(customer_id))
+                    .values(
+                        last_visit_date=today,
+                        visit_count=Customer.visit_count + 1,
+                    )
+                )
+                await session.commit()
+        except Exception as e:
+            logger.warning(f"[update_last_visit] local mirror failed (non-fatal): {e}")
+
+    return True
 
 
 # ─── Availability tools ───────────────────────────────────────────────────────
@@ -418,24 +632,12 @@ async def get_next_token_number(restaurant_id: str) -> str:
 
 
 # ─── Table availability tools ─────────────────────────────────────────────────
-# NEW: get_available_tables reads from autom8 Supabase (same DB as the portal)
-# so the bot always sees real-time table status rather than a stale local copy.
 
 async def get_available_tables(restaurant_id: str) -> List[Dict[str, Any]]:
     """
     Return all currently available tables for a restaurant, sorted by
     capacity descending (largest first — useful for greedy bin-packing).
-
-    Reads from the autom8 Supabase DB via REST so the status is always
-    in sync with the manager portal. Falls back to an empty list on error
-    so the booking flow is never blocked.
-
-    Results are cached for _TABLES_TTL seconds (30 s) to avoid hammering
-    the DB on every message during a busy service.
     """
-    import os as _os
-    import httpx as _httpx
-
     now = time.monotonic()
     cached, ts = _TABLES_CACHE.get(restaurant_id, ([], 0.0))
     if cached and now - ts < _TABLES_TTL:
@@ -724,9 +926,6 @@ async def block_slot(restaurant_id: str, date: str, slot: str, reason: str = "")
 # ─── Menu tools ───────────────────────────────────────────────────────────────
 
 async def get_menu(restaurant_id: str) -> List[Dict[str, Any]]:
-    import os as _os
-    import httpx as _httpx
-
     now = time.monotonic()
     cached, ts = _MENU_CACHE.get(restaurant_id, (None, 0.0))
     if cached is not None and now - ts < _MENU_TTL:
@@ -1019,21 +1218,52 @@ async def get_unpaid_bookings(restaurant_id: str) -> List[Dict[str, Any]]:
 
 
 async def block_customer(restaurant_id: str, phone: str) -> bool:
-    """Block a customer from future bot interactions."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Customer).where(
-                and_(
-                    Customer.restaurant_id == UUID(restaurant_id),
-                    Customer.phone == phone,
-                )
-            )
-        )
-        customer = result.scalar_one_or_none()
+    """
+    Block a customer from future bot interactions.
 
-        if customer:
-            customer.opted_in_marketing = False
-            session.add(customer)
-            await session.commit()
-            return True
-        return False
+    1. PATCHes opted_in_marketing=false in autom8 Supabase (primary).
+    2. Mirrors the same flag to local Railway DB.
+    """
+    base = _a8_base()
+
+    # ── 1. Supabase ───────────────────────────────────────────────────────────
+    if base:
+        try:
+            async with _httpx.AsyncClient(timeout=5) as client:
+                resp = await client.patch(
+                    f"{base}/rest/v1/customers",
+                    params={
+                        "restaurant_id": f"eq.{restaurant_id}",
+                        "phone":         f"eq.{phone}",
+                    },
+                    json={"opted_in_marketing": False},
+                    headers=_a8_headers(),
+                )
+            if resp.status_code not in (200, 204):
+                logger.warning(
+                    f"[block_customer] Supabase {resp.status_code}: {resp.text}"
+                )
+        except Exception as e:
+            logger.error(f"[block_customer] Supabase update failed for {phone}: {e}")
+
+    # ── 2. Local Railway DB mirror ────────────────────────────────────────────
+    if AsyncSessionLocal is not None:
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(Customer).where(
+                        and_(
+                            Customer.restaurant_id == UUID(restaurant_id),
+                            Customer.phone == phone,
+                        )
+                    )
+                )
+                customer = result.scalar_one_or_none()
+                if customer:
+                    customer.opted_in_marketing = False
+                    session.add(customer)
+                    await session.commit()
+        except Exception as e:
+            logger.warning(f"[block_customer] local mirror failed (non-fatal): {e}")
+
+    return True
