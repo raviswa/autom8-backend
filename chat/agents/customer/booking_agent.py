@@ -43,6 +43,15 @@ FIX LOG
                 swallowed by the greeting guard;
             (c) empty-cart + short-message guard in takeaway & delivery
                 awaiting_order re-sends catalog instead of creating ₹0 booking.
+
+  Perf 1 — classify_intent (Gemini) + load_context + log_event moved to
+            asyncio background task — no longer blocks the WhatsApp reply.
+  Perf 2 — Shared module-level aiohttp.ClientSession replaces per-call sessions,
+            eliminating TCP setup overhead on every outbound HTTP call.
+  Perf 3 — asyncio.gather() parallelises independent awaits in all three order
+            confirmation flows (token, portal sync, suggestion, create_booking).
+  Perf 4 — Removed broken requests.post / undefined api_base / receipt_url
+            blocks that caused NameError crashes on every order confirmation.
 """
 
 from datetime import datetime
@@ -134,6 +143,64 @@ _KDS_SECRET          = "munafe_kds_sync_2026"
 _PAYMENT_PLACEHOLDER_SENTINEL = "placeholder"
 LARGE_PARTY_THRESHOLD = 8
 
+# ─── Receipt generator (optional import — bot still works if file not present) ─
+try:
+    from generate_receipt import generate_receipt as _generate_receipt
+    from generate_receipt import ReceiptData as _ReceiptData
+    from generate_receipt import LineItem as _LineItem
+    _RECEIPT_AVAILABLE = True
+except ImportError:
+    _RECEIPT_AVAILABLE = False
+
+# ─── Home hint — appended to all negative / error messages ───────────────────
+_HOME_HINT = "\n\n_Tip: Type *Home* to start a fresh booking anytime._"
+
+
+# ─── Shared HTTP client ───────────────────────────────────────────────────────
+# Perf 2: One aiohttp session reused across all outbound calls.
+# Creating a fresh ClientSession per request incurs TCP connection setup
+# overhead on every portal sync, KDS notification, and feedback queue call.
+
+_http_client: aiohttp.ClientSession | None = None
+
+def _get_http() -> aiohttp.ClientSession:
+    """Return the module-level shared aiohttp session (creates one if needed)."""
+    global _http_client
+    if _http_client is None or _http_client.closed:
+        _http_client = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(limit=20),
+            timeout=aiohttp.ClientTimeout(total=5),
+        )
+    return _http_client
+
+
+async def _fetch_restaurant_info(restaurant_id: str) -> dict:
+    """
+    Best-effort fetch of restaurant name and WA number for receipts.
+    Returns empty dict on any failure — receipt generation degrades gracefully.
+    """
+    try:
+        base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
+        key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
+        if not (base and key):
+            return {}
+        resp = await _get_http().get(
+            f"{base}/rest/v1/restaurants",
+            params={
+                "select": "name,whatsapp_number",
+                "id":     f"eq.{restaurant_id}",
+                "limit":  "1",
+            },
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            timeout=aiohttp.ClientTimeout(total=3),
+        )
+        if resp.status == 200:
+            rows = resp.json()
+            return rows[0] if rows else {}
+    except Exception as e:
+        logger.debug(f"[receipt] restaurant info fetch failed (non-fatal): {e}")
+    return {}
+
 
 # ─────────────────────────────────────────────
 # LARGE PARTY HELPERS
@@ -185,26 +252,26 @@ def _format_combo_message(combo: list, party_size: int) -> str:
 async def _sync_token_to_portal(
     customer_name: str, customer_phone: str, token_type: str, pax: int,
 ) -> str | None:
+    # Perf 2: uses shared _get_http() instead of fresh ClientSession
     try:
-        async with aiohttp.ClientSession() as http:
-            resp = await http.post(
-                PORTAL_API_URL,
-                json={
-                    "restaurant_id": PORTAL_RESTAURANT_ID,
-                    "name": customer_name, "phone": customer_phone,
-                    "type": token_type, "pax": pax,
-                },
-                timeout=aiohttp.ClientTimeout(total=5),
-            )
-            if resp.status == 201:
-                data = await resp.json()
-                token_id = data.get("token", {}).get("id")
-                logger.info(f"[portal-sync] Token created: {token_id}")
-                return token_id
-            else:
-                text = await resp.text()
-                logger.warning(f"[portal-sync] Non-201 response {resp.status}: {text}")
-                return None
+        resp = await _get_http().post(
+            PORTAL_API_URL,
+            json={
+                "restaurant_id": PORTAL_RESTAURANT_ID,
+                "name": customer_name, "phone": customer_phone,
+                "type": token_type, "pax": pax,
+            },
+            timeout=aiohttp.ClientTimeout(total=5),
+        )
+        if resp.status == 201:
+            data = await resp.json()
+            token_id = data.get("token", {}).get("id")
+            logger.info(f"[portal-sync] Token created: {token_id}")
+            return token_id
+        else:
+            text = await resp.text()
+            logger.warning(f"[portal-sync] Non-201 response {resp.status}: {text}")
+            return None
     except Exception as e:
         logger.warning(f"[portal-sync] Failed (non-fatal): {e}")
         return None
@@ -213,49 +280,49 @@ async def _sync_token_to_portal(
 async def _sync_token_to_portal_large_party(
     customer_name: str, customer_phone: str, pax: int, combo: list,
 ) -> str | None:
+    # Perf 2: uses shared _get_http() instead of fresh ClientSession
     try:
-        async with aiohttp.ClientSession() as http:
-            resp = await http.post(
-                PORTAL_API_URL,
-                params={"notify": "false"},
-                json={
-                    "restaurant_id": PORTAL_RESTAURANT_ID,
-                    "name": customer_name, "phone": customer_phone,
-                    "type": "large_party", "pax": pax,
-                    "meta": {"combo": combo},
-                },
-                timeout=aiohttp.ClientTimeout(total=5),
-            )
-            if resp.status == 201:
-                data = await resp.json()
-                token_id = data.get("token", {}).get("id")
-                logger.info(f"[portal-sync-large] Token created: {token_id}")
-                return token_id
-            else:
-                text = await resp.text()
-                logger.warning(f"[portal-sync-large] Non-201 {resp.status}: {text}")
-                return None
+        resp = await _get_http().post(
+            PORTAL_API_URL,
+            params={"notify": "false"},
+            json={
+                "restaurant_id": PORTAL_RESTAURANT_ID,
+                "name": customer_name, "phone": customer_phone,
+                "type": "large_party", "pax": pax,
+                "meta": {"combo": combo},
+            },
+            timeout=aiohttp.ClientTimeout(total=5),
+        )
+        if resp.status == 201:
+            data = await resp.json()
+            token_id = data.get("token", {}).get("id")
+            logger.info(f"[portal-sync-large] Token created: {token_id}")
+            return token_id
+        else:
+            text = await resp.text()
+            logger.warning(f"[portal-sync-large] Non-201 {resp.status}: {text}")
+            return None
     except Exception as e:
         logger.warning(f"[portal-sync-large] Failed (non-fatal): {e}")
         return None
 
 
 async def _lookup_table_assignment(customer_phone: str) -> str | None:
+    # Perf 2: uses shared _get_http() instead of fresh ClientSession
     try:
-        async with aiohttp.ClientSession() as http:
-            resp = await http.get(
-                PORTAL_API_URL,
-                params={"phone": customer_phone, "restaurant_id": PORTAL_RESTAURANT_ID},
-                timeout=aiohttp.ClientTimeout(total=3),
-            )
-            if resp.status == 200:
-                data = await resp.json()
-                tokens = data if isinstance(data, list) else data.get("tokens", [])
-                for token_record in tokens:
-                    tbl = token_record.get("table_number")
-                    if tbl:
-                        logger.info(f"[table-check] Found table {tbl} for {customer_phone}")
-                        return str(tbl)
+        resp = await _get_http().get(
+            PORTAL_API_URL,
+            params={"phone": customer_phone, "restaurant_id": PORTAL_RESTAURANT_ID},
+            timeout=aiohttp.ClientTimeout(total=3),
+        )
+        if resp.status == 200:
+            data = await resp.json()
+            tokens = data if isinstance(data, list) else data.get("tokens", [])
+            for token_record in tokens:
+                tbl = token_record.get("table_number")
+                if tbl:
+                    logger.info(f"[table-check] Found table {tbl} for {customer_phone}")
+                    return str(tbl)
     except Exception as e:
         logger.warning(f"[table-check] Portal lookup failed (non-fatal): {e}")
     return None
@@ -270,6 +337,7 @@ async def _notify_kds(
     table_number: str | int | None, token_number: str, service_type: str,
     special_notes: str | None = None,
 ) -> None:
+    # Perf 2: uses shared _get_http() instead of fresh ClientSession
     try:
         items = []
         for item_id, line in cart.items():
@@ -288,17 +356,18 @@ async def _notify_kds(
             "service_type": service_type, "items": items,
             "special_notes": special_notes, "secret": _KDS_SECRET,
         }
-        async with aiohttp.ClientSession() as http:
-            resp = await http.post(AUTOM8_KDS_URL, json=payload, timeout=aiohttp.ClientTimeout(total=5))
-            if resp.status in (200, 201):
-                data = await resp.json()
-                logger.info(
-                    f"[kds-notify] ✅ {data.get('kds_items_created', '?')} KDS item(s) created "
-                    f"for token {token_number} | table {table_number}"
-                )
-            else:
-                text = await resp.text()
-                logger.warning(f"[kds-notify] Non-2xx {resp.status}: {text[:200]}")
+        resp = await _get_http().post(
+            AUTOM8_KDS_URL, json=payload, timeout=aiohttp.ClientTimeout(total=5)
+        )
+        if resp.status in (200, 201):
+            data = await resp.json()
+            logger.info(
+                f"[kds-notify] ✅ {data.get('kds_items_created', '?')} KDS item(s) created "
+                f"for token {token_number} | table {table_number}"
+            )
+        else:
+            text = await resp.text()
+            logger.warning(f"[kds-notify] Non-2xx {resp.status}: {text[:200]}")
     except Exception as e:
         logger.warning(f"[kds-notify] Failed (non-fatal): {e}")
 
@@ -822,6 +891,27 @@ async def _safe_build_order_suggestion(customer_id: str, restaurant_id: str) -> 
     except Exception as e: logger.debug(f"build_order_suggestion failed: {e}"); return ""
 
 
+async def _background_analytics(
+    restaurant_id: str,
+    customer_id: str,
+    message: str,
+    step: str,
+) -> None:
+    """
+    Perf 1: Non-blocking analytics — classify_intent (Gemini) + DB log run
+    after the WhatsApp reply is already sent. Never blocks the customer reply.
+    """
+    try:
+        context = await _safe_load_context(restaurant_id, customer_id)
+        intent  = await _safe_classify_intent(message, "booking_flow", context)
+        await _safe_log_event(
+            restaurant_id, customer_id,
+            f"booking_{step}", "booking_message", intent, message,
+        )
+    except Exception as e:
+        logger.debug(f"[background-analytics] non-fatal: {e}")
+
+
 # ─────────────────────────────────────────────
 # SMART GREETING BUILDER  (Fix 29)
 # ─────────────────────────────────────────────
@@ -953,13 +1043,13 @@ async def handle_booking_flow(
     session_state: Dict[str, Any], table_number: int | None = None,
 ) -> Dict[str, Any]:
 
-    context = await _safe_load_context(restaurant_id, customer_id)
-    intent  = await _safe_classify_intent(message, "booking_flow", context)
-    await _safe_log_event(
+    # Perf 1: analytics (Gemini classify_intent + DB log) run in the background
+    # so they never add latency to the customer's reply.
+    asyncio.create_task(_background_analytics(
         restaurant_id, customer_id,
-        f"booking_{session_state.get('booking_step', 'start')}",
-        "booking_message", intent, message,
-    )
+        message, session_state.get("booking_step", "start"),
+    ))
+
     current_step = session_state.get("booking_step", "ask_service")
 
     # Fix 24: visit_complete
@@ -1047,7 +1137,7 @@ async def handle_booking_flow(
         try:
             service_type = await resolve_service_choice(restaurant_id, choice)
         except ValueError:
-            await send_whatsapp_message(customer_phone, "Sorry, I did not catch that. Please tap one of the options above.", restaurant_id)
+            await send_whatsapp_message(customer_phone, "Sorry, I did not catch that. Please tap one of the options above." + _HOME_HINT, restaurant_id)
             return {"status": "error"}
 
         if service_type is None:
@@ -1113,7 +1203,7 @@ async def handle_booking_flow(
             await _do_reset(customer_id, customer_name, customer_phone, restaurant_id, session_state, full_restart=full_restart)
             return {"status": "identity_restart" if full_restart else "reset_complete"}
         else:
-            await send_whatsapp_message(customer_phone, "Please tap *Continue my order* or *Start over*.", restaurant_id)
+            await send_whatsapp_message(customer_phone, "Please tap *Continue my order* or *Start over*." + _HOME_HINT, restaurant_id)
             return {"status": "error"}
 
     # Cart: confirming_order
@@ -1372,7 +1462,7 @@ async def handle_dine_in_flow(
             return {"status": "awaiting_table_assignment"}
 
         except ValueError:
-            await send_whatsapp_message(customer_phone, "Please enter a valid number of people (e.g. 2).", restaurant_id)
+            await send_whatsapp_message(customer_phone, "Please enter a valid number of people (e.g. 2)." + _HOME_HINT, restaurant_id)
             return {"status": "error"}
 
     elif booking_step == "awaiting_large_party_response":
@@ -1416,7 +1506,7 @@ async def handle_dine_in_flow(
             return {"status": "awaiting_manager_approval"}
 
         else:
-            await send_whatsapp_message(customer_phone, "Please tap one of the options above to continue.", restaurant_id)
+            await send_whatsapp_message(customer_phone, "Please tap one of the options above to continue." + _HOME_HINT, restaurant_id)
             return {"status": "awaiting_large_party_response"}
 
     elif booking_step == "awaiting_manager_approval":
@@ -1466,16 +1556,20 @@ async def handle_dine_in_flow(
         cart          = session_state.get("cart", {})
         cart_snapshot = dict(cart)
         total         = cart_total(cart) if cart else 0.0
+        session_state["order_total"] = total   # stored for receipt generation
         token         = session_state.get("display_token", session_state.get("token_number", ""))
         booking_time  = session_state.get("booking_time", _now_display())
-        suggestion    = await _safe_build_order_suggestion(customer_id, restaurant_id)
 
         try:
-            booking = await create_booking(
-                restaurant_id, customer_id, "dine_in",
-                party_size=session_state.get("party_size"),
-                table_number=session_state.get("table_number"),
-                token_number=token,
+            # Perf 3: suggestion fetch and booking creation are independent — run concurrently
+            suggestion, booking = await asyncio.gather(
+                _safe_build_order_suggestion(customer_id, restaurant_id),
+                create_booking(
+                    restaurant_id, customer_id, "dine_in",
+                    party_size=session_state.get("party_size"),
+                    table_number=session_state.get("table_number"),
+                    token_number=token,
+                ),
             )
             booking_id = booking["id"]
             session_state["booking_id"] = booking_id
@@ -1488,19 +1582,12 @@ async def handle_dine_in_flow(
                             if _is_placeholder_payment_link(payment_link)
                             else f"Pay here: {payment_link}")
 
-
-          kds_response = requests.post(f"{api_base}/api/kds/notify", json=payload)
-          kds_data = kds_response.json()
-          order_id = kds_data.get("order_id")   # ← this is the UUID needed
-          receipt_url = f"{os.getenv('API_BASE_URL', 'https://api.autom8.works')}/verify/{order_id}"
-      
             confirmation = (
                 f"Your order has been placed! 🎉\n"
                 f"────────────────────\n"
                 f"Token: {token}\nOrder: {order_text}\n"
                 f"────────────────────\n"
                 f"Total: ₹{total:.0f}\n\n{payment_line}"
-                f"🧾 *Receipt:* {receipt_url}"   # ← add this line
             )
             if suggestion: confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
@@ -1544,13 +1631,14 @@ async def handle_dine_in_flow(
             session_state["visit_count"]           = session_state.get("visit_count", 0) + 1
             session_state["_kds_cart_snapshot"] = cart_snapshot
             session_state["_kds_order_text"]    = order_text
+            session_state["_receipt_cart"]      = cart_snapshot   # kept for receipt after KDS pop
             session_state["booking_step"] = "awaiting_special_notes"
             clear_cart(session_state)
             return {"status": "awaiting_special_notes", "booking_id": booking_id, "total": total}
 
         except Exception as e:
             logger.error(f"Failed to create dine-in booking: {e}")
-            await send_whatsapp_message(customer_phone, "Sorry, there was an error processing your order. Please try again.", restaurant_id)
+            await send_whatsapp_message(customer_phone, "Sorry, there was an error processing your order. Please try again." + _HOME_HINT, restaurant_id)
             return {"status": "error"}
 
     elif booking_step == "awaiting_special_notes":
@@ -1608,20 +1696,49 @@ async def handle_dine_in_flow(
             special_notes=special_notes,
         )
 
-        # Queue feedback request — sent 2 hours later via server.js scheduler
-        try:
-            async with aiohttp.ClientSession() as http:
-                await http.post(
-                    "https://autom8-backend-production.up.railway.app/api/feedback/queue",
-                    json={
-                        "customer_phone": customer_phone,
-                        "customer_name":  customer_name,
-                        "token_number":   token,
-                        "table_number":   str(session_state.get("table_number", "")),
-                    },
-                    headers={"Authorization": f"Bearer {_KDS_SECRET}"},
-                    timeout=aiohttp.ClientTimeout(total=5),
+        # ── Generate receipt + mark booking confirmed ─────────────────────────
+        if _RECEIPT_AVAILABLE:
+            try:
+                r_info = await _fetch_restaurant_info(restaurant_id)
+                receipt_data = _ReceiptData(
+                    restaurant_name=r_info.get("name", ""),
+                    restaurant_wa_number=r_info.get("whatsapp_number", ""),
+                    token_number=token,
+                    table_number=str(session_state.get("table_number", "")),
+                    service_type="dine_in",
+                    customer_name=customer_name,
+                    customer_phone=customer_phone,
+                    items=_LineItem.from_cart(
+                        session_state.get("_receipt_cart", {})
+                    ),
+                    gst_rate=5.0,
+                    gst_inclusive=False,
+                    payment_mode=session_state.get("payment_mode", "Cash"),
+                    special_notes=special_notes or "",
                 )
+                receipt_path = _generate_receipt(receipt_data)
+                logger.info(f"[receipt] Dine-in receipt saved: {receipt_path}")
+                booking_id = session_state.get("booking_id")
+                if booking_id:
+                    await update_booking_status(booking_id, "confirmed")
+                    logger.info(f"[receipt] Booking {booking_id} marked confirmed")
+            except Exception as _re:
+                logger.warning(f"[receipt] Generation failed (non-fatal): {_re}")
+
+        # Queue feedback request — sent 2 hours later via server.js scheduler
+        # Perf 2: uses shared _get_http() instead of fresh ClientSession
+        try:
+            await _get_http().post(
+                "https://autom8-backend-production.up.railway.app/api/feedback/queue",
+                json={
+                    "customer_phone": customer_phone,
+                    "customer_name":  customer_name,
+                    "token_number":   token,
+                    "table_number":   str(session_state.get("table_number", "")),
+                },
+                headers={"Authorization": f"Bearer {_KDS_SECRET}"},
+                timeout=aiohttp.ClientTimeout(total=5),
+            )
         except Exception as fb_err:
             logger.warning(f"[feedback-queue] Non-fatal: {fb_err}")
 
@@ -1660,14 +1777,17 @@ async def handle_takeaway_flow(
 
         cart_snapshot = dict(cart)
         total         = cart_total(cart) if cart else 0.0
-        token         = await get_next_token_number(restaurant_id)
+        session_state["order_total"] = total   # stored for receipt generation
+        token, portal_token_id, suggestion = await asyncio.gather(
+            get_next_token_number(restaurant_id),
+            _sync_token_to_portal(
+                customer_name=customer_name, customer_phone=customer_phone,
+                token_type="takeaway", pax=1,
+            ),
+            _safe_build_order_suggestion(customer_id, restaurant_id),
+        )
         booking_time  = _now_display()
         session_state["token_number"] = token
-
-        portal_token_id = await _sync_token_to_portal(
-            customer_name=customer_name, customer_phone=customer_phone,
-            token_type="takeaway", pax=1,
-        )
         display_token = portal_token_id or token
         session_state["display_token"] = display_token
 
@@ -1685,23 +1805,15 @@ async def handle_takeaway_flow(
             session_state["booking_id"] = booking_id
 
             payment_link = await create_payment_link(booking_id, total, customer_name, f"Takeaway {token}")
-            suggestion   = await _safe_build_order_suggestion(customer_id, restaurant_id)
             payment_line = ("💳 Payment can be made at the counter."
                             if _is_placeholder_payment_link(payment_link)
                             else f"Pay here: {payment_link}")
-
-kds_response = requests.post(f"{api_base}/api/kds/notify", json=payload)
-kds_data = kds_response.json()
-order_id = kds_data.get("order_id")   # ← this is the UUID needed
-
-receipt_url = f"{os.getenv('API_BASE_URL', 'https://api.autom8.works')}/verify/{order_id}"
 
             confirmation = (
                 f"Your order has been placed! 🎉\n────────────────────\n"
                 f"Token: {display_token}\nBooking Time: {booking_time}\n"
                 f"Order: {order_text}\n────────────────────\n"
                 f"Total: ₹{total:.0f}\n\n{payment_line}"
-                f"🧾 *Receipt:* {receipt_url}"   # ← add this line
             )
             if suggestion: confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
@@ -1730,6 +1842,30 @@ receipt_url = f"{os.getenv('API_BASE_URL', 'https://api.autom8.works')}/verify/{
                 order_text=order_text, cart=cart_snapshot, table_number=None,
                 token_number=display_token, service_type="takeaway",
             )
+
+            # ── Generate receipt + mark booking confirmed ─────────────────────
+            if _RECEIPT_AVAILABLE:
+                try:
+                    r_info = await _fetch_restaurant_info(restaurant_id)
+                    receipt_data = _ReceiptData(
+                        restaurant_name=r_info.get("name", ""),
+                        restaurant_wa_number=r_info.get("whatsapp_number", ""),
+                        token_number=display_token,
+                        service_type="takeaway",
+                        customer_name=customer_name,
+                        customer_phone=customer_phone,
+                        items=_LineItem.from_cart(cart_snapshot),
+                        gst_rate=5.0,
+                        gst_inclusive=False,
+                        payment_mode=session_state.get("payment_mode", "Cash"),
+                    )
+                    receipt_path = _generate_receipt(receipt_data)
+                    logger.info(f"[receipt] Takeaway receipt saved: {receipt_path}")
+                    await update_booking_status(booking_id, "confirmed")
+                    logger.info(f"[receipt] Booking {booking_id} marked confirmed")
+                except Exception as _re:
+                    logger.warning(f"[receipt] Generation failed (non-fatal): {_re}")
+
             return {"status": "awaiting_payment", "booking_id": booking_id, "total": total}
 
         except Exception as e:
@@ -1794,7 +1930,13 @@ async def handle_delivery_flow(
         cart_snapshot = dict(cart)
         items_total   = cart_total(cart) if cart else 0.0
         total         = items_total + DELIVERY_CHARGE
-        token         = await get_next_token_number(restaurant_id)
+        session_state["order_total"] = total   # stored for receipt generation
+
+        # Perf 3: token and suggestion are independent — run concurrently
+        token, suggestion = await asyncio.gather(
+            get_next_token_number(restaurant_id),
+            _safe_build_order_suggestion(customer_id, restaurant_id),
+        )
         booking_time  = _now_display()
         session_state["token_number"] = token
 
@@ -1807,23 +1949,15 @@ async def handle_delivery_flow(
             session_state["booking_id"] = booking_id
 
             payment_link = await create_payment_link(booking_id, total, customer_name, f"Delivery {token}")
-            suggestion   = await _safe_build_order_suggestion(customer_id, restaurant_id)
             payment_line = ("💳 Payment can be made on delivery."
                             if _is_placeholder_payment_link(payment_link)
                             else f"Pay here: {payment_link}")
-
-kds_response = requests.post(f"{api_base}/api/kds/notify", json=payload)
-kds_data = kds_response.json()
-order_id = kds_data.get("order_id")   # ← this is the UUID needed
-
-receipt_url = f"{os.getenv('API_BASE_URL', 'https://api.autom8.works')}/verify/{order_id}"
 
             confirmation = (
                 f"Your order has been placed! 🎉\n────────────────────\n"
                 f"Token: {token}\nBooking Time: {booking_time}\nOrder: {order_text}\n"
                 f"Items: ₹{items_total:.0f}\nDelivery charge: ₹{DELIVERY_CHARGE:.0f}\n"
                 f"────────────────────\nTotal: ₹{total:.0f}\n\n{payment_line}"
-                f"🧾 *Receipt:* {receipt_url}"   # ← add this line
             )
             if suggestion: confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
@@ -1854,6 +1988,32 @@ receipt_url = f"{os.getenv('API_BASE_URL', 'https://api.autom8.works')}/verify/{
                 order_text=order_text, cart=cart_snapshot, table_number=None,
                 token_number=token, service_type="delivery",
             )
+
+            # ── Generate receipt + mark booking confirmed ─────────────────────
+            if _RECEIPT_AVAILABLE:
+                try:
+                    r_info = await _fetch_restaurant_info(restaurant_id)
+                    receipt_data = _ReceiptData(
+                        restaurant_name=r_info.get("name", ""),
+                        restaurant_wa_number=r_info.get("whatsapp_number", ""),
+                        token_number=token,
+                        service_type="delivery",
+                        customer_name=customer_name,
+                        customer_phone=customer_phone,
+                        delivery_address=session_state.get("delivery_address", ""),
+                        items=_LineItem.from_cart(cart_snapshot),
+                        gst_rate=5.0,
+                        gst_inclusive=False,
+                        delivery_charge=DELIVERY_CHARGE,
+                        payment_mode=session_state.get("payment_mode", "Cash"),
+                    )
+                    receipt_path = _generate_receipt(receipt_data)
+                    logger.info(f"[receipt] Delivery receipt saved: {receipt_path}")
+                    await update_booking_status(booking_id, "confirmed")
+                    logger.info(f"[receipt] Booking {booking_id} marked confirmed")
+                except Exception as _re:
+                    logger.warning(f"[receipt] Generation failed (non-fatal): {_re}")
+
             return {"status": "awaiting_payment", "booking_id": booking_id, "total": total}
 
         except Exception as e:
@@ -1907,7 +2067,7 @@ async def handle_reserve_table_flow(
             return {"status": "awaiting_datetime"}
 
         except ValueError:
-            await send_whatsapp_message(customer_phone, "Please enter a valid number of people (e.g. 4).", restaurant_id)
+            await send_whatsapp_message(customer_phone, "Please enter a valid number of people (e.g. 4)." + _HOME_HINT, restaurant_id)
             return {"status": "error"}
 
     elif booking_step in ("awaiting_datetime", "awaiting_flow_datetime"):
@@ -1934,7 +2094,7 @@ async def handle_reserve_table_flow(
             await send_whatsapp_message(
                 customer_phone,
                 "Sorry, I couldn't understand that date and time. 🙏\n\n"
-                "Please use this format:\nExample: 25-05-2026, 8:00 PM",
+                "Please use this format:\nExample: 25-05-2026, 8:00 PM" + _HOME_HINT,
                 restaurant_id,
             )
             return {"status": "error"}
@@ -1943,7 +2103,7 @@ async def handle_reserve_table_flow(
             await send_whatsapp_message(
                 customer_phone,
                 f"Oops! *{parsed_dt.strftime('%d %b %Y, %I:%M %p')}* has already passed. 😊\n\n"
-                "Please send a future date and time.\nExample: 25-05-2026, 8:00 PM",
+                "Please send a future date and time.\nExample: 25-05-2026, 8:00 PM" + _HOME_HINT,
                 restaurant_id,
             )
             return {"status": "error"}
@@ -1996,7 +2156,7 @@ async def handle_reserve_table_flow(
             return {"status": "cancelled"}
 
         if not _is_affirmative(reply):
-            await send_whatsapp_message(customer_phone, "Please tap *Yes, confirm* to proceed or *Cancel* to cancel.", restaurant_id)
+            await send_whatsapp_message(customer_phone, "Please tap *Yes, confirm* to proceed or *Cancel* to cancel." + _HOME_HINT, restaurant_id)
             return {"status": "error"}
 
         token                = await get_next_token_number(restaurant_id)
@@ -2046,6 +2206,30 @@ async def handle_reserve_table_flow(
             )
             await send_whatsapp_message(customer_phone, summary, restaurant_id)
 
+            # ── Generate receipt + mark booking confirmed ─────────────────────
+            if _RECEIPT_AVAILABLE:
+                try:
+                    r_info = await _fetch_restaurant_info(restaurant_id)
+                    receipt_data = _ReceiptData(
+                        restaurant_name=r_info.get("name", ""),
+                        restaurant_wa_number=r_info.get("whatsapp_number", ""),
+                        token_number=token,
+                        table_number="",
+                        service_type="reserve_table",
+                        customer_name=customer_name,
+                        customer_phone=customer_phone,
+                        items=[],
+                        gst_rate=0.0,
+                        payment_mode=session_state.get("payment_mode", "Cash"),
+                        footer_message=f"Reservation for {display_dt} — {party_size} guests 😊",
+                    )
+                    receipt_path = _generate_receipt(receipt_data)
+                    logger.info(f"[receipt] Reservation receipt saved: {receipt_path}")
+                    await update_booking_status(booking_id, "confirmed")
+                    logger.info(f"[receipt] Booking {booking_id} marked confirmed")
+                except Exception as _re:
+                    logger.warning(f"[receipt] Generation failed (non-fatal): {_re}")
+
             session_state["order_confirmed_summary"] = (
                 f"Table Reservation Token *{token}* — {display_dt} "
                 f"for {party_size} guests (advance ₹{advance_amount:.0f})"
@@ -2055,7 +2239,7 @@ async def handle_reserve_table_flow(
 
         except Exception as e:
             logger.error(f"Failed to create reservation: {e}")
-            await send_whatsapp_message(customer_phone, "Sorry, there was an error creating your reservation. Please try again.", restaurant_id)
+            await send_whatsapp_message(customer_phone, "Sorry, there was an error creating your reservation. Please try again." + _HOME_HINT, restaurant_id)
             return {"status": "error"}
 
     return {"status": "error"}
