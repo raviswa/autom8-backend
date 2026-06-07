@@ -39,11 +39,10 @@ AsyncSessionLocal = None
 
 
 async def init_db():
-    """Initialize database engine and session factory."""
     global engine, AsyncSessionLocal
     try:
         engine = create_async_engine(
-            settings.get_db_url(),          # ← THIS LINE ONLY
+            settings.get_db_url(),
             echo=False,
             future=True,
             pool_size=10,
@@ -54,7 +53,7 @@ async def init_db():
         AsyncSessionLocal = async_sessionmaker(
             engine, class_=AsyncSession, expire_on_commit=False
         )
-        async with engine.begin() as conn:
+        async with engine.connect() as conn:          # ← use connect(), not begin()
             await conn.execute(select(1))
         print("Database connection successful")
     except Exception as e:
@@ -63,7 +62,6 @@ async def init_db():
             raise
         engine = None
         AsyncSessionLocal = None
-
 # ─── Feature Gate ─────────────────────────────────────────────────────────────
 
 async def get_restaurant_features(restaurant_id: str) -> list[str]:
