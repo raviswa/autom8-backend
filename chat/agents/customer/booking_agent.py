@@ -1063,7 +1063,19 @@ async def handle_booking_flow(
             )
             return {"status": "visit_complete"}
         logger.info(f"[visit_complete] New message from {customer_phone} — treating as fresh visit.")
+        # Preserve identity so it doesn't re-run on the very next message,
+        # causing a double-greeting and swallowing the service selection.
+        _prev_cid     = session_state.get("customer_id")
+        _prev_cname   = session_state.get("customer_name")
+        _prev_ret     = session_state.get("is_returning_customer", True)
+        _prev_visits  = session_state.get("visit_count", 0)
+        _prev_last    = session_state.get("last_order_summary", "")
         session_state.clear()
+        if _prev_cid:    session_state["customer_id"]          = _prev_cid
+        if _prev_cname:  session_state["customer_name"]        = _prev_cname
+        session_state["is_returning_customer"] = _prev_ret
+        if _prev_visits: session_state["visit_count"]          = _prev_visits
+        if _prev_last:   session_state["last_order_summary"]   = _prev_last
         session_state["booking_step"] = "ask_service"
         current_step = "ask_service"
 
