@@ -30,9 +30,11 @@ from zoneinfo import ZoneInfo
 try:
     import qrcode
     from PIL import Image, ImageDraw, ImageFont
-except ImportError:
-    print("Missing dependencies. Run:  pip install qrcode[pil] pillow")
-    sys.exit(1)
+except ImportError as _e:
+    raise ImportError(
+        f"generate_receipt requires qrcode[pil] and Pillow: {_e}. "
+        "Run: pip install qrcode[pil] pillow"
+    ) from _e
 
 
 # ─── Design tokens ────────────────────────────────────────────────────────────
@@ -52,7 +54,7 @@ COLOR_DIVIDER   = "#CCCCCC"
 COLOR_BG        = "#FFFFFF"
 COLOR_SUBTLBG   = "#F7F7F7"    # used for totals block
 
-OUTPUT_DIR = Path("receipt_output")
+OUTPUT_DIR = Path(os.getenv("RECEIPT_OUTPUT_DIR", "/tmp/receipt_output"))
 
 # System font search order
 _BOLD_FONTS = [
