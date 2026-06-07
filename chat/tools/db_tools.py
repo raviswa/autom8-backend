@@ -43,7 +43,7 @@ async def init_db():
     global engine, AsyncSessionLocal
     try:
         engine = create_async_engine(
-            settings.get_db_url,
+            settings.get_db_url(),          # ← THIS LINE ONLY
             echo=False,
             future=True,
             pool_size=10,
@@ -63,7 +63,6 @@ async def init_db():
             raise
         engine = None
         AsyncSessionLocal = None
-
 
 # ─── Feature Gate ─────────────────────────────────────────────────────────────
 
