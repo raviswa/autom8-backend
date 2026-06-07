@@ -44,5 +44,7 @@ class Settings(BaseSettings):
 
     razorpay_key_id: str | None      = None
     razorpay_key_secret: str | None  = None
+    log_level: str                   = "INFO"
+    environment: str                 = "production"
 
 settings = Settings()
