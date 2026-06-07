@@ -54,9 +54,9 @@ async def init_db():
         AsyncSessionLocal = async_sessionmaker(
             engine, class_=AsyncSession, expire_on_commit=False
         )
-        # Test connection without using a context manager that re-raises
-        conn = await engine.raw_connection()
-        await conn.close()
+        # Test connection properly with async context manager
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
         print("Database connection successful")
     except Exception as e:
         print(f"Database connection failed: {e}. Running without database.")
