@@ -43,6 +43,16 @@ FIX LOG
                 swallowed by the greeting guard;
             (c) empty-cart + short-message guard in takeaway & delivery
                 awaiting_order re-sends catalog instead of creating ₹0 booking.
+  Fix 32 — _fetch_restaurant_info: missing await before resp.json() (aiohttp
+            returns a coroutine without await; caused receipt to always use
+            empty restaurant name/wa_number).
+  Fix 33 — Takeaway awaiting_order: asyncio.gather (includes get_next_token_number
+            DB call) was outside the try block — any DB hiccup caused a silent
+            failure with no message to the customer. Moved entire processing block
+            into a single try, wrapped manager notifications in nested try-excepts
+            (non-fatal), added customer error message in the outer except.
+  Fix 34 — Delivery awaiting_order: same silent-failure pattern as Fix 33.
+            asyncio.gather moved inside try; customer error message added.
 
   Perf 1 — classify_intent (Gemini) + load_context + log_event moved to
             asyncio background task — no longer blocks the WhatsApp reply.
@@ -160,10 +170,6 @@ _HOME_HINT = "\n\n💡 Type *Home* to start a fresh booking anytime."
 
 
 # ─── Shared HTTP client ───────────────────────────────────────────────────────
-# Perf 2: One aiohttp session reused across all outbound calls.
-# Creating a fresh ClientSession per request incurs TCP connection setup
-# overhead on every portal sync, KDS notification, and feedback queue call.
-
 _http_client: aiohttp.ClientSession | None = None
 
 def _get_http() -> aiohttp.ClientSession:
@@ -181,6 +187,7 @@ async def _fetch_restaurant_info(restaurant_id: str) -> dict:
     """
     Best-effort fetch of restaurant name and WA number for receipts.
     Returns empty dict on any failure — receipt generation degrades gracefully.
+    Fix 32: added await before resp.json() (aiohttp requires it).
     """
     try:
         base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
@@ -198,7 +205,7 @@ async def _fetch_restaurant_info(restaurant_id: str) -> dict:
             timeout=aiohttp.ClientTimeout(total=3),
         )
         if resp.status == 200:
-            rows = resp.json()
+            rows = await resp.json()  # Fix 32: was resp.json() — missing await
             return rows[0] if rows else {}
     except Exception as e:
         logger.debug(f"[receipt] restaurant info fetch failed (non-fatal): {e}")
@@ -255,7 +262,6 @@ def _format_combo_message(combo: list, party_size: int) -> str:
 async def _sync_token_to_portal(
     customer_name: str, customer_phone: str, token_type: str, pax: int,
 ) -> str | None:
-    # Perf 2: uses shared _get_http() instead of fresh ClientSession
     try:
         resp = await _get_http().post(
             PORTAL_API_URL,
@@ -283,7 +289,6 @@ async def _sync_token_to_portal(
 async def _sync_token_to_portal_large_party(
     customer_name: str, customer_phone: str, pax: int, combo: list,
 ) -> str | None:
-    # Perf 2: uses shared _get_http() instead of fresh ClientSession
     try:
         resp = await _get_http().post(
             PORTAL_API_URL,
@@ -311,7 +316,6 @@ async def _sync_token_to_portal_large_party(
 
 
 async def _lookup_table_assignment(customer_phone: str) -> str | None:
-    # Perf 2: uses shared _get_http() instead of fresh ClientSession
     try:
         resp = await _get_http().get(
             PORTAL_API_URL,
@@ -340,7 +344,6 @@ async def _notify_kds(
     table_number: str | int | None, token_number: str, service_type: str,
     special_notes: str | None = None,
 ) -> None:
-    # Perf 2: uses shared _get_http() instead of fresh ClientSession
     try:
         items = []
         for item_id, line in cart.items():
@@ -797,7 +800,6 @@ async def _do_reset(
 async def _send_service_menu(customer_phone: str, restaurant_id: str, greeting: str) -> None:
     rows = await build_service_menu_rows(restaurant_id)
     _header_text = greeting[:57] + "..." if len(greeting) > 60 else greeting
-    # Fix 28: body text no longer repeats the name; cleaner CTA
     ok = await _send_interactive(customer_phone, {
         "interactive": {
             "type": "list",
@@ -843,12 +845,6 @@ def _parse_booking_datetime(text: str) -> datetime | None:
 async def _send_menu(
     customer_phone: str, restaurant_id: str, session_state: Dict[str, Any] | None = None,
 ) -> None:
-    """
-    Fix 30: Catalog-first, no time-slot filtering.
-    Delegates entirely to _send_catalog_with_fallback so the retry logic and
-    plain-text hard fallback are in one place. send_category_list / send_item_list /
-    items_for_slot are never called here.
-    """
     if session_state is None:
         session_state = {}
     await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
@@ -900,10 +896,6 @@ async def _background_analytics(
     message: str,
     step: str,
 ) -> None:
-    """
-    Perf 1: Non-blocking analytics — classify_intent (Gemini) + DB log run
-    after the WhatsApp reply is already sent. Never blocks the customer reply.
-    """
     try:
         context = await _safe_load_context(restaurant_id, customer_id)
         intent  = await _safe_classify_intent(message, "booking_flow", context)
@@ -932,7 +924,6 @@ def _first_name(full_name: str) -> str:
     return full_name.strip().split()[0].capitalize() if full_name.strip() else full_name
 
 
-# Warm returning-customer variants — keyed by (time_of_day, index % 4)
 _RETURNING_VARIANTS: dict[str, list[str]] = {
     "morning": [
         "Good morning, {first}! ☀️ Starting the day with us — we love that.",
@@ -960,7 +951,6 @@ _RETURNING_VARIANTS: dict[str, list[str]] = {
     ],
 }
 
-# Variants that mention the last order — appended when last_order is known
 _LAST_ORDER_SUFFIXES = [
     " Your {last_order} last time was a great choice — want to go again?",
     " Loved the {last_order} on your last visit?",
@@ -968,7 +958,6 @@ _LAST_ORDER_SUFFIXES = [
     " Coming back for the {last_order} again? 😄",
 ]
 
-# Variants for first-time customers
 _FIRST_TIME_VARIANTS: dict[str, list[str]] = {
     "morning": [
         "Good morning, {first}! ☀️ Welcome to Munafe — so glad you're here.",
@@ -994,29 +983,14 @@ def _build_smart_greeting(
     raw_greeting: str,
     session_state: Dict[str, Any],
 ) -> str:
-    """
-    Build a contextual greeting.
-
-    Priority:
-      1. If build_personalised_greeting returned a non-generic string → use it as-is.
-      2. If session carries last_order/last_service → inject into returning variant.
-      3. If session marks customer as returning → returning variant (no order hint).
-      4. First-time / unknown → first-time variant or plain welcome.
-
-    Greeting is capped at 60 chars for the WhatsApp list header; longer strings
-    are used in full for plain-text fallback (header truncation handled elsewhere).
-    """
-    # Priority 1: trust personalisation_tools if it gave us something real
     if raw_greeting and raw_greeting.strip().lower() not in _GENERIC_GREETINGS:
         return raw_greeting
 
     tod   = _time_of_day_label()
     first = _first_name(customer_name)
-
-    # Seed a stable-ish index from customer name length (no randomness = reproducible)
     idx = (len(customer_name) + len(first)) % 4
 
-    last_order   = session_state.get("last_order_summary", "")   # e.g. "Chicken Biryani"
+    last_order   = session_state.get("last_order_summary", "")
     is_returning = session_state.get("is_returning_customer", False)
     visit_count  = session_state.get("visit_count", 0)
 
@@ -1026,7 +1000,6 @@ def _build_smart_greeting(
         if last_order:
             suffix_idx = idx % len(_LAST_ORDER_SUFFIXES)
             suffix = _LAST_ORDER_SUFFIXES[suffix_idx].format(last_order=last_order)
-            # Keep total under 300 chars for WhatsApp body comfort
             if len(greeting) + len(suffix) <= 300:
                 greeting += suffix
     else:
@@ -1046,8 +1019,6 @@ async def handle_booking_flow(
     session_state: Dict[str, Any], table_number: int | None = None,
 ) -> Dict[str, Any]:
 
-    # Perf 1: analytics (Gemini classify_intent + DB log) run in the background
-    # so they never add latency to the customer's reply.
     asyncio.create_task(_background_analytics(
         restaurant_id, customer_id,
         message, session_state.get("booking_step", "start"),
@@ -1055,7 +1026,6 @@ async def handle_booking_flow(
 
     current_step = session_state.get("booking_step", "ask_service")
 
-    # Fix 24: visit_complete
     if current_step == "visit_complete":
         if _is_feedback_reply(message):
             await send_whatsapp_message(
@@ -1065,8 +1035,6 @@ async def handle_booking_flow(
             )
             return {"status": "visit_complete"}
         logger.info(f"[visit_complete] New message from {customer_phone} — treating as fresh visit.")
-        # Preserve identity so it doesn't re-run on the very next message,
-        # causing a double-greeting and swallowing the service selection.
         _prev_cid     = session_state.get("customer_id")
         _prev_cname   = session_state.get("customer_name")
         _prev_ret     = session_state.get("is_returning_customer", True)
@@ -1081,7 +1049,6 @@ async def handle_booking_flow(
         session_state["booking_step"] = "ask_service"
         current_step = "ask_service"
 
-    # Explicit reset-keyword intercept
     if (current_step not in {"awaiting_reset_confirmation"}
             and message.strip().lower() in _RESET_KEYWORDS):
         session_state["step_before_reset"]     = current_step
@@ -1090,14 +1057,12 @@ async def handle_booking_flow(
         await _ask_continue_or_reset(customer_phone, restaurant_id, full_restart=True)
         return {"status": "awaiting_reset_confirmation"}
 
-    # Global escape hatch
     if (current_step not in _STEPS_ALLOWING_SHORT_REPLY and _is_greeting(message)):
         session_state["step_before_reset"] = current_step
         session_state["booking_step"]      = "awaiting_reset_confirmation"
         await _ask_continue_or_reset(customer_phone, restaurant_id)
         return {"status": "awaiting_reset_confirmation"}
 
-    # awaiting_payment stale-button guard
     if current_step == "awaiting_payment":
         text_upper = message.strip().upper()
         if text_upper in ("NEW ORDER", "NEW", "ORDER AGAIN"):
@@ -1109,7 +1074,6 @@ async def handle_booking_flow(
             if _cname:  session_state["customer_name"] = _cname
             if _mphone: session_state["manager_phone"] = _mphone
             raw_greeting = await _safe_build_greeting(customer_id, restaurant_id)
-            # Mark as returning so smart greeting picks the right variant
             session_state["is_returning_customer"] = True
             ret_greeting = _build_smart_greeting(customer_name, raw_greeting, session_state)
             await _send_service_menu(customer_phone, restaurant_id, ret_greeting)
@@ -1129,7 +1093,6 @@ async def handle_booking_flow(
         })
         return {"status": "awaiting_payment"}
 
-    # Step 1: Show the service menu
     if current_step == "ask_service":
         if not session_state.get("_menu_sent"):
             raw_greeting = await _safe_build_greeting(customer_id, restaurant_id)
@@ -1139,7 +1102,6 @@ async def handle_booking_flow(
             session_state["booking_step"] = "awaiting_service_selection"
         return {"status": "menu_sent"}
 
-    # Step 2: Parse the service selection
     if current_step == "awaiting_service_selection":
         _raw_choice = message.strip()
         _SERVICE_TEXT_MAP = {
@@ -1175,8 +1137,6 @@ async def handle_booking_flow(
                 restaurant_id,
             )
             clear_cart(session_state)
-            # Fix 27: set step BEFORE calling fallback so it cannot be overwritten
-            # back to awaiting_order if catalog succeeds; fallback sets its own step.
             session_state["booking_step"] = "awaiting_order"
             await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
         elif service_type == "delivery":
@@ -1198,7 +1158,6 @@ async def handle_booking_flow(
 
         return {"status": f"awaiting_{session_state['booking_step'].replace('awaiting_', '')}"}
 
-    # Step 2b: Reset confirmation
     if current_step == "awaiting_reset_confirmation":
         choice = message.strip()
         if choice == "1":
@@ -1221,7 +1180,6 @@ async def handle_booking_flow(
             await send_whatsapp_message(customer_phone, "Please tap *Continue my order* or *Start over*." + _HOME_HINT, restaurant_id)
             return {"status": "error"}
 
-    # Cart: confirming_order
     if current_step == "confirming_order":
         cart = session_state.get("cart", {})
         if not cart:
@@ -1241,24 +1199,18 @@ async def handle_booking_flow(
         elif svc == "delivery":
             return await handle_delivery_flow(restaurant_id, customer_id, customer_name, customer_phone, mp, ot, session_state)
         else:
-            # service_type unknown — re-send service menu cleanly
             raw_g = await _safe_build_greeting(customer_id, restaurant_id)
             greet = _build_smart_greeting(customer_name, raw_g, session_state)
             await _send_service_menu(customer_phone, restaurant_id, greet)
             session_state["booking_step"] = "awaiting_service_selection"
             return {"status": "awaiting_service_selection"}
 
-    # Cart: awaiting_category_selection / awaiting_item_selection
-    # Fix 30: These steps are now dead-paths — the catalog API is the only entry
-    # point for browsing. If the customer somehow lands here (e.g. stale session),
-    # re-send the catalog. Never call send_item_list / items_for_slot / current_time_slot.
     if current_step in ("awaiting_category_selection", "awaiting_item_selection"):
         logger.info(f"[router] stale step {current_step} for {customer_phone} — re-sending catalog")
         session_state["booking_step"] = "awaiting_order"
         await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
         return {"status": session_state.get("booking_step", "awaiting_order")}
 
-    # Cart: awaiting_cart_action
     if current_step == "awaiting_cart_action":
         action = message.strip().upper()
         if action in ("CART:CONFIRM","CONFIRM","YES","Y","OK","OKAY"):
@@ -1280,14 +1232,12 @@ async def handle_booking_flow(
             elif svc == "delivery":
                 return await handle_delivery_flow(restaurant_id, customer_id, customer_name, customer_phone, mp, ot, session_state)
         elif action in ("CART:ADD_MORE","ADD MORE","ADD","MORE"):
-            # Fix 30: catalog-first, no send_category_list / items_for_slot
             session_state["booking_step"] = "awaiting_order"
             await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
             return {"status": session_state.get("booking_step", "awaiting_order")}
         elif action in ("CART:CLEAR","CLEAR","RESET CART"):
             clear_cart(session_state)
             await send_whatsapp_message(customer_phone, "Cart cleared! 🗑️ Let's start fresh.", restaurant_id)
-            # Fix 30: catalog-first, no send_category_list / items_for_slot
             session_state["booking_step"] = "awaiting_order"
             await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
             return {"status": session_state.get("booking_step", "awaiting_order")}
@@ -1295,23 +1245,17 @@ async def handle_booking_flow(
             await send_cart_summary_buttons(customer_phone, session_state)
             return {"status": "awaiting_cart_action"}
 
-    # Cart: awaiting_numbered_order
-    # Emergency plain-text path — only reached when the catalog API failed twice.
-    # Primary goal: get customer back onto the catalog ASAP, or submit their order.
     if current_step == "awaiting_numbered_order":
         text = message.strip()
         cat  = session_state.get("current_category")
 
-        # "DONE" or "CONFIRM" — submit whatever is in the cart
         if text.upper() in ("DONE", "CONFIRM"):
             cart = session_state.get("cart", {})
             if not cart:
-                # Cart empty — retry the catalog so they can pick items properly
                 await send_whatsapp_message(customer_phone, "Your cart is empty. Retrying the menu for you...", restaurant_id)
                 session_state["booking_step"] = "awaiting_order"
                 await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
                 return {"status": session_state.get("booking_step", "awaiting_order")}
-            # Cart has items — forward directly to the right sub-flow
             session_state["order_from_cart"] = True
             session_state["booking_step"]    = "awaiting_order"
             svc = session_state.get("service_type")
@@ -1324,13 +1268,11 @@ async def handle_booking_flow(
             elif svc == "delivery":
                 return await handle_delivery_flow(restaurant_id, customer_id, customer_name, customer_phone, mp, ot, session_state)
 
-        # "MENU" — re-attempt the catalog (primary channel) instead of re-sending plain text
         if text.upper() == "MENU":
             session_state["booking_step"] = "awaiting_order"
             await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
             return {"status": session_state.get("booking_step", "awaiting_order")}
 
-        # Numbered item selection (plain-text fallback ordering)
         matched = parse_numbered_order(text, cat, session_state)
         if matched:
             for item in matched:
@@ -1349,7 +1291,6 @@ async def handle_booking_flow(
             )
         return {"status": "awaiting_numbered_order"}
 
-    # Step 3: delegate to sub-flow
     service_type  = session_state.get("service_type")
     manager_phone = session_state.get("manager_phone", manager_phone)
     if service_type == "dine_in":
@@ -1443,7 +1384,6 @@ async def handle_dine_in_flow(
                     session_state["booking_step"]   = "awaiting_large_party_response"
                     return {"status": "awaiting_large_party_response"}
 
-            # Normal flow
             token        = await get_next_token_number(restaurant_id)
             booking_time = _now_display()
             session_state["token_number"] = token
@@ -1463,7 +1403,6 @@ async def handle_dine_in_flow(
                 f"Open portal to assign table:\n{MANAGER_PORTAL_URL}",
                 restaurant_id,
             )
-            # Fix 28: reworded dine-in check-in message — shorter wait hint + catalog tip
             await send_whatsapp_message(
                 customer_phone,
                 f"You're all checked in! 🍽️\n\n"
@@ -1549,7 +1488,6 @@ async def handle_dine_in_flow(
                 f"Browse our menu below and place your order 🍽️",
                 restaurant_id,
             )
-            # Fix 26: time-slot filtering via _send_catalog_with_fallback
             await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
             return {"status": "awaiting_order"}
         else:
@@ -1571,12 +1509,11 @@ async def handle_dine_in_flow(
         cart          = session_state.get("cart", {})
         cart_snapshot = dict(cart)
         total         = cart_total(cart) if cart else 0.0
-        session_state["order_total"] = total   # stored for receipt generation
+        session_state["order_total"] = total
         token         = session_state.get("display_token", session_state.get("token_number", ""))
         booking_time  = session_state.get("booking_time", _now_display())
 
         try:
-            # Perf 3: suggestion fetch and booking creation are independent — run concurrently
             suggestion, booking = await asyncio.gather(
                 _safe_build_order_suggestion(customer_id, restaurant_id),
                 create_booking(
@@ -1607,7 +1544,6 @@ async def handle_dine_in_flow(
             if suggestion: confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
 
-            # Fix 28: reworded special-notes prompt — warmer, removes cold "2-minute" footer
             notes_hint = _build_notes_hint(order_text)
             await _send_interactive(customer_phone, {
                 "interactive": {
@@ -1624,7 +1560,7 @@ async def handle_dine_in_flow(
                 }
             })
             session_state["special_notes_asked_at"] = time.time()
-            start_special_notes_timer(customer_phone, restaurant_id)  # Fix 23
+            start_special_notes_timer(customer_phone, restaurant_id)
 
             await send_whatsapp_message(
                 manager_phone,
@@ -1639,14 +1575,13 @@ async def handle_dine_in_flow(
                 f"Dine-in Token *{token}* — {order_text} "
                 f"({session_state.get('party_size')} guests, ₹{total:.0f})"
             )
-            # Fix 29: persist for smart greeting on next visit
             _first_item = order_text.split(",")[0].strip()[:40]
             session_state["last_order_summary"]    = _first_item
             session_state["is_returning_customer"] = True
             session_state["visit_count"]           = session_state.get("visit_count", 0) + 1
             session_state["_kds_cart_snapshot"] = cart_snapshot
             session_state["_kds_order_text"]    = order_text
-            session_state["_receipt_cart"]      = cart_snapshot   # kept for receipt after KDS pop
+            session_state["_receipt_cart"]      = cart_snapshot
             session_state["booking_step"] = "awaiting_special_notes"
             clear_cart(session_state)
             return {"status": "awaiting_special_notes", "booking_id": booking_id, "total": total}
@@ -1660,9 +1595,8 @@ async def handle_dine_in_flow(
         raw_notes: str = message.strip()
         token = session_state.get("display_token", session_state.get("token_number", ""))
 
-        stop_special_notes_timer(customer_phone)  # Fix 23
+        stop_special_notes_timer(customer_phone)
 
-        # Auto-close: more than 2 minutes → treat as no notes
         asked_at  = session_state.get("special_notes_asked_at", 0)
         timed_out = (time.time() - asked_at) > 120
         if timed_out:
@@ -1711,7 +1645,6 @@ async def handle_dine_in_flow(
             special_notes=special_notes,
         )
 
-        # ── Generate receipt + mark booking confirmed ─────────────────────────
         if _RECEIPT_AVAILABLE:
             try:
                 r_info = await _fetch_restaurant_info(restaurant_id)
@@ -1740,8 +1673,6 @@ async def handle_dine_in_flow(
             except Exception as _re:
                 import traceback as _tb; logger.warning(f"[receipt] Generation failed (non-fatal): {_re}\n{_tb.format_exc()}")
 
-        # Queue feedback request — sent 2 hours later via server.js scheduler
-        # Perf 2: uses shared _get_http() instead of fresh ClientSession
         try:
             await _get_http().post(
                 "https://autom8-backend-production.up.railway.app/api/feedback/queue",
@@ -1757,7 +1688,6 @@ async def handle_dine_in_flow(
         except Exception as fb_err:
             logger.warning(f"[feedback-queue] Non-fatal: {fb_err}")
 
-        # Fix 24: transition to visit_complete (not awaiting_payment)
         session_state["booking_step"] = "visit_complete"
         return {"status": "visit_complete"}
 
@@ -1784,37 +1714,44 @@ async def handle_takeaway_flow(
 
         cart = session_state.get("cart", {})
 
-        # Fix 31: empty cart + noise message → re-send catalog, don't create ₹0 booking
         if not cart and len(order_text) < 3:
             logger.info(f"[takeaway] empty cart + short message '{order_text}' — re-sending catalog")
             await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
             return {"status": session_state.get("booking_step", "awaiting_order")}
 
-        cart_snapshot = dict(cart)
-        total         = cart_total(cart) if cart else 0.0
-        session_state["order_total"] = total   # stored for receipt generation
-        token, portal_token_id, suggestion = await asyncio.gather(
-            get_next_token_number(restaurant_id),
-            _sync_token_to_portal(
-                customer_name=customer_name, customer_phone=customer_phone,
-                token_type="takeaway", pax=1,
-            ),
-            _safe_build_order_suggestion(customer_id, restaurant_id),
-        )
-        booking_time  = _now_display()
-        session_state["token_number"] = token
-        display_token = portal_token_id or token
-        session_state["display_token"] = display_token
-
-        await send_whatsapp_message(
-            manager_phone,
-            f"🛍️ *New Walk-in* — Token *{display_token}*\n"
-            f"👤 {customer_name}\n📦 Takeaway\n🕐 {booking_time}\n\n"
-            f"Open portal to manage:\n{MANAGER_PORTAL_URL}",
-            restaurant_id,
-        )
-
+        # Fix 33: entire processing block moved inside a single try so that
+        # get_next_token_number (DB) failures are caught and the customer always
+        # gets an error message instead of seeing silence.
         try:
+            cart_snapshot = dict(cart)
+            total         = cart_total(cart) if cart else 0.0
+            session_state["order_total"] = total   # stored for receipt generation
+
+            token, portal_token_id, suggestion = await asyncio.gather(
+                get_next_token_number(restaurant_id),
+                _sync_token_to_portal(
+                    customer_name=customer_name, customer_phone=customer_phone,
+                    token_type="takeaway", pax=1,
+                ),
+                _safe_build_order_suggestion(customer_id, restaurant_id),
+            )
+            booking_time  = _now_display()
+            session_state["token_number"] = token
+            display_token = portal_token_id or token
+            session_state["display_token"] = display_token
+
+            # manager walk-in alert — non-fatal if it fails
+            try:
+                await send_whatsapp_message(
+                    manager_phone,
+                    f"🛍️ *New Walk-in* — Token *{display_token}*\n"
+                    f"👤 {customer_name}\n📦 Takeaway\n🕐 {booking_time}\n\n"
+                    f"Open portal to manage:\n{MANAGER_PORTAL_URL}",
+                    restaurant_id,
+                )
+            except Exception as _mw:
+                logger.warning(f"[takeaway] manager walk-in notify failed (non-fatal): {_mw}")
+
             booking = await create_booking(restaurant_id, customer_id, "takeaway", token_number=token)
             booking_id = booking["id"]
             session_state["booking_id"] = booking_id
@@ -1833,18 +1770,22 @@ async def handle_takeaway_flow(
             if suggestion: confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
 
-            await send_whatsapp_message(
-                manager_phone,
-                f"📋 Order Details — Takeaway\n────────────────────\n"
-                f"Token: {display_token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
-                f"Booking Time: {booking_time}\nOrder: {order_text}\nTotal: ₹{total:.0f}\n"
-                f"────────────────────",
-                restaurant_id,
-            )
+            # manager order details — non-fatal if it fails
+            try:
+                await send_whatsapp_message(
+                    manager_phone,
+                    f"📋 Order Details — Takeaway\n────────────────────\n"
+                    f"Token: {display_token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
+                    f"Booking Time: {booking_time}\nOrder: {order_text}\nTotal: ₹{total:.0f}\n"
+                    f"────────────────────",
+                    restaurant_id,
+                )
+            except Exception as _md:
+                logger.warning(f"[takeaway] manager order details notify failed (non-fatal): {_md}")
+
             session_state["order_confirmed_summary"] = (
                 f"Takeaway Token *{display_token}* — {order_text} (₹{total:.0f})"
             )
-            # Fix 29: persist for smart greeting on next visit
             _first_item = order_text.split(",")[0].strip()[:40]
             session_state["last_order_summary"]    = _first_item
             session_state["is_returning_customer"] = True
@@ -1858,7 +1799,6 @@ async def handle_takeaway_flow(
                 token_number=display_token, service_type="takeaway",
             )
 
-            # ── Generate receipt + mark booking confirmed ─────────────────────
             if _RECEIPT_AVAILABLE:
                 try:
                     r_info = await _fetch_restaurant_info(restaurant_id)
@@ -1885,6 +1825,11 @@ async def handle_takeaway_flow(
 
         except Exception as e:
             logger.error(f"Failed to create takeaway booking: {e}")
+            await send_whatsapp_message(
+                customer_phone,
+                "Sorry, there was an error processing your order. Please try again." + _HOME_HINT,
+                restaurant_id,
+            )
             return {"status": "error"}
 
     return {"status": "error"}
@@ -1922,8 +1867,6 @@ async def handle_delivery_flow(
             restaurant_id,
         )
         clear_cart(session_state)
-        # Fix 27: set step to awaiting_order; _send_catalog_with_fallback will
-        # override to awaiting_category_selection if it needs the fallback path.
         session_state["booking_step"] = "awaiting_order"
         await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
         return {"status": session_state["booking_step"]}
@@ -1936,26 +1879,28 @@ async def handle_delivery_flow(
 
         cart = session_state.get("cart", {})
 
-        # Fix 31: empty cart + noise message → re-send catalog, don't create ₹0 booking
         if not cart and len(order_text) < 3:
             logger.info(f"[delivery] empty cart + short message '{order_text}' — re-sending catalog")
             await _send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
             return {"status": session_state.get("booking_step", "awaiting_order")}
 
-        cart_snapshot = dict(cart)
-        items_total   = cart_total(cart) if cart else 0.0
-        total         = items_total + DELIVERY_CHARGE
-        session_state["order_total"] = total   # stored for receipt generation
-
-        # Perf 3: token and suggestion are independent — run concurrently
-        token, suggestion = await asyncio.gather(
-            get_next_token_number(restaurant_id),
-            _safe_build_order_suggestion(customer_id, restaurant_id),
-        )
-        booking_time  = _now_display()
-        session_state["token_number"] = token
-
+        # Fix 34: entire processing block moved inside a single try so that
+        # get_next_token_number (DB) failures are caught and the customer always
+        # gets an error message instead of seeing silence.
         try:
+            cart_snapshot = dict(cart)
+            items_total   = cart_total(cart) if cart else 0.0
+            total         = items_total + DELIVERY_CHARGE
+            session_state["order_total"] = total   # stored for receipt generation
+
+            # Perf 3: token and suggestion are independent — run concurrently
+            token, suggestion = await asyncio.gather(
+                get_next_token_number(restaurant_id),
+                _safe_build_order_suggestion(customer_id, restaurant_id),
+            )
+            booking_time  = _now_display()
+            session_state["token_number"] = token
+
             booking = await create_booking(
                 restaurant_id, customer_id, "delivery",
                 delivery_address=session_state.get("delivery_address"), token_number=token,
@@ -1977,20 +1922,23 @@ async def handle_delivery_flow(
             if suggestion: confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
 
-            await send_whatsapp_message(
-                manager_phone,
-                f"🛵 New Delivery Order\n────────────────────\n"
-                f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
-                f"Address: {session_state.get('delivery_address')}\nBooking Time: {booking_time}\n"
-                f"Order: {order_text}\nTotal: ₹{total:.0f} (incl. ₹{DELIVERY_CHARGE:.0f} delivery)\n"
-                f"────────────────────",
-                restaurant_id,
-            )
+            try:
+                await send_whatsapp_message(
+                    manager_phone,
+                    f"🛵 New Delivery Order\n────────────────────\n"
+                    f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
+                    f"Address: {session_state.get('delivery_address')}\nBooking Time: {booking_time}\n"
+                    f"Order: {order_text}\nTotal: ₹{total:.0f} (incl. ₹{DELIVERY_CHARGE:.0f} delivery)\n"
+                    f"────────────────────",
+                    restaurant_id,
+                )
+            except Exception as _md:
+                logger.warning(f"[delivery] manager order notify failed (non-fatal): {_md}")
+
             session_state["order_confirmed_summary"] = (
                 f"Delivery Token *{token}* — {order_text} "
                 f"to {session_state.get('delivery_address', '')[:40]} (₹{total:.0f})"
             )
-            # Fix 29: persist for smart greeting on next visit
             _first_item = order_text.split(",")[0].strip()[:40]
             session_state["last_order_summary"]    = _first_item
             session_state["is_returning_customer"] = True
@@ -2004,7 +1952,6 @@ async def handle_delivery_flow(
                 token_number=token, service_type="delivery",
             )
 
-            # ── Generate receipt + mark booking confirmed ─────────────────────
             if _RECEIPT_AVAILABLE:
                 try:
                     r_info = await _fetch_restaurant_info(restaurant_id)
@@ -2033,6 +1980,11 @@ async def handle_delivery_flow(
 
         except Exception as e:
             logger.error(f"Failed to create delivery booking: {e}")
+            await send_whatsapp_message(
+                customer_phone,
+                "Sorry, there was an error processing your order. Please try again." + _HOME_HINT,
+                restaurant_id,
+            )
             return {"status": "error"}
 
     return {"status": "error"}
@@ -2221,7 +2173,6 @@ async def handle_reserve_table_flow(
             )
             await send_whatsapp_message(customer_phone, summary, restaurant_id)
 
-            # ── Generate receipt + mark booking confirmed ─────────────────────
             if _RECEIPT_AVAILABLE:
                 try:
                     r_info = await _fetch_restaurant_info(restaurant_id)
