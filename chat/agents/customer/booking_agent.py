@@ -150,8 +150,10 @@ try:
     from generate_receipt import ReceiptData as _ReceiptData
     from generate_receipt import LineItem as _LineItem
     _RECEIPT_AVAILABLE = True
-except ImportError:
+    print("[receipt] ✅ generate_receipt loaded — receipt generation enabled", flush=True)
+except ImportError as _e:
     _RECEIPT_AVAILABLE = False
+    print(f"[receipt] ⚠️  generate_receipt not available — receipts disabled: {_e}", flush=True)
 
 # ─── Home hint — appended to all negative / error messages ───────────────────
 _HOME_HINT = "\n\n💡 Type *Home* to start a fresh booking anytime."
@@ -1730,7 +1732,7 @@ async def handle_dine_in_flow(
                     special_notes=special_notes or "",
                 )
                 receipt_path = _generate_receipt(receipt_data)
-                logger.info(f"[receipt] Dine-in receipt saved: {receipt_path}")
+                print(f"[receipt] Dine-in receipt saved: {receipt_path}", flush=True); logger.info(f"[receipt] Dine-in receipt saved: {receipt_path}")
                 booking_id = session_state.get("booking_id")
                 if booking_id:
                     await update_booking_status(booking_id, "confirmed")
@@ -1873,7 +1875,7 @@ async def handle_takeaway_flow(
                         payment_mode=session_state.get("payment_mode", "Cash"),
                     )
                     receipt_path = _generate_receipt(receipt_data)
-                    logger.info(f"[receipt] Takeaway receipt saved: {receipt_path}")
+                    print(f"[receipt] Takeaway receipt saved: {receipt_path}", flush=True); logger.info(f"[receipt] Takeaway receipt saved: {receipt_path}")
                     await update_booking_status(booking_id, "confirmed")
                     logger.info(f"[receipt] Booking {booking_id} marked confirmed")
                 except Exception as _re:
@@ -2021,7 +2023,7 @@ async def handle_delivery_flow(
                         payment_mode=session_state.get("payment_mode", "Cash"),
                     )
                     receipt_path = _generate_receipt(receipt_data)
-                    logger.info(f"[receipt] Delivery receipt saved: {receipt_path}")
+                    print(f"[receipt] Delivery receipt saved: {receipt_path}", flush=True); logger.info(f"[receipt] Delivery receipt saved: {receipt_path}")
                     await update_booking_status(booking_id, "confirmed")
                     logger.info(f"[receipt] Booking {booking_id} marked confirmed")
                 except Exception as _re:
@@ -2237,7 +2239,7 @@ async def handle_reserve_table_flow(
                         footer_message=f"Reservation for {display_dt} — {party_size} guests 😊",
                     )
                     receipt_path = _generate_receipt(receipt_data)
-                    logger.info(f"[receipt] Reservation receipt saved: {receipt_path}")
+                    print(f"[receipt] Reservation receipt saved: {receipt_path}", flush=True); logger.info(f"[receipt] Reservation receipt saved: {receipt_path}")
                     await update_booking_status(booking_id, "confirmed")
                     logger.info(f"[receipt] Booking {booking_id} marked confirmed")
                 except Exception as _re:
