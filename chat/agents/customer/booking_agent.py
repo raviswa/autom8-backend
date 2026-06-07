@@ -61,6 +61,7 @@ import asyncio
 import logging
 import re
 import time
+import os as _os
 import aiohttp
 
 from tools.db_tools import (
@@ -1723,7 +1724,7 @@ async def handle_dine_in_flow(
                     await update_booking_status(booking_id, "confirmed")
                     logger.info(f"[receipt] Booking {booking_id} marked confirmed")
             except Exception as _re:
-                logger.warning(f"[receipt] Generation failed (non-fatal): {_re}")
+                import traceback as _tb; logger.warning(f"[receipt] Generation failed (non-fatal): {_re}\n{_tb.format_exc()}")
 
         # Queue feedback request — sent 2 hours later via server.js scheduler
         # Perf 2: uses shared _get_http() instead of fresh ClientSession
@@ -1864,7 +1865,7 @@ async def handle_takeaway_flow(
                     await update_booking_status(booking_id, "confirmed")
                     logger.info(f"[receipt] Booking {booking_id} marked confirmed")
                 except Exception as _re:
-                    logger.warning(f"[receipt] Generation failed (non-fatal): {_re}")
+                    import traceback as _tb; logger.warning(f"[receipt] Generation failed (non-fatal): {_re}\n{_tb.format_exc()}")
 
             return {"status": "awaiting_payment", "booking_id": booking_id, "total": total}
 
@@ -2012,7 +2013,7 @@ async def handle_delivery_flow(
                     await update_booking_status(booking_id, "confirmed")
                     logger.info(f"[receipt] Booking {booking_id} marked confirmed")
                 except Exception as _re:
-                    logger.warning(f"[receipt] Generation failed (non-fatal): {_re}")
+                    import traceback as _tb; logger.warning(f"[receipt] Generation failed (non-fatal): {_re}\n{_tb.format_exc()}")
 
             return {"status": "awaiting_payment", "booking_id": booking_id, "total": total}
 
@@ -2228,7 +2229,7 @@ async def handle_reserve_table_flow(
                     await update_booking_status(booking_id, "confirmed")
                     logger.info(f"[receipt] Booking {booking_id} marked confirmed")
                 except Exception as _re:
-                    logger.warning(f"[receipt] Generation failed (non-fatal): {_re}")
+                    import traceback as _tb; logger.warning(f"[receipt] Generation failed (non-fatal): {_re}\n{_tb.format_exc()}")
 
             session_state["order_confirmed_summary"] = (
                 f"Table Reservation Token *{token}* — {display_dt} "
