@@ -153,7 +153,7 @@ except ImportError:
     _RECEIPT_AVAILABLE = False
 
 # ─── Home hint — appended to all negative / error messages ───────────────────
-_HOME_HINT = "\n\n_Tip: Type *Home* to start a fresh booking anytime._"
+_HOME_HINT = "\n\n💡 Type *Home* to start a fresh booking anytime."
 
 
 # ─── Shared HTTP client ───────────────────────────────────────────────────────
