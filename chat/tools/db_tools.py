@@ -43,7 +43,7 @@ async def init_db():
     global engine, AsyncSessionLocal
     try:
         engine = create_async_engine(
-            settings.database_url,
+            settings.get_db_url,
             echo=False,
             future=True,
             pool_size=10,
