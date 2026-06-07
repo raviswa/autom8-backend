@@ -44,3 +44,5 @@ class Settings(BaseSettings):
 
     razorpay_key_id: str | None      = None
     razorpay_key_secret: str | None  = None
+
+settings = Settings()
