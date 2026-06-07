@@ -41,8 +41,9 @@ AsyncSessionLocal = None
 async def init_db():
     global engine, AsyncSessionLocal
     try:
+        db_url = settings.get_db_url()
         engine = create_async_engine(
-            settings.get_db_url(),
+            db_url,
             echo=False,
             future=True,
             pool_size=10,
@@ -53,8 +54,9 @@ async def init_db():
         AsyncSessionLocal = async_sessionmaker(
             engine, class_=AsyncSession, expire_on_commit=False
         )
-        async with engine.connect() as conn:          # ← use connect(), not begin()
-            await conn.execute(select(1))
+        # Test connection without using a context manager that re-raises
+        conn = await engine.raw_connection()
+        await conn.close()
         print("Database connection successful")
     except Exception as e:
         print(f"Database connection failed: {e}. Running without database.")
