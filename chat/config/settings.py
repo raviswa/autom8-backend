@@ -39,8 +39,9 @@ class Settings(BaseSettings):
         password = self.autom8_supabase_service_key  # service key doubles as DB password
         return (
             f"postgresql+asyncpg://postgres.{ref}:{password}"
-            f"@aws-0-ap-south-1.pooler.supabase.com:5432/postgres"
-        )
+            f"@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres"  # ← fix region
+            f"?prepared_statement_cache_size=0"                          # ← add this
+         )
 
     # ── Google AI (ADK + Gemini) ──────────────────────────────────────────────
     google_api_key: str
