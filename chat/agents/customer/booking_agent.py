@@ -1526,10 +1526,14 @@ async def handle_dine_in_flow(
             booking_id = booking["id"]
             session_state["booking_id"] = booking_id
 
-            payment_link = await create_payment_link(
-                booking_id, total, customer_name,
-                f"Dine-in {token} at table {session_state.get('table_number')}",
-            )
+      try:
+                payment_link = await create_payment_link(
+                    booking_id, total, customer_name,
+                    f"Dine-in {token} at table {session_state.get('table_number')}",
+                )
+            except Exception as _pl:
+                logger.warning(f"[payment] create_payment_link failed (non-fatal): {_pl}")
+                payment_link = "placeholder"            )
             payment_line = ("💳 Payment can be made at the counter."
                             if _is_placeholder_payment_link(payment_link)
                             else f"Pay here: {payment_link}")
@@ -1756,8 +1760,13 @@ async def handle_takeaway_flow(
             booking_id = booking["id"]
             session_state["booking_id"] = booking_id
 
-            payment_link = await create_payment_link(booking_id, total, customer_name, f"Takeaway {token}")
-            payment_line = ("💳 Payment can be made at the counter."
+            try:
+                payment_link = await create_payment_link(booking_id, total, customer_name, f"Takeaway {token}")
+            except Exception as _pl:
+                logger.warning(f"[payment] create_payment_link failed (non-fatal): {_pl}")
+                payment_link = "placeholder"
+            
+          payment_line = ("💳 Payment can be made at the counter."
                             if _is_placeholder_payment_link(payment_link)
                             else f"Pay here: {payment_link}")
 
@@ -1908,7 +1917,11 @@ async def handle_delivery_flow(
             booking_id = booking["id"]
             session_state["booking_id"] = booking_id
 
-            payment_link = await create_payment_link(booking_id, total, customer_name, f"Delivery {token}")
+            try:
+                payment_link = await create_payment_link(booking_id, total, customer_name, f"Delivery {token}")
+            except Exception as _pl:
+                logger.warning(f"[payment] create_payment_link failed (non-fatal): {_pl}")
+                payment_link = "placeholder"
             payment_line = ("💳 Payment can be made on delivery."
                             if _is_placeholder_payment_link(payment_link)
                             else f"Pay here: {payment_link}")
@@ -2146,9 +2159,15 @@ async def handle_reserve_table_flow(
             booking_id = booking["id"]
             session_state["booking_id"] = booking_id
 
-            payment_link = await create_payment_link(
-                booking_id, advance_amount, customer_name,
-                f"Reservation {token} for {party_size} people",
+
+            try:
+                payment_link = await create_payment_link(
+                    booking_id, advance_amount, customer_name,
+                    f"Reservation {token} for {party_size} people",
+                )
+            except Exception as _pl:
+                logger.warning(f"[payment] create_payment_link failed (non-fatal): {_pl}")
+                payment_link = "placeholder",
             )
 
             try:
