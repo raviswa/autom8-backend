@@ -101,6 +101,12 @@ async def start_scheduler():
         id="dispatch_scheduled_campaigns",
         name="Dispatch scheduled campaigns",
     )
+
+    scheduler.add_job(
+    lambda: asyncio.create_task(cleanup_expired_receipts()),
+    'cron', hour=3, minute=0, id='cleanup_receipts',
+    replace_existing=True,
+    )    
     
     scheduler.add_job(
         track_campaign_conversions,
