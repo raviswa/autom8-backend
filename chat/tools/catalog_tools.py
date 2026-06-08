@@ -79,6 +79,13 @@ FIX LOG
       This standardises the catalog across dine-in, takeaway, and delivery.
     - current_time_slot() and items_for_slot() are kept in the module for
       use by other callers (cart_tools, scheduling logic etc.).
+
+  Fix (dynamic restaurant label in footer):
+    - Footer previously hardcoded "Hotel Munafe, Chennai".
+    - New _get_restaurant_label() fetches restaurant name from DB via
+      get_restaurant_by_id() using the restaurant_id already in scope.
+    - Falls back to "Hotel Munafe" if DB lookup fails or restaurant_id is None.
+    - Footer now reads: "Prices excl. GST • <restaurant name from DB>"
 """
 
 from __future__ import annotations
@@ -389,6 +396,23 @@ async def _get_catalog_credentials(restaurant_id: str | None = None) -> dict[str
     return None
 
 
+async def _get_restaurant_label(restaurant_id: str | None) -> str:
+    """
+    Fetch restaurant name from DB for use in the catalog footer.
+    Falls back to 'Hotel Munafe' if restaurant_id is None or DB lookup fails.
+    """
+    if not restaurant_id:
+        return "Hotel Munafe"
+    try:
+        from tools.db_tools import get_restaurant_by_id
+        r = await get_restaurant_by_id(restaurant_id)
+        if r and r.get("name"):
+            return r["name"]
+    except Exception as e:
+        logger.warning(f"[catalog] Could not fetch restaurant label: {e}")
+    return "Hotel Munafe"
+
+
 async def send_whatsapp_catalog_message(
     customer_phone: str,
     restaurant_id: str | None = None,
@@ -427,6 +451,9 @@ async def send_whatsapp_catalog_message(
             )
         logger.warning("Using global META_GRAPH_API_TOKEN for catalog access")
 
+    # Fetch restaurant name for footer
+    restaurant_label = await _get_restaurant_label(restaurant_id)
+
     # Warm the cache — ALL items, no slot filter
     items = await fetch_menu_items()
 
@@ -461,7 +488,7 @@ async def send_whatsapp_catalog_message(
                     "When done, send us your basket to place the order."
                 ),
             },
-            "footer": {"text": "Prices excl. GST • {restaurant_label}"},
+            "footer": {"text": f"Prices excl. GST • {restaurant_label}"},
             "action": {
                 "catalog_id": _CATALOG_ID,
                 "sections": [
