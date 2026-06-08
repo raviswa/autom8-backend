@@ -53,6 +53,10 @@ FIX LOG
             (non-fatal), added customer error message in the outer except.
   Fix 34 — Delivery awaiting_order: same silent-failure pattern as Fix 33.
             asyncio.gather moved inside try; customer error message added.
+  Fix 36 — Receipt delivery: after generating the PNG, upload to Supabase Storage
+            ('Receipts' bucket) and send the public URL to the customer via WhatsApp.
+            Implemented as asyncio.create_task so it never blocks the confirmation
+            message. Non-fatal — upload/send failures are logged at WARNING level only.
   Fix 35 — create_payment_link raises "Razorpay is not configured in production"
             when Razorpay is absent, crashing order confirmation for all flows.
             Wrapped all 4 calls (dine-in, takeaway, delivery, reserve) in
@@ -381,6 +385,69 @@ async def _notify_kds(
             logger.warning(f"[kds-notify] Non-2xx {resp.status}: {text[:200]}")
     except Exception as e:
         logger.warning(f"[kds-notify] Failed (non-fatal): {e}")
+
+
+# ─────────────────────────────────────────────
+# RECEIPT UPLOAD + DELIVERY  (Fix 36)
+# ─────────────────────────────────────────────
+
+async def _upload_and_send_receipt(
+    receipt_path,          # pathlib.Path returned by generate_receipt()
+    customer_phone: str,
+    restaurant_id: str,
+    token_number: str,
+) -> None:
+    """
+    Fix 36 — Upload receipt PNG to Supabase Storage ('Receipts' bucket) and
+    send the public URL to the customer via WhatsApp.
+
+    Runs as an asyncio background task — never blocks order confirmation.
+    All failures are non-fatal and logged at WARNING level.
+    """
+    try:
+        import httpx as _httpx_r
+        _sb_base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
+        _sb_key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
+        if not (_sb_base and _sb_key):
+            logger.warning("[receipt-upload] AUTOM8_SUPABASE_URL/KEY not set — skipping")
+            return
+
+        _bucket   = "Receipts"                # matches Supabase bucket name (capital R)
+        _filename = receipt_path.name          # e.g. Hotel_Munafe_receipt_T-062.png
+
+        with open(receipt_path, "rb") as _f:
+            _img_bytes = _f.read()
+
+        async with _httpx_r.AsyncClient(timeout=10) as _rc:
+            _up = await _rc.post(
+                f"{_sb_base}/storage/v1/object/{_bucket}/{_filename}",
+                content=_img_bytes,
+                headers={
+                    "apikey":        _sb_key,
+                    "Authorization": f"Bearer {_sb_key}",
+                    "Content-Type":  "image/png",
+                    "x-upsert":      "true",   # overwrite if re-run for same token
+                },
+            )
+
+        if _up.status_code in (200, 201):
+            receipt_url = (
+                f"{_sb_base}/storage/v1/object/public/{_bucket}/{_filename}"
+            )
+            logger.info(f"[receipt-upload] ✅ Uploaded: {receipt_url}")
+            await send_whatsapp_message(
+                customer_phone,
+                f"🧾 *Your receipt — Token {token_number}*\n\n{receipt_url}",
+                restaurant_id,
+            )
+            logger.info(f"[receipt-upload] Receipt link sent to {customer_phone}")
+        else:
+            logger.warning(
+                f"[receipt-upload] Supabase upload failed "
+                f"{_up.status_code}: {_up.text[:200]}"
+            )
+    except Exception as _ue:
+        logger.warning(f"[receipt-upload] Failed (non-fatal): {_ue}")
 
 
 # ─────────────────────────────────────────────
@@ -1675,6 +1742,9 @@ async def handle_dine_in_flow(
                 )
                 receipt_path = _generate_receipt(receipt_data)
                 print(f"[receipt] Dine-in receipt saved: {receipt_path}", flush=True); logger.info(f"[receipt] Dine-in receipt saved: {receipt_path}")
+                asyncio.create_task(_upload_and_send_receipt(
+                    receipt_path, customer_phone, restaurant_id, token,
+                ))
                 booking_id = session_state.get("booking_id")
                 if booking_id:
                     await update_booking_status(booking_id, "confirmed")
@@ -1829,6 +1899,9 @@ async def handle_takeaway_flow(
                     )
                     receipt_path = _generate_receipt(receipt_data)
                     print(f"[receipt] Takeaway receipt saved: {receipt_path}", flush=True); logger.info(f"[receipt] Takeaway receipt saved: {receipt_path}")
+                    asyncio.create_task(_upload_and_send_receipt(
+                        receipt_path, customer_phone, restaurant_id, display_token,
+                    ))
                     await update_booking_status(booking_id, "confirmed")
                     logger.info(f"[receipt] Booking {booking_id} marked confirmed")
                 except Exception as _re:
@@ -1988,6 +2061,9 @@ async def handle_delivery_flow(
                     )
                     receipt_path = _generate_receipt(receipt_data)
                     print(f"[receipt] Delivery receipt saved: {receipt_path}", flush=True); logger.info(f"[receipt] Delivery receipt saved: {receipt_path}")
+                    asyncio.create_task(_upload_and_send_receipt(
+                        receipt_path, customer_phone, restaurant_id, token,
+                    ))
                     await update_booking_status(booking_id, "confirmed")
                     logger.info(f"[receipt] Booking {booking_id} marked confirmed")
                 except Exception as _re:
