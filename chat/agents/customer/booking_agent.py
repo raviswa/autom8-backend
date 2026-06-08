@@ -53,6 +53,11 @@ FIX LOG
             (non-fatal), added customer error message in the outer except.
   Fix 34 — Delivery awaiting_order: same silent-failure pattern as Fix 33.
             asyncio.gather moved inside try; customer error message added.
+  Fix 35 — create_payment_link raises "Razorpay is not configured in production"
+            when Razorpay is absent, crashing order confirmation for all flows.
+            Wrapped all 4 calls (dine-in, takeaway, delivery, reserve) in
+            try/except that falls back to "placeholder" so _is_placeholder_payment_link
+            returns True and the customer sees "Payment can be made at the counter."
 
   Perf 1 — classify_intent (Gemini) + load_context + log_event moved to
             asyncio background task — no longer blocks the WhatsApp reply.
@@ -1526,14 +1531,14 @@ async def handle_dine_in_flow(
             booking_id = booking["id"]
             session_state["booking_id"] = booking_id
 
-      try:
+            try:
                 payment_link = await create_payment_link(
                     booking_id, total, customer_name,
                     f"Dine-in {token} at table {session_state.get('table_number')}",
                 )
             except Exception as _pl:
                 logger.warning(f"[payment] create_payment_link failed (non-fatal): {_pl}")
-                payment_link = "placeholder"            )
+                payment_link = "placeholder"
             payment_line = ("💳 Payment can be made at the counter."
                             if _is_placeholder_payment_link(payment_link)
                             else f"Pay here: {payment_link}")
@@ -1765,8 +1770,7 @@ async def handle_takeaway_flow(
             except Exception as _pl:
                 logger.warning(f"[payment] create_payment_link failed (non-fatal): {_pl}")
                 payment_link = "placeholder"
-            
-          payment_line = ("💳 Payment can be made at the counter."
+            payment_line = ("💳 Payment can be made at the counter."
                             if _is_placeholder_payment_link(payment_link)
                             else f"Pay here: {payment_link}")
 
@@ -2159,7 +2163,6 @@ async def handle_reserve_table_flow(
             booking_id = booking["id"]
             session_state["booking_id"] = booking_id
 
-
             try:
                 payment_link = await create_payment_link(
                     booking_id, advance_amount, customer_name,
@@ -2167,8 +2170,7 @@ async def handle_reserve_table_flow(
                 )
             except Exception as _pl:
                 logger.warning(f"[payment] create_payment_link failed (non-fatal): {_pl}")
-                payment_link = "placeholder",
-            )
+                payment_link = "placeholder"
 
             try:
                 display_dt = datetime.fromisoformat(booking_datetime_iso).strftime("%d %b %Y, %I:%M %p")
