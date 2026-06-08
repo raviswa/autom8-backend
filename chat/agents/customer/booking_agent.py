@@ -42,7 +42,7 @@ FIX LOG
                 _STEPS_ALLOWING_SHORT_REPLY so catalog order messages are never
                 swallowed by the greeting guard;
             (c) empty-cart + short-message guard in takeaway & delivery
-                awaiting_order re-sends catalog instead of creating Rs.0 booking.
+                awaiting_order re-sends catalog instead of creating ₹0 booking.
   Fix 32 — _fetch_restaurant_info: missing await before resp.json() (aiohttp
             returns a coroutine without await; caused receipt to always use
             empty restaurant name/wa_number).
@@ -228,7 +228,7 @@ async def _fetch_restaurant_info(restaurant_id: str) -> dict:
         resp = await _get_http().get(
             f"{base}/rest/v1/restaurants",
             params={
-                "select": "name,whatsapp_number,address,phone,gstin",
+                "select": "name,whatsapp_number,address,phone,gstin,website",
                 "id":     f"eq.{restaurant_id}",
                 "limit":  "1",
             },
@@ -1856,6 +1856,7 @@ async def handle_dine_in_flow(
                     restaurant_phone=r_info.get("phone", ""),
                     restaurant_gstin=r_info.get("gstin", ""),
                     restaurant_wa_number=r_info.get("whatsapp_number", ""),
+                    restaurant_website=r_info.get("website", ""),
                     receipt_url=_receipt_qr_url(token),
                     token_number=token,
                     table_number=str(session_state.get("table_number", "")),
@@ -1884,7 +1885,7 @@ async def handle_dine_in_flow(
 
         try:
             await _get_http().post(
-                "https://autom8-backend-production.up.railway.app/api/feedback/queue",
+                "https://api.autom8.works/api/feedback/queue",
                 json={
                     "customer_phone": customer_phone,
                     "customer_name":  customer_name,
@@ -2021,6 +2022,7 @@ async def handle_takeaway_flow(
                         restaurant_phone=r_info.get("phone", ""),
                         restaurant_gstin=r_info.get("gstin", ""),
                         restaurant_wa_number=r_info.get("whatsapp_number", ""),
+                        restaurant_website=r_info.get("website", ""),
                         receipt_url=_receipt_qr_url(display_token),
                         token_number=display_token,
                         service_type="takeaway",
@@ -2185,6 +2187,7 @@ async def handle_delivery_flow(
                         restaurant_phone=r_info.get("phone", ""),
                         restaurant_gstin=r_info.get("gstin", ""),
                         restaurant_wa_number=r_info.get("whatsapp_number", ""),
+                        restaurant_website=r_info.get("website", ""),
                         receipt_url=_receipt_qr_url(token),
                         token_number=token,
                         service_type="delivery",
