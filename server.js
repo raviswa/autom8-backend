@@ -2744,7 +2744,7 @@ app.get('/api/dashboard/cancel-stats', async (req, res) => {
 // QR code is rendered client-side via CDN (no npm install needed).
 //
 // WHERE TO PLACE IN server.js:
-//   Paste this entire block just before the final app.listen() call.
+//   Paste this entire block just before the final () call.
 //
 // HOW IT WORKS:
 //   1. Looks up the invoice by order_id (generated post-order)
@@ -3452,7 +3452,61 @@ app.get('/verify/:orderId', async (req, res) => {
 // END: QR Receipt — /verify/:orderId endpoint
 
 
+// Receipt redirect — /r/:token → Supabase signed URL
+app.get('/r/:token', async (req, res) => {
+    const token    = req.params.token;
+    const sbBase   = (process.env.AUTOM8_SUPABASE_URL || '').replace(/\/$/, '');
+    const sbKey    = process.env.AUTOM8_SUPABASE_SERVICE_KEY || '';
 
+    if (!sbBase || !sbKey) {
+        return res.status(503).send('<h1>Service unavailable</h1>');
+    }
+
+    try {
+        // 1. List bucket files and find one matching this token
+        const listResp = await fetch(`${sbBase}/storage/v1/object/list/Receipts`, {
+            method:  'POST',
+            headers: { 'apikey': sbKey, 'Authorization': `Bearer ${sbKey}`,
+                       'Content-Type': 'application/json' },
+            body:    JSON.stringify({ prefix: '', limit: 200 }),
+        });
+        const files = await listResp.json();
+        const match = Array.isArray(files)
+            ? files.find(f => f.name && f.name.includes(token))
+            : null;
+
+        if (!match) {
+            return res.status(404).send(`
+                <html><body style="font-family:sans-serif;padding:40px">
+                <h2>Receipt not found or expired</h2>
+                <p>Receipts are available for 48 hours after your order.</p>
+                </body></html>`);
+        }
+
+        // 2. Generate a fresh 1-hour signed URL
+        const signResp = await fetch(
+            `${sbBase}/storage/v1/object/sign/Receipts/${match.name}`,
+            {
+                method:  'POST',
+                headers: { 'apikey': sbKey, 'Authorization': `Bearer ${sbKey}`,
+                           'Content-Type': 'application/json' },
+                body:    JSON.stringify({ expiresIn: 3600 }),
+            }
+        );
+        const signData   = await signResp.json();
+        const signedPath = signData.signedURL || '';
+
+        if (!signedPath) {
+            return res.status(503).send('<h1>Could not generate receipt link</h1>');
+        }
+
+        return res.redirect(`${sbBase}/storage/v1${signedPath}`);
+
+    } catch (err) {
+        console.error('[receipt-redirect] Error:', err);
+        return res.status(500).send('<h1>Error retrieving receipt</h1>');
+    }
+});
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
