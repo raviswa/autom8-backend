@@ -53,10 +53,22 @@ FIX LOG
             (non-fatal), added customer error message in the outer except.
   Fix 34 — Delivery awaiting_order: same silent-failure pattern as Fix 33.
             asyncio.gather moved inside try; customer error message added.
+  Fix 37 — Receipt address/phone/GSTIN: _fetch_restaurant_info now fetches
+            address, phone, and gstin columns from the restaurants table.
+            All three _ReceiptData() calls (dine-in, takeaway, delivery) updated
+            to pass restaurant_address, restaurant_phone, restaurant_gstin.
   Fix 36 — Receipt delivery: after generating the PNG, upload to Supabase Storage
             ('Receipts' bucket) and send the public URL to the customer via WhatsApp.
             Implemented as asyncio.create_task so it never blocks the confirmation
             message. Non-fatal — upload/send failures are logged at WARNING level only.
+  Fix 37 — Receipt enhancements:
+            (a) _fetch_restaurant_info now fetches address, phone, gstin in addition
+                to name/wa_number; all three ReceiptData calls pass these fields.
+            (b) _upload_and_send_receipt now generates a 48-hour signed URL instead
+                of a permanent public URL; shortened via is.gd before sending.
+            (c) Customer message includes 48-hour expiry notice.
+            (d) cleanup_expired_receipts() deletes files older than 48 h from the
+                Receipts bucket — register with APScheduler (daily cron).
   Fix 35 — create_payment_link raises "Razorpay is not configured in production"
             when Razorpay is absent, crashing order confirmation for all flows.
             Wrapped all 4 calls (dine-in, takeaway, delivery, reserve) in
@@ -163,6 +175,16 @@ _KDS_SECRET          = "munafe_kds_sync_2026"
 _PAYMENT_PLACEHOLDER_SENTINEL = "placeholder"
 LARGE_PARTY_THRESHOLD = 8
 
+# Receipt redirect base — QR on printed receipt points here; FastAPI /r/{token}
+# generates a fresh signed URL and redirects. Keep in sync with main.py endpoint.
+_RECEIPT_REDIRECT_BASE = "https://autom8-backend-production.up.railway.app/r"
+
+
+def _receipt_qr_url(token_number: str) -> str:
+    """Build the stable redirect URL embedded in the receipt QR code."""
+    clean = token_number.lstrip("#").replace(" ", "-").replace("/", "-")
+    return f"{_RECEIPT_REDIRECT_BASE}/{clean}"
+
 # ─── Receipt generator (optional import — bot still works if file not present) ─
 try:
     from generate_receipt import generate_receipt as _generate_receipt
@@ -206,7 +228,7 @@ async def _fetch_restaurant_info(restaurant_id: str) -> dict:
         resp = await _get_http().get(
             f"{base}/rest/v1/restaurants",
             params={
-                "select": "name,whatsapp_number",
+                "select": "name,whatsapp_number,address,phone,gstin",
                 "id":     f"eq.{restaurant_id}",
                 "limit":  "1",
             },
@@ -388,7 +410,7 @@ async def _notify_kds(
 
 
 # ─────────────────────────────────────────────
-# RECEIPT UPLOAD + DELIVERY  (Fix 36)
+# RECEIPT UPLOAD + DELIVERY  (Fix 36 / Fix 37)
 # ─────────────────────────────────────────────
 
 async def _upload_and_send_receipt(
@@ -398,10 +420,11 @@ async def _upload_and_send_receipt(
     token_number: str,
 ) -> None:
     """
-    Fix 36 — Upload receipt PNG to Supabase Storage ('Receipts' bucket) and
-    send the public URL to the customer via WhatsApp.
+    Fix 36/37 — Upload receipt PNG to Supabase Storage ('Receipts' bucket),
+    generate a 48-hour signed URL, shorten via is.gd, then WhatsApp the customer.
 
-    Runs as an asyncio background task — never blocks order confirmation.
+    Bucket should be PRIVATE — only signed URLs work, enforcing the 48 h limit.
+    Runs as asyncio.create_task — never blocks order confirmation.
     All failures are non-fatal and logged at WARNING level.
     """
     try:
@@ -409,16 +432,18 @@ async def _upload_and_send_receipt(
         _sb_base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
         _sb_key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
         if not (_sb_base and _sb_key):
-            logger.warning("[receipt-upload] AUTOM8_SUPABASE_URL/KEY not set — skipping")
+            logger.warning("[receipt-upload] Supabase env vars not set — skipping")
             return
 
-        _bucket   = "Receipts"                # matches Supabase bucket name (capital R)
+        _bucket   = "Receipts"
         _filename = receipt_path.name          # e.g. Hotel_Munafe_receipt_T-062.png
 
         with open(receipt_path, "rb") as _f:
             _img_bytes = _f.read()
 
-        async with _httpx_r.AsyncClient(timeout=10) as _rc:
+        async with _httpx_r.AsyncClient(timeout=15) as _rc:
+
+            # ── Step 1: upload ────────────────────────────────────────────────
             _up = await _rc.post(
                 f"{_sb_base}/storage/v1/object/{_bucket}/{_filename}",
                 content=_img_bytes,
@@ -426,28 +451,129 @@ async def _upload_and_send_receipt(
                     "apikey":        _sb_key,
                     "Authorization": f"Bearer {_sb_key}",
                     "Content-Type":  "image/png",
-                    "x-upsert":      "true",   # overwrite if re-run for same token
+                    "x-upsert":      "true",
                 },
             )
+            if _up.status_code not in (200, 201):
+                logger.warning(f"[receipt-upload] Upload failed {_up.status_code}: {_up.text[:200]}")
+                return
+            logger.info(f"[receipt-upload] ✅ Uploaded: {_filename}")
 
-        if _up.status_code in (200, 201):
-            receipt_url = (
-                f"{_sb_base}/storage/v1/object/public/{_bucket}/{_filename}"
+            # ── Step 2: 48-hour signed URL (172800 s) ─────────────────────────
+            _sign = await _rc.post(
+                f"{_sb_base}/storage/v1/object/sign/{_bucket}/{_filename}",
+                json={"expiresIn": 172800},
+                headers={
+                    "apikey":        _sb_key,
+                    "Authorization": f"Bearer {_sb_key}",
+                    "Content-Type":  "application/json",
+                },
             )
-            logger.info(f"[receipt-upload] ✅ Uploaded: {receipt_url}")
-            await send_whatsapp_message(
-                customer_phone,
-                f"🧾 *Your receipt — Token {token_number}*\n\n{receipt_url}",
-                restaurant_id,
-            )
-            logger.info(f"[receipt-upload] Receipt link sent to {customer_phone}")
-        else:
-            logger.warning(
-                f"[receipt-upload] Supabase upload failed "
-                f"{_up.status_code}: {_up.text[:200]}"
-            )
+            if _sign.status_code != 200:
+                logger.warning(f"[receipt-upload] Signed URL failed {_sign.status_code}: {_sign.text[:200]}")
+                return
+
+            _signed_path = _sign.json().get("signedURL", "")
+            receipt_url  = f"{_sb_base}/storage/v1{_signed_path}"
+            logger.info(f"[receipt-upload] Signed URL generated (48 h)")
+
+            # ── Step 3: shorten via is.gd (free, no auth) ────────────────────
+            try:
+                _short = await _rc.get(
+                    "https://is.gd/create.php",
+                    params={"format": "json", "url": receipt_url},
+                    timeout=5,
+                )
+                if _short.status_code == 200:
+                    _short_url = _short.json().get("shorturl", "")
+                    if _short_url:
+                        receipt_url = _short_url
+                        logger.info(f"[receipt-upload] Shortened → {receipt_url}")
+            except Exception as _se:
+                logger.debug(f"[receipt-upload] Shortening skipped (non-fatal): {_se}")
+
+        # ── Step 4: send to customer ──────────────────────────────────────────
+        await send_whatsapp_message(
+            customer_phone,
+            f"🧾 *Your Receipt — Token {token_number}*\n\n"
+            f"{receipt_url}\n\n"
+            f"⏰ _This link expires in 48 hours. Please save a copy if needed._",
+            restaurant_id,
+        )
+        logger.info(f"[receipt-upload] Receipt link sent to {customer_phone}")
+
     except Exception as _ue:
         logger.warning(f"[receipt-upload] Failed (non-fatal): {_ue}")
+
+
+async def cleanup_expired_receipts() -> None:
+    """
+    Fix 37d — Delete receipt files older than 48 hours from Supabase Storage.
+
+    Register in scheduler_tools.py (daily cron is fine):
+        scheduler.add_job(
+            lambda: asyncio.create_task(cleanup_expired_receipts()),
+            'cron', hour=3, minute=0, id='cleanup_receipts'
+        )
+    """
+    try:
+        import httpx as _httpx_c
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        _sb_base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
+        _sb_key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
+        if not (_sb_base and _sb_key):
+            return
+
+        _cutoff = _dt.now(_tz.utc) - _td(hours=48)
+
+        async with _httpx_c.AsyncClient(timeout=15) as _rc:
+            # List objects in bucket
+            _list = await _rc.post(
+                f"{_sb_base}/storage/v1/object/list/Receipts",
+                json={"prefix": "", "limit": 1000,
+                      "sortBy": {"column": "created_at", "order": "asc"}},
+                headers={
+                    "apikey":        _sb_key,
+                    "Authorization": f"Bearer {_sb_key}",
+                    "Content-Type":  "application/json",
+                },
+            )
+            if _list.status_code != 200:
+                logger.warning(f"[receipt-cleanup] List failed {_list.status_code}")
+                return
+
+            _to_delete = []
+            for _obj in _list.json():
+                _created = _obj.get("created_at", "")
+                if _created:
+                    try:
+                        _ft = _dt.fromisoformat(_created.replace("Z", "+00:00"))
+                        if _ft < _cutoff:
+                            _to_delete.append(_obj["name"])
+                    except Exception:
+                        pass
+
+            if not _to_delete:
+                logger.debug("[receipt-cleanup] No expired receipts to delete")
+                return
+
+            # Bulk delete
+            _del = await _rc.delete(
+                f"{_sb_base}/storage/v1/object/Receipts",
+                json={"prefixes": _to_delete},
+                headers={
+                    "apikey":        _sb_key,
+                    "Authorization": f"Bearer {_sb_key}",
+                    "Content-Type":  "application/json",
+                },
+            )
+            if _del.status_code in (200, 204):
+                logger.info(f"[receipt-cleanup] ✅ Deleted {len(_to_delete)} expired receipt(s)")
+            else:
+                logger.warning(f"[receipt-cleanup] Delete failed {_del.status_code}: {_del.text[:200]}")
+
+    except Exception as _ce:
+        logger.warning(f"[receipt-cleanup] Non-fatal: {_ce}")
 
 
 # ─────────────────────────────────────────────
@@ -1726,7 +1852,11 @@ async def handle_dine_in_flow(
                 r_info = await _fetch_restaurant_info(restaurant_id)
                 receipt_data = _ReceiptData(
                     restaurant_name=r_info.get("name", ""),
+                    restaurant_address=r_info.get("address", ""),
+                    restaurant_phone=r_info.get("phone", ""),
+                    restaurant_gstin=r_info.get("gstin", ""),
                     restaurant_wa_number=r_info.get("whatsapp_number", ""),
+                    receipt_url=_receipt_qr_url(token),
                     token_number=token,
                     table_number=str(session_state.get("table_number", "")),
                     service_type="dine_in",
@@ -1887,7 +2017,11 @@ async def handle_takeaway_flow(
                     r_info = await _fetch_restaurant_info(restaurant_id)
                     receipt_data = _ReceiptData(
                         restaurant_name=r_info.get("name", ""),
+                        restaurant_address=r_info.get("address", ""),
+                        restaurant_phone=r_info.get("phone", ""),
+                        restaurant_gstin=r_info.get("gstin", ""),
                         restaurant_wa_number=r_info.get("whatsapp_number", ""),
+                        receipt_url=_receipt_qr_url(display_token),
                         token_number=display_token,
                         service_type="takeaway",
                         customer_name=customer_name,
@@ -2047,7 +2181,11 @@ async def handle_delivery_flow(
                     r_info = await _fetch_restaurant_info(restaurant_id)
                     receipt_data = _ReceiptData(
                         restaurant_name=r_info.get("name", ""),
+                        restaurant_address=r_info.get("address", ""),
+                        restaurant_phone=r_info.get("phone", ""),
+                        restaurant_gstin=r_info.get("gstin", ""),
                         restaurant_wa_number=r_info.get("whatsapp_number", ""),
+                        receipt_url=_receipt_qr_url(token),
                         token_number=token,
                         service_type="delivery",
                         customer_name=customer_name,
