@@ -36,6 +36,40 @@ from agents.root_agent import route_message
 
 import asyncio
 
+from fastapi.responses import RedirectResponse, HTMLResponse
+import httpx, os
+
+@app.get("/r/{token}")
+async def receipt_redirect(token: str):
+    """Stable receipt QR target — generates fresh signed URL and redirects."""
+    sb_base = os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
+    sb_key  = os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            lst = await client.post(
+                f"{sb_base}/storage/v1/object/list/Receipts",
+                json={"prefix": "", "limit": 200},
+                headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}",
+                         "Content-Type": "application/json"},
+            )
+            files = [f["name"] for f in lst.json()
+                     if token.lower() in f.get("name", "").lower()]
+            if not files:
+                return HTMLResponse(
+                    "<h1>Receipt not found or expired</h1>"
+                    "<p>Receipts are available for 48 hours after your order.</p>",
+                    status_code=404)
+            sign = await client.post(
+                f"{sb_base}/storage/v1/object/sign/Receipts/{files[0]}",
+                json={"expiresIn": 3600},
+                headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}",
+                         "Content-Type": "application/json"},
+            )
+            signed_path = sign.json().get("signedURL", "")
+            return RedirectResponse(f"{sb_base}/storage/v1{signed_path}")
+    except Exception:
+        return HTMLResponse("<h1>Error retrieving receipt</h1>", status_code=500)
+
 _processed_message_ids: OrderedDict[str, int] = OrderedDict()
 _processed_message_ids_lock = asyncio.Lock()
 
