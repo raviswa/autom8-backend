@@ -461,7 +461,7 @@ async def send_whatsapp_catalog_message(
                     "When done, send us your basket to place the order."
                 ),
             },
-            "footer": {"text": "Prices include taxes • Hotel Munafe, Chennai"},
+            "footer": {"text": "Prices excl. GST • Hotel Munafe, Chennai"},
             "action": {
                 "catalog_id": _CATALOG_ID,
                 "sections": [
