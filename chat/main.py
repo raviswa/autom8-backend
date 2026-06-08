@@ -39,6 +39,26 @@ import asyncio
 from fastapi.responses import RedirectResponse, HTMLResponse
 import httpx, os
 
+# ── Lifespan ───────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Starting Munafe bot...")
+    await init_db()
+    from tools.scheduler_tools import start_scheduler
+    await start_scheduler()
+    yield
+
+    logger.info("Shutting down Munafe bot...")
+    from tools.whatsapp_tools import close_http_client
+    await close_http_client()
+    logger.info("HTTP client closed.")
+
+logging.basicConfig(level=settings.log_level)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Munafe Bot", version="0.1.0", lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -82,23 +102,6 @@ async def receipt_redirect(token: str):
 _processed_message_ids: OrderedDict[str, int] = OrderedDict()
 _processed_message_ids_lock = asyncio.Lock()
 
-logging.basicConfig(level=settings.log_level)
-logger = logging.getLogger(__name__)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("Starting Munafe bot...")
-    await init_db()
-    from tools.scheduler_tools import start_scheduler
-    await start_scheduler()
-    yield
-
-    logger.info("Shutting down Munafe bot...")
-    from tools.whatsapp_tools import close_http_client
-    await close_http_client()
-    logger.info("HTTP client closed.")
-
-app = FastAPI(title="Munafe Bot", version="0.1.0", lifespan=lifespan)
 
 # ─────────────────────────────────────────────
 # Message body extraction
