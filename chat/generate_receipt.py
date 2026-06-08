@@ -124,6 +124,7 @@ class ReceiptData:
     restaurant_phone: str = ""
     restaurant_gstin: str = ""
     restaurant_wa_number: str = ""
+    restaurant_website: str = ""    # e.g. "https://munafe.in"
 
     # ── Order meta ─────────────────────────────────────────────────────────
     token_number: str = ""
@@ -287,6 +288,8 @@ class ReceiptRenderer:
             self._center(f"Ph: {d.restaurant_phone}", self.f_small, COLOR_LIGHT)
         if d.restaurant_gstin:
             self._center(f"GSTIN: {d.restaurant_gstin}", self.f_small, COLOR_LIGHT)
+        if d.restaurant_website:
+            self._center(d.restaurant_website, self.f_small, COLOR_GREEN)
         self._gap(4)
 
     def _section_order_meta(self):
