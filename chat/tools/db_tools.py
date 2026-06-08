@@ -64,6 +64,8 @@ async def init_db():
             raise
         engine = None
         AsyncSessionLocal = None
+
+
 # ─── Feature Gate ─────────────────────────────────────────────────────────────
 
 async def get_restaurant_features(restaurant_id: str) -> list[str]:
@@ -230,6 +232,38 @@ async def get_restaurant_by_whatsapp_number(whatsapp_number: str) -> Dict[str, A
             return None
     except Exception as e:
         logger.error(f"Failed to look up restaurant {whatsapp_number}: {e}")
+        return cached
+
+
+async def get_restaurant_by_id(restaurant_id: str) -> Dict[str, Any] | None:
+    """Look up restaurant by UUID. Uses the same TTL cache as get_restaurant_by_whatsapp_number."""
+    cache_key = f"id:{restaurant_id}"
+    now = time.monotonic()
+    cached, ts = _RESTAURANT_CACHE.get(cache_key, (None, 0.0))
+    if cached is not None and now - ts < _RESTAURANT_TTL:
+        return cached
+
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Restaurant).where(Restaurant.id == UUID(restaurant_id))
+            )
+            restaurant = result.scalar_one_or_none()
+            if restaurant:
+                data = {
+                    "id":              str(restaurant.id),
+                    "name":            restaurant.name,
+                    "whatsapp_number": restaurant.whatsapp_number,
+                    "manager_phone":   restaurant.manager_phone,
+                    "timezone":        restaurant.timezone,
+                    "is_active":       restaurant.is_active,
+                }
+                _RESTAURANT_CACHE[cache_key] = (data, now)
+                return data
+            _RESTAURANT_CACHE[cache_key] = (None, now)
+            return None
+    except Exception as e:
+        logger.error(f"Failed to look up restaurant {restaurant_id}: {e}")
         return cached
 
 
