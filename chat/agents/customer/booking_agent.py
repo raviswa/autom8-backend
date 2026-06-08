@@ -42,7 +42,7 @@ FIX LOG
                 _STEPS_ALLOWING_SHORT_REPLY so catalog order messages are never
                 swallowed by the greeting guard;
             (c) empty-cart + short-message guard in takeaway & delivery
-                awaiting_order re-sends catalog instead of creating ₹0 booking.
+                awaiting_order re-sends catalog instead of creating Rs.0 booking.
   Fix 32 — _fetch_restaurant_info: missing await before resp.json() (aiohttp
             returns a coroutine without await; caused receipt to always use
             empty restaurant name/wa_number).
@@ -165,10 +165,10 @@ async def auto_nudge_special_notes_loop() -> None:
 logger = logging.getLogger(__name__)
 
 DELIVERY_CHARGE = 40.00
-MANAGER_PORTAL_URL = "https://autom8-frontend-production.up.railway.app/dashboard/manager"
+MANAGER_PORTAL_URL = "https://app.autom8.works/dashboard/manager"
 
-PORTAL_API_URL       = "https://autom8-backend-production.up.railway.app/api/tokens"
-AUTOM8_KDS_URL       = "https://autom8-backend-production.up.railway.app/api/kds/notify"
+PORTAL_API_URL       = "https://api.autom8.works/api/tokens"
+AUTOM8_KDS_URL       = "https://api.autom8.works/api/kds/notify"
 PORTAL_RESTAURANT_ID = "46fb9b9e-431a-43c9-9edb-d316b0fef216"
 _KDS_SECRET          = "munafe_kds_sync_2026"
 
@@ -177,7 +177,7 @@ LARGE_PARTY_THRESHOLD = 8
 
 # Receipt redirect base — QR on printed receipt points here; FastAPI /r/{token}
 # generates a fresh signed URL and redirects. Keep in sync with main.py endpoint.
-_RECEIPT_REDIRECT_BASE = "https://autom8-backend-production.up.railway.app/r"
+_RECEIPT_REDIRECT_BASE = "https://api.autom8.works/r"
 
 
 def _receipt_qr_url(token_number: str) -> str:
