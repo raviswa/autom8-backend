@@ -162,6 +162,7 @@ class ReceiptData:
     # ── Extras ─────────────────────────────────────────────────────────────
     special_notes: str = ""
     footer_message: str = "Thank you for dining with us! 😊"
+    receipt_url: str = ""              # if set, QR links here; else falls back to WA reorder
 
     def __post_init__(self):
         if not self.order_datetime:
@@ -427,26 +428,32 @@ class ReceiptRenderer:
                       color_l=COLOR_LIGHT, color_r=COLOR_MID,
                       font_l=self.f_small, font_r=self.f_small)
 
-    def _section_reorder_qr(self):
+def _section_reorder_qr(self):
         d = self.data
-        if not d.restaurant_wa_number:
+        # Prefer receipt_url (digital receipt) over WhatsApp reorder QR
+        if d.receipt_url:
+            qr_url   = d.receipt_url
+            qr_label = "Scan for your digital receipt"
+        elif d.restaurant_wa_number:
+            qr_url   = f"https://wa.me/{d.restaurant_wa_number.lstrip('+')}?text=Hi"
+            qr_label = "Scan to order again"
+        else:
             return
         self._divider("dashed")
         self._gap(4)
-        self._center("Scan to order again", self.f_small, COLOR_LIGHT)
+        self._center(qr_label, self.f_small, COLOR_LIGHT)
         self._gap(4)
 
-        url = f"https://wa.me/{d.restaurant_wa_number.lstrip('+')}?text=Hi"
         qr = qrcode.QRCode(version=1, box_size=4, border=2,
                            error_correction=qrcode.constants.ERROR_CORRECT_M)
-        qr.add_data(url)
+        qr.add_data(qr_url)
         qr.make(fit=True)
         qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
 
         qx = (RECEIPT_WIDTH - qr_img.width) // 2
         self.img.paste(qr_img, (qx, self.y))
         self.y += qr_img.height + 8
-
+    
     def _section_footer(self):
         self._gap(6)
         self._center(self.data.footer_message, self.f_small, COLOR_MID)
