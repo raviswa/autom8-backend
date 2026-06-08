@@ -39,6 +39,15 @@ import asyncio
 from fastapi.responses import RedirectResponse, HTMLResponse
 import httpx, os
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Receipt redirect ───────────────────────────────────────────────────────────
+
 @app.get("/r/{token}")
 async def receipt_redirect(token: str):
     """Stable receipt QR target — generates fresh signed URL and redirects."""
