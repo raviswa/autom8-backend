@@ -242,6 +242,225 @@ async def _fetch_restaurant_info(restaurant_id: str) -> dict:
         logger.debug(f"[receipt] restaurant info fetch failed (non-fatal): {e}")
     return {}
 
+"""
+Advance Payment Adjustment — Python helpers for booking_agent.py
+================================================================
+ADD these 3 functions anywhere after _fetch_restaurant_info().
+
+Then apply the 4 PATCH sections in the existing flow handlers.
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER 1 — Store advance amount on the reservation booking row
+# Call this right after create_booking() in handle_reserve_table_flow
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _store_advance_on_booking(booking_id: str, advance_amount: float) -> None:
+    try:
+        base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
+        key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
+        if not (base and key):
+            return
+        resp = await _get_http().patch(
+            f"{base}/rest/v1/bookings",
+            params={"id": f"eq.{booking_id}"},
+            json={"advance_paid": advance_amount},
+            headers={
+                "apikey":        key,
+                "Authorization": f"Bearer {key}",
+                "Content-Type":  "application/json",
+                "Prefer":        "return=minimal",
+            },
+            timeout=aiohttp.ClientTimeout(total=3),
+        )
+        if resp.status in (200, 204):
+            logger.info(f"[advance] ✅ Stored advance ₹{advance_amount} on booking {booking_id}")
+        else:
+            logger.warning(f"[advance] Store failed {resp.status}: {await resp.text()}")
+    except Exception as e:
+        logger.warning(f"[advance] _store_advance_on_booking failed (non-fatal): {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER 2 — Find unapplied reservation advance for this customer
+# Call this at the start of awaiting_order in handle_dine_in_flow
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _find_pending_reservation(customer_id: str, restaurant_id: str) -> dict | None:
+    """
+    Returns the most recent confirmed reservation with advance_paid > 0
+    and advance_applied = false.  Returns None if none found.
+    """
+    try:
+        base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
+        key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
+        if not (base and key):
+            return None
+        resp = await _get_http().get(
+            f"{base}/rest/v1/bookings",
+            params={
+                "select":        "id,token_number,advance_paid,booking_datetime",
+                "customer_id":   f"eq.{customer_id}",
+                "restaurant_id": f"eq.{restaurant_id}",
+                "service_type":  "eq.reserve_table",
+                "status":        "eq.confirmed",
+                "advance_applied": "eq.false",
+                "advance_paid":  "gt.0",
+                "order":         "created_at.desc",
+                "limit":         "1",
+            },
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            timeout=aiohttp.ClientTimeout(total=3),
+        )
+        if resp.status == 200:
+            rows = await resp.json()
+            if rows:
+                logger.info(
+                    f"[advance] Found pending reservation {rows[0]['id']} "
+                    f"— advance ₹{rows[0]['advance_paid']}"
+                )
+            return rows[0] if rows else None
+    except Exception as e:
+        logger.debug(f"[advance] _find_pending_reservation failed (non-fatal): {e}")
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER 3 — Mark advance as applied after dine-in order is confirmed
+# Call this in awaiting_special_notes after _notify_kds()
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _mark_advance_applied(reservation_booking_id: str) -> None:
+    try:
+        base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
+        key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
+        if not (base and key):
+            return
+        resp = await _get_http().patch(
+            f"{base}/rest/v1/bookings",
+            params={"id": f"eq.{reservation_booking_id}"},
+            json={
+                "advance_applied": True,
+                "status":          "completed",   # reservation fulfilled
+            },
+            headers={
+                "apikey":        key,
+                "Authorization": f"Bearer {key}",
+                "Content-Type":  "application/json",
+                "Prefer":        "return=minimal",
+            },
+            timeout=aiohttp.ClientTimeout(total=3),
+        )
+        if resp.status in (200, 204):
+            logger.info(f"[advance] ✅ Advance applied + reservation {reservation_booking_id} completed")
+        else:
+            logger.warning(f"[advance] Mark applied failed {resp.status}: {await resp.text()}")
+    except Exception as e:
+        logger.warning(f"[advance] _mark_advance_applied failed (non-fatal): {e}")
+
+
+# =============================================================================
+# PATCH A — handle_reserve_table_flow → awaiting_advance_confirmation
+# After: booking = await create_booking(...)  booking_id = booking["id"]
+# ADD these 2 lines:
+# =============================================================================
+#
+#   await _store_advance_on_booking(booking_id, advance_amount)
+#   session_state["reservation_booking_id"] = booking_id
+#
+# =============================================================================
+
+
+# =============================================================================
+# PATCH B — handle_dine_in_flow → awaiting_order
+# After: suggestion, booking = await asyncio.gather(...)
+#        booking_id = booking["id"]
+#        session_state["booking_id"] = booking_id
+# ADD:
+# =============================================================================
+#
+#   # ── Advance credit lookup ─────────────────────────────────────────────
+#   reservation = await _find_pending_reservation(customer_id, restaurant_id)
+#   advance_credit = float(reservation.get("advance_paid", 0)) if reservation else 0.0
+#   adjusted_total = max(0.0, round(total - advance_credit, 2))
+#   session_state["advance_credit"]          = advance_credit
+#   session_state["_reservation_booking_id"] = reservation["id"] if reservation else None
+#
+# THEN replace the confirmation string with:
+# =============================================================================
+#
+#   confirmation = (
+#       f"Your order has been placed! 🎉\n"
+#       f"────────────────────\n"
+#       f"Token: {token}\nOrder: {order_text}\n"
+#       f"────────────────────\n"
+#       f"Subtotal: ₹{total:.0f}\n"
+#   )
+#   if advance_credit > 0:
+#       res_token = reservation.get("token_number", "")
+#       confirmation += (
+#           f"🎟️ Reservation advance ({res_token}): -₹{advance_credit:.0f}\n"
+#           f"*Amount due: ₹{adjusted_total:.0f}*\n"
+#       )
+#   else:
+#       confirmation += f"Total: ₹{total:.0f}\n"
+#   confirmation += f"\n{payment_line}"
+#
+# ALSO update the manager notification to include advance credit:
+# =============================================================================
+#
+#   advance_line = (
+#       f"\n🎟️ Advance credit applied: ₹{advance_credit:.0f}"
+#       if advance_credit > 0 else ""
+#   )
+#   await send_whatsapp_message(
+#       manager_phone,
+#       f"📋 Order Received — Dine-in\n────────────────────\n"
+#       f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
+#       f"Table: {session_state.get('table_number', 'TBD')}\n"
+#       f"Guests: {session_state.get('party_size')}\nBooking Time: {booking_time}\n"
+#       f"Order: {order_text}\nSubtotal: ₹{total:.0f}{advance_line}\n"
+#       f"Amount due: ₹{adjusted_total:.0f}\n────────────────────",
+#       restaurant_id,
+#   )
+#
+# =============================================================================
+
+
+# =============================================================================
+# PATCH C — handle_dine_in_flow → awaiting_special_notes
+# After: await _notify_kds(...)
+# ADD:
+# =============================================================================
+#
+#   # ── Mark reservation advance as applied ──────────────────────────────
+#   _res_bid = session_state.pop("_reservation_booking_id", None)
+#   if _res_bid:
+#       asyncio.create_task(_mark_advance_applied(_res_bid))
+#
+# =============================================================================
+
+
+# =============================================================================
+# PATCH D — _notify_kds signature + payload (optional — surfaces in KDS)
+# Add advance_credit param to _notify_kds:
+# =============================================================================
+#
+#   async def _notify_kds(
+#       ...,
+#       advance_credit: float = 0.0,   # ← add this
+#   ) -> None:
+#
+# And in payload dict add:
+#       "advance_credit": advance_credit,
+#
+# Then in handle_dine_in_flow awaiting_special_notes call:
+#   await _notify_kds(
+#       ...,
+#       advance_credit=session_state.get("advance_credit", 0.0),
+#   )
+#
+# =============================================================================
 
 # ─────────────────────────────────────────────
 # LARGE PARTY HELPERS
