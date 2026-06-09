@@ -103,7 +103,7 @@ class LineItem:
         items = []
         for v in cart.values():
             items.append(cls(
-                name=v.get("title", "Item"),
+                name=v.get("title") or v.get("name") or "Item",
                 qty=int(v.get("qty", 1)),
                 unit_price=float(v.get("unit_price", 0)),
             ))
