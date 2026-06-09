@@ -146,7 +146,6 @@ class RestaurantIntegration(Base):
     provider             = Column(String(50), nullable=False)
     channel              = Column(String(50), nullable=False)
     external_account_id  = Column(String(255))
-    phone_number         = Column(String(20))
     phone_number_id      = Column(String(255))
     api_endpoint         = Column(String(500))
     access_token         = Column(Text)
