@@ -36,15 +36,11 @@ router.get('/waba', async (req, res) => {
 
     const { data, error } = await supabaseAdmin
       .from('restaurants')
-      .select('id, name, waba_id, whatsapp_number, whatsapp_phone_number, whatsapp_display_name, manager_phone, timezone, dining_duration_minutes, payment_mode')
+      .select('id, name, waba_id, whatsapp_number, display_name, manager_phone, timezone, dining_duration_minutes, payment_mode')
       .eq('id', restaurantId)
       .maybeSingle();
 
     if (error) console.error('[dashboard/waba]', error.message);
-    // Normalise: map whatsapp_phone_number → whatsapp_number for WABAPanel
-    if (data && !data.whatsapp_number && data.whatsapp_phone_number) {
-      data.whatsapp_number = data.whatsapp_phone_number;
-    }
     res.json({ success: true, restaurant: data ?? null });
   } catch (err) {
     console.error('[dashboard/waba]', err.message);
