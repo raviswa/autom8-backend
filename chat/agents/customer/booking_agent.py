@@ -799,6 +799,7 @@ _STEPS_ALLOWING_SHORT_REPLY = {
     # Fix 31: order-related steps must allow structured/short messages so that
     # WhatsApp catalog order submissions are never swallowed by the greeting guard.
     "awaiting_order","awaiting_address","confirming_order","awaiting_cart_action",
+    "awaiting_advance_confirmation",
 }
 _GENERIC_GREETINGS = {"welcome!","welcome","hi!","hi","hello!","hello",""}
 
