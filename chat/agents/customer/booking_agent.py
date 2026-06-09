@@ -414,98 +414,62 @@ async def _notify_kds(
 # ─────────────────────────────────────────────
 
 async def _upload_and_send_receipt(
-    receipt_path,          # pathlib.Path returned by generate_receipt()
-    customer_phone: str,
-    restaurant_id: str,
-    token_number: str,
-) -> None:
-    """
-    Fix 36/37 — Upload receipt PNG to Supabase Storage ('Receipts' bucket),
-    generate a 48-hour signed URL, shorten via is.gd, then WhatsApp the customer.
-
-    Bucket should be PRIVATE — only signed URLs work, enforcing the 48 h limit.
-    Runs as asyncio.create_task — never blocks order confirmation.
-    All failures are non-fatal and logged at WARNING level.
-    """
-    try:
-        import httpx as _httpx_r
-        _sb_base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
-        _sb_key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
-        if not (_sb_base and _sb_key):
-            logger.warning("[receipt-upload] Supabase env vars not set — skipping")
-            return
-
-        _bucket   = "Receipts"
-        _filename = receipt_path.name          # e.g. Hotel_Munafe_receipt_T-062.png
-
-        with open(receipt_path, "rb") as _f:
-            _img_bytes = _f.read()
-
-        async with _httpx_r.AsyncClient(timeout=15) as _rc:
-
-            # ── Step 1: upload ────────────────────────────────────────────────
-            _up = await _rc.post(
-                f"{_sb_base}/storage/v1/object/{_bucket}/{_filename}",
-                content=_img_bytes,
-                headers={
-                    "apikey":        _sb_key,
-                    "Authorization": f"Bearer {_sb_key}",
-                    "Content-Type":  "image/png",
-                    "x-upsert":      "true",
-                },
-            )
-            if _up.status_code not in (200, 201):
-                logger.warning(f"[receipt-upload] Upload failed {_up.status_code}: {_up.text[:200]}")
-                return
-            logger.info(f"[receipt-upload] ✅ Uploaded: {_filename}")
-
-            # ── Step 2: 48-hour signed URL (172800 s) ─────────────────────────
-            _sign = await _rc.post(
-                f"{_sb_base}/storage/v1/object/sign/{_bucket}/{_filename}",
-                json={"expiresIn": 172800},
-                headers={
-                    "apikey":        _sb_key,
-                    "Authorization": f"Bearer {_sb_key}",
-                    "Content-Type":  "application/json",
-                },
-            )
-            if _sign.status_code != 200:
-                logger.warning(f"[receipt-upload] Signed URL failed {_sign.status_code}: {_sign.text[:200]}")
+        receipt_path,
+        customer_phone: str,
+        restaurant_id: str,
+        token_number: str,
+    ) -> None:
+        try:
+            import httpx as _httpx_r
+            _sb_base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
+            _sb_key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
+            if not (_sb_base and _sb_key):
+                logger.warning("[receipt-upload] Supabase env vars not set — skipping")
                 return
 
-            _signed_path = _sign.json().get("signedURL", "")
-            receipt_url  = f"{_sb_base}/storage/v1{_signed_path}"
-            logger.info(f"[receipt-upload] Signed URL generated (48 h)")
+            _bucket   = "Receipts"
+            _filename = receipt_path.name
 
-            # ── Step 3: shorten via is.gd (free, no auth) ────────────────────
-            try:
-                _short = await _rc.get(
-                    "https://is.gd/create.php",
-                    params={"format": "json", "url": receipt_url},
-                    timeout=5,
+            with open(receipt_path, "rb") as _f:
+                _img_bytes = _f.read()
+
+            async with _httpx_r.AsyncClient(timeout=15) as _rc:
+
+                # ── Step 1: upload ────────────────────────────────────────────
+                _up = await _rc.post(
+                    f"{_sb_base}/storage/v1/object/{_bucket}/{_filename}",
+                    content=_img_bytes,
+                    headers={
+                        "apikey":        _sb_key,
+                        "Authorization": f"Bearer {_sb_key}",
+                        "Content-Type":  "image/png",
+                        "x-upsert":      "true",
+                    },
                 )
-                if _short.status_code == 200:
-                    _short_url = _short.json().get("shorturl", "")
-                    if _short_url:
-                        receipt_url = _short_url
-                        logger.info(f"[receipt-upload] Shortened → {receipt_url}")
-            except Exception as _se:
-                logger.debug(f"[receipt-upload] Shortening skipped (non-fatal): {_se}")
+                if _up.status_code not in (200, 201):
+                    logger.warning(f"[receipt-upload] Upload failed {_up.status_code}: {_up.text[:200]}")
+                    return
+                logger.info(f"[receipt-upload] ✅ Uploaded: {_filename}")
 
-        # ── Step 4: send to customer ──────────────────────────────────────────
-        await send_whatsapp_message(
-            customer_phone,
-            f"🧾 *Your Receipt — Token {token_number}*\n\n"
-            f"{receipt_url}\n\n"
-            f"⏰ _This link expires in 48 hours. Please save a copy if needed._",
-            restaurant_id,
-        )
-        logger.info(f"[receipt-upload] Receipt link sent to {customer_phone}")
+            # ── Step 3: use /r/{token} redirect — no shortener needed ─────────
+            redirect_url = (
+                f"https://api.autom8.works/r/"
+                f"{token_number.lstrip('#').replace(' ', '-').replace('/', '-')}"
+            )
+            logger.info(f"[receipt-upload] Using redirect URL: {redirect_url}")
 
-    except Exception as _ue:
-        logger.warning(f"[receipt-upload] Failed (non-fatal): {_ue}")
+            # ── Step 4: send to customer ───────────────────────────────────────
+            await send_whatsapp_message(
+                customer_phone,
+                f"🧾 *Your Receipt — Token {token_number}*\n\n"
+                f"{redirect_url}\n\n"
+                f"⏰ _This link expires in 48 hours. Please save a copy if needed._",
+                restaurant_id,
+            )
+            logger.info(f"[receipt-upload] Receipt link sent to {customer_phone}")
 
-
+        except Exception as _ue:
+            logger.warning(f"[receipt-upload] Failed (non-fatal): {_ue}")
 async def cleanup_expired_receipts() -> None:
     """
     Fix 37d — Delete receipt files older than 48 hours from Supabase Storage.
