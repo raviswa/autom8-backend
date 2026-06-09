@@ -1309,16 +1309,17 @@ app.post('/api/kds/notify', async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
-  const {
-    restaurant_id,
-    customer_name,
-    customer_phone,
-    token_number,
-    table_number,
-    service_type,
-    items        = [],
-    special_notes,
-  } = req.body;
+const {
+  restaurant_id,
+  customer_name,
+  customer_phone,
+  token_number,
+  table_number,
+  service_type,
+  items         = [],
+  special_notes,
+  advance_credit = 0,
+} = req.body;
 
   if (!restaurant_id)      return res.status(400).json({ error: 'restaurant_id required' });
   if (!items.length)       return res.status(400).json({ error: 'items array must not be empty' });
@@ -1461,6 +1462,7 @@ kdsInserts.push({
   service_type:         service_type  || null,
   special_instructions: special_notes || null,
   item_category:        item.category || '',
+  advance_credit:       advance_credit || 0,    // ← NEW
   created_at:           new Date().toISOString(),
   updated_at:           new Date().toISOString(),
 });
@@ -1488,22 +1490,22 @@ kdsInserts.push({
     // The payload mirrors the shape broadcast by handleWhatsAppOrder() so
     // KDSScreen.jsx needs no changes.
     // ──────────────────────────────────────────────────────────────────────────
-    broadcastToRestaurant(restaurant_id, {
-      type:           'ORDER_NEW',
-      order_id:       orderRow.id,
-      order_number:   orderRow.order_number,
-      order_number:   orderRow.order_number,   // KDSScreen reads this for KOT
-      token_number:   token_number   ?? null,
-      table_number:   table_number   ?? null,
-      customer_name:  customer_name  ?? null,
-      customer_phone: cleanPhone,
-      service_type:   service_type   ?? null,
-      special_notes:  special_notes  ?? null,
-      item_count:     kdsItemsCreated,
-      source:         'whatsapp_booking',
-      timestamp:      new Date().toISOString(),
-    });
-
+broadcastToRestaurant(restaurant_id, {
+  type:           'ORDER_NEW',
+  order_id:       orderRow.id,
+  order_number:   orderRow.order_number,
+  token_number:   token_number   ?? null,
+  table_number:   table_number   ?? null,
+  customer_name:  customer_name  ?? null,
+  customer_phone: cleanPhone,
+  service_type:   service_type   ?? null,
+  special_notes:  special_notes  ?? null,
+  advance_credit: advance_credit || 0,          // ← NEW
+  item_count:     kdsItemsCreated,
+  source:         'whatsapp_booking',
+  timestamp:      new Date().toISOString(),
+});
+	  
 	  // ── Step 5: Broadcast ORDER_NEW ───────────────────────────────────────────
     broadcastToRestaurant(restaurant_id, {
       type:         'ORDER_NEW',
@@ -1513,16 +1515,19 @@ kdsInserts.push({
     });
 
     // BEGIN: QR Receipt — send receipt URL to customer
-    if (cleanPhone && kdsItemsCreated > 0) {
-      const receiptUrl = `${process.env.API_BASE_URL ?? 'https://api.autom8.works'}/verify/${orderRow.id}`;
-      sendWhatsAppMessage(
-        cleanPhone,
-        `🧾 *Your receipt is ready!*\n\n` +
-        `Order: *${orderRow.order_number}*\n` +
-        `Tap to view your itemised bill:\n${receiptUrl}`
-      ).catch(e => console.error('[kds-notify] Receipt send failed (non-fatal):', e.message));
-    }
-    // END: QR Receipt
+if (cleanPhone && kdsItemsCreated > 0) {
+  const receiptUrl  = `${process.env.API_BASE_URL ?? 'https://api.autom8.works'}/verify/${orderRow.id}`;
+  const advanceLine = advance_credit > 0
+    ? `\n🎟️ Reservation advance applied: -₹${Number(advance_credit).toFixed(0)}`
+    : '';
+  sendWhatsAppMessage(
+    cleanPhone,
+    `🧾 *Your receipt is ready!*\n\n` +
+    `Order: *${orderRow.order_number}*${advanceLine}\n` +
+    `Tap to view your itemised bill:\n${receiptUrl}`
+  ).catch(e => console.error('[kds-notify] Receipt send failed (non-fatal):', e.message));
+}
+     // END: QR Receipt
 
     // ── Step 6: Audit log (non-fatal) ──────────────────────────────────────────
     supabaseAdmin.from('audit_logs').insert({
