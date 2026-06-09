@@ -267,7 +267,7 @@ async def _check_large_party_seating(party_size: int, restaurant_id: str) -> dic
         if remaining <= 0:
             break
         seats_used = min(t["capacity"], remaining)
-        combo.append((t["table_number"], t["capacity"], seats_used))
+        combo.append((t[""], t["capacity"], seats_used))
         remaining -= seats_used
 
     return {
@@ -357,7 +357,7 @@ async def _lookup_table_assignment(customer_phone: str) -> str | None:
             data = await resp.json()
             tokens = data if isinstance(data, list) else data.get("tokens", [])
             for token_record in tokens:
-                tbl = token_record.get("table_number")
+                tbl = token_record.get("")
                 if tbl:
                     logger.info(f"[table-check] Found table {tbl} for {customer_phone}")
                     return str(tbl)
@@ -1859,7 +1859,7 @@ async def handle_dine_in_flow(
                     restaurant_website=r_info.get("website", ""),
                     receipt_url=_receipt_qr_url(token),
                     token_number=token,
-                    table_number=str(session_state.get("table_number", "")),
+                    table_number=str(session_state.get("table_number") or ""),
                     service_type="dine_in",
                     customer_name=customer_name,
                     customer_phone=customer_phone,
@@ -2418,7 +2418,7 @@ async def handle_reserve_table_flow(
                         restaurant_name=r_info.get("name", ""),
                         restaurant_wa_number=r_info.get("whatsapp_number", ""),
                         token_number=token,
-                        table_number="",
+                        table_number=str(session_state.get("table_number") or ""),
                         service_type="reserve_table",
                         customer_name=customer_name,
                         customer_phone=customer_phone,
