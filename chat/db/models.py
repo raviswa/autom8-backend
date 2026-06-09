@@ -60,8 +60,23 @@ class Restaurant(Base):
         server_default="{}",
     )
 
-    # Relationships
-    details             = relationship("RestaurantDetails",     back_populates="restaurant", uselist=False, cascade="all, delete-orphan")
+    # ── Merged from restaurant_details (migration: consolidate_restaurants) ────
+    display_name    = Column(String(255))
+    legal_name      = Column(String(255))
+    address_line1   = Column(String(255))
+    address_line2   = Column(String(255))
+    state           = Column(String(100))
+    postal_code     = Column(String(20))
+    latitude        = Column(Numeric(10, 7))
+    longitude       = Column(Numeric(10, 7))
+    contact_phone   = Column(String(20))
+    contact_email   = Column(String(255))
+    website_url     = Column(String(500))
+    google_maps_url = Column(String(1000))
+    cuisine_type    = Column(String(100))
+    opening_hours   = Column(JSON)
+
+    # Relationships (RestaurantDetails removed — table dropped in migration)
     integrations        = relationship("RestaurantIntegration", back_populates="restaurant", cascade="all, delete-orphan")
     subscription        = relationship("RestaurantSubscription",back_populates="restaurant", uselist=False, cascade="all, delete-orphan")
     customers           = relationship("Customer",              back_populates="restaurant", cascade="all, delete-orphan")
@@ -117,34 +132,8 @@ class RestaurantSubscription(Base):
     restaurant    = relationship("Restaurant", back_populates="subscription")
 
 
-class RestaurantDetails(Base):
-    """Business profile, address, and public contact details."""
-
-    __tablename__ = "restaurant_details"
-
-    id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    restaurant_id   = Column(UUID(as_uuid=True), ForeignKey("restaurants.id"), unique=True, nullable=False, index=True)
-    display_name    = Column(String(255))
-    legal_name      = Column(String(255))
-    address_line1   = Column(String(255))
-    address_line2   = Column(String(255))
-    city            = Column(String(100))
-    state           = Column(String(100))
-    country         = Column(String(100), default="India", nullable=False)
-    postal_code     = Column(String(20))
-    latitude        = Column(Numeric(10, 7))
-    longitude       = Column(Numeric(10, 7))
-    contact_phone   = Column(String(20))
-    contact_email   = Column(String(255))
-    website_url     = Column(String(500))
-    google_maps_url = Column(String(1000))
-    cuisine_type    = Column(String(100))
-    opening_hours   = Column(JSON)
-    tax_id          = Column(String(100))
-    created_at      = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at      = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
-
-    restaurant      = relationship("Restaurant", back_populates="details")
+# RestaurantDetails class removed — table dropped in migration_consolidate_restaurants.sql
+# All columns now live directly on the Restaurant model above.
 
 
 class RestaurantIntegration(Base):
