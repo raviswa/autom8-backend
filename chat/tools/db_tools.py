@@ -304,7 +304,6 @@ async def get_restaurant_integration(
                 "provider": integration.provider,
                 "channel": integration.channel,
                 "external_account_id": integration.external_account_id,
-                "phone_number": integration.phone_number,
                 "phone_number_id": integration.phone_number_id,
                 "api_endpoint": integration.api_endpoint,
                 "access_token": integration.access_token,
