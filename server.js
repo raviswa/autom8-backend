@@ -1089,15 +1089,27 @@ app.post('/api/tokens', async (req, res) => {
     if (insertError) throw insertError;
 
     const arrivalTime = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true });
-    if (process.env.MANAGER_WHATSAPP_NUMBER && process.env.WHATSAPP_ACCESS_TOKEN) {
+
+    // Resolve manager phone: prefer per-restaurant row, fall back to global env var
+    let managerPhone = process.env.MANAGER_WHATSAPP_NUMBER || null;
+    try {
+      const { data: restRow } = await supabaseAdmin
+        .from('restaurants')
+        .select('manager_phone')
+        .eq('id', restaurant_id)
+        .single();
+      if (restRow?.manager_phone) managerPhone = restRow.manager_phone;
+    } catch (_) {}
+
+    if (managerPhone && process.env.WHATSAPP_ACCESS_TOKEN) {
       if (type === 'large_party') {
         const combo = meta?.combo ?? [];
         const tableLines = combo.length > 0 ? combo.map(t => `Table ${t[0]} (${t[2]}/${t[1]} seats)`).join(' + ') : `${token.pax} seats`;
-        sendWhatsAppMessage(process.env.MANAGER_WHATSAPP_NUMBER, `🟣 *Large Party Request* — Token *${token.id}*\n👥 ${token.name} · *${token.pax} people*\n🕐 ${arrivalTime}\n\nProposed: ${tableLines}\n\n⚠️ *Action required:*\n${process.env.FRONTEND_URL || ''}/dashboard/manager`);
+        sendWhatsAppMessage(managerPhone, `🟣 *Large Party Request* — Token *${token.id}*\n👥 ${token.name} · *${token.pax} people*\n🕐 ${arrivalTime}\n\nProposed: ${tableLines}\n\n⚠️ *Action required:*\n${process.env.FRONTEND_URL || ''}/dashboard/manager`);
       } else if (req.query.notify !== 'false') {
         const typeLabel = type === 'dinein' ? 'Dine-in' : 'Takeaway';
         const paxLine   = type === 'dinein' ? `, ${token.pax} ${token.pax === 1 ? 'person' : 'people'}` : '';
-        sendWhatsAppMessage(process.env.MANAGER_WHATSAPP_NUMBER, `🪑 *New Walk-in* — Token *${token.id}*\n👤 ${token.name}${paxLine}\n📋 ${typeLabel}\n🕐 ${arrivalTime}\n\n${process.env.FRONTEND_URL || ''}/dashboard/manager`);
+        sendWhatsAppMessage(managerPhone, `🪑 *New Walk-in* — Token *${token.id}*\n👤 ${token.name}${paxLine}\n📋 ${typeLabel}\n🕐 ${arrivalTime}\n\n${process.env.FRONTEND_URL || ''}/dashboard/manager`);
       }
     }
     broadcastToRestaurant(restaurant_id, { type: 'NEW_TOKEN', token, timestamp: new Date().toISOString() });
@@ -2609,22 +2621,19 @@ app.get('/api/dashboard/waba', async (req, res) => {
     const { data: userData } = await supabaseAdmin
       .from('users').select('restaurant_id').eq('id', user.id).single();
 
- // BEGIN: Updated Table Integrations — restaurant_details
+ // restaurant_details table dropped — all fields now on restaurants directly
     const { data, error } = await supabaseAdmin
       .from('restaurants')
       .select(`
         id, name, whatsapp_number, manager_phone, timezone,
         dining_duration_minutes, payment_mode, waba_id,
-        restaurant_details (
-          display_name, city, state, country,
-          cuisine_type, opening_hours,
-          contact_phone, contact_email,
-          website_url, google_maps_url, address_line1
-        )
+        display_name, city, state, country,
+        cuisine_type, opening_hours,
+        contact_phone, contact_email,
+        website_url, google_maps_url, address_line1
       `)
       .eq('id', userData.restaurant_id)
       .maybeSingle();
-    // END: Updated Table Integrations — restaurant_details
 	
     if (error) console.error('[/api/dashboard/waba]', error.message);
     res.json({ success: true, restaurant: data ?? null });
@@ -3516,27 +3525,3 @@ app.listen(PORT, () => {
   console.log(`🗄️  Database: ${process.env.SUPABASE_URL}`);
   startSlotScheduler();
 });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
