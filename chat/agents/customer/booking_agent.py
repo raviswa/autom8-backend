@@ -167,10 +167,10 @@ logger = logging.getLogger(__name__)
 DELIVERY_CHARGE = 40.00
 MANAGER_PORTAL_URL = "https://app.autom8.works/dashboard/manager"
 
-PORTAL_API_URL       = "https://api.autom8.works/api/tokens"
-AUTOM8_KDS_URL       = "https://api.autom8.works/api/kds/notify"
-PORTAL_RESTAURANT_ID = "46fb9b9e-431a-43c9-9edb-d316b0fef216"
-_KDS_SECRET          = "munafe_kds_sync_2026"
+PORTAL_API_URL = "https://api.autom8.works/api/tokens"
+AUTOM8_KDS_URL = "https://api.autom8.works/api/kds/notify"
+_KDS_SECRET    = "munafe_kds_sync_2026"
+# PORTAL_RESTAURANT_ID removed — restaurant_id is now threaded dynamically
 
 _PAYMENT_PLACEHOLDER_SENTINEL = "placeholder"
 LARGE_PARTY_THRESHOLD = 8
@@ -242,20 +242,13 @@ async def _fetch_restaurant_info(restaurant_id: str) -> dict:
         logger.debug(f"[receipt] restaurant info fetch failed (non-fatal): {e}")
     return {}
 
-"""
-Advance Payment Adjustment — Python helpers for booking_agent.py
-================================================================
-ADD these 3 functions anywhere after _fetch_restaurant_info().
 
-Then apply the 4 PATCH sections in the existing flow handlers.
-"""
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPER 1 — Store advance amount on the reservation booking row
-# Call this right after create_booking() in handle_reserve_table_flow
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# ADVANCE PAYMENT HELPERS
+# ─────────────────────────────────────────────
 
 async def _store_advance_on_booking(booking_id: str, advance_amount: float) -> None:
+    """Store the advance paid amount on a reservation booking row."""
     try:
         base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
         key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
@@ -281,15 +274,10 @@ async def _store_advance_on_booking(booking_id: str, advance_amount: float) -> N
         logger.warning(f"[advance] _store_advance_on_booking failed (non-fatal): {e}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPER 2 — Find unapplied reservation advance for this customer
-# Call this at the start of awaiting_order in handle_dine_in_flow
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def _find_pending_reservation(customer_id: str, restaurant_id: str) -> dict | None:
     """
     Returns the most recent confirmed reservation with advance_paid > 0
-    and advance_applied = false.  Returns None if none found.
+    and advance_applied = false. Returns None if none found.
     """
     try:
         base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
@@ -299,15 +287,15 @@ async def _find_pending_reservation(customer_id: str, restaurant_id: str) -> dic
         resp = await _get_http().get(
             f"{base}/rest/v1/bookings",
             params={
-                "select":        "id,token_number,advance_paid,booking_datetime",
-                "customer_id":   f"eq.{customer_id}",
-                "restaurant_id": f"eq.{restaurant_id}",
-                "service_type":  "eq.reserve_table",
-                "status":        "eq.confirmed",
+                "select":          "id,token_number,advance_paid,booking_datetime",
+                "customer_id":     f"eq.{customer_id}",
+                "restaurant_id":   f"eq.{restaurant_id}",
+                "service_type":    "eq.reserve_table",
+                "status":          "eq.confirmed",
                 "advance_applied": "eq.false",
-                "advance_paid":  "gt.0",
-                "order":         "created_at.desc",
-                "limit":         "1",
+                "advance_paid":    "gt.0",
+                "order":           "created_at.desc",
+                "limit":           "1",
             },
             headers={"apikey": key, "Authorization": f"Bearer {key}"},
             timeout=aiohttp.ClientTimeout(total=3),
@@ -325,12 +313,8 @@ async def _find_pending_reservation(customer_id: str, restaurant_id: str) -> dic
     return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPER 3 — Mark advance as applied after dine-in order is confirmed
-# Call this in awaiting_special_notes after _notify_kds()
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def _mark_advance_applied(reservation_booking_id: str) -> None:
+    """Mark a reservation advance as applied once the dine-in order is confirmed."""
     try:
         base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
         key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
@@ -339,10 +323,7 @@ async def _mark_advance_applied(reservation_booking_id: str) -> None:
         resp = await _get_http().patch(
             f"{base}/rest/v1/bookings",
             params={"id": f"eq.{reservation_booking_id}"},
-            json={
-                "advance_applied": True,
-                "status":          "completed",   # reservation fulfilled
-            },
+            json={"advance_applied": True, "status": "completed"},
             headers={
                 "apikey":        key,
                 "Authorization": f"Bearer {key}",
@@ -358,109 +339,6 @@ async def _mark_advance_applied(reservation_booking_id: str) -> None:
     except Exception as e:
         logger.warning(f"[advance] _mark_advance_applied failed (non-fatal): {e}")
 
-
-# =============================================================================
-# PATCH A — handle_reserve_table_flow → awaiting_advance_confirmation
-# After: booking = await create_booking(...)  booking_id = booking["id"]
-# ADD these 2 lines:
-# =============================================================================
-#
-#   await _store_advance_on_booking(booking_id, advance_amount)
-#   session_state["reservation_booking_id"] = booking_id
-#
-# =============================================================================
-
-
-# =============================================================================
-# PATCH B — handle_dine_in_flow → awaiting_order
-# After: suggestion, booking = await asyncio.gather(...)
-#        booking_id = booking["id"]
-#        session_state["booking_id"] = booking_id
-# ADD:
-# =============================================================================
-#
-#   # ── Advance credit lookup ─────────────────────────────────────────────
-#   reservation = await _find_pending_reservation(customer_id, restaurant_id)
-#   advance_credit = float(reservation.get("advance_paid", 0)) if reservation else 0.0
-#   adjusted_total = max(0.0, round(total - advance_credit, 2))
-#   session_state["advance_credit"]          = advance_credit
-#   session_state["_reservation_booking_id"] = reservation["id"] if reservation else None
-#
-# THEN replace the confirmation string with:
-# =============================================================================
-#
-#   confirmation = (
-#       f"Your order has been placed! 🎉\n"
-#       f"────────────────────\n"
-#       f"Token: {token}\nOrder: {order_text}\n"
-#       f"────────────────────\n"
-#       f"Subtotal: ₹{total:.0f}\n"
-#   )
-#   if advance_credit > 0:
-#       res_token = reservation.get("token_number", "")
-#       confirmation += (
-#           f"🎟️ Reservation advance ({res_token}): -₹{advance_credit:.0f}\n"
-#           f"*Amount due: ₹{adjusted_total:.0f}*\n"
-#       )
-#   else:
-#       confirmation += f"Total: ₹{total:.0f}\n"
-#   confirmation += f"\n{payment_line}"
-#
-# ALSO update the manager notification to include advance credit:
-# =============================================================================
-#
-#   advance_line = (
-#       f"\n🎟️ Advance credit applied: ₹{advance_credit:.0f}"
-#       if advance_credit > 0 else ""
-#   )
-#   await send_whatsapp_message(
-#       manager_phone,
-#       f"📋 Order Received — Dine-in\n────────────────────\n"
-#       f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
-#       f"Table: {session_state.get('table_number', 'TBD')}\n"
-#       f"Guests: {session_state.get('party_size')}\nBooking Time: {booking_time}\n"
-#       f"Order: {order_text}\nSubtotal: ₹{total:.0f}{advance_line}\n"
-#       f"Amount due: ₹{adjusted_total:.0f}\n────────────────────",
-#       restaurant_id,
-#   )
-#
-# =============================================================================
-
-
-# =============================================================================
-# PATCH C — handle_dine_in_flow → awaiting_special_notes
-# After: await _notify_kds(...)
-# ADD:
-# =============================================================================
-#
-#   # ── Mark reservation advance as applied ──────────────────────────────
-#   _res_bid = session_state.pop("_reservation_booking_id", None)
-#   if _res_bid:
-#       asyncio.create_task(_mark_advance_applied(_res_bid))
-#
-# =============================================================================
-
-
-# =============================================================================
-# PATCH D — _notify_kds signature + payload (optional — surfaces in KDS)
-# Add advance_credit param to _notify_kds:
-# =============================================================================
-#
-#   async def _notify_kds(
-#       ...,
-#       advance_credit: float = 0.0,   # ← add this
-#   ) -> None:
-#
-# And in payload dict add:
-#       "advance_credit": advance_credit,
-#
-# Then in handle_dine_in_flow awaiting_special_notes call:
-#   await _notify_kds(
-#       ...,
-#       advance_credit=session_state.get("advance_credit", 0.0),
-#   )
-#
-# =============================================================================
 
 # ─────────────────────────────────────────────
 # LARGE PARTY HELPERS
@@ -486,7 +364,7 @@ async def _check_large_party_seating(party_size: int, restaurant_id: str) -> dic
         if remaining <= 0:
             break
         seats_used = min(t["capacity"], remaining)
-        combo.append((t[""], t["capacity"], seats_used))
+        combo.append((t["table_number"], t["capacity"], seats_used))
         remaining -= seats_used
 
     return {
@@ -511,12 +389,13 @@ def _format_combo_message(combo: list, party_size: int) -> str:
 
 async def _sync_token_to_portal(
     customer_name: str, customer_phone: str, token_type: str, pax: int,
+    restaurant_id: str,
 ) -> str | None:
     try:
         resp = await _get_http().post(
             PORTAL_API_URL,
             json={
-                "restaurant_id": PORTAL_RESTAURANT_ID,
+                "restaurant_id": restaurant_id,
                 "name": customer_name, "phone": customer_phone,
                 "type": token_type, "pax": pax,
             },
@@ -538,13 +417,14 @@ async def _sync_token_to_portal(
 
 async def _sync_token_to_portal_large_party(
     customer_name: str, customer_phone: str, pax: int, combo: list,
+    restaurant_id: str,
 ) -> str | None:
     try:
         resp = await _get_http().post(
             PORTAL_API_URL,
             params={"notify": "false"},
             json={
-                "restaurant_id": PORTAL_RESTAURANT_ID,
+                "restaurant_id": restaurant_id,
                 "name": customer_name, "phone": customer_phone,
                 "type": "large_party", "pax": pax,
                 "meta": {"combo": combo},
@@ -565,18 +445,18 @@ async def _sync_token_to_portal_large_party(
         return None
 
 
-async def _lookup_table_assignment(customer_phone: str) -> str | None:
+async def _lookup_table_assignment(customer_phone: str, restaurant_id: str) -> str | None:
     try:
         resp = await _get_http().get(
             PORTAL_API_URL,
-            params={"phone": customer_phone, "restaurant_id": PORTAL_RESTAURANT_ID},
+            params={"phone": customer_phone, "restaurant_id": restaurant_id},
             timeout=aiohttp.ClientTimeout(total=3),
         )
         if resp.status == 200:
             data = await resp.json()
             tokens = data if isinstance(data, list) else data.get("tokens", [])
             for token_record in tokens:
-                tbl = token_record.get("")
+                tbl = token_record.get("table_number")
                 if tbl:
                     logger.info(f"[table-check] Found table {tbl} for {customer_phone}")
                     return str(tbl)
@@ -592,6 +472,7 @@ async def _lookup_table_assignment(customer_phone: str) -> str | None:
 async def _notify_kds(
     customer_name: str, customer_phone: str, order_text: str, cart: dict,
     table_number: str | int | None, token_number: str, service_type: str,
+    restaurant_id: str,
     special_notes: str | None = None,
 ) -> None:
     try:
@@ -605,7 +486,7 @@ async def _notify_kds(
             items = [{"retailer_id": "manual", "name": order_text, "qty": 1, "unit_price": 0}]
 
         payload = {
-            "restaurant_id": PORTAL_RESTAURANT_ID,
+            "restaurant_id": restaurant_id,
             "customer_name": customer_name, "customer_phone": customer_phone,
             "token_number": token_number,
             "table_number": str(table_number) if table_number else None,
@@ -633,62 +514,98 @@ async def _notify_kds(
 # ─────────────────────────────────────────────
 
 async def _upload_and_send_receipt(
-        receipt_path,
-        customer_phone: str,
-        restaurant_id: str,
-        token_number: str,
-    ) -> None:
-        try:
-            import httpx as _httpx_r
-            _sb_base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
-            _sb_key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
-            if not (_sb_base and _sb_key):
-                logger.warning("[receipt-upload] Supabase env vars not set — skipping")
+    receipt_path,          # pathlib.Path returned by generate_receipt()
+    customer_phone: str,
+    restaurant_id: str,
+    token_number: str,
+) -> None:
+    """
+    Fix 36/37 — Upload receipt PNG to Supabase Storage ('Receipts' bucket),
+    generate a 48-hour signed URL, shorten via is.gd, then WhatsApp the customer.
+
+    Bucket should be PRIVATE — only signed URLs work, enforcing the 48 h limit.
+    Runs as asyncio.create_task — never blocks order confirmation.
+    All failures are non-fatal and logged at WARNING level.
+    """
+    try:
+        import httpx as _httpx_r
+        _sb_base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
+        _sb_key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
+        if not (_sb_base and _sb_key):
+            logger.warning("[receipt-upload] Supabase env vars not set — skipping")
+            return
+
+        _bucket   = "Receipts"
+        _filename = receipt_path.name          # e.g. Hotel_Munafe_receipt_T-062.png
+
+        with open(receipt_path, "rb") as _f:
+            _img_bytes = _f.read()
+
+        async with _httpx_r.AsyncClient(timeout=15) as _rc:
+
+            # ── Step 1: upload ────────────────────────────────────────────────
+            _up = await _rc.post(
+                f"{_sb_base}/storage/v1/object/{_bucket}/{_filename}",
+                content=_img_bytes,
+                headers={
+                    "apikey":        _sb_key,
+                    "Authorization": f"Bearer {_sb_key}",
+                    "Content-Type":  "image/png",
+                    "x-upsert":      "true",
+                },
+            )
+            if _up.status_code not in (200, 201):
+                logger.warning(f"[receipt-upload] Upload failed {_up.status_code}: {_up.text[:200]}")
+                return
+            logger.info(f"[receipt-upload] ✅ Uploaded: {_filename}")
+
+            # ── Step 2: 48-hour signed URL (172800 s) ─────────────────────────
+            _sign = await _rc.post(
+                f"{_sb_base}/storage/v1/object/sign/{_bucket}/{_filename}",
+                json={"expiresIn": 172800},
+                headers={
+                    "apikey":        _sb_key,
+                    "Authorization": f"Bearer {_sb_key}",
+                    "Content-Type":  "application/json",
+                },
+            )
+            if _sign.status_code != 200:
+                logger.warning(f"[receipt-upload] Signed URL failed {_sign.status_code}: {_sign.text[:200]}")
                 return
 
-            _bucket   = "Receipts"
-            _filename = receipt_path.name
+            _signed_path = _sign.json().get("signedURL", "")
+            receipt_url  = f"{_sb_base}/storage/v1{_signed_path}"
+            logger.info(f"[receipt-upload] Signed URL generated (48 h)")
 
-            with open(receipt_path, "rb") as _f:
-                _img_bytes = _f.read()
-
-            async with _httpx_r.AsyncClient(timeout=15) as _rc:
-
-                # ── Step 1: upload ────────────────────────────────────────────
-                _up = await _rc.post(
-                    f"{_sb_base}/storage/v1/object/{_bucket}/{_filename}",
-                    content=_img_bytes,
-                    headers={
-                        "apikey":        _sb_key,
-                        "Authorization": f"Bearer {_sb_key}",
-                        "Content-Type":  "image/png",
-                        "x-upsert":      "true",
-                    },
+            # ── Step 3: shorten via is.gd (free, no auth) ────────────────────
+            try:
+                _short = await _rc.get(
+                    "https://is.gd/create.php",
+                    params={"format": "json", "url": receipt_url},
+                    timeout=5,
                 )
-                if _up.status_code not in (200, 201):
-                    logger.warning(f"[receipt-upload] Upload failed {_up.status_code}: {_up.text[:200]}")
-                    return
-                logger.info(f"[receipt-upload] ✅ Uploaded: {_filename}")
+                if _short.status_code == 200:
+                    _short_url = _short.json().get("shorturl", "")
+                    if _short_url:
+                        receipt_url = _short_url
+                        logger.info(f"[receipt-upload] Shortened → {receipt_url}")
+            except Exception as _se:
+                logger.debug(f"[receipt-upload] Shortening skipped (non-fatal): {_se}")
 
-            # ── Step 3: use /r/{token} redirect — no shortener needed ─────────
-            redirect_url = (
-                f"https://api.autom8.works/r/"
-                f"{token_number.lstrip('#').replace(' ', '-').replace('/', '-')}"
-            )
-            logger.info(f"[receipt-upload] Using redirect URL: {redirect_url}")
+        # ── Step 4: send to customer ──────────────────────────────────────────
+        await send_whatsapp_message(
+            customer_phone,
+            f"🧾 *Your Receipt — Token {token_number}*\n\n"
+            f"{receipt_url}\n\n"
+            f"⏰ _This link expires in 48 hours. Please save a copy if needed._",
+            restaurant_id,
+        )
+        logger.info(f"[receipt-upload] Receipt link sent to {customer_phone}")
 
-            # ── Step 4: send to customer ───────────────────────────────────────
-            await send_whatsapp_message(
-                customer_phone,
-                f"🧾 *Your Receipt — Token {token_number}*\n\n"
-                f"{redirect_url}\n\n"
-                f"⏰ _This link expires in 48 hours. Please save a copy if needed._",
-                restaurant_id,
-            )
-            logger.info(f"[receipt-upload] Receipt link sent to {customer_phone}")
+    except Exception as _ue:
+        logger.warning(f"[receipt-upload] Failed (non-fatal): {_ue}")
 
-        except Exception as _ue:
-            logger.warning(f"[receipt-upload] Failed (non-fatal): {_ue}")
+
 async def cleanup_expired_receipts() -> None:
     """
     Fix 37d — Delete receipt files older than 48 hours from Supabase Storage.
@@ -1018,7 +935,6 @@ _STEPS_ALLOWING_SHORT_REPLY = {
     # Fix 31: order-related steps must allow structured/short messages so that
     # WhatsApp catalog order submissions are never swallowed by the greeting guard.
     "awaiting_order","awaiting_address","confirming_order","awaiting_cart_action",
-    "awaiting_advance_confirmation",
 }
 _GENERIC_GREETINGS = {"welcome!","welcome","hi!","hi","hello!","hello",""}
 
@@ -1773,6 +1689,7 @@ async def handle_dine_in_flow(
             portal_token_id = await _sync_token_to_portal(
                 customer_name=customer_name, customer_phone=customer_phone,
                 token_type="dinein", pax=party_size,
+                restaurant_id=restaurant_id,
             )
             display_token = portal_token_id or token
             session_state["display_token"] = display_token
@@ -1827,6 +1744,7 @@ async def handle_dine_in_flow(
             party_size = session_state.get("party_size", 1)
             portal_token_id = await _sync_token_to_portal_large_party(
                 customer_name=customer_name, customer_phone=customer_phone, pax=party_size, combo=combo,
+                restaurant_id=restaurant_id,
             )
             display_token = portal_token_id or f"#{party_size}pax"
             session_state["display_token"] = display_token
@@ -1858,7 +1776,7 @@ async def handle_dine_in_flow(
     elif booking_step == "awaiting_table_assignment":
         table_assigned = session_state.get("table_number")
         if not table_assigned:
-            table_assigned = await _lookup_table_assignment(customer_phone)
+            table_assigned = await _lookup_table_assignment(customer_phone, restaurant_id)
             if table_assigned:
                 session_state["table_number"] = table_assigned
 
@@ -2028,6 +1946,7 @@ async def handle_dine_in_flow(
             table_number=session_state.get("table_number"),
             token_number=token,
             service_type="dine_in",
+            restaurant_id=restaurant_id,
             special_notes=special_notes,
         )
 
@@ -2043,7 +1962,7 @@ async def handle_dine_in_flow(
                     restaurant_website=r_info.get("website", ""),
                     receipt_url=_receipt_qr_url(token),
                     token_number=token,
-                    table_number=str(session_state.get("table_number") or ""),
+                    table_number=str(session_state.get("table_number", "")),
                     service_type="dine_in",
                     customer_name=customer_name,
                     customer_phone=customer_phone,
@@ -2071,6 +1990,7 @@ async def handle_dine_in_flow(
             await _get_http().post(
                 "https://api.autom8.works/api/feedback/queue",
                 json={
+                    "restaurant_id": restaurant_id,
                     "customer_phone": customer_phone,
                     "customer_name":  customer_name,
                     "token_number":   token,
@@ -2126,6 +2046,7 @@ async def handle_takeaway_flow(
                 _sync_token_to_portal(
                     customer_name=customer_name, customer_phone=customer_phone,
                     token_type="takeaway", pax=1,
+                    restaurant_id=restaurant_id,
                 ),
                 _safe_build_order_suggestion(customer_id, restaurant_id),
             )
@@ -2195,6 +2116,7 @@ async def handle_takeaway_flow(
                 customer_name=customer_name, customer_phone=customer_phone,
                 order_text=order_text, cart=cart_snapshot, table_number=None,
                 token_number=display_token, service_type="takeaway",
+                restaurant_id=restaurant_id,
             )
 
             if _RECEIPT_AVAILABLE:
@@ -2360,6 +2282,7 @@ async def handle_delivery_flow(
                 customer_name=customer_name, customer_phone=customer_phone,
                 order_text=order_text, cart=cart_snapshot, table_number=None,
                 token_number=token, service_type="delivery",
+                restaurant_id=restaurant_id,
             )
 
             if _RECEIPT_AVAILABLE:
@@ -2554,6 +2477,7 @@ async def handle_reserve_table_flow(
         await _sync_token_to_portal(
             customer_name=customer_name, customer_phone=customer_phone,
             token_type="dinein", pax=party_size or 1,
+            restaurant_id=restaurant_id,
         )
 
         try:
@@ -2602,7 +2526,7 @@ async def handle_reserve_table_flow(
                         restaurant_name=r_info.get("name", ""),
                         restaurant_wa_number=r_info.get("whatsapp_number", ""),
                         token_number=token,
-                        table_number=str(session_state.get("table_number") or ""),
+                        table_number="",
                         service_type="reserve_table",
                         customer_name=customer_name,
                         customer_phone=customer_phone,
