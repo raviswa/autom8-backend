@@ -17,7 +17,7 @@ router.post('/signup', async (req, res) => {
     if (authError) throw authError;
 
     const { data: userData, error: userError } = await supabaseAdmin
-      .from('users')
+      .from('employees')
       .insert({ id: authData.user.id, email, full_name, restaurant_id, role })
       .select().single();
     if (userError) throw userError;
@@ -44,11 +44,11 @@ router.post('/login', async (req, res) => {
     if (error) throw error;
 
     const { data: userDetails } = await supabaseAdmin
-      .from('users').select('*').eq('id', data.user.id).single();
+      .from('employees').select('*').eq('id', data.user.id).single();
     if (!userDetails)
       return res.status(401).json({ error: 'User account not fully set up. No profile found.' });
 
-    await supabaseAdmin.from('users').update({ last_login: new Date() }).eq('id', data.user.id);
+    await supabaseAdmin.from('employees').update({ last_login: new Date() }).eq('id', data.user.id);
 
     try {
       await supabaseAdmin.from('audit_logs').insert({
