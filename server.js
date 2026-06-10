@@ -1309,17 +1309,17 @@ app.post('/api/kds/notify', async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
-const {
-  restaurant_id,
-  customer_name,
-  customer_phone,
-  token_number,
-  table_number,
-  service_type,
-  items         = [],
-  special_notes,
-  advance_credit = 0,
-} = req.body;
+  const {
+    restaurant_id,
+    customer_name,
+    customer_phone,
+    token_number,
+    table_number,
+    service_type,
+    items          = [],
+    special_notes,
+    advance_credit = 0,
+  } = req.body;
 
   if (!restaurant_id)      return res.status(400).json({ error: 'restaurant_id required' });
   if (!items.length)       return res.status(400).json({ error: 'items array must not be empty' });
@@ -1462,7 +1462,7 @@ kdsInserts.push({
   service_type:         service_type  || null,
   special_instructions: special_notes || null,
   item_category:        item.category || '',
-  advance_credit:       advance_credit || 0,    // ← NEW
+  advance_credit:       advance_credit || 0,
   created_at:           new Date().toISOString(),
   updated_at:           new Date().toISOString(),
 });
@@ -1490,44 +1490,36 @@ kdsInserts.push({
     // The payload mirrors the shape broadcast by handleWhatsAppOrder() so
     // KDSScreen.jsx needs no changes.
     // ──────────────────────────────────────────────────────────────────────────
-broadcastToRestaurant(restaurant_id, {
-  type:           'ORDER_NEW',
-  order_id:       orderRow.id,
-  order_number:   orderRow.order_number,
-  token_number:   token_number   ?? null,
-  table_number:   table_number   ?? null,
-  customer_name:  customer_name  ?? null,
-  customer_phone: cleanPhone,
-  service_type:   service_type   ?? null,
-  special_notes:  special_notes  ?? null,
-  advance_credit: advance_credit || 0,          // ← NEW
-  item_count:     kdsItemsCreated,
-  source:         'whatsapp_booking',
-  timestamp:      new Date().toISOString(),
-});
-	  
-	  // ── Step 5: Broadcast ORDER_NEW ───────────────────────────────────────────
     broadcastToRestaurant(restaurant_id, {
-      type:         'ORDER_NEW',
-      order_id:     orderRow.id,
-      order_number: orderRow.order_number,
-      // ...rest of existing payload unchanged...
+      type:           'ORDER_NEW',
+      order_id:       orderRow.id,
+      order_number:   orderRow.order_number,
+      token_number:   token_number   ?? null,
+      table_number:   table_number   ?? null,
+      customer_name:  customer_name  ?? null,
+      customer_phone: cleanPhone,
+      service_type:   service_type   ?? null,
+      special_notes:  special_notes  ?? null,
+      advance_credit: advance_credit || 0,
+      item_count:     kdsItemsCreated,
+      source:         'whatsapp_booking',
+      timestamp:      new Date().toISOString(),
     });
 
     // BEGIN: QR Receipt — send receipt URL to customer
-if (cleanPhone && kdsItemsCreated > 0) {
-  const receiptUrl  = `${process.env.API_BASE_URL ?? 'https://api.autom8.works'}/verify/${orderRow.id}`;
-  const advanceLine = advance_credit > 0
-    ? `\n🎟️ Reservation advance applied: -₹${Number(advance_credit).toFixed(0)}`
-    : '';
-  sendWhatsAppMessage(
-    cleanPhone,
-    `🧾 *Your receipt is ready!*\n\n` +
-    `Order: *${orderRow.order_number}*${advanceLine}\n` +
-    `Tap to view your itemised bill:\n${receiptUrl}`
-  ).catch(e => console.error('[kds-notify] Receipt send failed (non-fatal):', e.message));
-}
-     // END: QR Receipt
+    if (cleanPhone && kdsItemsCreated > 0) {
+      const receiptUrl  = `${process.env.API_BASE_URL ?? 'https://api.autom8.works'}/verify/${orderRow.id}`;
+      const advanceLine = advance_credit > 0
+        ? `\n🎟️ Reservation advance applied: -₹${Number(advance_credit).toFixed(0)}`
+        : '';
+      sendWhatsAppMessage(
+        cleanPhone,
+        `🧾 *Your receipt is ready!*\n\n` +
+        `Order: *${orderRow.order_number}*${advanceLine}\n` +
+        `Tap to view your itemised bill:\n${receiptUrl}`
+      ).catch(e => console.error('[kds-notify] Receipt send failed (non-fatal):', e.message));
+    }
+    // END: QR Receipt
 
     // ── Step 6: Audit log (non-fatal) ──────────────────────────────────────────
     supabaseAdmin.from('audit_logs').insert({
@@ -3108,362 +3100,6 @@ app.get('/verify/:orderId', async (req, res) => {
 // END: QR Receipt — /verify/:orderId endpoint
 
 
-// ============================================================================
-// RECEIPT ENDPOINT — GET /verify/:orderId
-// ============================================================================
-// Public endpoint — no auth required.
-// Returns a mobile-friendly HTML receipt with a QR code.
-// QR code is rendered client-side via CDN (no npm install needed).
-//
-// WHERE TO PLACE IN server.js:
-//   Paste this entire block just before the final app.listen() call.
-//
-// HOW IT WORKS:
-//   1. Looks up the invoice by order_id (generated post-order)
-//   2. Falls back to building payload on-the-fly from orders table
-//      (handles the brief race window before invoice is persisted)
-//   3. Renders a clean HTML receipt page with itemised breakdown,
-//      GST split, and a scannable QR code pointing to this same URL
-// ============================================================================
-
-// BEGIN: QR Receipt — /verify/:orderId endpoint
-
-// Simple HTML escaper — prevents XSS from DB content in the receipt page
-function escHtml(str) {
-  return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-app.get('/verify/:orderId', async (req, res) => {
-  try {
-    const { orderId } = req.params;
-    if (!orderId) return res.status(400).send('<p>Order ID required</p>');
-
-    // ── Step 1: Try invoice table first ──────────────────────────────────────
-    const { data: invoice } = await supabaseAdmin
-      .from('invoices')
-      .select('payload, grand_total, generated_at')
-      .eq('order_id', orderId)
-      .maybeSingle();
-
-    let p = invoice?.payload ?? null;
-
-    // ── Step 2: Fall back to building payload from orders table ──────────────
-    // Handles race window between order creation and invoice persistence.
-    if (!p) {
-      const { data: order } = await supabaseAdmin
-        .from('orders')
-        .select('*, order_items(quantity, unit_price, menu_item:menu_item_id(name, category))')
-        .eq('id', orderId)
-        .single();
-
-      if (!order) {
-        return res.status(404).send(`
-          <!DOCTYPE html><html><head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width,initial-scale=1">
-          <title>Receipt not found</title></head>
-          <body style="font-family:sans-serif;text-align:center;padding:48px 24px;color:#888">
-            <p style="font-size:44px;margin-bottom:12px">🔍</p>
-            <p style="font-size:16px;color:#555;margin-bottom:8px">Receipt not found</p>
-            <p style="font-size:12px">Order: ${escHtml(orderId)}</p>
-          </body></html>`
-        );
-      }
-
-      const { data: restaurant } = await supabaseAdmin
-        .from('restaurants')
-        .select('id, name, gstin, brand_id')
-        .eq('id', order.restaurant_id)
-        .maybeSingle();
-
-      // Uses server.js's own buildInvoicePayload + GST_RATES (no cross-require)
-      p = buildInvoicePayload(order, restaurant ?? {}, GST_RATES.default);
-    }
-
-    // ── Step 3: Render HTML receipt ───────────────────────────────────────────
-    const receiptUrl = `${process.env.API_BASE_URL ?? 'https://api.autom8.works'}/verify/${orderId}`;
-    const im         = p.invoice_meta         ?? {};
-    const fb         = p.financial_breakdown  ?? {};
-    const lineItems  = p.line_items           ?? [];
-
-    const itemRows = lineItems.map(li => `
-      <tr>
-        <td class="item-name">${escHtml(li.name)}${(li.quantity ?? 1) > 1 ? ` <span class="item-qty-inline">×${li.quantity}</span>` : ''}</td>
-        <td class="item-price">₹${(li.line_total ?? 0).toFixed(2)}</td>
-      </tr>`
-    ).join('');
-
-    const deliveryRow = (fb.packaging_or_delivery_charge ?? 0) > 0
-      ? `<div class="total-row"><span>Delivery charge</span><span>₹${fb.packaging_or_delivery_charge.toFixed(2)}</span></div>`
-      : '';
-
-    const dateStr = new Date(im.invoice_date ?? Date.now())
-      .toLocaleString('en-IN', {
-        day: '2-digit', month: 'short', year: 'numeric',
-        hour: '2-digit', minute: '2-digit', hour12: true,
-        timeZone: 'Asia/Kolkata',
-      });
-
-    const fulfillmentLabel = (im.fulfillment_type ?? 'dine_in')
-      .replace(/_/g, ' ')
-      .replace(/\b\w/g, c => c.toUpperCase());
-
-    const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-  <meta name="theme-color" content="#1a1a1a" />
-  <title>Receipt — ${escHtml(im.order_number ?? orderId.slice(-8))}</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: #f0f0ee;
-      min-height: 100vh;
-      padding: 20px 16px 48px;
-      display: flex;
-      align-items: flex-start;
-      justify-content: center;
-    }
-    .receipt {
-      background: #fff;
-      border-radius: 16px;
-      width: 100%;
-      max-width: 400px;
-      box-shadow: 0 2px 24px rgba(0,0,0,.1);
-      overflow: hidden;
-    }
-
-    /* Header */
-    .rh {
-      background: #1a1a1a;
-      color: #fff;
-      padding: 22px 20px 18px;
-      text-align: center;
-    }
-    .rh-name  { font-size: 17px; font-weight: 600; letter-spacing: .02em; }
-    .rh-order { font-size: 12px; color: #888; margin-top: 3px; }
-    .rh-badge {
-      display: inline-block;
-      margin-top: 10px;
-      padding: 3px 12px;
-      border-radius: 20px;
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: .04em;
-      background: rgba(34,197,94,.15);
-      color: #22c55e;
-      border: 1px solid rgba(34,197,94,.3);
-    }
-
-    /* Body */
-    .rb { padding: 18px 20px 20px; }
-
-    /* Meta rows */
-    .meta { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px; }
-    .meta .lbl { color: #aaa; }
-    .meta .val { color: #333; font-weight: 500; }
-
-    /* Divider */
-    .dv { border: none; border-top: 1px dashed #e0e0dc; margin: 14px 0; }
-
-    /* Items table */
-    .items { width: 100%; border-collapse: collapse; }
-    .items td { padding: 7px 0; vertical-align: top; }
-    .item-name {
-      font-size: 13px;
-      color: #222;
-      padding-right: 10px;
-    }
-    .item-qty-inline { font-size: 11px; color: #aaa; }
-    .item-price {
-      font-size: 13px;
-      color: #222;
-      text-align: right;
-      white-space: nowrap;
-      font-variant-numeric: tabular-nums;
-    }
-
-    /* Totals */
-    .totals { margin-top: 4px; }
-    .total-row {
-      display: flex;
-      justify-content: space-between;
-      font-size: 12px;
-      color: #888;
-      margin-bottom: 6px;
-    }
-    .total-row.grand {
-      font-size: 15px;
-      font-weight: 600;
-      color: #111;
-      padding-top: 9px;
-      margin-top: 3px;
-      border-top: 1px solid #e0e0dc;
-    }
-
-    /* Payment note */
-    .pay-note {
-      margin-top: 14px;
-      padding: 10px 14px;
-      background: #f0f9f4;
-      border-radius: 8px;
-      font-size: 12px;
-      color: #15803d;
-      text-align: center;
-      font-weight: 500;
-    }
-
-    /* QR section */
-    .qr-section {
-      margin-top: 18px;
-      padding-top: 16px;
-      border-top: 1px dashed #e0e0dc;
-      text-align: center;
-    }
-    .qr-label {
-      font-size: 10px;
-      color: #bbb;
-      letter-spacing: .04em;
-      text-transform: uppercase;
-      margin-bottom: 10px;
-    }
-    #qrcode { display: inline-block; }
-    #qrcode canvas, #qrcode img {
-      border-radius: 6px;
-    }
-
-    /* Footer */
-    .rfooter {
-      text-align: center;
-      font-size: 10px;
-      color: #ccc;
-      margin-top: 12px;
-      padding-bottom: 2px;
-    }
-
-    /* Print / save button */
-    .print-btn {
-      display: block;
-      width: 100%;
-      margin-top: 16px;
-      padding: 13px;
-      background: #1a1a1a;
-      color: #fff;
-      border: none;
-      border-radius: 10px;
-      font-size: 13px;
-      font-weight: 500;
-      cursor: pointer;
-      letter-spacing: .03em;
-    }
-    .print-btn:active { opacity: .85; }
-
-    /* Print styles */
-    @media print {
-      body { background: #fff; padding: 0; }
-      .receipt { box-shadow: none; border-radius: 0; max-width: 100%; }
-      .print-btn { display: none; }
-    }
-  </style>
-</head>
-<body>
-  <div class="receipt">
-
-    <div class="rh">
-      <div class="rh-name">${escHtml(im.store_name || 'Restaurant')}</div>
-      <div class="rh-order">Order #${escHtml(im.order_number ?? orderId.slice(-8))}</div>
-      <div class="rh-badge">✓ Order Received</div>
-    </div>
-
-    <div class="rb">
-
-      <div class="meta"><span class="lbl">Date &amp; time</span><span class="val">${escHtml(dateStr)}</span></div>
-      <div class="meta"><span class="lbl">Order type</span><span class="val">${escHtml(fulfillmentLabel)}</span></div>
-      ${im.gstin ? `<div class="meta"><span class="lbl">GSTIN</span><span class="val">${escHtml(im.gstin)}</span></div>` : ''}
-
-      <hr class="dv" />
-
-      <table class="items"><tbody>${itemRows}</tbody></table>
-
-      <hr class="dv" />
-
-      <div class="totals">
-        <div class="total-row">
-          <span>Subtotal</span>
-          <span>₹${(fb.subtotal_base_price ?? 0).toFixed(2)}</span>
-        </div>
-        <div class="total-row">
-          <span>GST (CGST ${fb.cgst_rate_pct ?? 2.5}% + SGST ${fb.sgst_rate_pct ?? 2.5}%)</span>
-          <span>₹${(fb.total_gst ?? 0).toFixed(2)}</span>
-        </div>
-        ${deliveryRow}
-        <div class="total-row grand">
-          <span>Total</span>
-          <span>₹${(fb.grand_total ?? 0).toFixed(2)}</span>
-        </div>
-      </div>
-
-      <div class="pay-note">💚 Payment can be made at the counter</div>
-
-      <div class="qr-section">
-        <div class="qr-label">Scan to open this receipt</div>
-        <div id="qrcode"></div>
-        <div class="rfooter">Powered by Autom8 · ${escHtml(im.store_name || '')}</div>
-      </div>
-
-      <button class="print-btn" onclick="window.print()">🖨 Save / Print receipt</button>
-
-    </div>
-  </div>
-
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"
-          integrity="sha512-CNgIRecGo7nphbeZ04Sc13ka07paqdeTu0WR1IM4kNcpmBAUSHSi2jPyei5Z0DxUi0GsfcOQhHFAP7uYBiWzA=="
-          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-  <script>
-    var receiptUrl = ${JSON.stringify(receiptUrl)};
-    try {
-      new QRCode(document.getElementById('qrcode'), {
-        text:         receiptUrl,
-        width:        128,
-        height:       128,
-        colorDark:    '#1a1a1a',
-        colorLight:   '#ffffff',
-        correctLevel: QRCode.CorrectLevel.M,
-      });
-    } catch (e) {
-      document.getElementById('qrcode').innerHTML =
-        '<p style="font-size:11px;color:#bbb;padding:10px">QR unavailable</p>';
-    }
-  </script>
-</body>
-</html>`;
-
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store');
-    res.send(html);
-
-  } catch (err) {
-    console.error('[verify-receipt]', err.message);
-    res.status(500).send(`
-      <!DOCTYPE html><html><head>
-      <meta charset="utf-8">
-      <meta name="viewport" content="width=device-width,initial-scale=1">
-      <title>Error</title></head>
-      <body style="font-family:sans-serif;text-align:center;padding:48px 24px;color:#888">
-        <p style="font-size:44px;margin-bottom:12px">⚠️</p>
-        <p>Could not load receipt. Please try again.</p>
-      </body></html>`
-    );
-  }
-});
-
-// END: QR Receipt — /verify/:orderId endpoint
 
 
 // Receipt redirect — /r/:token → Supabase signed URL
