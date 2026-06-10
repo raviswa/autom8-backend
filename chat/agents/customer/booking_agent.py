@@ -577,104 +577,18 @@ async def _upload_and_send_receipt(
             receipt_url  = f"{_sb_base}/storage/v1{_signed_path}"
             logger.info(f"[receipt-upload] Signed URL generated (48 h)")
 
-            # ── Step 3: shorten via is.gd (free, no auth) ────────────────────
-            try:
-                _short = await _rc.get(
-                    "https://is.gd/create.php",
-                    params={"format": "json", "url": receipt_url},
-                    timeout=5,
-                )
-                if _short.status_code == 200:
-                    _short_url = _short.json().get("shorturl", "")
-                    if _short_url:
-                        receipt_url = _short_url
-                        logger.info(f"[receipt-upload] Shortened → {receipt_url}")
-            except Exception as _se:
-                logger.debug(f"[receipt-upload] Shortening skipped (non-fatal): {_se}")
+# ── Step 3: use /r/{token} redirect — no shortener needed ────────────
+redirect_url = f"https://api.autom8.works/r/{token_number.lstrip('#').replace(' ', '-').replace('/', '-')}"
+logger.info(f"[receipt-upload] Using redirect URL: {redirect_url}")
 
-        # ── Step 4: send to customer ──────────────────────────────────────────
-        await send_whatsapp_message(
-            customer_phone,
-            f"🧾 *Your Receipt — Token {token_number}*\n\n"
-            f"{receipt_url}\n\n"
-            f"⏰ _This link expires in 48 hours. Please save a copy if needed._",
-            restaurant_id,
-        )
-        logger.info(f"[receipt-upload] Receipt link sent to {customer_phone}")
-
-    except Exception as _ue:
-        logger.warning(f"[receipt-upload] Failed (non-fatal): {_ue}")
-
-
-async def cleanup_expired_receipts() -> None:
-    """
-    Fix 37d — Delete receipt files older than 48 hours from Supabase Storage.
-
-    Register in scheduler_tools.py (daily cron is fine):
-        scheduler.add_job(
-            lambda: asyncio.create_task(cleanup_expired_receipts()),
-            'cron', hour=3, minute=0, id='cleanup_receipts'
-        )
-    """
-    try:
-        import httpx as _httpx_c
-        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
-        _sb_base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
-        _sb_key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
-        if not (_sb_base and _sb_key):
-            return
-
-        _cutoff = _dt.now(_tz.utc) - _td(hours=48)
-
-        async with _httpx_c.AsyncClient(timeout=15) as _rc:
-            # List objects in bucket
-            _list = await _rc.post(
-                f"{_sb_base}/storage/v1/object/list/Receipts",
-                json={"prefix": "", "limit": 1000,
-                      "sortBy": {"column": "created_at", "order": "asc"}},
-                headers={
-                    "apikey":        _sb_key,
-                    "Authorization": f"Bearer {_sb_key}",
-                    "Content-Type":  "application/json",
-                },
-            )
-            if _list.status_code != 200:
-                logger.warning(f"[receipt-cleanup] List failed {_list.status_code}")
-                return
-
-            _to_delete = []
-            for _obj in _list.json():
-                _created = _obj.get("created_at", "")
-                if _created:
-                    try:
-                        _ft = _dt.fromisoformat(_created.replace("Z", "+00:00"))
-                        if _ft < _cutoff:
-                            _to_delete.append(_obj["name"])
-                    except Exception:
-                        pass
-
-            if not _to_delete:
-                logger.debug("[receipt-cleanup] No expired receipts to delete")
-                return
-
-            # Bulk delete
-            _del = await _rc.delete(
-                f"{_sb_base}/storage/v1/object/Receipts",
-                json={"prefixes": _to_delete},
-                headers={
-                    "apikey":        _sb_key,
-                    "Authorization": f"Bearer {_sb_key}",
-                    "Content-Type":  "application/json",
-                },
-            )
-            if _del.status_code in (200, 204):
-                logger.info(f"[receipt-cleanup] ✅ Deleted {len(_to_delete)} expired receipt(s)")
-            else:
-                logger.warning(f"[receipt-cleanup] Delete failed {_del.status_code}: {_del.text[:200]}")
-
-    except Exception as _ce:
-        logger.warning(f"[receipt-cleanup] Non-fatal: {_ce}")
-
+# ── Step 4: send to customer ──────────────────────────────────────────
+await send_whatsapp_message(
+    customer_phone,
+    f"🧾 *Your Receipt — Token {token_number}*\n\n"
+    f"{redirect_url}\n\n"
+    f"⏰ _This link expires in 48 hours. Please save a copy if needed._",
+    restaurant_id,
+)
 
 # ─────────────────────────────────────────────
 # GENERAL HELPERS
