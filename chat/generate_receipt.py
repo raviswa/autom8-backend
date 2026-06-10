@@ -99,14 +99,11 @@ class LineItem:
         return round(self.qty * self.unit_price, 2)
 
     @classmethod
-    def from_cart(cls, cart: dict) -> list["LineItem"]:
-        items = []
-        for v in cart.values():
-            items.append(cls(
-                name=v.get("title") or v.get("name") or "Item",
-                qty=int(v.get("qty", 1)),
-                unit_price=float(v.get("unit_price", 0)),
-            ))
+    def from_cart(cls, cart: dict):
+    return [
+        cls(name=line["title"], qty=line["qty"], unit_price=line["unit_price"])
+        for item_id, line in cart.items()
+    ]
         return items
 
     @classmethod
