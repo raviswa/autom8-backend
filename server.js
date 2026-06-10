@@ -121,6 +121,8 @@ app.use('/api/restaurants', require('./src/routes/marketing'));   // ← ADD (fo
 app.use('/api',             require('./src/routes/pos'));
 app.use('/api/onboarding',  require('./src/routes/onboarding'));
 app.use('/api/whatsapp',    require('./src/routes/webhook'));
+app.use('/api/v1/takeaway', require('./src/routes/takeaway'));    // takeaway QR scan
+app.use('/api/staff',       require('./src/routes/staff'));         // employee management
 
 // ============================================================================
 // HEALTH CHECK
@@ -329,7 +331,7 @@ async function applySlotForAllRestaurants() {
 
 app.post('/api/catalog/slot-sync', async (req, res) => {
   try {
-    const { data: userData } = await supabaseAdmin.from('users').select('role, restaurant_id').eq('id', req.user?.sub).single();
+    const { data: userData } = await supabaseAdmin.from('employees').select('role, restaurant_id').eq('id', req.user?.sub).single();
     if (userData?.role !== 'owner' && userData?.role !== 'manager')
       return res.status(403).json({ error: 'Unauthorized' });
     const slot        = req.body.slot ?? getCurrentSlotIST();
@@ -630,7 +632,7 @@ app.post('/api/catalog/sync', async (req, res) => {
     if (!token) return res.status(401).json({ error: 'No token' });
     const { data: { user } } = await supabase.auth.getUser(token);
     if (!user) return res.status(403).json({ error: 'Invalid token' });
-    const { data: userData } = await supabaseAdmin.from('users').select('role, restaurant_id').eq('id', user.id).single();
+    const { data: userData } = await supabaseAdmin.from('employees').select('role, restaurant_id').eq('id', user.id).single();
     if (userData?.role !== 'owner' && userData?.role !== 'manager') return res.status(403).json({ error: 'Unauthorized' });
     const result = await syncCatalogFromMeta(userData.restaurant_id);
     res.json(result);
@@ -698,7 +700,7 @@ app.post('/api/menu/upload', async (req, res) => {
     if (!token) return res.status(401).json({ error: 'No token' });
     const { data: { user } } = await supabase.auth.getUser(token);
     if (!user) return res.status(403).json({ error: 'Invalid token' });
-    const { data: userData } = await supabaseAdmin.from('users').select('role, restaurant_id').eq('id', user.id).single();
+    const { data: userData } = await supabaseAdmin.from('employees').select('role, restaurant_id').eq('id', user.id).single();
     if (userData?.role !== 'owner' && userData?.role !== 'manager') return res.status(403).json({ error: 'Unauthorized' });
 
     const { items } = req.body;
@@ -915,7 +917,7 @@ app.put('/api/menu-items/:id/availability', async (req, res) => {
     if (!user) return res.status(403).json({ error: 'Invalid token' });
  
     const { data: userData } = await supabaseAdmin
-      .from('users').select('role, restaurant_id').eq('id', user.id).single();
+      .from('employees').select('role, restaurant_id').eq('id', user.id).single();
     if (userData?.role !== 'owner' && userData?.role !== 'manager')
       return res.status(403).json({ error: 'Unauthorized' });
  
@@ -1126,7 +1128,7 @@ app.get('/api/tokens', async (req, res) => {
     if (!token) return res.status(401).json({ error: 'No token' });
     const { data: { user } } = await supabase.auth.getUser(token);
     if (!user) return res.status(403).json({ error: 'Invalid token' });
-    const { data: userData } = await supabaseAdmin.from('users').select('restaurant_id').eq('id', user.id).single();
+    const { data: userData } = await supabaseAdmin.from('employees').select('restaurant_id').eq('id', user.id).single();
     const restaurantId = userData?.restaurant_id;
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
     const { status } = req.query;
@@ -1159,7 +1161,7 @@ app.put('/api/tokens/:id/assign', async (req, res) => {
     const authToken = authHeader?.split(' ')[1];
     if (!authToken) return res.status(401).json({ error: 'No token' });
     const { data: { user } } = await supabase.auth.getUser(authToken);
-    const { data: userData } = await supabaseAdmin.from('users').select('restaurant_id').eq('id', user.id).single();
+    const { data: userData } = await supabaseAdmin.from('employees').select('restaurant_id').eq('id', user.id).single();
     const restaurantId = userData?.restaurant_id;
 
     const { table_id, table_number } = req.body;
@@ -1189,7 +1191,7 @@ app.put('/api/tokens/:id/approve', async (req, res) => {
     const authHeader = req.headers['authorization'];
     const authToken = authHeader?.split(' ')[1];
     const { data: { user } } = await supabase.auth.getUser(authToken);
-    const { data: userData } = await supabaseAdmin.from('users').select('role, restaurant_id').eq('id', user.id).single();
+    const { data: userData } = await supabaseAdmin.from('employees').select('role, restaurant_id').eq('id', user.id).single();
     if (userData?.role !== 'owner' && userData?.role !== 'manager') return res.status(403).json({ error: 'Unauthorized' });
     const restaurantId = userData.restaurant_id;
 
@@ -1224,7 +1226,7 @@ app.put('/api/tokens/:id/reject', async (req, res) => {
     const authHeader = req.headers['authorization'];
     const authToken = authHeader?.split(' ')[1];
     const { data: { user } } = await supabase.auth.getUser(authToken);
-    const { data: userData } = await supabaseAdmin.from('users').select('role, restaurant_id').eq('id', user.id).single();
+    const { data: userData } = await supabaseAdmin.from('employees').select('role, restaurant_id').eq('id', user.id).single();
     if (userData?.role !== 'owner' && userData?.role !== 'manager') return res.status(403).json({ error: 'Unauthorized' });
 
     const { data: token } = await supabaseAdmin.from('walk_in_tokens').select('*').eq('id', req.params.id).eq('restaurant_id', userData.restaurant_id).single();
@@ -1246,7 +1248,7 @@ app.put('/api/tokens/:id/complete', async (req, res) => {
     const authHeader = req.headers['authorization'];
     const authToken = authHeader?.split(' ')[1];
     const { data: { user } } = await supabase.auth.getUser(authToken);
-    const { data: userData } = await supabaseAdmin.from('users').select('restaurant_id').eq('id', user.id).single();
+    const { data: userData } = await supabaseAdmin.from('employees').select('restaurant_id').eq('id', user.id).single();
     const restaurantId = userData.restaurant_id;
 
     const { data: token } = await supabaseAdmin.from('walk_in_tokens').select('*').eq('id', req.params.id).eq('restaurant_id', restaurantId).single();
@@ -1280,7 +1282,7 @@ app.delete('/api/tokens/:id', async (req, res) => {
     const authHeader = req.headers['authorization'];
     const authToken = authHeader?.split(' ')[1];
     const { data: { user } } = await supabase.auth.getUser(authToken);
-    const { data: userData } = await supabaseAdmin.from('users').select('restaurant_id').eq('id', user.id).single();
+    const { data: userData } = await supabaseAdmin.from('employees').select('restaurant_id').eq('id', user.id).single();
     const { error } = await supabaseAdmin.from('walk_in_tokens').delete().eq('id', req.params.id).eq('restaurant_id', userData.restaurant_id);
     if (error) throw error;
     res.json({ success: true, message: 'Token dismissed' });
@@ -1462,9 +1464,10 @@ kdsInserts.push({
   service_type:         service_type  || null,
   special_instructions: special_notes || null,
   item_category:        item.category || '',
-  advance_credit:       advance_credit || 0,
   created_at:           new Date().toISOString(),
   updated_at:           new Date().toISOString(),
+  // advance_credit is broadcast via WebSocket (ORDER_NEW) for KDS display
+  // but NOT stored in kds_items — it lives on bookings.advance_paid
 });
     }
 
@@ -1520,6 +1523,34 @@ kdsInserts.push({
       ).catch(e => console.error('[kds-notify] Receipt send failed (non-fatal):', e.message));
     }
     // END: QR Receipt
+
+    // ── Fulfillment groups (multi-counter takeaway mode) ───────────────────────
+    // Only runs when service_type is takeaway AND restaurant is in multi_counter mode.
+    // Creates one group per section that has items — never empty groups.
+    // A customer who ordered only sweets + beverages gets exactly 2 groups.
+    // Order completes only when both (and only those two) are collected.
+    if (service_type === 'takeaway' || service_type === 'whatsapp_booking') {
+      try {
+        const { data: rest } = await supabaseAdmin
+          .from('restaurants')
+          .select('takeaway_fulfillment_mode')
+          .eq('id', restaurant_id)
+          .single();
+
+        if (rest?.takeaway_fulfillment_mode === 'multi_counter') {
+          const { data: groupResult } = await supabaseAdmin.rpc(
+            'create_fulfillment_groups',
+            { p_order_id: orderRow.id, p_restaurant_id: restaurant_id }
+          );
+          console.log(
+            `[kds-notify] Fulfillment groups: ${groupResult?.created ?? 0} created` +
+            ` for order ${orderRow.order_number}`
+          );
+        }
+      } catch (fgErr) {
+        console.error('[kds-notify] Fulfillment group creation failed (non-fatal):', fgErr.message);
+      }
+    }
 
     // ── Step 6: Audit log (non-fatal) ──────────────────────────────────────────
     supabaseAdmin.from('audit_logs').insert({
@@ -1645,7 +1676,7 @@ app.post('/api/feedback/queue', async (req, res) => {
     const authHeader = req.headers['authorization'];
     const authToken = authHeader?.split(' ')[1];
     const { data: { user } } = await supabase.auth.getUser(authToken);
-    const { data: userData } = await supabaseAdmin.from('users').select('restaurant_id').eq('id', user.id).single();
+    const { data: userData } = await supabaseAdmin.from('employees').select('restaurant_id').eq('id', user.id).single();
     const { customer_phone, customer_name, token_number, table_number } = req.body;
     if (!customer_phone) return res.status(400).json({ error: 'customer_phone required' });
 
@@ -1801,7 +1832,7 @@ app.post('/api/referrals/generate', async (req, res) => {
     if (!token) return res.status(401).json({ error: 'No token' });
     const { data: { user } } = await supabase.auth.getUser(token);
     if (!user) return res.status(403).json({ error: 'Invalid token' });
-    const { data: userData } = await supabaseAdmin.from('users').select('restaurant_id').eq('id', user.id).single();
+    const { data: userData } = await supabaseAdmin.from('employees').select('restaurant_id').eq('id', user.id).single();
 
     const { customer_phone, customer_name } = req.body;
     if (!customer_phone) return res.status(400).json({ error: 'customer_phone required' });
@@ -2028,7 +2059,7 @@ app.post('/api/delivery/rider-assigned', async (req, res) => {
  */
 async function enforceHierarchyAccess(userId, requestedScope, storeId = null) {
   const { data: userData } = await supabaseAdmin
-    .from('users')
+    .from('employees')
     .select('role, restaurant_id, brand_id')
     .eq('id', userId)
     .single();
@@ -2328,7 +2359,7 @@ app.post('/api/invoices/generate', async (req, res) => {
     if (!token) return res.status(401).json({ error: 'No token' });
     const { data: { user } } = await supabase.auth.getUser(token);
     if (!user) return res.status(403).json({ error: 'Invalid token' });
-    const { data: userData } = await supabaseAdmin.from('users').select('role, restaurant_id').eq('id', user.id).single();
+    const { data: userData } = await supabaseAdmin.from('employees').select('role, restaurant_id').eq('id', user.id).single();
     if (userData?.role !== 'owner' && userData?.role !== 'manager')
       return res.status(403).json({ error: 'Unauthorized' });
 
@@ -2616,7 +2647,7 @@ app.get('/api/dashboard/waba', async (req, res) => {
     const { data: { user }, error: authErr } = await supabase.auth.getUser(authToken);
     if (authErr || !user) return res.status(403).json({ error: 'Invalid token' });
     const { data: userData } = await supabaseAdmin
-      .from('users').select('restaurant_id').eq('id', user.id).single();
+      .from('employees').select('restaurant_id').eq('id', user.id).single();
 
  // restaurant_details table dropped — all fields now on restaurants directly
     const { data, error } = await supabaseAdmin
@@ -2648,7 +2679,7 @@ app.get('/api/dashboard/wa-orders', async (req, res) => {
     const { data: { user }, error: authErr } = await supabase.auth.getUser(authToken);
     if (authErr || !user) return res.status(403).json({ error: 'Invalid token' });
     const { data: userData } = await supabaseAdmin
-      .from('users').select('restaurant_id').eq('id', user.id).single();
+      .from('employees').select('restaurant_id').eq('id', user.id).single();
 
     const { start, end } = req.query;
     if (!start || !end) return res.status(400).json({ error: 'start and end required' });
@@ -2694,7 +2725,7 @@ app.get('/api/dashboard/cancel-stats', async (req, res) => {
     const { data: { user }, error: authErr } = await supabase.auth.getUser(authToken);
     if (authErr || !user) return res.status(403).json({ error: 'Invalid token' });
     const { data: userData } = await supabaseAdmin
-      .from('users').select('restaurant_id').eq('id', user.id).single();
+      .from('employees').select('restaurant_id').eq('id', user.id).single();
     const restaurantId = userData.restaurant_id;
 
     const { start, end } = req.query;
