@@ -449,6 +449,160 @@ router.put('/tables/:id/status', authenticateToken, getRestaurantId, async (req,
   }
 });
 
+router.post('/tables', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'owner' && req.user_role !== 'manager')
+      return res.status(403).json({ error: 'Unauthorized' });
+    const { table_number, capacity = 4, section = null } = req.body;
+    if (!table_number) return res.status(400).json({ error: 'table_number is required' });
+    const { data, error } = await supabaseAdmin
+      .from('tables')
+      .insert({ restaurant_id: req.restaurant_id, table_number: parseInt(table_number), capacity: parseInt(capacity), section, status: 'available', is_active: true })
+      .select().single();
+    if (error) throw error;
+    res.status(201).json({ success: true, table: data });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.put('/tables/:id', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'owner' && req.user_role !== 'manager')
+      return res.status(403).json({ error: 'Unauthorized' });
+    const { table_number, capacity, section, is_active } = req.body;
+    const updates = { updated_at: new Date().toISOString() };
+    if (table_number !== undefined) updates.table_number = parseInt(table_number);
+    if (capacity     !== undefined) updates.capacity     = parseInt(capacity);
+    if (section      !== undefined) updates.section      = section;
+    if (is_active    !== undefined) updates.is_active    = Boolean(is_active);
+    const { data, error } = await supabaseAdmin
+      .from('tables')
+      .update(updates)
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id)
+      .select().single();
+    if (error) throw error;
+    res.json({ success: true, table: data });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.delete('/tables/:id', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'owner' && req.user_role !== 'manager')
+      return res.status(403).json({ error: 'Unauthorized' });
+    // Block delete if table is currently occupied
+    const { data: table } = await supabaseAdmin
+      .from('tables').select('status, table_number').eq('id', req.params.id).single();
+    if (table?.status === 'occupied')
+      return res.status(409).json({ error: `Table ${table.table_number} is currently occupied — free it before deleting` });
+    const { error } = await supabaseAdmin
+      .from('tables')
+      .delete()
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ── Owner self-service restaurant update ──────────────────────────────────────
+// Used by SettingsPanel tabs: Restaurant, Services, Kitchen, WhatsApp
+
+router.put('/restaurants/me', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'owner' && req.user_role !== 'manager')
+      return res.status(403).json({ error: 'Unauthorized' });
+
+    const ALLOWED = [
+      'name','display_name','legal_name','address_line1','address_line2',
+      'city','state','postal_code','country',
+      'contact_phone','contact_email','website_url','cuisine_type',
+      'logo_url','gstin','opening_hours',
+      'whatsapp_number','waba_id','manager_phone',
+      'timezone','dining_duration_minutes','payment_mode','kitchen_workflow',
+      'subscribed_features',
+    ];
+    const updates = Object.fromEntries(
+      Object.entries(req.body).filter(([k]) => ALLOWED.includes(k))
+    );
+    if (Object.keys(updates).length === 0)
+      return res.status(400).json({ error: 'No valid fields provided' });
+
+    updates.updated_at = new Date().toISOString();
+    const { data, error } = await supabaseAdmin
+      .from('restaurants')
+      .update(updates)
+      .eq('id', req.restaurant_id)
+      .select().single();
+    if (error) throw error;
+
+    await supabaseAdmin.from('audit_logs').insert({
+      user_id: req.user.id, restaurant_id: req.restaurant_id,
+      action: 'Restaurant settings updated', details: { fields: Object.keys(updates) },
+    }).catch(() => {});
+
+    res.json({ success: true, restaurant: data });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ── WhatsApp integration credentials ──────────────────────────────────────────
+router.get('/restaurants/integration', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { data } = await supabaseAdmin
+      .from('restaurant_integrations')
+      .select('id,provider,channel,phone_number_id,access_token,webhook_secret,webhook_verify_token,config,is_active')
+      .eq('restaurant_id', req.restaurant_id)
+      .eq('provider', 'meta').eq('channel', 'whatsapp')
+      .maybeSingle();
+    res.json({ success: true, integration: data ?? null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/restaurants/integration', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (req.user_role !== 'owner' && req.user_role !== 'manager')
+      return res.status(403).json({ error: 'Unauthorized' });
+
+    const { provider = 'meta', channel = 'whatsapp', phone_number_id, access_token, webhook_secret, webhook_verify_token } = req.body;
+    const updates = { updated_at: new Date().toISOString() };
+    if (phone_number_id     !== undefined) updates.phone_number_id     = phone_number_id;
+    if (access_token        !== undefined) updates.access_token        = access_token;
+    if (webhook_secret      !== undefined) updates.webhook_secret      = webhook_secret;
+    if (webhook_verify_token!== undefined) updates.webhook_verify_token= webhook_verify_token;
+
+    const { data: existing } = await supabaseAdmin
+      .from('restaurant_integrations')
+      .select('id').eq('restaurant_id', req.restaurant_id)
+      .eq('provider', provider).eq('channel', channel).maybeSingle();
+
+    let result;
+    if (existing) {
+      const { data, error } = await supabaseAdmin
+        .from('restaurant_integrations').update(updates)
+        .eq('id', existing.id).select().single();
+      if (error) throw error;
+      result = data;
+    } else {
+      const { data, error } = await supabaseAdmin
+        .from('restaurant_integrations')
+        .insert({ restaurant_id: req.restaurant_id, provider, channel, is_active: true, ...updates })
+        .select().single();
+      if (error) throw error;
+      result = data;
+    }
+    res.json({ success: true, integration: result });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // ── Payments ─────────────────────────────────────────────────────────────────
 
 router.post('/payments', authenticateToken, getRestaurantId, async (req, res) => {
