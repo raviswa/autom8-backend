@@ -100,11 +100,10 @@ class LineItem:
 
     @classmethod
     def from_cart(cls, cart: dict):
-    return [
-        cls(name=line["title"], qty=line["qty"], unit_price=line["unit_price"])
-        for item_id, line in cart.items()
-    ]
-        return items
+        return [
+            cls(name=line["title"], qty=line["qty"], unit_price=line["unit_price"])
+            for item_id, line in cart.items()
+        ]
 
     @classmethod
     def from_order_text(cls, order_text: str) -> list["LineItem"]:
