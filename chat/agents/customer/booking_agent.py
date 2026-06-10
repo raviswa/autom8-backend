@@ -514,19 +514,11 @@ async def _notify_kds(
 # ─────────────────────────────────────────────
 
 async def _upload_and_send_receipt(
-    receipt_path,          # pathlib.Path returned by generate_receipt()
+    receipt_path,
     customer_phone: str,
     restaurant_id: str,
     token_number: str,
 ) -> None:
-    """
-    Fix 36/37 — Upload receipt PNG to Supabase Storage ('Receipts' bucket),
-    generate a 48-hour signed URL, shorten via is.gd, then WhatsApp the customer.
-
-    Bucket should be PRIVATE — only signed URLs work, enforcing the 48 h limit.
-    Runs as asyncio.create_task — never blocks order confirmation.
-    All failures are non-fatal and logged at WARNING level.
-    """
     try:
         import httpx as _httpx_r
         _sb_base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
@@ -536,7 +528,7 @@ async def _upload_and_send_receipt(
             return
 
         _bucket   = "Receipts"
-        _filename = receipt_path.name          # e.g. Hotel_Munafe_receipt_T-062.png
+        _filename = receipt_path.name
 
         with open(receipt_path, "rb") as _f:
             _img_bytes = _f.read()
@@ -559,7 +551,7 @@ async def _upload_and_send_receipt(
                 return
             logger.info(f"[receipt-upload] ✅ Uploaded: {_filename}")
 
-            # ── Step 2: 48-hour signed URL (172800 s) ─────────────────────────
+            # ── Step 2: 48-hour signed URL ────────────────────────────────────
             _sign = await _rc.post(
                 f"{_sb_base}/storage/v1/object/sign/{_bucket}/{_filename}",
                 json={"expiresIn": 172800},
@@ -569,15 +561,15 @@ async def _upload_and_send_receipt(
                     "Content-Type":  "application/json",
                 },
             )
-if _sign.status_code != 200:
-                logger.warning(f"[receipt-upload] Signed URL failed ...")
+            if _sign.status_code != 200:
+                logger.warning(f"[receipt-upload] Signed URL failed {_sign.status_code}: {_sign.text[:200]}")
                 return
 
             _signed_path = _sign.json().get("signedURL", "")
             receipt_url  = f"{_sb_base}/storage/v1{_signed_path}"
             logger.info(f"[receipt-upload] Signed URL generated (48 h)")
 
-            # ── Step 3: use /r/{token} redirect ──────────────────────────────
+            # ── Step 3: redirect URL ──────────────────────────────────────────
             redirect_url = f"https://api.autom8.works/r/{token_number.lstrip('#').replace(' ', '-').replace('/', '-')}"
             logger.info(f"[receipt-upload] Using redirect URL: {redirect_url}")
 
