@@ -430,13 +430,13 @@ router.get('/restaurants/:id/waba', async (req, res) => {
     if (req.params.id !== auth.restaurantId) return res.status(403).json({ error: 'Access denied' });
     const { data, error } = await supabaseAdmin
       .from('restaurants')
-      .select('id, name, waba_id, whatsapp_phone_number, whatsapp_display_name')
+      .select('id, name, waba_id, whatsapp_number, display_name')
       .eq('id', auth.restaurantId).single();
     if (error || !data) return res.status(404).json({ error: 'Restaurant not found' });
     res.json({
       success: true, waba_id: data.waba_id ?? null, name: data.name,
-      whatsapp_phone_number: data.whatsapp_phone_number ?? null,
-      whatsapp_display_name: data.whatsapp_display_name ?? data.name,
+      whatsapp_phone_number: data.whatsapp_number ?? null,
+      whatsapp_display_name: data.display_name ?? data.name,
     });
   } catch (err) {
     console.error('[restaurants/:id/waba]', err.message);
@@ -449,7 +449,7 @@ router.get('/:id', async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('restaurants')
-      .select('id, name, waba_id, whatsapp_number, whatsapp_phone_number, whatsapp_display_name, is_active')
+      .select('id, name, waba_id, whatsapp_number, display_name, is_active')
       .eq('id', req.params.id).maybeSingle();
     if (error) return res.status(500).json({ error: error.message });
     if (!data)  return res.status(404).json({ error: 'Restaurant not found' });
@@ -464,7 +464,7 @@ router.get('/', async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('restaurants')
-      .select('id, name, waba_id, whatsapp_number, whatsapp_phone_number, is_active')
+      .select('id, name, waba_id, whatsapp_number, is_active')
       .eq('is_active', true);
     if (error) return res.status(500).json({ error: error.message });
     res.json({ success: true, restaurants: data ?? [] });
