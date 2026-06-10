@@ -569,26 +569,29 @@ async def _upload_and_send_receipt(
                     "Content-Type":  "application/json",
                 },
             )
-            if _sign.status_code != 200:
-                logger.warning(f"[receipt-upload] Signed URL failed {_sign.status_code}: {_sign.text[:200]}")
+if _sign.status_code != 200:
+                logger.warning(f"[receipt-upload] Signed URL failed ...")
                 return
 
             _signed_path = _sign.json().get("signedURL", "")
             receipt_url  = f"{_sb_base}/storage/v1{_signed_path}"
             logger.info(f"[receipt-upload] Signed URL generated (48 h)")
 
-# ── Step 3: use /r/{token} redirect — no shortener needed ────────────
-redirect_url = f"https://api.autom8.works/r/{token_number.lstrip('#').replace(' ', '-').replace('/', '-')}"
-logger.info(f"[receipt-upload] Using redirect URL: {redirect_url}")
+            # ── Step 3: use /r/{token} redirect ──────────────────────────────
+            redirect_url = f"https://api.autom8.works/r/{token_number.lstrip('#').replace(' ', '-').replace('/', '-')}"
+            logger.info(f"[receipt-upload] Using redirect URL: {redirect_url}")
 
-# ── Step 4: send to customer ──────────────────────────────────────────
-await send_whatsapp_message(
-    customer_phone,
-    f"🧾 *Your Receipt — Token {token_number}*\n\n"
-    f"{redirect_url}\n\n"
-    f"⏰ _This link expires in 48 hours. Please save a copy if needed._",
-    restaurant_id,
-)
+            # ── Step 4: send to customer ──────────────────────────────────────
+            await send_whatsapp_message(
+                customer_phone,
+                f"🧾 *Your Receipt — Token {token_number}*\n\n"
+                f"{redirect_url}\n\n"
+                f"⏰ _This link expires in 48 hours. Please save a copy if needed._",
+                restaurant_id,
+            )
+
+    except Exception as e:
+        logger.warning(f"[receipt-upload] Failed (non-fatal): {e}")
 
 # ─────────────────────────────────────────────
 # GENERAL HELPERS
