@@ -1,17 +1,14 @@
 // src/routes/onboarding.js
 // Handles: restaurant registration + default user creation
 // This is the endpoint the WordPress plugin calls when a new restaurant signs up.
-
 const express = require('express');
 const router  = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
 
 // ── POST /api/onboarding/register ────────────────────────────────────────────
-// Creates a new restaurant + owner user in one atomic step.
-// Called by the WordPress plugin after payment is confirmed.
-//
 // Body: { name, email, phone, owner_name, owner_password, whatsapp_number?,
-//         waba_id?, timezone?, dining_duration_minutes?, payment_mode? }
+//         waba_id?, timezone?, dining_duration_minutes?, payment_mode?,
+//         manager_phone?, table_count? }
 
 router.post('/register', async (req, res) => {
   try {
@@ -26,6 +23,8 @@ router.post('/register', async (req, res) => {
       timezone               = 'Asia/Kolkata',
       dining_duration_minutes = 90,
       payment_mode           = 'prepay',
+      manager_phone          = null,
+      table_count            = 0,
     } = req.body;
 
     if (!name || !email || !owner_name || !owner_password)
@@ -43,6 +42,7 @@ router.post('/register', async (req, res) => {
         timezone,
         dining_duration_minutes,
         payment_mode,
+        manager_phone:          manager_phone || null,
         is_active:              true,
         subscribed_features:    ['dine_in', 'takeaway', 'delivery', 'reserve_table'],
       })
@@ -57,7 +57,6 @@ router.post('/register', async (req, res) => {
       email_confirm: true,
     });
     if (authError) {
-      // Roll back restaurant if auth user creation fails
       await supabaseAdmin.from('restaurants').delete().eq('id', restaurant.id);
       throw authError;
     }
@@ -87,18 +86,34 @@ router.post('/register', async (req, res) => {
       });
     } catch (_) {}
 
-    console.log(`[onboarding] ✅ New restaurant: ${name} (${restaurant.id}) — owner: ${email}`);
+    // 5. Auto-create tables if table_count supplied
+    const tableCount = parseInt(table_count) || 0;
+    if (tableCount > 0) {
+      const tableRows = Array.from({ length: tableCount }, (_, i) => ({
+        restaurant_id: restaurant.id,
+        table_number:  i + 1,
+        capacity:      4,
+        status:        'available',
+        is_active:     true,
+      }));
+      const { error: tableError } = await supabaseAdmin
+        .from('tables')
+        .insert(tableRows);
+      if (tableError)
+        console.error(`[onboarding] ⚠️  Table creation failed (non-fatal): ${tableError.message}`);
+      else
+        console.log(`[onboarding] ✅ Created ${tableCount} table(s) for ${restaurant.id}`);
+    }
 
+    console.log(`[onboarding] ✅ New restaurant: ${name} (${restaurant.id}) — owner: ${email}`);
     res.status(201).json({
       success:       true,
       restaurant_id: restaurant.id,
       user_id:       user.id,
       region:        req.region?.region || process.env.REGION || 'IN',
     });
-
   } catch (err) {
     console.error('[onboarding/register]', err.message);
-    // Surface friendly messages for common conflicts
     if (err.message?.includes('duplicate') || err.message?.includes('already exists')) {
       return res.status(409).json({ error: 'A restaurant or user with this email already exists.' });
     }
