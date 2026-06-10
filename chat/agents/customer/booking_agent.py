@@ -1728,7 +1728,7 @@ async def handle_dine_in_flow(
                 create_booking(
                     restaurant_id, customer_id, "dine_in",
                     party_size=session_state.get("party_size"),
-                    table_number=session_state.get("table_number"),
+                    table_number=str(session_state.get("table_number", "")),
                     token_number=token,
                 ),
             )
