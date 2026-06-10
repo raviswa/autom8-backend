@@ -63,7 +63,7 @@ router.post('/register', async (req, res) => {
 
     // 3. Create users table row
     const { data: user, error: userError } = await supabaseAdmin
-      .from('users')
+      .from('employees')
       .insert({
         id:            authData.user.id,
         restaurant_id: restaurant.id,
