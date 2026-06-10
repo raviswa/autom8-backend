@@ -19,7 +19,7 @@ async function auth(req, res) {
   if (error || !user) { res.status(403).json({ error: 'Invalid token' }); return null; }
 
   const { data: userData } = await supabaseAdmin
-    .from('users').select('restaurant_id').eq('id', user.id).single();
+    .from('employees').select('restaurant_id').eq('id', user.id).single();
 
   if (!userData?.restaurant_id) {
     res.status(403).json({ error: 'No restaurant linked to this account' });
