@@ -43,7 +43,7 @@ async function requireAuth(req, res) {
   const { data: { user }, error } = await supabase.auth.getUser(token);
   if (error || !user) { res.status(403).json({ error: 'Invalid token' }); return null; }
   const { data: u } = await supabaseAdmin
-    .from('users').select('role, restaurant_id').eq('id', user.id).single();
+    .from('employees').select('role, restaurant_id').eq('id', user.id).single();
   if (!u) { res.status(403).json({ error: 'User not found' }); return null; }
   return { user, role: u.role, restaurantId: u.restaurant_id };
 }
