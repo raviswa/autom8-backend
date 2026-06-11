@@ -32,7 +32,7 @@ const NOTIFY_ROLES = ['manager', 'kitchen_staff', 'captain', 'waiter', 'owner'];
 
 router.get('/', authenticateToken, getRestaurantId, async (req, res) => {
   try {
-    const isOwner   = req.user_role === 'owner';
+    const isOwner   = ['owner', 'brand_owner', 'brand_manager'].includes(req.user_role);
     const isManager = req.user_role === 'manager';
     if (!isOwner && !isManager)
       return res.status(403).json({ error: 'Unauthorized' });
@@ -66,7 +66,7 @@ router.get('/', authenticateToken, getRestaurantId, async (req, res) => {
 
 router.post('/', authenticateToken, getRestaurantId, async (req, res) => {
   try {
-    const isOwner   = req.user_role === 'owner';
+    const isOwner   = ['owner', 'brand_owner', 'brand_manager'].includes(req.user_role);
     const isManager = req.user_role === 'manager';
     if (!isOwner && !isManager)
       return res.status(403).json({ error: 'Unauthorized' });
@@ -181,7 +181,7 @@ router.post('/', authenticateToken, getRestaurantId, async (req, res) => {
 
 router.put('/:id', authenticateToken, getRestaurantId, async (req, res) => {
   try {
-    const isOwner   = req.user_role === 'owner';
+    const isOwner   = ['owner', 'brand_owner', 'brand_manager'].includes(req.user_role);
     const isManager = req.user_role === 'manager';
     if (!isOwner && !isManager)
       return res.status(403).json({ error: 'Unauthorized' });
@@ -245,7 +245,7 @@ router.put('/:id', authenticateToken, getRestaurantId, async (req, res) => {
 
 router.put('/:id/terminate', authenticateToken, getRestaurantId, async (req, res) => {
   try {
-    const isOwner   = req.user_role === 'owner';
+    const isOwner   = ['owner', 'brand_owner', 'brand_manager'].includes(req.user_role);
     const isManager = req.user_role === 'manager';
     if (!isOwner && !isManager)
       return res.status(403).json({ error: 'Unauthorized' });
