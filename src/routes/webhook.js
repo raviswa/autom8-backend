@@ -7,10 +7,14 @@
 //   3. forwardToChatService()   — all other messages proxied to Python ADK agent
 //
 // Catalog order messages (type === 'order'):
-//   → handleWhatsAppOrder() in server.js (REQ 1 nudge + REQ 4 share + REQ 7 invoice)
+//   → handleWhatsAppOrder() in waHandlers.js
 //
-// All three business-logic helpers are imported from server.js to avoid
-// duplication and to share the same supabaseAdmin client instance.
+// MULTI-OUTLET ROUTING:
+//   Restaurant is resolved from metadata.phone_number_id via restaurant_integrations
+//   (not restaurants.whatsapp_phone_number_id which does not exist in the schema).
+//   A 5-minute in-memory cache (resolveRestaurantByPhone) avoids a DB hit per message.
+
+'use strict';
 
 const express = require('express');
 const router  = express.Router();
@@ -18,19 +22,12 @@ const router  = express.Router();
 const { supabaseAdmin }         = require('../config/supabase');
 const { sendWhatsAppMessage }   = require('../whatsapp');
 const { broadcastToRestaurant } = require('../websocket');
+const { resolveRestaurantByPhone } = require('../helpers/resolveRestaurant');
 
-// Import shared business-logic helpers from server.js.
-// server.js registers module.exports BEFORE requiring this route file
-// (routes are loaded inside the server.listen callback), so the
-// circular reference is safe at runtime.
+const { handleWhatsAppOrder, handleFeedbackReply, validateReferralCode }
+  = require('../handlers/waHandlers');
 
-const { handleWhatsAppOrder, handleFeedbackReply, validateReferralCode } = require('../handlers/waHandlers');
-
-// Internal Python chat service URL — same Railway deployment, different process
-const CHAT_SERVICE_URL = process.env.CHAT_SERVICE_URL || 'http://localhost:8001';
-
-// Referral code pattern — 6-char alphanumeric (e.g. "ABCD12", "9876XY")
-// Matches when the entire message body is exactly a code (with optional whitespace)
+const CHAT_SERVICE_URL  = process.env.CHAT_SERVICE_URL || 'http://localhost:8001';
 const REFERRAL_CODE_REGEX = /^\s*([A-Z0-9]{6})\s*$/i;
 
 // ── GET /api/whatsapp/webhook — Meta verification ────────────────────────────
@@ -65,29 +62,33 @@ router.post('/webhook', async (req, res) => {
         for (const message of value.messages ?? []) {
           console.log(`[WA Webhook] type=${message.type} from=${message.from}`);
 
+          // ── Resolve restaurant_id from phone_number_id ───────────────────
+          // Uses restaurant_integrations table via cached helper.
+          // Falls back to DEFAULT_RESTAURANT_ID env var for dev/staging.
+          let restaurantId = null;
+          if (metadata?.phone_number_id) {
+            restaurantId = await resolveRestaurantByPhone(metadata.phone_number_id)
+              .catch(err => {
+                console.warn('[WA Webhook] resolveRestaurantByPhone error:', err.message);
+                return null;
+              });
+          }
+          if (!restaurantId) {
+            restaurantId = process.env.DEFAULT_RESTAURANT_ID ?? null;
+            if (restaurantId) {
+              console.warn(`[WA Webhook] phone_number_id not found in integrations — using DEFAULT_RESTAURANT_ID`);
+            }
+          }
+
           if (message.type === 'order') {
-            // WhatsApp catalog orders → Node handles (creates POS order + KDS +
-            // REQ 1 condiment nudge via handleWhatsAppOrder in server.js)
-            await handleWhatsAppOrder(message, metadata).catch(err =>
+            await handleWhatsAppOrder(message, metadata, restaurantId).catch(err =>
               console.error('[WA Webhook] handleWhatsAppOrder failed:', err.message)
             );
 
           } else if (message.type === 'text' || message.type === 'button') {
-            // ── Resolve restaurant_id from phone_number_id ─────────────────
-            let restaurantId = process.env.DEFAULT_RESTAURANT_ID || null;
-            if (metadata?.phone_number_id) {
-              const { data: restaurant } = await supabaseAdmin
-                .from('restaurants').select('id')
-                .eq('whatsapp_phone_number_id', metadata.phone_number_id)
-                .eq('is_active', true).single();
-              if (restaurant) restaurantId = restaurant.id;
-            }
-
             const messageText = message.text?.body || message.button?.text || '';
 
-            // ── Priority 1: REQ 3 — Feedback reply check ──────────────────
-            // Must run before referral check: a "4" could be both a rating
-            // and the start of a referral code; feedback takes precedence.
+            // ── Priority 1: Feedback reply ─────────────────────────────────
             const wasFeedback = restaurantId
               ? await handleFeedbackReply(message.from, messageText, restaurantId).catch(err => {
                   console.error('[WA Webhook] handleFeedbackReply failed:', err.message);
@@ -95,22 +96,18 @@ router.post('/webhook', async (req, res) => {
                 })
               : false;
 
-            if (wasFeedback) continue; // Consumed — skip Python proxy
+            if (wasFeedback) continue;
 
-            // ── Priority 2: REQ 4 — Referral code detection ───────────────
-            // Only triggers when the entire message body matches the 6-char
-            // alphanumeric pattern so normal conversation is never hijacked.
+            // ── Priority 2: Referral code ──────────────────────────────────
             const referralMatch = messageText.match(REFERRAL_CODE_REGEX);
             if (referralMatch && restaurantId) {
               const wasReferral = await validateReferralCode(
-                message.from,
-                referralMatch[1],
-                restaurantId
+                message.from, referralMatch[1], restaurantId
               ).catch(err => {
                 console.error('[WA Webhook] validateReferralCode failed:', err.message);
                 return false;
               });
-              if (wasReferral) continue; // Consumed — skip Python proxy
+              if (wasReferral) continue;
             }
 
             // ── Priority 3: Forward to Python chat service ─────────────────
@@ -119,25 +116,22 @@ router.post('/webhook', async (req, res) => {
             );
 
           } else {
-            // All other message types (interactive, location, sticker, etc.)
-            // → proxy to Python chat service
             await forwardToChatService(message, metadata, value).catch(err =>
               console.error('[WA Webhook] forwardToChatService failed:', err.message)
             );
           }
 
-          // Audit log — best-effort, never blocks message processing
-          try {
-            await supabaseAdmin.from('audit_logs').insert({
-              action:  'WhatsApp message received',
-              details: {
-                type:            message.type,
-                from:            message.from,
-                phone_number_id: metadata?.phone_number_id,
-                message_id:      message.id,
-              },
-            });
-          } catch (_) {}
+          // Audit log — best-effort
+          supabaseAdmin.from('audit_logs').insert({
+            action:        'WhatsApp message received',
+            restaurant_id: restaurantId,
+            details: {
+              type:            message.type,
+              from:            message.from,
+              phone_number_id: metadata?.phone_number_id,
+              message_id:      message.id,
+            },
+          }).catch(() => {});
         }
       }
     }
@@ -146,7 +140,7 @@ router.post('/webhook', async (req, res) => {
   }
 });
 
-// ── Forward non-order, non-feedback messages to Python chat service ──────────
+// ── Forward to Python chat service ───────────────────────────────────────────
 async function forwardToChatService(message, metadata, value) {
   try {
     const response = await fetch(`${CHAT_SERVICE_URL}/webhook/botbiz`, {
@@ -161,18 +155,16 @@ async function forwardToChatService(message, metadata, value) {
           }],
         }],
       }),
-      signal: AbortSignal.timeout(10_000), // 10-second guard — never block Node event loop
+      signal: AbortSignal.timeout(10_000),
     });
 
     if (!response.ok) {
       const body = await response.text().catch(() => '');
       console.error(`[webhook-proxy] Python returned ${response.status}: ${body.slice(0, 200)}`);
     } else {
-      console.log(`[webhook-proxy] ✅ Forwarded ${message.type} from ${message.from} to chat service`);
+      console.log(`[webhook-proxy] ✅ Forwarded ${message.type} from ${message.from}`);
     }
   } catch (err) {
-    // Network error (Python service down, timeout, etc.) — log and move on.
-    // The WhatsApp ACK is already sent so Meta will not retry.
     console.error(`[webhook-proxy] Failed to reach chat service: ${err.message}`);
   }
 }
