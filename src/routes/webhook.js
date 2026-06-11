@@ -20,7 +20,7 @@ const express = require('express');
 const router  = express.Router();
 
 const { supabaseAdmin }         = require('../config/supabase');
-const { sendWhatsAppMessage }   = require('../whatsapp');
+const { sendWhatsAppMessage }   = require('../helpers/whatsapp');
 const { broadcastToRestaurant } = require('../websocket');
 const { resolveRestaurantByPhone } = require('../helpers/resolveRestaurant');
 
