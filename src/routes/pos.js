@@ -7,9 +7,9 @@ const router  = express.Router();
 const { supabaseAdmin }           = require('../config/supabase');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { broadcastToRestaurant }   = require('../websocket');
-const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../whatsapp');
-const { applySlotAvailability, getCurrentSlotIST, triggerMetaFeedRefetch, mapTimeSlot } = require('../catalog');
-const { notifyOrderReady }        = require('../helpers/notifyOrderReady');
+const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../helpers/whatsapp');
+const { applySlotAvailability, getCurrentSlotIST, triggerMetaFeedRefetch, mapTimeSlot } = require('./catalog');
+const { notifyOrderReady }        = require('../helpers/whatsapp');
 
 // ── Menu items ───────────────────────────────────────────────────────────────
 
