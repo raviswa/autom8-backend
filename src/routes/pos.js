@@ -294,62 +294,6 @@ router.put('/kds/:id/status', authenticateToken, getRestaurantId, async (req, re
   }
 });
 
-    if (!restaurant_id || !items || items.length === 0)
-      return res.status(400).json({ error: 'restaurant_id and items are required' });
-
-    const orderNumber = `ORD-WA-${Date.now()}`;
-    let tableId = null;
-    if (table_number) {
-      const { data: tableRow } = await supabaseAdmin.from('tables').select('id')
-        .eq('restaurant_id', restaurant_id).eq('table_number', String(table_number)).maybeSingle();
-      if (tableRow) tableId = tableRow.id;
-    }
-
-    const { data: orderData, error: orderError } = await supabaseAdmin.from('orders')
-      .insert({ restaurant_id, table_id: tableId, order_number: orderNumber, status: 'pending', source: 'whatsapp' })
-      .select().single();
-    if (orderError) return res.status(500).json({ error: orderError.message });
-
-    let subtotal = 0, kdsCreated = 0;
-    const kdsInserts = [];
-
-    for (const item of items) {
-      let menuItemId = null, resolvedPrice = item.unit_price || 0;
-      if (item.retailer_id && item.retailer_id !== 'manual') {
-        const { data: menuItem } = await supabaseAdmin.from('menu_items').select('id, price')
-          .eq('restaurant_id', restaurant_id).eq('retailer_id', item.retailer_id).maybeSingle();
-        if (menuItem) { menuItemId = menuItem.id; resolvedPrice = menuItem.price; }
-      }
-      subtotal += resolvedPrice * (item.qty || 1);
-      const { data: orderItem, error: itemError } = await supabaseAdmin.from('order_items')
-        .insert({ order_id: orderData.id, menu_item_id: menuItemId, quantity: item.qty || 1, unit_price: resolvedPrice, special_instructions: item.name })
-        .select().single();
-      if (itemError) { console.error(`[kds-notify] order_item insert failed:`, itemError.message); continue; }
-      kdsInserts.push({ restaurant_id, order_item_id: orderItem.id, status: 'pending', priority: 'normal', special_instructions: special_notes || null, item_name: item.name, token_number: token_number || null, customer_phone: customer_phone || null, service_type: service_type || null });
-    }
-
-    if (kdsInserts.length > 0) {
-      const { error: kdsError } = await supabaseAdmin.from('kds_items').insert(kdsInserts);
-      if (kdsError) console.error('[kds-notify] kds_items insert failed:', kdsError.message);
-      else kdsCreated = kdsInserts.length;
-    }
-
-    const tax = subtotal * 0.1, total = subtotal + tax;
-    await supabaseAdmin.from('orders').update({ subtotal, tax, total_amount: total }).eq('id', orderData.id);
-
-    broadcastToRestaurant(restaurant_id, { type: 'ORDER_NEW', order_id: orderData.id, order_number: orderNumber, token_number, table_number: table_number || null, customer_name, service_type: service_type || 'whatsapp', kds_items_count: kdsCreated, special_notes: special_notes || null, source: 'whatsapp', timestamp: new Date().toISOString() });
-
-    try {
-      await supabaseAdmin.from('audit_logs').insert({ restaurant_id, action: 'KDS notified via WhatsApp order', details: { order_id: orderData.id, order_number: orderNumber, token_number, table_number, customer_phone, kds_items_created: kdsCreated } });
-    } catch (_) {}
-
-    res.json({ success: true, order_id: orderData.id, order_number: orderNumber, kds_items_created: kdsCreated });
-  } catch (err) {
-    console.error('[kds-notify]', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // ── Tables ───────────────────────────────────────────────────────────────────
 
 router.get('/tables', authenticateToken, getRestaurantId, async (req, res) => {
