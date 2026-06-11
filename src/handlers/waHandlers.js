@@ -510,7 +510,7 @@ async function generateReferralSharePrompt(customerPhone, restaurantId, customer
 // Wrapped in a top-level try/catch — any unhandled error is logged, not thrown.
 // ============================================================================
 
-async function handleWhatsAppOrder(message, metadata) {
+async function handleWhatsAppOrder(message, metadata, preResolvedRestaurantId = null) {
   try {
     const customerPhone = message?.from;
     const productItems  = message?.order?.product_items ?? [];
@@ -525,16 +525,16 @@ async function handleWhatsAppOrder(message, metadata) {
     }
 
     // ── Resolve restaurant from phone_number_id ───────────────────────────────
-    let restaurantId = process.env.DEFAULT_RESTAURANT_ID || null;
-    if (metadata?.phone_number_id) {
+    // Uses restaurant_integrations (not restaurants.whatsapp_phone_number_id
+    // which does not exist in the schema).
+    // resolveRestaurantByPhone is cached (5-min TTL) to avoid a DB hit per order.
+    // Webhook.js pre-resolves and passes it directly; resolve here as fallback.
+    let restaurantId = preResolvedRestaurantId || process.env.DEFAULT_RESTAURANT_ID || null;
+    if (!restaurantId && metadata?.phone_number_id) {
       try {
-        const { data: restaurant } = await supabaseAdmin
-          .from('restaurants')
-          .select('id')
-          .eq('whatsapp_phone_number_id', metadata.phone_number_id)
-          .eq('is_active', true)
-          .single();
-        if (restaurant?.id) restaurantId = restaurant.id;
+        const { resolveRestaurantByPhone } = require('../helpers/resolveRestaurant');
+        const resolved = await resolveRestaurantByPhone(metadata.phone_number_id);
+        if (resolved) restaurantId = resolved;
       } catch (resolveErr) {
         console.warn('[waHandlers:order] Restaurant resolve error:', resolveErr.message);
       }
