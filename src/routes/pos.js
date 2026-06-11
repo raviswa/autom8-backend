@@ -8,7 +8,7 @@ const { supabaseAdmin }           = require('../config/supabase');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { broadcastToRestaurant }   = require('../websocket');
 const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../helpers/whatsapp');
-const { applySlotAvailability, getCurrentSlotIST, triggerMetaFeedRefetch, mapTimeSlot } = require('./catalog');
+const { applySlotAvailability, getCurrentSlotIST } = require('./catalog');
 const { notifyOrderReady }        = require('../helpers/whatsapp');
 
 // ── Menu items ───────────────────────────────────────────────────────────────
@@ -66,10 +66,6 @@ router.post('/menu-items', authenticateToken, getRestaurantId, async (req, res) 
   }
 });
 
-router.put('/menu-items/:id/availability', authenticateToken, getRestaurantId, async (req, res) => {
-  try {
-    if (req.user_role !== 'owner' && req.user_role !== 'manager')
-      return res.status(403).json({ error: 'Unauthorized' });
 
     const isStocked = Boolean(req.body.is_available);
 
@@ -346,11 +342,6 @@ router.put('/kds/:id/status', authenticateToken, getRestaurantId, async (req, re
   }
 });
 
-router.post('/kds/notify', async (req, res) => {
-  try {
-    const { secret, restaurant_id, customer_name, customer_phone, token_number, table_number, service_type, special_notes, items } = req.body;
-    const expected = process.env.AUTOM8_KDS_SECRET || 'munafe_kds_sync_2026';
-    if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
     if (!restaurant_id || !items || items.length === 0)
       return res.status(400).json({ error: 'restaurant_id and items are required' });
 
