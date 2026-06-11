@@ -1,18 +1,18 @@
 // src/middleware/auth.js
-// Extracted from server.js — authenticateToken + getRestaurantId
+// ============================================================================
+// Authentication + context middleware
 //
-// FIX 1: getRestaurantId now queries 'employees' (renamed from 'users').
-//        The migration creates a VIEW public.users as a fallback, but
-//        pointing here directly is cleaner and removes the VIEW dependency.
-//
-// FIX 2: authenticateToken now uses supabaseAdmin.auth.getUser(token)
-//        instead of supabase.auth.getUser(token).
-//        The anon client requires ANON_KEY env var to be set correctly;
-//        if it's missing or misconfigured, every request returns 403.
-//        supabaseAdmin uses SERVICE_ROLE_KEY which is always required
-//        for the server to start — so if admin works, auth works.
+// authenticateToken  — validates Bearer JWT via Supabase admin
+// getRestaurantId    — attaches restaurant_id, brand_id, user_role, scope
+//                      Handles both outlet employees AND brand-level employees
+//                      (brand_owner / brand_manager have restaurant_id = NULL)
+// ============================================================================
+
+'use strict';
 
 const { supabaseAdmin } = require('../config/supabase');
+
+const BRAND_ROLES = ['brand_owner', 'brand_manager'];
 
 // ── authenticateToken ────────────────────────────────────────────────────────
 // Validates the Bearer JWT via Supabase admin client.
@@ -32,45 +32,76 @@ const authenticateToken = async (req, res, next) => {
 };
 
 // ── getRestaurantId ──────────────────────────────────────────────────────────
-// Looks up the employee record to attach restaurant_id and role to the request.
-// Must run after authenticateToken (depends on req.user.sub).
+// Looks up the employee record to attach context to the request.
+//
+// For outlet employees:
+//   req.restaurant_id — the employee's outlet UUID
+//   req.brand_id      — the outlet's brand UUID (may be null for standalone)
+//   req.user_role     — 'owner' | 'manager' | 'kitchen_staff' | ...
+//   req.scope         — 'outlet'
+//
+// For brand employees (brand_owner, brand_manager):
+//   req.restaurant_id — null  (brand employees are not tied to a single outlet)
+//   req.brand_id      — the brand UUID
+//   req.user_role     — 'brand_owner' | 'brand_manager'
+//   req.scope         — 'brand'
+//
+// Endpoints that require a specific outlet_id should use req.brand_id +
+// verify the requested outlet belongs to that brand, rather than relying
+// on req.restaurant_id directly.
 
 const getRestaurantId = async (req, res, next) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('employees')
-      .select('restaurant_id, role, is_active')
+      .select('restaurant_id, brand_id, role, is_active')
       .eq('id', req.user.sub)
       .single();
 
     if (error) return res.status(401).json({ error: `Employee lookup failed: ${error.message}` });
     if (!data)  return res.status(401).json({ error: 'Employee profile not found.' });
 
-    // Terminated employees cannot access the system
-    if (data.is_active === false)
+    if (!data.is_active)
       return res.status(403).json({ error: 'Your account has been deactivated. Contact your manager.' });
 
-    if (!data.restaurant_id) {
-      // Dev/staging fallback: if this employee has no restaurant assigned
-      // and there is exactly one restaurant in the DB, use it.
-      // This never triggers in production (every employee has restaurant_id at creation).
-      const { data: restaurants } = await supabaseAdmin
-        .from('restaurants')
-        .select('id')
-        .eq('is_active', true)
-        .limit(2);
+    // ── Brand-level employees: no restaurant_id, scope = brand ───────────────
+    if (BRAND_ROLES.includes(data.role)) {
+      if (!data.brand_id)
+        return res.status(403).json({ error: 'Brand employee has no brand assigned.' });
 
-      if (restaurants?.length === 1) {
-        req.restaurant_id = restaurants[0].id;
-        req.user_role     = data.role;
-        return next();
-      }
-      return res.status(401).json({ error: 'Employee has no restaurant assigned.' });
+      req.restaurant_id = null;
+      req.brand_id      = data.brand_id;
+      req.user_role     = data.role;
+      req.scope         = 'brand';
+      return next();
     }
 
-    req.restaurant_id = data.restaurant_id;
-    req.user_role     = data.role;
-    next();
+    // ── Outlet-level employees ────────────────────────────────────────────────
+    if (data.restaurant_id) {
+      req.restaurant_id = data.restaurant_id;
+      req.brand_id      = data.brand_id ?? null;
+      req.user_role     = data.role;
+      req.scope         = 'outlet';
+      return next();
+    }
+
+    // ── Fallback for dev/staging (single-restaurant environment only) ─────────
+    const { data: restaurants } = await supabaseAdmin
+      .from('restaurants')
+      .select('id')
+      .eq('is_active', true)
+      .limit(2);
+
+    if (restaurants?.length === 1) {
+      req.restaurant_id = restaurants[0].id;
+      req.brand_id      = data.brand_id ?? null;
+      req.user_role     = data.role;
+      req.scope         = 'outlet';
+      return next();
+    }
+
+    return res.status(401).json({ error: 'Employee has no restaurant assigned.' });
+
   } catch (err) {
     res.status(401).json({ error: `Auth middleware failed: ${err.message}` });
   }
