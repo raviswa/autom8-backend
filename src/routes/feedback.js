@@ -14,8 +14,8 @@ const express = require('express');
 const router  = express.Router();
 
 const { supabaseAdmin }       = require('../config/supabase');
-const { sendWhatsAppMessage } = require('../helpers/whatsapp');
 const { queueFeedbackForTable } = require('../helpers/feedback');
+const { sendFeedbackInvite } = require('../helpers/feedbackFlow');
 
 const { isValidKdsSecret } = require('../config/internalSecret');
 
@@ -120,22 +120,7 @@ function startFeedbackScheduler() {
 
           sentPhones.add(dedupeKey);
 
-          await sendWhatsAppMessage(
-            record.customer_phone,
-            `Hi ${record.customer_name}! 😊\n\n` +
-            `Thank you for dining with us today` +
-            (record.table_number ? ` (Table *${record.table_number}*)` : '') +
-            `.\n\n` +
-            `*How was your experience?*\n\n` +
-            `⭐ Reply with a rating from *1 to 5*:\n` +
-            `5 ⭐ — Excellent\n` +
-            `4 ⭐ — Good\n` +
-            `3 ⭐ — Average\n` +
-            `2 ⭐ — Below average\n` +
-            `1 ⭐ — Poor\n\n` +
-            `You can also add comments after your rating. 🙏`,
-            record.restaurant_id
-          );
+          await sendFeedbackInvite(record);
 
           // Close any other open rows for this customer (legacy duplicates)
           await supabaseAdmin

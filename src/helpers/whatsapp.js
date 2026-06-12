@@ -186,4 +186,61 @@ async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
   }
 }
 
-module.exports = { sendWhatsAppMessage, sendWhatsAppCatalogMessage, notifyOrderReady };
+// ── sendWhatsAppInteractive ───────────────────────────────────────────────────
+// Sends a WhatsApp interactive message (list, button, etc.).
+
+async function sendWhatsAppInteractive(toNumber, interactive, restaurantId = null) {
+  try {
+    let accessToken   = process.env.WHATSAPP_ACCESS_TOKEN;
+    let phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+    let apiUrl        = process.env.WHATSAPP_API_URL;
+
+    if (restaurantId) {
+      const { data: integration } = await supabaseAdmin
+        .from('restaurant_integrations')
+        .select('access_token, phone_number_id, api_endpoint')
+        .eq('restaurant_id', restaurantId)
+        .eq('provider', 'meta')
+        .eq('is_active', true)
+        .maybeSingle();
+
+      if (integration?.access_token)    accessToken   = integration.access_token;
+      if (integration?.phone_number_id) phoneNumberId = integration.phone_number_id;
+      if (integration?.api_endpoint)    apiUrl        = integration.api_endpoint;
+    }
+
+    if (!accessToken || !phoneNumberId || !apiUrl) {
+      console.warn(`[WhatsApp] Missing credentials — skipping interactive to ${toNumber}`);
+      return false;
+    }
+
+    const response = await fetch(`${apiUrl}/${phoneNumberId}/messages`, {
+      method:  'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to:   String(toNumber),
+        type: 'interactive',
+        interactive,
+      }),
+      signal: AbortSignal.timeout(8_000),
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      console.error('[WhatsApp] Interactive API error:', JSON.stringify(err).slice(0, 300));
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('[WhatsApp] Interactive send failed:', err.message);
+    return false;
+  }
+}
+
+module.exports = {
+  sendWhatsAppMessage,
+  sendWhatsAppInteractive,
+  sendWhatsAppCatalogMessage,
+  notifyOrderReady,
+};

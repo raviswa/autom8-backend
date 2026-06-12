@@ -1,7 +1,7 @@
 // src/routes/webhook.js
 // Handles: WhatsApp webhook verification + message routing
 //
-// Message routing priority (text/button messages):
+// Message routing priority (text/button/interactive messages):
 //   1. handleFeedbackReply()    — consumes a feedback star/rating reply (REQ 3)
 //   2. validateReferralCode()   — consumes a 6-char alphanumeric referral code (REQ 4)
 //   3. forwardToChatService()   — all other messages proxied to Python ADK agent
@@ -85,12 +85,16 @@ router.post('/webhook', async (req, res) => {
               console.error('[WA Webhook] handleWhatsAppOrder failed:', err.message)
             );
 
-          } else if (message.type === 'text' || message.type === 'button') {
-            const messageText = message.text?.body || message.button?.text || '';
+          } else if (message.type === 'text' || message.type === 'button' || message.type === 'interactive') {
+            const messageText = message.text?.body
+              || message.button?.text
+              || message.interactive?.list_reply?.title
+              || message.interactive?.button_reply?.title
+              || '';
 
             // ── Priority 1: Feedback reply ─────────────────────────────────
             const wasFeedback = restaurantId
-              ? await handleFeedbackReply(message.from, messageText, restaurantId).catch(err => {
+              ? await handleFeedbackReply(message.from, message, restaurantId).catch(err => {
                   console.error('[WA Webhook] handleFeedbackReply failed:', err.message);
                   return false;
                 })

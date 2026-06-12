@@ -55,9 +55,19 @@ async function queueFeedbackForTable({
       return;
     }
 
-    // Resolve table_number for the feedback message if not supplied
+    // Resolve table_number and visit type from token / table
     let tableNumber = null;
-    if (tableId) {
+
+    if (tokenId) {
+      const { data: tokenRow } = await supabaseAdmin
+        .from('walk_in_tokens')
+        .select('table_number')
+        .eq('id', tokenId)
+        .maybeSingle();
+      if (tokenRow?.table_number != null) tableNumber = String(tokenRow.table_number);
+    }
+
+    if (tableId && tableNumber == null) {
       const { data: tableRow } = await supabaseAdmin
         .from('tables')
         .select('table_number')
@@ -96,13 +106,13 @@ async function queueFeedbackForTable({
     const { error: insertErr } = await supabaseAdmin
       .from('feedback_pending')
       .insert({
-        restaurant_id:  restaurantId,
-        customer_phone: cleanPhone,
-        customer_name:  customerName || 'Guest',
-        token_number:   tokenId       ?? null,
-        table_number:   tableNumber   !== null ? String(tableNumber) : null,
-        freed_at:       new Date().toISOString(),
-        feedback_sent:  false,
+        restaurant_id:    restaurantId,
+        customer_phone:   cleanPhone,
+        customer_name:    customerName || 'Guest',
+        token_number:     tokenId ?? null,
+        table_number:     tableNumber !== null ? String(tableNumber) : null,
+        freed_at:         new Date().toISOString(),
+        feedback_sent:    false,
         manager_notified: false,
       });
 

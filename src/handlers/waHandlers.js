@@ -257,83 +257,8 @@ async function sendWhatsAppMessage(toNumber, message, restaurantId = null) {
   }
 }
 
-// ============================================================================
-// handleFeedbackReply
-// Called from webhook.js when an inbound WA message may be a feedback rating.
-// Returns true if the message was consumed as feedback, false otherwise.
-// ============================================================================
-
-async function handleFeedbackReply(customerPhone, message, restaurantId) {
-  try {
-    if (!customerPhone || !restaurantId) return false;
-
-    const phone = String(customerPhone).replace(/\D/g, '');
-    if (!phone) return false;
-
-    const { data: record } = await supabaseAdmin
-      .from('feedback_pending')
-      .select('*')
-      .eq('customer_phone', phone)
-      .eq('restaurant_id', restaurantId)
-      .eq('feedback_sent', true)      // invitation already dispatched
-      .eq('manager_notified', false)  // not yet processed
-      .order('freed_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (!record) return false;
-
-    const text       = (message || '').trim();
-    const digitMatch = text.match(/\b([1-5])\b/);
-    const starMatch  = text.match(/([⭐★]+)/);
-    let rating = null;
-    if (digitMatch) {
-      rating = parseInt(digitMatch[1], 10);
-    } else if (starMatch) {
-      rating = Math.min((starMatch[1].match(/[⭐★]/g) || []).length, 5) || null;
-    }
-
-    // Persist customer reply
-    await supabaseAdmin
-      .from('feedback_pending')
-      .update({
-        feedback_text:        text,
-        feedback_rating:      rating,
-        feedback_received_at: new Date().toISOString(),
-        manager_notified:     true,
-      })
-      .eq('id', record.id);
-
-    // Thank-you to customer
-    const thankYou = (rating && rating >= 4)
-      ? `🙏 Thank you for the *${rating}⭐* rating, ${record.customer_name}!\n\nWe're so glad you enjoyed your visit. See you again soon! 😊`
-      : `🙏 Thank you for your honest feedback, ${record.customer_name}!\n\nWe'll use it to make things better. Hope to see you again! 😊`;
-    await sendWhatsAppMessage(customerPhone, thankYou);
-
-    // Manager escalation alert
-    if (process.env.MANAGER_WHATSAPP_NUMBER) {
-      const starBar     = rating ? '⭐'.repeat(rating) + ` (${rating}/5)` : 'No rating given';
-      const tableLabel  = record.table_number ? `Table ${record.table_number}` : 'Unknown table';
-      const urgencyFlag = (rating && rating <= 2)
-        ? '🚨 *LOW SCORE — Immediate follow-up recommended*\n'
-        : '';
-      await sendWhatsAppMessage(
-        process.env.MANAGER_WHATSAPP_NUMBER,
-        `📣 *Customer Feedback Alert*\n────────────────────\n${urgencyFlag}` +
-        `Customer: *${record.customer_name}*\nPhone:    +${phone}\n` +
-        `Token:    ${record.token_number || '—'}\nTable:    ${tableLabel}\n` +
-        `Rating:   ${starBar}\n────────────────────\n` +
-        `*Notes:*\n${text || '(no text provided)'}\n────────────────────\n` +
-        `Received: ${new Date().toISOString()}`
-      );
-    }
-
-    return true;
-  } catch (err) {
-    console.error('[waHandlers:handleFeedbackReply]', err.message);
-    return false;
-  }
-}
+// Multi-step feedback (rating → aspects → comment) lives in feedbackFlow.js
+const { handleFeedbackReply } = require('../helpers/feedbackFlow');
 
 // ============================================================================
 // validateReferralCode
@@ -547,7 +472,7 @@ async function handleWhatsAppOrder(message, metadata, preResolvedRestaurantId = 
     // ── Check for feedback reply before treating as new order ─────────────────
     const wasFeedback = await handleFeedbackReply(
       customerPhone,
-      message?.text?.body || '',
+      message,
       restaurantId
     ).catch(err => {
       console.error('[waHandlers:order] Feedback check error (non-fatal):', err.message);
