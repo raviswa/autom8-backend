@@ -121,17 +121,22 @@ _MENU_CACHE: dict = {"items": [], "fetched_at": 0.0}
 _MENU_CACHE_TTL = 60  # seconds — refresh every minute so slot changes propagate
 
 # Mapping from DB time_slot values to the display labels used throughout the bot
+# Must cover every time_slot value stored in menu_items (see catalog.js mapTimeSlot).
 _SLOT_DB_TO_LABEL: dict[str, str] = {
     "morning_tiffin": "Morning Tiffin",
+    "morning":        "Morning Tiffin",
     "lunch":          "Lunch",
     "evening_snacks": "Evening Snacks",
+    "snacks":         "Evening Snacks",
     "dinner_tiffin":  "Dinner Tiffin",
+    "dinner":         "Dinner Tiffin",
+    "all":            "All Day",
 }
 
 
 # ── Live menu fetch ────────────────────────────────────────────────────────────
 
-async def _fetch_menu_items_from_backend() -> list[dict]:
+async def _fetch_menu_items_from_backend(restaurant_id: str | None = None) -> list[dict]:
     """
     Fetch all menu items from the autom8 backend (restaurant DB).
     Uses a 60-second in-process cache so we don't hammer the API.
@@ -146,13 +151,14 @@ async def _fetch_menu_items_from_backend() -> list[dict]:
     if _MENU_CACHE["items"] and (now - _MENU_CACHE["fetched_at"]) < _MENU_CACHE_TTL:
         return _MENU_CACHE["items"]
 
+    rid = restaurant_id or _PORTAL_RESTAURANT_ID
     url = f"{_AUTOM8_BACKEND_URL}/api/internal/menu-items"
     try:
         async with aiohttp.ClientSession() as http:
             resp = await http.get(
                 url,
                 headers={"x-internal-secret": _AUTOM8_KDS_SECRET},
-                params={"restaurant_id": _PORTAL_RESTAURANT_ID},
+                params={"restaurant_id": rid},
                 timeout=aiohttp.ClientTimeout(total=5),
             )
             if resp.status == 200:
@@ -160,8 +166,8 @@ async def _fetch_menu_items_from_backend() -> list[dict]:
                 raw_items = data.get("items", [])
                 mapped = []
                 for item in raw_items:
-                    slot_db    = item.get("time_slot", "")
-                    slot_label = _SLOT_DB_TO_LABEL.get(slot_db, "Morning Tiffin")
+                    slot_db    = (item.get("time_slot") or "all").strip().lower()
+                    slot_label = _SLOT_DB_TO_LABEL.get(slot_db, "All Day")
                     # price in DB is rupees (e.g. 60.0); bot expects paise (e.g. 6000)
                     price_paise = int(float(item.get("price", 0)) * 100)
                     mapped.append({
@@ -191,13 +197,13 @@ async def _fetch_menu_items_from_backend() -> list[dict]:
     return _MENU_CACHE["items"]  # stale or empty — never crashes the bot
 
 
-async def fetch_menu_items() -> list[dict]:
+async def fetch_menu_items(restaurant_id: str | None = None) -> list[dict]:
     """
     Public async entry point. Call this in all async contexts (send_category_list,
     handle_incoming_message, etc.) to keep the cache warm.
     Returns the full menu item list.
     """
-    return await _fetch_menu_items_from_backend()
+    return await _fetch_menu_items_from_backend(restaurant_id)
 
 
 # Public alias — keeps all existing `from tools.catalog_tools import MENU_ITEMS`
@@ -455,7 +461,7 @@ async def send_whatsapp_catalog_message(
     restaurant_label = await _get_restaurant_label(restaurant_id)
 
     # Warm the cache — ALL items, no slot filter
-    items = await fetch_menu_items()
+    items = await fetch_menu_items(restaurant_id)
 
     if not items:
         logger.error(

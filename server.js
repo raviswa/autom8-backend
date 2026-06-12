@@ -18,6 +18,7 @@ const cors    = require('cors');
 
 const { startAllSchedulers } = require('./src/schedulers/index');
 const { attachWebSocketServer } = require('./src/websocket');
+const { handleInternalMenuItems } = require('./src/routes/catalog');
 
 if (process.env.NODE_ENV === 'production' && !process.env.AUTOM8_KDS_SECRET) {
   throw new Error('AUTOM8_KDS_SECRET must be set in production');
@@ -57,6 +58,7 @@ app.use('/api/brands',      require('./src/routes/brands'));
 // ── Specific /api sub-paths (must come before the catch-all pos router) ──────
 app.use('/api/kds',         require('./src/routes/kds'));          // FULL kds/notify
 app.use('/api/catalog',     require('./src/routes/catalog'));      // catalog sync + feed + menu upload
+app.get('/api/internal/menu-items', handleInternalMenuItems);      // Python chat menu cache
 app.use('/api/tokens',      require('./src/routes/tokens'));
 app.use('/api/feedback',    require('./src/routes/feedback'));
 app.use('/api/referrals',   require('./src/routes/referrals'));

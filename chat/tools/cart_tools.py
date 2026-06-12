@@ -368,7 +368,8 @@ async def send_category_list(
     """
     # Warm the menu cache before building the list — ensures MENU_ITEMS always
     # reflects the latest items from the restaurant DB (not the static list).
-    await fetch_menu_items()
+    restaurant_id = session_state.get("restaurant_id")
+    await fetch_menu_items(restaurant_id)
 
     slot       = current_time_slot()
     slot_emoji = _SLOT_EMOJI.get(slot, "🍽️")
@@ -435,6 +436,7 @@ async def send_item_list(
     previously caused HTTP 400 "Row description is too long" errors from the
     WhatsApp API — especially when a cart note was appended.
     """
+    await fetch_menu_items(session_state.get("restaurant_id"))
     items = items_for_slot(category)
     if not items:
         return False

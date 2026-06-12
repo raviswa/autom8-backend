@@ -46,11 +46,22 @@ function mapTimeSlot(raw) {
   const MAP = {
     'morning tiffin': 'morning_tiffin', morning_tiffin: 'morning_tiffin',
     lunch: 'lunch',
-    'evening snacks': 'snacks',         snacks: 'snacks',
+    'evening snacks': 'snacks',         snacks: 'snacks', evening_snacks: 'snacks',
     'dinner tiffin':  'dinner',         dinner: 'dinner', dinner_tiffin: 'dinner',
     all: 'all',
   };
   return MAP[String(raw).toLowerCase().trim()] || 'all';
+}
+
+/** DB time_slot values that belong to the active scheduler slot (aliases included). */
+function slotDbValuesForActive(slotDbValue) {
+  const ALIASES = {
+    morning_tiffin: ['morning_tiffin'],
+    lunch:          ['lunch'],
+    snacks:         ['snacks', 'evening_snacks'],
+    dinner:         ['dinner', 'dinner_tiffin'],
+  };
+  return ALIASES[slotDbValue] ?? [slotDbValue];
 }
 
 async function applySlotAvailability(restaurantId, slotDbValue) {
@@ -61,20 +72,22 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
       .eq('restaurant_id', restaurantId);
     return { available: 0, unavailable: 'all' };
   }
+  const activeSlots = [...slotDbValuesForActive(slotDbValue), 'all'];
   const { data: activated,   error: e1 } = await supabaseAdmin.from('menu_items')
     .update({ is_available: true,  updated_at: new Date().toISOString() })
     .eq('restaurant_id', restaurantId).eq('is_stocked', true)
-    .in('time_slot', [slotDbValue, 'all']).select('id');
+    .in('time_slot', activeSlots).select('id');
   if (e1) throw e1;
+  const inList = activeSlots.map(s => `"${s}"`).join(',');
   const { data: deactivated, error: e2 } = await supabaseAdmin.from('menu_items')
     .update({ is_available: false, updated_at: new Date().toISOString() })
     .eq('restaurant_id', restaurantId)
-    .not('time_slot', 'in', `("${slotDbValue}","all")`).select('id');
+    .not('time_slot', 'in', `(${inList})`).select('id');
   if (e2) throw e2;
   await supabaseAdmin.from('menu_items')
     .update({ is_available: false, updated_at: new Date().toISOString() })
     .eq('restaurant_id', restaurantId).eq('is_stocked', false)
-    .in('time_slot', [slotDbValue, 'all']);
+    .in('time_slot', activeSlots);
   console.log(`  ✅ Activated: ${activated?.length ?? 0} | Deactivated: ${deactivated?.length ?? 0}`);
   return { slot: slotDbValue, available: activated?.length ?? 0, unavailable: deactivated?.length ?? 0 };
 }
@@ -356,9 +369,11 @@ router.get('/feed/template', async (req, res) => {
   }
 });
 
-// ── GET /api/internal/menu-items — Python chat service ───────────────────────
+// ── GET internal menu — Python chat service ───────────────────────────────────
+//   /api/catalog/internal-menu
+//   /api/internal/menu-items  (alias registered in server.js)
 
-router.get('/internal-menu', async (req, res) => {
+async function handleInternalMenuItems(req, res) {
   try {
     if (req.headers['x-internal-secret'] !== getKdsSecret())
       return res.status(403).json({ error: 'Forbidden' });
@@ -368,6 +383,7 @@ router.get('/internal-menu', async (req, res) => {
     const { data, error } = await supabaseAdmin.from('menu_items')
       .select('id, name, description, price, image_url, time_slot, retailer_id, is_available, is_stocked, category')
       .eq('restaurant_id', restaurantId)
+      .eq('is_stocked', true)
       .order('time_slot', { ascending: true }).order('name', { ascending: true });
 
     if (error) throw error;
@@ -375,7 +391,9 @@ router.get('/internal-menu', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
+}
+
+router.get('/internal-menu', handleInternalMenuItems);
 
 // ── POST /api/menu/upload — Bulk menu upload from Excel/CSV ──────────────────
 
@@ -555,6 +573,7 @@ router.put('/menu-items/:id/availability', authenticateToken, getRestaurantId, a
 module.exports = router;
 module.exports.getCurrentSlotIST = getCurrentSlotIST;
 module.exports.applySlotAvailability = applySlotAvailability;
+module.exports.handleInternalMenuItems = handleInternalMenuItems;
 module.exports.applySlotForAllRestaurants = async function() {
   const slot = getCurrentSlotIST();
   const { data: restaurants } = await supabaseAdmin.from('restaurants').select('id').eq('is_active', true);
