@@ -1444,7 +1444,10 @@ async def create_walk_in_token_direct(
                 },
             )
             await session.commit()
-            logger.info(f"[walk-in-token] ✅ Direct DB token {token_id} for {name}")
+            logger.info(
+                f"[walk-in-token] ✅ Direct DB token {token_id} for {name} "
+                f"(restaurant={restaurant_id})"
+            )
             return token_id
     except Exception as e:
         logger.error(f"[walk-in-token] Direct insert failed: {e}")

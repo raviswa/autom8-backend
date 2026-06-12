@@ -475,6 +475,27 @@ async def _sync_token_via_api(
     return None
 
 
+async def _rebroadcast_portal_token(restaurant_id: str, token_id: str) -> None:
+    """Notify manager portal WebSocket after direct DB token insert."""
+    secret = _get_kds_secret()
+    if not secret:
+        return
+    url = f"{_AUTOM8_BACKEND_URL}/api/tokens/rebroadcast"
+    try:
+        resp = await get_http().post(
+            url,
+            json={"restaurant_id": restaurant_id, "token_id": token_id},
+            headers=_portal_auth_headers(),
+            timeout=aiohttp.ClientTimeout(total=5),
+        )
+        if resp.status == 200:
+            logger.info(f"[portal-sync] Rebroadcast TOKEN_NEW for {token_id}")
+        else:
+            logger.warning(f"[portal-sync] Rebroadcast failed {resp.status}: {(await resp.text())[:200]}")
+    except Exception as e:
+        logger.warning(f"[portal-sync] Rebroadcast error (non-fatal): {e}")
+
+
 async def sync_token_to_portal(
     customer_name: str, customer_phone: str, token_type: str, pax: int,
     restaurant_id: str,
@@ -510,6 +531,7 @@ async def sync_token_to_portal(
         await _send_manager_walk_in_alert(
             restaurant_id, token_id, customer_name, pax, token_type,
         )
+        await _rebroadcast_portal_token(restaurant_id, token_id)
     return token_id
 
 
@@ -723,6 +745,16 @@ async def send_unified_booking_menu(
     Sets session_state["booking_mechanism"] accordingly.
     """
     logger.info(f"[BOOKING] send_unified_booking_menu called for {customer_phone}")
+
+    # Dine-in: never send menu until a table is assigned (portal or chat poll).
+    if session_state.get("service_type") == "dine_in":
+        step = session_state.get("booking_step")
+        if step in ("awaiting_table_assignment", "awaiting_party_size", "awaiting_manager_approval"):
+            logger.info(f"[BOOKING] Skipping menu for dine-in step={step} (await table)")
+            return "none"
+        if step == "awaiting_order" and not session_state.get("table_number"):
+            logger.info(f"[BOOKING] Skipping menu for dine-in — no table_number yet")
+            return "none"
 
     # ── Attempt 1: Catalog ───────────────────────────────────────────────────
     if await send_catalog_booking(customer_phone, restaurant_id, session_state):

@@ -112,6 +112,20 @@ router.post('/login', async (req, res) => {
         .limit(2);
       if (restaurants?.length === 1) effectiveRestaurantId = restaurants[0].id;
     }
+    if (!effectiveRestaurantId && !isBrandEmployee && emp.phone) {
+      const digits = String(emp.phone).replace(/\D/g, '');
+      const { data: outlets } = await supabaseAdmin
+        .from('restaurants')
+        .select('id, manager_phone, whatsapp_number')
+        .eq('is_active', true);
+      const match = (outlets ?? []).filter((r) => {
+        const mgr = String(r.manager_phone || '').replace(/\D/g, '');
+        const wa  = String(r.whatsapp_number || '').replace(/\D/g, '');
+        return mgr.endsWith(digits.slice(-10)) || wa.endsWith(digits.slice(-10))
+          || mgr === digits || wa === digits;
+      });
+      if (match.length === 1) effectiveRestaurantId = match[0].id;
+    }
 
     try {
       await supabaseAdmin.from('audit_logs').insert({

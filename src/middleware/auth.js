@@ -83,7 +83,7 @@ const getRestaurantId = async (req, res, next) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('employees')
-      .select('restaurant_id, brand_id, role, is_active')
+      .select('restaurant_id, brand_id, role, is_active, phone')
       .eq('id', req.user.sub)
       .single();
 
@@ -114,7 +114,7 @@ const getRestaurantId = async (req, res, next) => {
       return next();
     }
 
-    // ── Fallback for dev/staging (single-restaurant environment only) ─────────
+    // ── Fallback: single active outlet ────────────────────────────────────────
     const { data: restaurants } = await supabaseAdmin
       .from('restaurants')
       .select('id')
@@ -127,6 +127,30 @@ const getRestaurantId = async (req, res, next) => {
       req.user_role     = data.role;
       req.scope         = 'outlet';
       return next();
+    }
+
+    // ── Fallback: manager linked by phone on restaurant row ───────────────────
+    if (data.phone) {
+      const digits = String(data.phone).replace(/\D/g, '');
+      const { data: outlets } = await supabaseAdmin
+        .from('restaurants')
+        .select('id, manager_phone, whatsapp_number')
+        .eq('is_active', true);
+
+      const match = (outlets ?? []).filter((r) => {
+        const mgr = String(r.manager_phone || '').replace(/\D/g, '');
+        const wa  = String(r.whatsapp_number || '').replace(/\D/g, '');
+        return mgr.endsWith(digits.slice(-10)) || wa.endsWith(digits.slice(-10))
+          || mgr === digits || wa === digits;
+      });
+
+      if (match.length === 1) {
+        req.restaurant_id = match[0].id;
+        req.brand_id      = data.brand_id ?? null;
+        req.user_role     = data.role;
+        req.scope         = 'outlet';
+        return next();
+      }
     }
 
     return res.status(401).json({ error: 'Employee has no restaurant assigned.' });

@@ -160,6 +160,38 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
   }
 });
 
+// ── POST /api/tokens/rebroadcast — internal: WS notify after chat DB fallback ─
+
+router.post('/rebroadcast', requireKdsSecret, async (req, res) => {
+  try {
+    const { restaurant_id, token_id } = req.body;
+    if (!restaurant_id || !token_id) {
+      return res.status(400).json({ error: 'restaurant_id and token_id are required' });
+    }
+
+    const { data: token, error } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .select('*')
+      .eq('id', token_id)
+      .eq('restaurant_id', restaurant_id)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!token) return res.status(404).json({ error: 'Token not found for this outlet' });
+
+    broadcastToRestaurant(restaurant_id, {
+      type:      'TOKEN_NEW',
+      token_id:  token.id,
+      token,
+      timestamp: new Date().toISOString(),
+    });
+
+    res.json({ success: true, token });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /api/tokens ───────────────────────────────────────────────────────────
 
 router.get('/', outletAuth, async (req, res) => {
