@@ -306,14 +306,17 @@ async def handle_dine_in_flow(
             await send_whatsapp_message(
                 customer_phone,
                 f"You're all checked in! 🍽️\n\n"
-                f"*Token: {display_token}*\n\n"
-                f"We're assigning your table now — usually takes just a minute or two. "
-                f"You'll get a WhatsApp message the moment it's confirmed.\n\n"
-                f"While you wait, feel free to browse the menu using the 🛍️ Shop icon at the top of this chat. 😊",
+                f"*Token: {display_token}*\n"
+                f"*Party size: {party_size}*\n\n"
+                f"We're assigning your table — you'll get a WhatsApp when it's ready.\n\n"
+                f"Meanwhile, browse today's menu below and add items to your basket 🛒",
                 restaurant_id,
             )
-            session_state["booking_step"] = "awaiting_table_assignment"
-            return {"status": "awaiting_table_assignment"}
+            clear_cart(session_state)
+            session_state["booking_step"] = "awaiting_order"
+            await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+            session_state["_catalog_sent_after_party"] = True
+            return {"status": "awaiting_order"}
 
         except ValueError:
             await send_whatsapp_message(
@@ -418,10 +421,17 @@ async def handle_dine_in_flow(
             await send_whatsapp_message(
                 customer_phone,
                 f"✅ Your table has been confirmed — *Table {table_assigned}*!\n\n"
-                f"Browse our menu below and place your order 🍽️",
+                + (
+                    "You can continue adding items from the menu above, "
+                    "or type *MENU* to reopen it. 🍽️"
+                    if session_state.get("_catalog_sent_after_party")
+                    else "Browse our menu below and place your order 🍽️"
+                ),
                 restaurant_id,
             )
-            await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+            if not session_state.get("_catalog_sent_after_party"):
+                await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+                session_state["_catalog_sent_after_party"] = True
             return {"status": "awaiting_order"}
         else:
             await send_whatsapp_message(

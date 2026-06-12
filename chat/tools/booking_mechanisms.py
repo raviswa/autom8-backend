@@ -589,12 +589,16 @@ async def send_unified_booking_menu(
 
     # ── Attempt 1: Catalog ───────────────────────────────────────────────────
     if await send_catalog_booking(customer_phone, restaurant_id, session_state):
+        if session_state.get("service_type") in ("dine_in", "takeaway", "delivery"):
+            session_state["booking_step"] = "awaiting_order"
         return "catalog"
 
     # ── Attempt 2: Retry catalog after 2 s ───────────────────────────────────
     logger.warning(f"[BOOKING] {customer_phone} → catalog attempt 1 failed, retrying in 2 s")
     await asyncio.sleep(2)
     if await send_catalog_booking(customer_phone, restaurant_id, session_state):
+        if session_state.get("service_type") in ("dine_in", "takeaway", "delivery"):
+            session_state["booking_step"] = "awaiting_order"
         return "catalog"
 
     # ── Attempt 3: Interactive cart ───────────────────────────────────────────

@@ -171,12 +171,13 @@ async def _fetch_menu_items_from_backend(restaurant_id: str | None = None) -> li
                     # price in DB is rupees (e.g. 60.0); bot expects paise (e.g. 6000)
                     price_paise = int(float(item.get("price", 0)) * 100)
                     mapped.append({
-                        "id":          item.get("retailer_id") or item.get("id", ""),
-                        "title":       item.get("name", ""),
-                        "price":       price_paise,
-                        "time_slot":   slot_label,
-                        "description": item.get("description", ""),
-                        "image_link":  item.get("image_url", ""),
+                        "id":           item.get("retailer_id") or item.get("id", ""),
+                        "title":        item.get("name", ""),
+                        "price":        price_paise,
+                        "time_slot":    slot_label,
+                        "description":  item.get("description", ""),
+                        "image_link":   item.get("image_url", ""),
+                        "is_available": bool(item.get("is_available", True)),
                     })
                 _MENU_CACHE["items"]      = mapped
                 _MENU_CACHE["fetched_at"] = now
@@ -460,13 +461,23 @@ async def send_whatsapp_catalog_message(
     # Fetch restaurant name for footer
     restaurant_label = await _get_restaurant_label(restaurant_id)
 
-    # Warm the cache — ALL items, no slot filter
+    # Load manager-approved items from backend (is_available toggle in portal).
     items = await fetch_menu_items(restaurant_id)
+    items = [i for i in items if i.get("is_available", True)]
+
+    # Show only the current serving slot (+ All Day items).
+    slot = current_time_slot()
+    slot_items = [
+        i for i in items
+        if i["time_slot"] == slot or i["time_slot"] == "All Day"
+    ]
+    if slot_items:
+        items = slot_items
 
     if not items:
         logger.error(
-            f"[catalog] MENU_ITEMS is empty for {customer_phone} — "
-            "cannot send catalog. Check backend /api/internal/menu-items."
+            f"[catalog] No available items for slot {slot!r} ({customer_phone}) — "
+            "check manager availability toggles and time-slot scheduler."
         )
         return False
 

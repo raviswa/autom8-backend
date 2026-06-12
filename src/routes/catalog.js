@@ -384,6 +384,7 @@ async function handleInternalMenuItems(req, res) {
       .select('id, name, description, price, image_url, time_slot, retailer_id, is_available, is_stocked, category')
       .eq('restaurant_id', restaurantId)
       .eq('is_stocked', true)
+      .eq('is_available', true)
       .order('time_slot', { ascending: true }).order('name', { ascending: true });
 
     if (error) throw error;
