@@ -78,8 +78,34 @@ MechanismType = Literal["catalog", "cart", "cart_text", "none"]
 _AUTOM8_BACKEND_URL    = _os.getenv("AUTOM8_BACKEND_URL", "https://api.autom8.works").rstrip("/")
 PORTAL_API_URL         = f"{_AUTOM8_BACKEND_URL}/api/tokens"
 AUTOM8_KDS_URL         = f"{_AUTOM8_BACKEND_URL}/api/kds/notify"
-KDS_SECRET             = _os.getenv("AUTOM8_KDS_SECRET", "")
+_KDS_DEV_FALLBACK      = "munafe_kds_sync_2026"
 _RECEIPT_REDIRECT_BASE = f"{_AUTOM8_BACKEND_URL}/r"
+
+
+def _get_kds_secret() -> str:
+    """Match Node internalSecret.js — Bearer + body secret for portal API calls."""
+    secret = (_os.getenv("AUTOM8_KDS_SECRET") or "").strip()
+    if secret:
+        return secret
+    env = (_os.getenv("NODE_ENV") or _os.getenv("RAILWAY_ENVIRONMENT") or "").lower()
+    if env == "production":
+        logger.error("[portal-sync] AUTOM8_KDS_SECRET is not set — portal sync will fail")
+        return ""
+    logger.warning("[portal-sync] AUTOM8_KDS_SECRET not set — using dev fallback")
+    return _KDS_DEV_FALLBACK
+
+
+KDS_SECRET = _get_kds_secret()
+
+
+def _portal_auth_headers() -> dict[str, str]:
+    secret = _get_kds_secret()
+    if not secret:
+        return {}
+    return {
+        "Authorization":     f"Bearer {secret}",
+        "x-internal-secret": secret,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -363,67 +389,102 @@ def format_combo_message(combo: list, party_size: int) -> str:
 async def sync_token_to_portal(
     customer_name: str, customer_phone: str, token_type: str, pax: int,
     restaurant_id: str,
+    max_attempts: int = 3,
 ) -> str | None:
     """
     Create a walk_in_tokens row in the manager portal.
-    notify=false — the chat flow sends the single manager WhatsApp alert.
+    API sends the manager WhatsApp alert (notify=true default).
     """
-    try:
-        resp = await get_http().post(
-            PORTAL_API_URL,
-            params={"notify": "false"},
-            headers={"x-internal-secret": KDS_SECRET} if KDS_SECRET else {},
-            json={
-                "restaurant_id": restaurant_id,
-                "name": customer_name, "phone": customer_phone,
-                "type": token_type, "pax": pax,
-                "secret": KDS_SECRET,
-            },
-            timeout=aiohttp.ClientTimeout(total=5),
-        )
-        if resp.status == 201:
-            data = await resp.json()
-            token_id = data.get("token", {}).get("id")
-            logger.info(f"[portal-sync] Token created: {token_id}")
-            return token_id
-        body = await resp.text()
-        logger.error(
-            f"[portal-sync] Failed {resp.status} for {customer_phone}: {body[:300]}"
-        )
+    secret = _get_kds_secret()
+    if not secret:
+        logger.error(f"[portal-sync] No KDS secret — cannot create token for {customer_phone}")
         return None
-    except Exception as e:
-        logger.error(f"[portal-sync] Failed for {customer_phone}: {e}")
-        return None
+
+    payload = {
+        "restaurant_id": restaurant_id,
+        "name":          customer_name,
+        "phone":         customer_phone,
+        "type":          token_type,
+        "pax":           pax,
+        "secret":        secret,
+    }
+    headers = _portal_auth_headers()
+
+    for attempt in range(max_attempts):
+        try:
+            resp = await get_http().post(
+                PORTAL_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=8),
+            )
+            if resp.status == 201:
+                data = await resp.json()
+                token_id = data.get("token", {}).get("id")
+                logger.info(f"[portal-sync] Token created: {token_id}")
+                return token_id
+            body = await resp.text()
+            logger.error(
+                f"[portal-sync] Attempt {attempt + 1}/{max_attempts} "
+                f"failed {resp.status} for {customer_phone}: {body[:300]}"
+            )
+        except Exception as e:
+            logger.error(
+                f"[portal-sync] Attempt {attempt + 1}/{max_attempts} "
+                f"error for {customer_phone}: {e}"
+            )
+        if attempt < max_attempts - 1:
+            await asyncio.sleep(0.75 * (attempt + 1))
+
+    return None
 
 
 async def sync_token_to_portal_large_party(
     customer_name: str, customer_phone: str, pax: int, combo: list,
     restaurant_id: str,
+    max_attempts: int = 3,
 ) -> str | None:
-    try:
-        resp = await get_http().post(
-            PORTAL_API_URL,
-            params={"notify": "false"},
-            headers={"x-internal-secret": KDS_SECRET} if KDS_SECRET else {},
-            json={
-                "restaurant_id": restaurant_id,
-                "name": customer_name, "phone": customer_phone,
-                "type": "large_party", "pax": pax,
-                "meta": {"combo": combo},
-                "secret": KDS_SECRET,
-            },
-            timeout=aiohttp.ClientTimeout(total=5),
-        )
-        if resp.status == 201:
-            data = await resp.json()
-            token_id = data.get("token", {}).get("id")
-            logger.info(f"[portal-sync-large] Token created: {token_id}")
-            return token_id
-        logger.warning(f"[portal-sync-large] Non-201 {resp.status}: {await resp.text()}")
+    secret = _get_kds_secret()
+    if not secret:
+        logger.error(f"[portal-sync-large] No KDS secret — cannot create token for {customer_phone}")
         return None
-    except Exception as e:
-        logger.warning(f"[portal-sync-large] Failed (non-fatal): {e}")
-        return None
+
+    payload = {
+        "restaurant_id": restaurant_id,
+        "name":          customer_name,
+        "phone":         customer_phone,
+        "type":          "large_party",
+        "pax":           pax,
+        "meta":          {"combo": combo},
+        "secret":        secret,
+    }
+    headers = _portal_auth_headers()
+
+    for attempt in range(max_attempts):
+        try:
+            resp = await get_http().post(
+                PORTAL_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=8),
+            )
+            if resp.status == 201:
+                data = await resp.json()
+                token_id = data.get("token", {}).get("id")
+                logger.info(f"[portal-sync-large] Token created: {token_id}")
+                return token_id
+            logger.warning(
+                f"[portal-sync-large] Attempt {attempt + 1}/{max_attempts} "
+                f"non-201 {resp.status}: {(await resp.text())[:300]}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[portal-sync-large] Attempt {attempt + 1}/{max_attempts} failed: {e}"
+            )
+        if attempt < max_attempts - 1:
+            await asyncio.sleep(0.75 * (attempt + 1))
+
+    return None
 
 
 async def lookup_table_assignment(customer_phone: str, restaurant_id: str) -> str | None:
@@ -431,7 +492,7 @@ async def lookup_table_assignment(customer_phone: str, restaurant_id: str) -> st
         resp = await get_http().get(
             f"{PORTAL_API_URL}/lookup",
             params={"phone": customer_phone, "restaurant_id": restaurant_id},
-            headers={"Authorization": f"Bearer {KDS_SECRET}"},
+            headers=_portal_auth_headers(),
             timeout=aiohttp.ClientTimeout(total=3),
         )
         if resp.status == 200:

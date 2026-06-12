@@ -16,7 +16,6 @@ import time
 from typing import Dict, Any
 
 from tools.db_tools import (
-    get_next_token_number,
     create_booking,
     update_booking_status,
     recover_session_from_walk_in_token,
@@ -285,10 +284,8 @@ async def handle_dine_in_flow(
                     session_state["booking_step"]   = "awaiting_large_party_response"
                     return {"status": "awaiting_large_party_response"}
 
-            token        = await get_next_token_number(restaurant_id)
             booking_time = now_display()
-            session_state["token_number"]  = token
-            session_state["booking_time"]  = booking_time
+            session_state["booking_time"] = booking_time
 
             portal_token_id = await sync_token_to_portal(
                 customer_name=customer_name, customer_phone=customer_phone,
@@ -299,23 +296,32 @@ async def handle_dine_in_flow(
                     f"[dine-in] Portal token sync failed for {customer_phone} "
                     f"(restaurant={restaurant_id}) — queue will be empty in manager portal"
                 )
-            display_token = portal_token_id or token
-            session_state["display_token"] = display_token
+                await send_whatsapp_message(
+                    manager_phone,
+                    f"⚠️ *Walk-in sync failed — add manually in portal*\n"
+                    f"👤 {customer_name} · {party_size} {'person' if party_size == 1 else 'people'}\n"
+                    f"📱 {customer_phone}\n"
+                    f"🕐 {booking_time} IST\n\n"
+                    f"Open portal → Queue → create walk-in token:\n{MANAGER_PORTAL_URL}",
+                    restaurant_id,
+                )
+                await send_whatsapp_message(
+                    customer_phone,
+                    f"Thanks, {customer_name}! We've noted your party of *{party_size}*.\n\n"
+                    f"Our team is confirming your table — you'll get a WhatsApp shortly. 🙏",
+                    restaurant_id,
+                )
+                session_state["booking_step"] = "awaiting_table_assignment"
+                return {"status": "awaiting_table_assignment"}
 
-            await send_whatsapp_message(
-                manager_phone,
-                f"🪑 *New Dine-in — assign table*\n"
-                f"Token: *{display_token}*\n"
-                f"👤 {customer_name} · {party_size} {'person' if party_size == 1 else 'people'}\n"
-                f"📱 {customer_phone}\n"
-                f"🕐 {booking_time} IST\n\n"
-                f"Review headcount and assign a table in the portal:\n{MANAGER_PORTAL_URL}",
-                restaurant_id,
-            )
+            session_state["token_number"]  = portal_token_id
+            session_state["display_token"] = portal_token_id
+
+            # Manager alert is sent by POST /api/tokens (notify=true) — same as T-077 flow.
             await send_whatsapp_message(
                 customer_phone,
                 f"You're all checked in! 🍽️\n\n"
-                f"*Token: {display_token}*\n"
+                f"*Token: {portal_token_id}*\n"
                 f"*Party size: {party_size}*\n\n"
                 f"We're assigning your table — you'll get a WhatsApp when it's ready.\n\n"
                 f"Meanwhile, browse today's menu below and add items to your basket 🛒",
@@ -370,26 +376,36 @@ async def handle_dine_in_flow(
                     f"[dine-in] Large-party portal sync failed for {customer_phone} "
                     f"(restaurant={restaurant_id})"
                 )
-            display_token = portal_token_id or f"#{party_size}pax"
-            session_state["display_token"] = display_token
-            table_lines = " + ".join(
-                f"Table {t[0]} ({t[2]}/{t[1]} seats)" for t in combo
-            ) if combo else f"{party_size} seats"
-            await send_whatsapp_message(
-                manager_phone,
-                f"🟣 *Large party — approval needed*\n"
-                f"Token: *{display_token}*\n"
-                f"👤 {customer_name} · {party_size} people\n"
-                f"📱 {customer_phone}\n"
-                f"🕐 {booking_time} IST\n"
-                f"Proposed: {table_lines}\n\n"
-                f"Review and approve in the portal:\n{MANAGER_PORTAL_URL}",
-                restaurant_id,
-            )
+                table_lines = " + ".join(
+                    f"Table {t[0]} ({t[2]}/{t[1]} seats)" for t in combo
+                ) if combo else f"{party_size} seats"
+                await send_whatsapp_message(
+                    manager_phone,
+                    f"⚠️ *Large-party sync failed — add manually in portal*\n"
+                    f"👤 {customer_name} · {party_size} people\n"
+                    f"📱 {customer_phone}\n"
+                    f"🕐 {booking_time} IST\n"
+                    f"Proposed: {table_lines}\n\n"
+                    f"Open portal → Queue:\n{MANAGER_PORTAL_URL}",
+                    restaurant_id,
+                )
+                await send_whatsapp_message(
+                    customer_phone,
+                    f"Thanks! Your party of *{party_size}* is being confirmed by our team. "
+                    f"We'll message you shortly. 🙏",
+                    restaurant_id,
+                )
+                session_state["booking_step"] = "awaiting_manager_approval"
+                return {"status": "awaiting_manager_approval"}
+
+            session_state["display_token"] = portal_token_id
+            session_state["token_number"]  = portal_token_id
+
+            # Manager alert is sent by POST /api/tokens (notify=true).
             await send_whatsapp_message(
                 customer_phone,
                 f"✅ Your request for *{party_size} people* has been sent to our manager for approval.\n\n"
-                f"Token: *{display_token}*\n\n"
+                f"Token: *{portal_token_id}*\n\n"
                 f"We'll confirm your tables shortly. If you don't hear back within "
                 f"5 minutes, please speak to our staff directly. 😊",
                 restaurant_id,

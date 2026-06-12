@@ -87,17 +87,7 @@ async def handle_takeaway_flow(
             display_token = portal_token_id or token
             session_state["display_token"] = display_token
 
-            # Manager walk-in alert
-            try:
-                await send_whatsapp_message(
-                    manager_phone,
-                    f"🛍️ *New Walk-in* — Token *{display_token}*\n"
-                    f"👤 {customer_name}\n📦 Takeaway\n🕐 {booking_time}\n\n"
-                    f"Open portal to manage:\n{MANAGER_PORTAL_URL}",
-                    restaurant_id,
-                )
-            except Exception as _mw:
-                logger.warning(f"[takeaway] manager walk-in notify failed (non-fatal): {_mw}")
+            # Manager alert is sent by POST /api/tokens when portal sync succeeds.
 
             booking    = await create_booking(restaurant_id, customer_id, "takeaway", token_number=token)
             booking_id = booking["id"]

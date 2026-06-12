@@ -80,9 +80,12 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
       .from('walk_in_tokens').insert(tokenRecord).select().single();
     if (insertError) throw insertError;
 
-    const arrivalTime = new Date().toLocaleString('en-IN', {
-      timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true,
-    });
+    const arrivalTime = new Date().toLocaleString('en-GB', {
+      timeZone: 'Asia/Kolkata',
+      day: '2-digit', month: 'short', year: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    }).replace(',', ', ');
+    const portalUrl = `${process.env.FRONTEND_URL || 'https://app.autom8.works'}/dashboard/manager`;
 
     // Resolve manager phone (outlet row first, then global env)
     let managerPhone = process.env.MANAGER_WHATSAPP_NUMBER || null;
@@ -92,8 +95,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
       if (rest?.manager_phone) managerPhone = rest.manager_phone;
     } catch (_) {}
 
-    // Manager WhatsApp alerts are sent by the chat agent (notify=false on sync).
-    // WalkInForm / kiosk POST keeps the default notify=true behaviour below.
+    // notify=false skips the manager alert (e.g. duplicate guard). Default: send from API.
     const shouldNotify = req.query.notify !== 'false';
     if (shouldNotify && managerPhone && process.env.WHATSAPP_ACCESS_TOKEN) {
       if (type === 'large_party') {
@@ -103,15 +105,22 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
           : `${token.pax} seats`;
         sendWhatsAppMessage(
           managerPhone,
-          `🟣 *Large Party Request* — Token *${token.id}*\n👥 ${token.name} · *${token.pax} people*\n🕐 ${arrivalTime} IST\n\nProposed: ${tableLines}\n\n⚠️ *Action required:*\n${process.env.FRONTEND_URL || ''}/dashboard/manager`,
+          `🟣 *Large Party Request* — Token *${token.id}*\n👥 ${token.name} · *${token.pax} people*\n🕐 ${arrivalTime} IST\n\nProposed: ${tableLines}\n\n⚠️ *Action required:*\n${portalUrl}`,
+          restaurant_id
+        );
+      } else if (type === 'dinein') {
+        sendWhatsAppMessage(
+          managerPhone,
+          `🪑 *New Walk-in* — Token *${token.id}*\n` +
+          `👤 ${token.name}, ${token.pax} ${token.pax === 1 ? 'person' : 'people'}\n` +
+          `🍽️ Dine-in\n🕐 ${arrivalTime} IST\n\n` +
+          `Open portal to assign table:\n${portalUrl}`,
           restaurant_id
         );
       } else {
-        const typeLabel = type === 'dinein' ? 'Dine-in' : 'Takeaway';
-        const paxLine   = type === 'dinein' ? `, ${token.pax} ${token.pax === 1 ? 'person' : 'people'}` : '';
         sendWhatsAppMessage(
           managerPhone,
-          `🪑 *New Walk-in* — Token *${token.id}*\n👤 ${token.name}${paxLine}\n📋 ${typeLabel}\n🕐 ${arrivalTime} IST\n\n${process.env.FRONTEND_URL || ''}/dashboard/manager`,
+          `🪑 *New Walk-in* — Token *${token.id}*\n👤 ${token.name}\n📦 Takeaway\n🕐 ${arrivalTime} IST\n\n${portalUrl}`,
           restaurant_id
         );
       }
