@@ -493,19 +493,19 @@ async def handle_dine_in_flow(
             session_state["display_token"] = portal_token_id
 
             # Manager alert is sent by POST /api/tokens (notify=true) — same as T-077 flow.
+            # Menu catalog is sent only after table assignment (portal or chat poll below).
             await send_whatsapp_message(
                 customer_phone,
                 f"You're all checked in! 🍽️\n\n"
                 f"*Token: {portal_token_id}*\n"
                 f"*Party size: {party_size}*\n\n"
-                f"We're assigning your table — you'll get a WhatsApp when it's ready.\n\n"
-                f"Meanwhile, browse today's menu below and add items to your basket 🛒",
+                f"We're assigning your table — you'll get a WhatsApp when it's ready "
+                f"with our menu to place your order. 🙏",
                 restaurant_id,
             )
             clear_cart(session_state)
-            await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
-            session_state["_catalog_sent_after_party"] = True
-            return {"status": status_after_booking_menu(session_state)}
+            session_state["booking_step"] = "awaiting_table_assignment"
+            return {"status": "awaiting_table_assignment"}
 
         except ValueError:
             await send_whatsapp_message(

@@ -70,6 +70,8 @@ async function syncConversationForTokenApproval({
       party_size:      partySize ?? prev.party_size,
       table_number:    Number.isFinite(primaryTable) ? primaryTable : prev.table_number ?? null,
       assigned_tables: tableNumbers,
+      // Portal sends catalog on assign — avoid duplicate from chat poll path
+      _catalog_sent_after_party: true,
     };
 
     await supabaseAdmin.from('conversation_states').upsert({
