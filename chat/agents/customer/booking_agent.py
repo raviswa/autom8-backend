@@ -25,9 +25,13 @@ FIX LOG (router-level)
             last_order_summary so greeting never falls back to first-timer
             template. See booking_helpers.do_reset.
   Fix 40 — send_catalog_with_fallback last-resort message now directs customer
-            to the 🛍️ Shop icon. See booking_helpers.send_catalog_with_fallback.
+            to the Shop icon. See booking_helpers.send_catalog_with_fallback.
   Fix 41 — handle_dine_in_flow awaiting_order: empty-cart guard added.
             See dine_in_flow.py.
+  Fix 42 — Feedback reply interception: 1-5 replies arriving while session is
+            in awaiting_order / awaiting_payment / visit_complete (sent by
+            Node.js feedback job) are now handled gracefully instead of being
+            routed to the booking flow and erroring.
 
 DEAD CODE REMOVED
 ─────────────────
@@ -404,6 +408,27 @@ async def handle_booking_flow(
                 restaurant_id,
             )
         return {"status": "awaiting_numbered_order"}
+
+    # ── Feedback reply interception  (Fix 42) ─────────────────────────────────
+    # Handles 1-5 replies sent to Node.js feedback messages when the session
+    # is not yet in an explicit feedback step.
+    if (
+        is_feedback_reply(message)
+        and current_step in {
+            "awaiting_order", "awaiting_payment",
+            "awaiting_table_assignment", "awaiting_special_notes",
+        }
+        and not session_state.get("order_from_cart")
+        and not session_state.get("cart")
+    ):
+        await send_whatsapp_message(
+            customer_phone,
+            "Thank you for your rating! 🙏 We hope to see you again soon at Munafe. 😊",
+            restaurant_id,
+        )
+        clear_cart(session_state)
+        session_state["booking_step"] = "visit_complete"
+        return {"status": "visit_complete"}
 
     # ── Dispatch to service flows ─────────────────────────────────────────────
     service_type  = session_state.get("service_type")
