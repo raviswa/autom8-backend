@@ -51,6 +51,7 @@ from tools.cart_tools import (
     add_to_cart,
     clear_cart,
     cart_to_order_text,
+    enrich_cart_titles,
     cart_summary_text,
     cart_total,
     send_cart_summary_buttons,
@@ -318,6 +319,7 @@ async def handle_booking_flow(
         session_state["booking_step"]    = "awaiting_order"
         svc = session_state.get("service_type")
         mp  = session_state.get("manager_phone", manager_phone)
+        await enrich_cart_titles(cart, restaurant_id)
         ot  = cart_to_order_text(cart)
         return await _dispatch_to_flow(
             svc, restaurant_id, customer_id, customer_name, customer_phone,
@@ -345,6 +347,7 @@ async def handle_booking_flow(
             session_state["booking_step"]    = "awaiting_order"
             svc = session_state.get("service_type")
             mp  = session_state.get("manager_phone", manager_phone)
+            await enrich_cart_titles(cart, restaurant_id)
             ot  = cart_to_order_text(cart)
             return await _dispatch_to_flow(
                 svc, restaurant_id, customer_id, customer_name, customer_phone,
@@ -380,6 +383,7 @@ async def handle_booking_flow(
             session_state["booking_step"]    = "awaiting_order"
             svc = session_state.get("service_type")
             mp  = session_state.get("manager_phone", manager_phone)
+            await enrich_cart_titles(cart, restaurant_id)
             ot  = cart_to_order_text(cart)
             return await _dispatch_to_flow(
                 svc, restaurant_id, customer_id, customer_name, customer_phone,

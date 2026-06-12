@@ -317,7 +317,9 @@ async def _process_meta_payload(payload: dict):
             # 5a. Catalog order bridge
             if is_catalog_order(message_obj):
                 logger.info(f"[CATALOG] Catalog order detected from {phone}")
-                bridge_success = bridge_catalog_order_to_cart(message_obj, session_state)
+                bridge_success = await bridge_catalog_order_to_cart(
+                    message_obj, session_state, restaurant_id
+                )
                 if bridge_success:
                     logger.info(f"[CATALOG] Successfully bridged order to cart for {phone}")
                     message_body = "CART:CONFIRM"

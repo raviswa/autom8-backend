@@ -436,18 +436,26 @@ def parse_whatsapp_order(webhook_message: dict[str, Any]) -> dict[str, Any] | No
 
     order         = webhook_message.get("order", {})
     product_items = order.get("product_items", [])
-    item_lookup   = {i["id"]: i for i in MENU_ITEMS}
+    item_lookup: dict[str, dict] = {}
+    for i in MENU_ITEMS:
+        rid = (i.get("id") or "").strip()
+        if not rid:
+            continue
+        item_lookup[rid] = i
+        item_lookup[rid.upper()] = i
+        item_lookup[rid.lower()] = i
 
     lines = []
     total = 0.0
 
     for pi in product_items:
-        rid      = pi.get("product_retailer_id", "")
+        rid      = (pi.get("product_retailer_id") or "").strip()
         qty      = int(pi.get("quantity", 1))
         price    = float(pi.get("item_price", 0))
         subtotal = price * qty
         total   += subtotal
-        title    = item_lookup.get(rid, {}).get("title", rid)
+        matched  = item_lookup.get(rid) or item_lookup.get(rid.upper())
+        title    = (matched or {}).get("title") or rid
         lines.append({
             "id":         rid,
             "title":      title,

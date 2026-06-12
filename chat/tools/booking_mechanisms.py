@@ -812,9 +812,10 @@ send_catalog_with_fallback = send_unified_booking_menu
 # BRIDGE: CATALOG ORDER → CART STATE
 # ─────────────────────────────────────────────
 
-def bridge_catalog_order_to_cart(
+async def bridge_catalog_order_to_cart(
     webhook_message: dict[str, Any],
     session_state: dict[str, Any],
+    restaurant_id: str,
 ) -> bool:
     """
     Parse incoming WhatsApp catalog 'order' message and populate session cart.
@@ -827,6 +828,11 @@ def bridge_catalog_order_to_cart(
 
     Returns True if successfully parsed and populated, False otherwise.
     """
+    from tools.catalog_tools import fetch_menu_items
+    from tools.cart_tools import enrich_cart_titles
+
+    await fetch_menu_items(restaurant_id)
+
     parsed_order = parse_whatsapp_order(webhook_message)
     if parsed_order is None:
         logger.debug("Message is not a catalog order")
@@ -848,6 +854,7 @@ def bridge_catalog_order_to_cart(
             "unit_price": item_line["unit_price"],
         }
 
+    await enrich_cart_titles(cart, restaurant_id)
     session_state["cart"] = cart
     session_state["booking_mechanism_order_source"] = "catalog"
     session_state["booking_step"] = "confirming_order"

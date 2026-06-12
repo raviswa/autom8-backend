@@ -203,6 +203,38 @@ def clear_cart(session_state: dict[str, Any]) -> None:
     session_state["cart"] = {}
 
 
+def _looks_like_retailer_sku(text: str) -> bool:
+    """True when title is a Meta/catalog retailer id (e.g. E003, D007)."""
+    return bool(re.match(r"^[A-Z]\d{2,}$", (text or "").strip()))
+
+
+async def enrich_cart_titles(cart: dict[str, Any], restaurant_id: str) -> None:
+    """Replace SKU-only cart titles with human-readable menu names."""
+    if not cart or not restaurant_id:
+        return
+
+    items = await fetch_menu_items(restaurant_id)
+    by_id: dict[str, str] = {}
+    for item in items:
+        rid = (item.get("id") or "").strip()
+        name = (item.get("title") or "").strip()
+        if rid and name:
+            by_id[rid] = name
+            by_id[rid.upper()] = name
+            by_id[rid.lower()] = name
+
+    for item_id, line in cart.items():
+        rid = (item_id or "").strip()
+        current = (line.get("title") or "").strip()
+        resolved = by_id.get(rid) or by_id.get(rid.upper()) or by_id.get(current)
+        if resolved and (
+            not current
+            or current == rid
+            or _looks_like_retailer_sku(current)
+        ):
+            line["title"] = resolved
+
+
 def cart_to_order_text(cart: dict[str, Any]) -> str:
     """Convert cart to the order string expected by booking_agent."""
     parts = [f"{line['qty']}x {line['title']}" for line in cart.values()]

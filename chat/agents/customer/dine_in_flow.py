@@ -30,6 +30,7 @@ from tools.cart_tools import (
     cart_to_order_text,
     cart_total,
     clear_cart,
+    enrich_cart_titles,
     _send_interactive,
 )
 from tools.booking_mechanisms import (
@@ -291,6 +292,9 @@ async def _confirm_dine_in_order(
     cart_snapshot: dict,
 ) -> Dict[str, Any]:
     """Create booking + send confirmation. Raises on failure."""
+    await enrich_cart_titles(cart_snapshot, restaurant_id)
+    if cart_snapshot:
+        order_text = cart_to_order_text(cart_snapshot)
     total = cart_total(cart_snapshot) if cart_snapshot else 0.0
     session_state["order_total"] = total
     token = session_state.get("display_token", session_state.get("token_number", ""))
@@ -701,6 +705,8 @@ async def handle_dine_in_flow(
             return {"status": status_after_booking_menu(session_state)}
 
         cart_snapshot = dict(cart)
+        await enrich_cart_titles(cart_snapshot, restaurant_id)
+        order_text = cart_to_order_text(cart_snapshot)
 
         try:
             return await _confirm_dine_in_order(
