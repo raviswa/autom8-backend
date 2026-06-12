@@ -61,7 +61,19 @@ async function generateTokenId(restaurantId) {
 
 router.post('/', requireKdsSecretOrJwt, async (req, res) => {
   try {
-    const { name, phone, type, pax, restaurant_id, meta } = req.body;
+    let { name, phone, type, pax, restaurant_id, meta } = req.body;
+
+    // Manager portal JWT may omit restaurant_id — resolve like getRestaurantId
+    if (!restaurant_id && req.user) {
+      const { data: emp } = await supabaseAdmin
+        .from('employees').select('restaurant_id').eq('id', req.user.sub).single();
+      restaurant_id = emp?.restaurant_id ?? null;
+      if (!restaurant_id) {
+        const { data: restaurants } = await supabaseAdmin
+          .from('restaurants').select('id').eq('is_active', true).limit(2);
+        if (restaurants?.length === 1) restaurant_id = restaurants[0].id;
+      }
+    }
 
     if (!name?.trim())    return res.status(400).json({ error: 'name is required' });
     if (!type)            return res.status(400).json({ error: 'type is required' });

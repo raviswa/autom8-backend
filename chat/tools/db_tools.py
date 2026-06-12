@@ -4,8 +4,10 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
 from decimal import Decimal
 from uuid import UUID
+import json
 import logging
 import hashlib
+import re
 import time
 import os as _os
 import httpx as _httpx
@@ -1367,6 +1369,86 @@ def _phone_variants(phone: str) -> list[str]:
         if digits.startswith("91") and len(digits) == 12:
             variants.add(digits[2:])
     return list(variants)
+
+
+async def _next_portal_token_id(session, restaurant_id: str) -> str:
+    """Sequential T-001 style ID — mirrors Node generateTokenId()."""
+    result = await session.execute(
+        text("SELECT id FROM walk_in_tokens WHERE restaurant_id = CAST(:rid AS uuid)"),
+        {"rid": restaurant_id},
+    )
+    max_seq = 0
+    for row in result:
+        match = re.match(r"^T-(\d+)$", str(row[0]))
+        if match:
+            max_seq = max(max_seq, int(match.group(1)))
+    for attempt in range(20):
+        candidate = f"T-{str(max_seq + 1 + attempt).zfill(3)}"
+        exists = await session.execute(
+            text("SELECT 1 FROM walk_in_tokens WHERE id = :tid"),
+            {"tid": candidate},
+        )
+        if not exists.first():
+            return candidate
+    return f"T-{str(int(time.time()) % 1_000_000).zfill(6)}"
+
+
+async def create_walk_in_token_direct(
+    restaurant_id: str,
+    name: str,
+    phone: str,
+    token_type: str,
+    pax: int = 1,
+    meta: dict | None = None,
+) -> str | None:
+    """
+    Insert walk_in_tokens directly via Postgres when the Node API sync fails.
+    Chat service always has DB access in production.
+    """
+    if AsyncSessionLocal is None:
+        logger.error("[walk-in-token] DB session not initialized")
+        return None
+
+    if token_type not in ("dinein", "takeaway", "large_party"):
+        logger.error(f"[walk-in-token] Invalid type: {token_type}")
+        return None
+
+    clean_phone = "".join(c for c in str(phone) if c.isdigit()) or None
+    status = (
+        "pending_approval" if token_type == "large_party"
+        else "takeaway" if token_type == "takeaway"
+        else "waiting"
+    )
+    actual_pax = 1 if token_type == "takeaway" else max(1, int(pax or 1))
+
+    try:
+        async with AsyncSessionLocal() as session:
+            token_id = await _next_portal_token_id(session, restaurant_id)
+            await session.execute(
+                text("""
+                    INSERT INTO walk_in_tokens
+                      (id, restaurant_id, name, phone, type, pax, status, arrived_at, meta)
+                    VALUES
+                      (:id, CAST(:rid AS uuid), :name, :phone, :type, :pax, :status,
+                       NOW(), CAST(:meta AS jsonb))
+                """),
+                {
+                    "id":     token_id,
+                    "rid":    restaurant_id,
+                    "name":   name.strip(),
+                    "phone":  clean_phone,
+                    "type":   token_type,
+                    "pax":    actual_pax,
+                    "status": status,
+                    "meta":   json.dumps(meta or {}),
+                },
+            )
+            await session.commit()
+            logger.info(f"[walk-in-token] ✅ Direct DB token {token_id} for {name}")
+            return token_id
+    except Exception as e:
+        logger.error(f"[walk-in-token] Direct insert failed: {e}")
+        return None
 
 
 async def get_active_walk_in_token(

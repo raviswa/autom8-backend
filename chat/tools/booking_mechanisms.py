@@ -386,28 +386,64 @@ def format_combo_message(combo: list, party_size: int) -> str:
 # PORTAL SYNC
 # ─────────────────────────────────────────────
 
-async def sync_token_to_portal(
-    customer_name: str, customer_phone: str, token_type: str, pax: int,
+async def _send_manager_walk_in_alert(
     restaurant_id: str,
+    token_id: str,
+    customer_name: str,
+    pax: int,
+    token_type: str,
+) -> None:
+    """Manager alert when token is created via DB fallback (API path sends its own)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from tools.db_tools import get_restaurant_by_id
+
+    rest = await get_restaurant_by_id(restaurant_id)
+    manager_phone = (rest or {}).get("manager_phone")
+    if not manager_phone:
+        return
+
+    arrival = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d-%b-%y, %H:%M")
+    portal_url = f"{_os.getenv('FRONTEND_URL', 'https://app.autom8.works').rstrip('/')}/dashboard/manager"
+
+    if token_type == "dinein":
+        body = (
+            f"🪑 *New Walk-in* — Token *{token_id}*\n"
+            f"👤 {customer_name}, {pax} {'person' if pax == 1 else 'people'}\n"
+            f"🍽️ Dine-in\n🕐 {arrival} IST\n\n"
+            f"Open portal to assign table:\n{portal_url}"
+        )
+    elif token_type == "takeaway":
+        body = (
+            f"🪑 *New Walk-in* — Token *{token_id}*\n"
+            f"👤 {customer_name}\n📦 Takeaway\n🕐 {arrival} IST\n\n{portal_url}"
+        )
+    else:
+        body = (
+            f"🟣 *Large Party Request* — Token *{token_id}*\n"
+            f"👥 {customer_name} · *{pax} people*\n🕐 {arrival} IST\n\n"
+            f"⚠️ *Action required:*\n{portal_url}"
+        )
+
+    try:
+        await send_whatsapp_message(manager_phone, body, restaurant_id)
+    except Exception as e:
+        logger.warning(f"[portal-sync] Manager alert failed (non-fatal): {e}")
+
+
+async def _sync_token_via_api(
+    payload: dict,
+    customer_phone: str,
+    log_label: str,
     max_attempts: int = 3,
 ) -> str | None:
-    """
-    Create a walk_in_tokens row in the manager portal.
-    API sends the manager WhatsApp alert (notify=true default).
-    """
     secret = _get_kds_secret()
     if not secret:
-        logger.error(f"[portal-sync] No KDS secret — cannot create token for {customer_phone}")
+        logger.warning(f"[{log_label}] No AUTOM8_KDS_SECRET — skipping API, will use DB fallback")
         return None
 
-    payload = {
-        "restaurant_id": restaurant_id,
-        "name":          customer_name,
-        "phone":         customer_phone,
-        "type":          token_type,
-        "pax":           pax,
-        "secret":        secret,
-    }
+    payload = {**payload, "secret": secret}
     headers = _portal_auth_headers()
 
     for attempt in range(max_attempts):
@@ -421,16 +457,16 @@ async def sync_token_to_portal(
             if resp.status == 201:
                 data = await resp.json()
                 token_id = data.get("token", {}).get("id")
-                logger.info(f"[portal-sync] Token created: {token_id}")
+                logger.info(f"[{log_label}] API token created: {token_id}")
                 return token_id
             body = await resp.text()
             logger.error(
-                f"[portal-sync] Attempt {attempt + 1}/{max_attempts} "
+                f"[{log_label}] Attempt {attempt + 1}/{max_attempts} "
                 f"failed {resp.status} for {customer_phone}: {body[:300]}"
             )
         except Exception as e:
             logger.error(
-                f"[portal-sync] Attempt {attempt + 1}/{max_attempts} "
+                f"[{log_label}] Attempt {attempt + 1}/{max_attempts} "
                 f"error for {customer_phone}: {e}"
             )
         if attempt < max_attempts - 1:
@@ -439,15 +475,50 @@ async def sync_token_to_portal(
     return None
 
 
+async def sync_token_to_portal(
+    customer_name: str, customer_phone: str, token_type: str, pax: int,
+    restaurant_id: str,
+    max_attempts: int = 3,
+) -> str | None:
+    """
+    Create a walk_in_tokens row for the manager portal.
+    Tries Node API first; falls back to direct Postgres insert.
+    """
+    from tools.db_tools import create_walk_in_token_direct
+
+    payload = {
+        "restaurant_id": restaurant_id,
+        "name":          customer_name,
+        "phone":         customer_phone,
+        "type":          token_type,
+        "pax":           pax,
+    }
+
+    token_id = await _sync_token_via_api(payload, customer_phone, "portal-sync", max_attempts)
+    if token_id:
+        return token_id
+
+    logger.warning(f"[portal-sync] API failed — direct DB fallback for {customer_phone}")
+    token_id = await create_walk_in_token_direct(
+        restaurant_id=restaurant_id,
+        name=customer_name,
+        phone=customer_phone,
+        token_type=token_type,
+        pax=pax,
+    )
+    if token_id:
+        await _send_manager_walk_in_alert(
+            restaurant_id, token_id, customer_name, pax, token_type,
+        )
+    return token_id
+
+
 async def sync_token_to_portal_large_party(
     customer_name: str, customer_phone: str, pax: int, combo: list,
     restaurant_id: str,
     max_attempts: int = 3,
 ) -> str | None:
-    secret = _get_kds_secret()
-    if not secret:
-        logger.error(f"[portal-sync-large] No KDS secret — cannot create token for {customer_phone}")
-        return None
+    from tools.db_tools import create_walk_in_token_direct
 
     payload = {
         "restaurant_id": restaurant_id,
@@ -456,35 +527,26 @@ async def sync_token_to_portal_large_party(
         "type":          "large_party",
         "pax":           pax,
         "meta":          {"combo": combo},
-        "secret":        secret,
     }
-    headers = _portal_auth_headers()
 
-    for attempt in range(max_attempts):
-        try:
-            resp = await get_http().post(
-                PORTAL_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=8),
-            )
-            if resp.status == 201:
-                data = await resp.json()
-                token_id = data.get("token", {}).get("id")
-                logger.info(f"[portal-sync-large] Token created: {token_id}")
-                return token_id
-            logger.warning(
-                f"[portal-sync-large] Attempt {attempt + 1}/{max_attempts} "
-                f"non-201 {resp.status}: {(await resp.text())[:300]}"
-            )
-        except Exception as e:
-            logger.warning(
-                f"[portal-sync-large] Attempt {attempt + 1}/{max_attempts} failed: {e}"
-            )
-        if attempt < max_attempts - 1:
-            await asyncio.sleep(0.75 * (attempt + 1))
+    token_id = await _sync_token_via_api(payload, customer_phone, "portal-sync-large", max_attempts)
+    if token_id:
+        return token_id
 
-    return None
+    logger.warning(f"[portal-sync-large] API failed — direct DB fallback for {customer_phone}")
+    token_id = await create_walk_in_token_direct(
+        restaurant_id=restaurant_id,
+        name=customer_name,
+        phone=customer_phone,
+        token_type="large_party",
+        pax=pax,
+        meta={"combo": combo},
+    )
+    if token_id:
+        await _send_manager_walk_in_alert(
+            restaurant_id, token_id, customer_name, pax, "large_party",
+        )
+    return token_id
 
 
 async def lookup_table_assignment(customer_phone: str, restaurant_id: str) -> str | None:
