@@ -1,4 +1,4 @@
-"""Database tools - ADK-compatible async database operations."""
+"""Database tools - ADK-compatible async database operations"""
 
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
