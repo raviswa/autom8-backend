@@ -112,6 +112,69 @@ async def _sync_table_from_portal(
     return None
 
 
+async def _fire_kitchen_and_receipt(
+    *,
+    restaurant_id: str,
+    customer_name: str,
+    customer_phone: str,
+    order_text: str,
+    cart_snapshot: dict,
+    session_state: Dict[str, Any],
+    token: str,
+    table_number,
+    special_notes: str | None = None,
+) -> None:
+    """Send order to KDS/KOT immediately; receipt image follows in background."""
+    await notify_kds(
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        order_text=order_text,
+        cart=cart_snapshot,
+        table_number=table_number,
+        token_number=token,
+        service_type="dine_in",
+        restaurant_id=restaurant_id,
+        special_notes=special_notes,
+    )
+
+    if not RECEIPT_AVAILABLE:
+        return
+
+    try:
+        r_info = await fetch_restaurant_info(restaurant_id)
+        table_label = str(table_number) if table_number else ""
+        receipt_data = _ReceiptData(
+            restaurant_name=r_info.get("name", ""),
+            restaurant_address=r_info.get("address", ""),
+            restaurant_phone=r_info.get("phone", ""),
+            restaurant_gstin=r_info.get("gstin", ""),
+            restaurant_wa_number=r_info.get("whatsapp_number", ""),
+            restaurant_website=r_info.get("website", ""),
+            receipt_url=receipt_qr_url(token),
+            token_number=token,
+            table_number=table_label,
+            service_type="dine_in",
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            items=_LineItem.from_cart(cart_snapshot),
+            gst_rate=5.0,
+            gst_inclusive=False,
+            payment_mode=session_state.get("payment_mode", "Cash"),
+            special_notes=special_notes or "",
+        )
+        receipt_path = _generate_receipt(receipt_data)
+        logger.info(f"[receipt] Dine-in receipt saved: {receipt_path}")
+        asyncio.create_task(
+            upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, token)
+        )
+        booking_id = session_state.get("booking_id")
+        if booking_id:
+            await update_booking_status(booking_id, "confirmed")
+    except Exception as _re:
+        import traceback as _tb
+        logger.warning(f"[receipt] Generation failed (non-fatal): {_re}\n{_tb.format_exc()}")
+
+
 async def _confirm_dine_in_order(
     *,
     restaurant_id: str,
@@ -203,12 +266,22 @@ async def _confirm_dine_in_order(
     session_state["last_order_summary"] = _first_item
     session_state["is_returning_customer"] = True
     session_state["visit_count"] = session_state.get("visit_count", 0) + 1
-    session_state["_kds_cart_snapshot"] = cart_snapshot
-    session_state["_kds_order_text"] = order_text
-    session_state["_receipt_cart"] = cart_snapshot
     session_state["booking_step"] = "awaiting_special_notes"
     session_state.pop("_order_retry_attempted", None)
     clear_cart(session_state)
+
+    # Kitchen + receipt fire immediately — do not wait for optional notes reply.
+    await _fire_kitchen_and_receipt(
+        restaurant_id=restaurant_id,
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        order_text=order_text,
+        cart_snapshot=cart_snapshot,
+        session_state=session_state,
+        token=token,
+        table_number=table_num or session_state.get("table_number"),
+    )
+
     return {"status": "awaiting_special_notes", "booking_id": booking_id, "total": total}
 
 
@@ -629,53 +702,7 @@ async def handle_dine_in_flow(
             )
 
         session_state["special_notes"] = special_notes
-
-        await notify_kds(
-            customer_name=customer_name,
-            customer_phone=customer_phone,
-            order_text=session_state.pop("_kds_order_text", ""),
-            cart=session_state.pop("_kds_cart_snapshot", {}),
-            table_number=table_num_str or None,
-            token_number=token,
-            service_type="dine_in",
-            restaurant_id=restaurant_id,
-            special_notes=special_notes,
-        )
-
-        if RECEIPT_AVAILABLE:
-            try:
-                r_info = await fetch_restaurant_info(restaurant_id)
-                receipt_data = _ReceiptData(
-                    restaurant_name=r_info.get("name", ""),
-                    restaurant_address=r_info.get("address", ""),
-                    restaurant_phone=r_info.get("phone", ""),
-                    restaurant_gstin=r_info.get("gstin", ""),
-                    restaurant_wa_number=r_info.get("whatsapp_number", ""),
-                    restaurant_website=r_info.get("website", ""),
-                    receipt_url=receipt_qr_url(token),
-                    token_number=token,
-                    table_number=table_num_str,
-                    service_type="dine_in",
-                    customer_name=customer_name,
-                    customer_phone=customer_phone,
-                    items=_LineItem.from_cart(session_state.get("_receipt_cart", {})),
-                    gst_rate=5.0,
-                    gst_inclusive=False,
-                    payment_mode=session_state.get("payment_mode", "Cash"),
-                    special_notes=special_notes or "",
-                )
-                receipt_path = _generate_receipt(receipt_data)
-                logger.info(f"[receipt] Dine-in receipt saved: {receipt_path}")
-                asyncio.create_task(
-                    upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, token)
-                )
-                booking_id = session_state.get("booking_id")
-                if booking_id:
-                    await update_booking_status(booking_id, "confirmed")
-                    logger.info(f"[receipt] Booking {booking_id} marked confirmed")
-            except Exception as _re:
-                import traceback as _tb
-                logger.warning(f"[receipt] Generation failed (non-fatal): {_re}\n{_tb.format_exc()}")
+        # KDS + receipt already sent at order confirm; notes go to manager above.
 
         # Feedback queue
         try:

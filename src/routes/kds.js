@@ -32,15 +32,14 @@ const { supabaseAdmin }       = require('../config/supabase');
 const { broadcastToRestaurant } = require('../websocket');
 const { sendWhatsAppMessage }  = require('../helpers/whatsapp');
 
-const { getKdsSecret } = require('../config/internalSecret');
+const { isValidKdsSecret, extractInternalSecret } = require('../config/internalSecret');
 
 // ── POST /api/kds/notify ──────────────────────────────────────────────────────
 
 router.post('/notify', async (req, res) => {
 
-  // ── Auth (shared secret — same as Python booking agent) ─────────────────────
-  const { secret } = req.body;
-  if (secret !== getKdsSecret()) {
+  // ── Auth (Bearer / x-internal-secret / body.secret — same as portal sync) ─
+  if (!isValidKdsSecret(extractInternalSecret(req))) {
     console.warn('[kds-notify] Rejected — bad secret');
     return res.status(403).json({ error: 'Forbidden' });
   }
@@ -202,20 +201,28 @@ router.post('/notify', async (req, res) => {
     }
 
     // ── Step 5: Broadcast ORDER_NEW → KDSScreen.jsx ───────────────────────────
+    let kitchenWorkflow = 'KOT_only';
+    try {
+      const { data: restRow } = await supabaseAdmin
+        .from('restaurants').select('kitchen_workflow').eq('id', restaurant_id).single();
+      kitchenWorkflow = restRow?.kitchen_workflow || 'KOT_only';
+    } catch (_) {}
+
     broadcastToRestaurant(restaurant_id, {
-      type:           'ORDER_NEW',
-      order_id:       orderRow.id,
-      order_number:   orderRow.order_number,
-      token_number:   token_number   ?? null,
-      table_number:   table_number   ?? null,
-      customer_name:  customer_name  ?? null,
-      customer_phone: cleanPhone,
-      service_type:   service_type   ?? null,
-      special_notes:  special_notes  ?? null,
-      advance_credit: advance_credit || 0,
-      item_count:     kdsItemsCreated,
-      source:         'whatsapp_booking',
-      timestamp:      new Date().toISOString(),
+      type:             'ORDER_NEW',
+      order_id:         orderRow.id,
+      order_number:     orderRow.order_number,
+      token_number:     token_number   ?? null,
+      table_number:     table_number   ?? null,
+      customer_name:    customer_name  ?? null,
+      customer_phone:   cleanPhone,
+      service_type:     service_type   ?? null,
+      special_notes:    special_notes  ?? null,
+      advance_credit:   advance_credit || 0,
+      item_count:       kdsItemsCreated,
+      kitchen_workflow: kitchenWorkflow,
+      source:           'whatsapp_booking',
+      timestamp:        new Date().toISOString(),
     });
 
     // ── Step 6: Send receipt URL to customer ──────────────────────────────────

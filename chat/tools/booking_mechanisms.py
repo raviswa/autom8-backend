@@ -599,16 +599,20 @@ async def notify_kds(
         if not items:
             items = [{"retailer_id": "manual", "name": order_text, "qty": 1, "unit_price": 0}]
 
+        secret = _get_kds_secret()
         payload = {
             "restaurant_id": restaurant_id,
             "customer_name": customer_name, "customer_phone": customer_phone,
             "token_number": token_number,
             "table_number": str(table_number) if table_number else None,
             "service_type": service_type, "items": items,
-            "special_notes": special_notes, "secret": KDS_SECRET,
+            "special_notes": special_notes, "secret": secret,
         }
         resp = await get_http().post(
-            AUTOM8_KDS_URL, json=payload, timeout=aiohttp.ClientTimeout(total=5)
+            AUTOM8_KDS_URL,
+            json=payload,
+            headers=_portal_auth_headers(),
+            timeout=aiohttp.ClientTimeout(total=8),
         )
         if resp.status in (200, 201):
             data = await resp.json()
