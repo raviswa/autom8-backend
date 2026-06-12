@@ -81,6 +81,7 @@ from agents.customer.dine_in_flow import handle_dine_in_flow
 from agents.customer.takeaway_flow import handle_takeaway_flow
 from agents.customer.delivery_flow import handle_delivery_flow
 from agents.customer.reserve_table_flow import handle_reserve_table_flow
+from agents.customer.feedback_flow import handle_feedback_flow
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,22 @@ async def handle_booking_flow(
         if _prev_last:   session_state["last_order_summary"]   = _prev_last
         session_state["booking_step"] = "ask_service"
         current_step = "ask_service"
+
+    # ── Feedback steps — routed entirely to feedback_flow ────────────────────
+    _FEEDBACK_STEPS = {
+        "awaiting_feedback_rating",
+        "awaiting_feedback_aspects",
+        "awaiting_feedback_comment",
+    }
+    if current_step in _FEEDBACK_STEPS:
+        return await handle_feedback_flow(
+            restaurant_id=restaurant_id,
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            message=message,
+            session_state=session_state,
+            message_obj=None,   # pass full webhook dict here once dispatcher supports it
+        )
 
     # ── Global Home / reset keyword ───────────────────────────────────────────
     if (current_step not in {"awaiting_reset_confirmation"}
