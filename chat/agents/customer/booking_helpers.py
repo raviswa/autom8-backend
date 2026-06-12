@@ -2,7 +2,7 @@
 agents/customer/booking_helpers.py
 ────────────────────────────────────
 Pure helper functions extracted from booking_agent.py.
-No flow logic here — only utilities consumed by the flow modules and the router.
+No flow logic here — only utilities consumed by flow modules and the router.
 
 Sections
 --------
@@ -11,12 +11,14 @@ Sections
   C. Menu keyword sets + special-notes hint builder
   D. Party-size parser
   E. Message classification helpers
-  F. Catalog fallback              (Fix 40 applied)
-  G. Reset helpers                 (Fix 39 applied in _do_reset)
-  H. Service-menu sender
-  I. Booking-datetime parser
-  J. Smart greeting builder
-  K. Special-notes nudge stubs     (dead code removed: auto_nudge_special_notes_loop)
+  F. Reset helpers                 (Fix 39 applied in do_reset)
+  G. Service-menu sender
+  H. Booking-datetime parser
+  I. Smart greeting builder
+  J. Special-notes nudge stubs
+
+Note: send_catalog_with_fallback lives in tools/booking_mechanisms.py
+      (merged with the existing catalog/cart strategy). Import it from there.
 """
 
 from __future__ import annotations
@@ -31,10 +33,12 @@ from typing import Dict, Any
 from zoneinfo import ZoneInfo
 
 from tools.whatsapp_tools import send_whatsapp_message
-from tools.catalog_tools import send_whatsapp_catalog_message
-from tools.cart_tools import plain_text_menu, clear_cart, _send_interactive
+from tools.cart_tools import clear_cart, _send_interactive
 from tools.feature_gate import build_service_menu_rows
 from tools.db_tools import update_booking_status
+
+# send_catalog_with_fallback is the alias for send_unified_booking_menu
+from tools.booking_mechanisms import send_catalog_with_fallback  # noqa: F401 — re-exported
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +46,12 @@ logger = logging.getLogger(__name__)
 # A. CONSTANTS
 # ─────────────────────────────────────────────
 
-MANAGER_PORTAL_URL       = "https://app.autom8.works/dashboard/manager"
-LARGE_PARTY_THRESHOLD    = 8
-_HOME_HINT               = "\n\n💡 Type *Home* to start a fresh booking anytime."
+MANAGER_PORTAL_URL            = "https://app.autom8.works/dashboard/manager"
+LARGE_PARTY_THRESHOLD         = 8
+_HOME_HINT                    = "\n\n💡 Type *Home* to start a fresh booking anytime."
 _PAYMENT_PLACEHOLDER_SENTINEL = "placeholder"
-_GENERIC_GREETINGS: set[str] = {"welcome!", "welcome", "hi!", "hi", "hello!", "hello", ""}
+_GENERIC_GREETINGS: set[str]  = {"welcome!", "welcome", "hi!", "hi", "hello!", "hello", ""}
+
 
 # ─────────────────────────────────────────────
 # B. TIME UTILITIES
@@ -337,74 +342,7 @@ def is_placeholder_payment_link(link: str) -> bool:
 
 
 # ─────────────────────────────────────────────
-# F. CATALOG FALLBACK  (Fix 40 applied)
-# ─────────────────────────────────────────────
-
-async def send_catalog_with_fallback(
-    customer_phone: str, restaurant_id: str, session_state: Dict[str, Any],
-) -> None:
-    """
-    Attempt 1 : native WhatsApp Catalog API
-    Attempt 2 : single retry after 2 s
-    Hard fallback : plain-text numbered menu
-    Last resort   : static prompt directing customer to 🛍️ Shop icon (Fix 40)
-    """
-    logger.info(f"[catalog] send_catalog_with_fallback called for {customer_phone}")
-
-    catalog_sent = False
-    try:
-        catalog_sent = await send_whatsapp_catalog_message(customer_phone, restaurant_id)
-        logger.info(f"[catalog] attempt-1 result={catalog_sent}")
-    except Exception as e:
-        logger.warning(f"[catalog] attempt-1 raised: {e}")
-
-    if catalog_sent:
-        return
-
-    logger.warning(f"[catalog] attempt-1 failed — retrying in 2 s")
-    await asyncio.sleep(2)
-    try:
-        catalog_sent = await send_whatsapp_catalog_message(customer_phone, restaurant_id)
-        logger.info(f"[catalog] attempt-2 result={catalog_sent}")
-    except Exception as e:
-        logger.warning(f"[catalog] attempt-2 raised: {e}")
-
-    if catalog_sent:
-        return
-
-    # Hard fallback: plain-text numbered menu
-    logger.warning(f"[catalog] both attempts failed — plain-text fallback")
-    try:
-        menu_text = plain_text_menu()
-        if menu_text and menu_text.strip():
-            await send_whatsapp_message(customer_phone, menu_text, restaurant_id)
-            session_state["booking_step"] = "awaiting_numbered_order"
-            logger.info(f"[catalog-fallback] plain-text menu delivered to {customer_phone}")
-            return
-        logger.error(f"[catalog-fallback] plain_text_menu() returned empty")
-    except Exception as e:
-        logger.error(f"[catalog-fallback] plain_text_menu() raised: {e}")
-
-    # Last resort: direct to Shop icon (Fix 40)
-    logger.error(f"[catalog-fallback] last-resort static prompt for {customer_phone}")
-    try:
-        await send_whatsapp_message(
-            customer_phone,
-            (
-                "🍽️ Our menu is ready for you!\n\n"
-                "👆 Tap the *🛍️ Shop* icon at the top of this chat to browse "
-                "and add items to your basket — then come back here to confirm.\n\n"
-                "Or type *MENU* if you'd prefer a text list of today's items."
-            ),
-            restaurant_id,
-        )
-        session_state["booking_step"] = session_state.get("booking_step", "awaiting_order")
-    except Exception as e:
-        logger.critical(f"[catalog-fallback] even last-resort message failed: {e}")
-
-
-# ─────────────────────────────────────────────
-# G. RESET HELPERS  (Fix 39 applied in _do_reset)
+# F. RESET HELPERS  (Fix 39 applied)
 # ─────────────────────────────────────────────
 
 async def ask_continue_or_reset(
@@ -444,7 +382,7 @@ async def do_reset(
 
     if full_restart:
         # Fix 39: preserve returning-customer signals before wipe so greeting
-        # doesn't fall into the first-timer branch on the very next visit.
+        # never falls into the first-timer branch after a full restart.
         _prev_ret    = session_state.get("is_returning_customer", False)
         _prev_visits = session_state.get("visit_count", 0)
         _prev_last   = session_state.get("last_order_summary", "")
@@ -474,15 +412,14 @@ async def do_reset(
     session_state["booking_step"]          = "awaiting_service_selection"
     session_state["is_returning_customer"] = True
 
-    # Import here to avoid circular at module load
     from agents.customer.conversation_helpers import safe_build_greeting
-    raw_greeting  = await safe_build_greeting(customer_id, restaurant_id) if customer_id else ""
+    raw_greeting   = await safe_build_greeting(customer_id, restaurant_id) if customer_id else ""
     reset_greeting = build_smart_greeting(customer_name, raw_greeting, session_state)
     await send_service_menu(customer_phone, restaurant_id, reset_greeting)
 
 
 # ─────────────────────────────────────────────
-# H. SERVICE MENU SENDER
+# G. SERVICE MENU SENDER
 # ─────────────────────────────────────────────
 
 async def send_service_menu(customer_phone: str, restaurant_id: str, greeting: str) -> None:
@@ -510,7 +447,7 @@ async def send_service_menu(customer_phone: str, restaurant_id: str, greeting: s
 
 
 # ─────────────────────────────────────────────
-# I. BOOKING DATETIME PARSER
+# H. BOOKING DATETIME PARSER
 # ─────────────────────────────────────────────
 
 def parse_booking_datetime(text: str) -> datetime | None:
@@ -537,7 +474,7 @@ def parse_booking_datetime(text: str) -> datetime | None:
 
 
 # ─────────────────────────────────────────────
-# J. SMART GREETING BUILDER
+# I. SMART GREETING BUILDER
 # ─────────────────────────────────────────────
 
 _RETURNING_VARIANTS: dict[str, list[str]] = {
@@ -636,9 +573,9 @@ def build_smart_greeting(
 
 
 # ─────────────────────────────────────────────
-# K. SPECIAL-NOTES NUDGE STUBS
-#    auto_nudge_special_notes_loop removed (dead code — was a no-op stub
-#    never registered with APScheduler).
+# J. SPECIAL-NOTES NUDGE STUBS
+#    auto_nudge_special_notes_loop removed — was a no-op stub never
+#    registered with APScheduler (dead code).
 # ─────────────────────────────────────────────
 
 _nudge_tasks: dict = {}
