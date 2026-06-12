@@ -60,7 +60,7 @@ def _make_message_dict(message: str | Dict[str, Any]) -> dict[str, Any]:
     dict that satisfies both paths in handle_incoming_message():
 
       Plain text "4"       → {"type": "text", "text": {"body": "4"}}
-      "CAT:Morning Tiffin" → {"type": "interactive", "interactive": {"type": "list_reply", ...}}
+      "CAT:South Indian"   → {"type": "interactive", "interactive": {"type": "list_reply", ...}}
       "ITEM:M003"          → {"type": "interactive", "interactive": {"type": "list_reply", ...}}
       "CART:CONFIRM"       → {"type": "interactive", "interactive": {"type": "button_reply", ...}}
     """

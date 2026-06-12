@@ -92,7 +92,10 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
       if (rest?.manager_phone) managerPhone = rest.manager_phone;
     } catch (_) {}
 
-    if (managerPhone && process.env.WHATSAPP_ACCESS_TOKEN) {
+    // Manager WhatsApp alerts are sent by the chat agent (notify=false on sync).
+    // WalkInForm / kiosk POST keeps the default notify=true behaviour below.
+    const shouldNotify = req.query.notify !== 'false';
+    if (shouldNotify && managerPhone && process.env.WHATSAPP_ACCESS_TOKEN) {
       if (type === 'large_party') {
         const combo      = meta?.combo ?? [];
         const tableLines = combo.length > 0
@@ -100,15 +103,15 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
           : `${token.pax} seats`;
         sendWhatsAppMessage(
           managerPhone,
-          `🟣 *Large Party Request* — Token *${token.id}*\n👥 ${token.name} · *${token.pax} people*\n🕐 ${arrivalTime}\n\nProposed: ${tableLines}\n\n⚠️ *Action required:*\n${process.env.FRONTEND_URL || ''}/dashboard/manager`,
+          `🟣 *Large Party Request* — Token *${token.id}*\n👥 ${token.name} · *${token.pax} people*\n🕐 ${arrivalTime} IST\n\nProposed: ${tableLines}\n\n⚠️ *Action required:*\n${process.env.FRONTEND_URL || ''}/dashboard/manager`,
           restaurant_id
         );
-      } else if (req.query.notify !== 'false') {
+      } else {
         const typeLabel = type === 'dinein' ? 'Dine-in' : 'Takeaway';
         const paxLine   = type === 'dinein' ? `, ${token.pax} ${token.pax === 1 ? 'person' : 'people'}` : '';
         sendWhatsAppMessage(
           managerPhone,
-          `🪑 *New Walk-in* — Token *${token.id}*\n👤 ${token.name}${paxLine}\n📋 ${typeLabel}\n🕐 ${arrivalTime}\n\n${process.env.FRONTEND_URL || ''}/dashboard/manager`,
+          `🪑 *New Walk-in* — Token *${token.id}*\n👤 ${token.name}${paxLine}\n📋 ${typeLabel}\n🕐 ${arrivalTime} IST\n\n${process.env.FRONTEND_URL || ''}/dashboard/manager`,
           restaurant_id
         );
       }

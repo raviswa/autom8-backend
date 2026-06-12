@@ -111,8 +111,6 @@ from tools.cart_tools import (
     parse_numbered_order,
     plain_text_menu,
     MENU_ITEMS,
-    items_for_slot,
-    current_time_slot,
     _send_interactive,
 )
 
@@ -720,10 +718,10 @@ async def handle_booking_flow(
             cat = message[4:]
         elif ":" not in message:
             from tools.catalog_tools import MENU_ITEMS as _MI
-            slots = list(dict.fromkeys(i["time_slot"] for i in _MI))
-            for s in slots:
-                if s.lower() in message.lower():
-                    cat = s
+            categories = list(dict.fromkeys(i.get("category", "General") for i in _MI))
+            for c in categories:
+                if c.lower() in message.lower():
+                    cat = c
                     break
 
         if not cat:
@@ -755,7 +753,11 @@ async def handle_booking_flow(
                 await send_quantity_prompt(customer_phone, item, session_state)
                 return {"status": "awaiting_quantity"}
 
-        cat = session_state.get("current_category", current_time_slot())
+        cat = session_state.get("current_category")
+        if not cat:
+            from tools.catalog_tools import MENU_ITEMS as _MI
+            available = [i for i in _MI if i.get("is_available", True)]
+            cat = available[0].get("category", "General") if available else "General"
         await send_item_list(customer_phone, cat, session_state)
         return {"status": "awaiting_item_selection"}
 

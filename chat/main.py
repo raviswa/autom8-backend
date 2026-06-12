@@ -114,7 +114,7 @@ def _extract_message_body(message_obj: dict) -> str:
     Returns a string that booking_agent can dispatch on:
       - Plain text      → the message body
       - button_reply    → the reply ID (e.g. "1", "SKIP", "YES", "CART:CONFIRM")
-      - list_reply      → the reply ID (e.g. "4", "CAT:Evening Snacks")
+      - list_reply      → the reply ID (e.g. "4", "CAT:South Indian")
       - nfm_reply       → "FLOW:{token}|date=YYYY-MM-DD|time=HH:MM"
       - location        → "LOCATION:lat,lng|label"
       - order (catalog) → "" (handled separately via is_catalog_order)

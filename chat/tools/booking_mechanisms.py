@@ -364,9 +364,15 @@ async def sync_token_to_portal(
     customer_name: str, customer_phone: str, token_type: str, pax: int,
     restaurant_id: str,
 ) -> str | None:
+    """
+    Create a walk_in_tokens row in the manager portal.
+    notify=false — the chat flow sends the single manager WhatsApp alert.
+    """
     try:
         resp = await get_http().post(
             PORTAL_API_URL,
+            params={"notify": "false"},
+            headers={"x-internal-secret": KDS_SECRET} if KDS_SECRET else {},
             json={
                 "restaurant_id": restaurant_id,
                 "name": customer_name, "phone": customer_phone,
@@ -380,10 +386,13 @@ async def sync_token_to_portal(
             token_id = data.get("token", {}).get("id")
             logger.info(f"[portal-sync] Token created: {token_id}")
             return token_id
-        logger.warning(f"[portal-sync] Non-201 {resp.status}: {await resp.text()}")
+        body = await resp.text()
+        logger.error(
+            f"[portal-sync] Failed {resp.status} for {customer_phone}: {body[:300]}"
+        )
         return None
     except Exception as e:
-        logger.warning(f"[portal-sync] Failed (non-fatal): {e}")
+        logger.error(f"[portal-sync] Failed for {customer_phone}: {e}")
         return None
 
 
@@ -395,6 +404,7 @@ async def sync_token_to_portal_large_party(
         resp = await get_http().post(
             PORTAL_API_URL,
             params={"notify": "false"},
+            headers={"x-internal-secret": KDS_SECRET} if KDS_SECRET else {},
             json={
                 "restaurant_id": restaurant_id,
                 "name": customer_name, "phone": customer_phone,
@@ -623,11 +633,16 @@ async def send_unified_booking_menu(
             restaurant_id,
         )
         session_state["booking_mechanism"] = "none"
-        session_state["booking_step"] = session_state.get("booking_step", "awaiting_order")
+        session_state["booking_step"] = "awaiting_order"
     except Exception as e:
         logger.critical(f"[BOOKING] {customer_phone} → even last-resort message failed: {e}")
 
     return "none"
+
+
+def status_after_booking_menu(session_state: dict[str, Any]) -> str:
+    """Routing status aligned with booking_step after send_catalog_with_fallback."""
+    return session_state.get("booking_step", "awaiting_order")
 
 
 # Alias used by booking_helpers and flow modules

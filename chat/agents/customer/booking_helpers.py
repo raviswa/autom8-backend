@@ -38,7 +38,10 @@ from tools.feature_gate import build_service_menu_rows
 from tools.db_tools import update_booking_status
 
 # send_catalog_with_fallback is the alias for send_unified_booking_menu
-from tools.booking_mechanisms import send_catalog_with_fallback  # noqa: F401 — re-exported
+from tools.booking_mechanisms import (  # noqa: F401 — re-exported
+    send_catalog_with_fallback,
+    status_after_booking_menu,
+)
 
 logger = logging.getLogger(__name__)
 

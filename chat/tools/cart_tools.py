@@ -24,7 +24,7 @@ Session keys used:
 
 WhatsApp interactive message limits (as of API v20):
   - list message: max 10 sections, max 10 rows per section (total <= 10 rows in
-    a single section). We split across sections when > 10 items per slot.
+    a single section). We split across sections when > 10 items per category.
   - button message: max 3 buttons
   - All button IDs must be <= 256 bytes, unique per message.
   - Row description: max 72 characters (enforced by _truncate_desc helper)
@@ -33,7 +33,6 @@ Environment variables (same as catalog_tools):
   META_GRAPH_API_TOKEN
   WABA_PHONE_NUMBER_ID
   META_GRAPH_VERSION
-  TIMEZONE                 — IANA timezone name (default: Asia/Kolkata)
 
 FIX LOG
 -------
@@ -67,17 +66,6 @@ FIX LOG
            Fix: _truncate_desc() caps the ENTIRE assembled description string
            to 72 characters, truncating with "..." if needed. Applied to every
            row built in send_item_list().
-
-  Bug 5 — No communication to customer when they select a category that is
-           not currently being served (e.g. selecting Lunch during Morning
-           Tiffin hours). The order would silently fail or behave unexpectedly.
-           Fix 1: send_category_list() body text now explicitly tells the
-           customer to select only the "<- Now serving" category for immediate
-           orders, and that other categories show future menu items only.
-           Fix 2: handle_incoming_message() detects when the selected category
-           is not the current slot and sends a clear warning message before
-           showing the item list, so the customer knows the items are not
-           available right now.
 
   Bug 6 — Stale-button guard in handle_incoming_message() was using _send_text()
            for the "order confirmed" message, inconsistent with the same guard in
@@ -116,15 +104,6 @@ FIX LOG
            A dedicated _qty_error_message() helper sends a consistent,
            friendly rejection to the customer.
 
-  Bug 10 — current_time_slot() used datetime.now() without a timezone, causing
-            incorrect menu selection on UTC-based cloud servers (e.g. showing
-            Morning Tiffin at 11:30 PM IST because UTC offset was not applied).
-            Fix: timezone is now read from the TIMEZONE env var (default:
-            Asia/Kolkata). datetime.now() is called with that explicit tzinfo
-            so the correct local hour is always used regardless of the server's
-            system timezone. tzlocal is used as a fallback if TIMEZONE is unset
-            and pytz is unavailable.
-
   Fix (menu source) — MENU_ITEMS was a static hardcoded list in catalog_tools.py.
             send_category_list() now calls fetch_menu_items() at the start so the
             cache is always warm before building the menu. All other functions that
@@ -137,32 +116,11 @@ from __future__ import annotations
 import logging
 import os
 import re
-from datetime import datetime
 from typing import Any
 
 import httpx
-import pytz
 
-from tools.catalog_tools import MENU_ITEMS, current_time_slot, items_for_slot, fetch_menu_items
-
-# ── Timezone setup ────────────────────────────────────────────────────────────
-# Reads TIMEZONE env var (IANA name, e.g. "Asia/Kolkata").
-# Falls back to Asia/Kolkata (IST) if unset — correct default for Indian
-# deployments running on UTC cloud servers.
-_TZ: Any  # pytz timezone object
-try:
-    _TZ = pytz.timezone(os.getenv("TIMEZONE", "Asia/Kolkata"))
-except Exception:
-    _TZ = pytz.utc
-    logging.getLogger(__name__).warning(
-        "Invalid TIMEZONE env var — falling back to UTC. Set TIMEZONE=Asia/Kolkata in .env"
-    )
-
-
-def _local_hour() -> int:
-    """Return the current hour (0-23) in the configured local timezone."""
-    return datetime.now(_TZ).hour
-
+from tools.catalog_tools import MENU_ITEMS, items_for_category, fetch_menu_items
 
 # Lazy import to avoid circular import at module load time.
 # whatsapp_tools._get_http_client() returns the module-level shared AsyncClient.
@@ -184,16 +142,6 @@ _MAX_ROW_DESC = 72
 # ── Quantity validation bounds ────────────────────────────────────────────────
 MIN_QTY = 1
 MAX_QTY = 20
-
-# ── Slot display config ───────────────────────────────────────────────────────
-
-_SLOT_EMOJI = {
-    "Morning Tiffin": "🌅",
-    "Lunch":          "☀️",
-    "Evening Snacks": "🍵",
-    "Dinner Tiffin":  "🌙",
-}
-
 
 # ── Description truncation helper ─────────────────────────────────────────────
 
@@ -358,46 +306,33 @@ async def send_category_list(
     Send a WhatsApp list message showing available menu categories.
     Customer taps one to browse items in that category.
 
-    Bug 10 fix: uses _local_hour() via current_time_slot() so the correct
-    slot is shown regardless of server system timezone.
-
-    Menu source fix: calls fetch_menu_items() to warm the live cache before
-    building the list, so MENU_ITEMS always reflects the restaurant DB.
-
     Returns True on API success.
     """
-    # Warm the menu cache before building the list — ensures MENU_ITEMS always
-    # reflects the latest items from the restaurant DB (not the static list).
     restaurant_id = session_state.get("restaurant_id")
     await fetch_menu_items(restaurant_id)
 
-    slot       = current_time_slot()
-    slot_emoji = _SLOT_EMOJI.get(slot, "🍽️")
-
-    all_slots = list(dict.fromkeys(
-        [slot] + [i["time_slot"] for i in MENU_ITEMS if i["time_slot"] != slot]
+    available = [i for i in MENU_ITEMS if i.get("is_available", True)]
+    categories = list(dict.fromkeys(
+        i.get("category", "General") for i in available
     ))
 
     rows = []
-    for s in all_slots:
-        count  = sum(1 for i in MENU_ITEMS if i["time_slot"] == s)
-        emoji  = _SLOT_EMOJI.get(s, "🍽️")
-        marker = " <- Now serving" if s == slot else ""
+    for cat in categories[:10]:
+        count = sum(1 for i in available if i.get("category", "General") == cat)
         rows.append({
-            "id":          f"CAT:{s}",
-            "title":       f"{emoji} {s}",
-            "description": _truncate_desc(f"{count} items{marker}"),
+            "id":          f"CAT:{cat}",
+            "title":       cat[:24],
+            "description": _truncate_desc(f"{count} items"),
         })
 
     payload = {
         "interactive": {
             "type": "list",
-            "header": {"type": "text", "text": f"{slot_emoji} Munafe Menu"},
+            "header": {"type": "text", "text": "🍽️ Munafe Menu"},
             "body": {
                 "text": (
                     "What would you like to eat? 🍽️\n\n"
-                    "Tap Morning, Noon, Evening, or Dinner to browse items.\n\n"
-                    "✅ = Available now  |  🕐 = Not available right now\n\n"
+                    "Tap a category to browse items.\n\n"
                     "Add items one by one to your cart 🛒\n\n"
                     "When you're done, you can:\n"
                     "🎯 Confirm Order — to place your order & pay the bill\n"
@@ -437,11 +372,10 @@ async def send_item_list(
     WhatsApp API — especially when a cart note was appended.
     """
     await fetch_menu_items(session_state.get("restaurant_id"))
-    items = items_for_slot(category)
+    items = items_for_category(category)
     if not items:
         return False
 
-    emoji = _SLOT_EMOJI.get(category, "🍽️")
     cart  = get_cart(session_state)
 
     rows = []
@@ -472,7 +406,7 @@ async def send_item_list(
     payload = {
         "interactive": {
             "type": "list",
-            "header": {"type": "text", "text": f"{emoji} {category}"},
+            "header": {"type": "text", "text": f"🍽️ {category}"},
             "body": {
                 "text": (
                     "Tap an item to add it to your cart.\n"
@@ -482,7 +416,7 @@ async def send_item_list(
             "footer": {"text": footer},
             "action": {
                 "button": "Pick item",
-                "sections": [{"title": f"{emoji} {category}", "rows": rows}],
+                "sections": [{"title": category[:24], "rows": rows}],
             },
         }
     }
@@ -902,24 +836,8 @@ async def handle_incoming_message(
                 await send_done_or_more_buttons(customer_phone, title, cart)
             return True
 
-        # Category selected -> warn if not current slot, then show item list
         if reply_id.startswith("CAT:"):
-            category   = reply_id.split(":", 1)[1]
-            slot       = current_time_slot()
-            emoji      = _SLOT_EMOJI.get(category, "🍽️")
-
-            if category != slot:
-                slot_emoji = _SLOT_EMOJI.get(slot, "🍽️")
-                await _send_text(
-                    customer_phone,
-                    f"⚠️ *{emoji} {category}* is not available right now.\n\n"
-                    f"We are currently serving *{slot_emoji} {slot}* only.\n\n"
-                    f"Please go back and select *{slot_emoji} {slot} <- Now serving* "
-                    f"to place an order. 😊",
-                )
-                await send_category_list(customer_phone, session_state)
-                return True
-
+            category = reply_id.split(":", 1)[1]
             await send_item_list(customer_phone, category, session_state)
             return True
 
@@ -982,7 +900,7 @@ async def handle_incoming_message(
             return True
 
         category = session_state.get("current_category")
-        matched  = parse_numbered_order(text, slot=category)
+        matched  = parse_numbered_order(text, category=category)
 
         if matched:
             if len(matched) == 1:
@@ -1001,18 +919,17 @@ async def handle_incoming_message(
 
 # ── Fallback: plain-text cart flow ────────────────────────────────────────────
 
-def plain_text_menu(slot: str | None = None) -> str:
+def plain_text_menu(category: str | None = None) -> str:
     """
     Plain-text menu for when interactive messages are unavailable.
     Numbered so customer can reply '1', '2' etc. instead of typing item names.
     """
-    slot  = slot or current_time_slot()
-    items = items_for_slot(slot)
+    items = items_for_category(category)
     if not items:
-        items = MENU_ITEMS
+        items = [i for i in MENU_ITEMS if i.get("is_available", True)]
 
-    emoji = _SLOT_EMOJI.get(slot, "🍽️")
-    lines = [f"{emoji} *{slot} Menu* — reply with item number(s)\n"]
+    label = category or "Menu"
+    lines = [f"🍽️ *{label}* — reply with item number(s)\n"]
     for i, item in enumerate(items, 1):
         price_inr = item["price"] // 100
         lines.append(f"{i}. {item['title']} — ₹{price_inr}")
@@ -1023,15 +940,16 @@ def plain_text_menu(slot: str | None = None) -> str:
 
 def parse_numbered_order(
     text: str,
-    slot: str | None = None,
+    category: str | None = None,
     session_state: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]] | None:
     """
-    Parse a numbered reply like '1 3' or '2, 4' against the current slot menu.
+    Parse a numbered reply like '1 3' or '2, 4' against the current category menu.
     Returns list of matched items, or None if nothing parsed.
     """
-    slot  = slot or current_time_slot()
-    items = items_for_slot(slot) or MENU_ITEMS
+    items = items_for_category(category) or [
+        i for i in MENU_ITEMS if i.get("is_available", True)
+    ]
 
     numbers = [int(n) for n in re.findall(r"\d+", text)]
     matched = []

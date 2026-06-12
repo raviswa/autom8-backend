@@ -984,28 +984,12 @@ async def get_menu(restaurant_id: str) -> List[Dict[str, Any]]:
 
     if _autom8_url and _autom8_key:
         try:
-            from datetime import datetime, timezone, timedelta
-            _ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-            _ist_hour = _ist.hour
-            if   6  <= _ist_hour < 11: _slot = "morning_tiffin"
-            elif 11 <= _ist_hour < 15: _slot = "lunch"
-            elif 15 <= _ist_hour < 19: _slot = "evening_snacks"
-            elif 19 <= _ist_hour < 23: _slot = "dinner_tiffin"
-            else:                      _slot = None
-
-            # Build base params — or= must NOT go through httpx params dict
-            # because httpx percent-encodes the parentheses, which Supabase
-            # does not recognise, causing the filter to be silently ignored
-            # and ALL items to be returned regardless of time_slot.
-            # Instead we append the raw or= string directly to the URL.
             _base_params = (
-                f"select=id,name,price,category,time_slot,is_available"
+                f"select=id,name,price,category,is_available"
                 f"&restaurant_id=eq.{restaurant_id}"
                 f"&is_available=eq.true"
                 f"&order=category.asc,name.asc"
             )
-            if _slot:
-                _base_params += f"&or=(time_slot.eq.{_slot},time_slot.eq.all)"
 
             _url = f"{_autom8_url}/rest/v1/menu_items?{_base_params}"
 
@@ -1031,7 +1015,7 @@ async def get_menu(restaurant_id: str) -> List[Dict[str, Any]]:
                     for row in _rows
                 ]
                 _MENU_CACHE[restaurant_id] = (data, now)
-                logger.debug(f"[get_menu] {len(data)} items from autom8 DB (slot={_slot})")
+                logger.debug(f"[get_menu] {len(data)} items from autom8 DB")
                 return data
             else:
                 logger.warning(f"[get_menu] autom8 DB returned {_resp.status_code} — falling back to local")

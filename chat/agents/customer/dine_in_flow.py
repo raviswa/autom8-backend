@@ -57,6 +57,7 @@ from agents.customer.booking_helpers import (
     is_placeholder_payment_link,
     build_notes_hint,
     send_catalog_with_fallback,
+    status_after_booking_menu,
     start_special_notes_timer,
     stop_special_notes_timer,
 )
@@ -286,21 +287,29 @@ async def handle_dine_in_flow(
 
             token        = await get_next_token_number(restaurant_id)
             booking_time = now_display()
-            session_state["token_number"] = token
+            session_state["token_number"]  = token
+            session_state["booking_time"]  = booking_time
 
             portal_token_id = await sync_token_to_portal(
                 customer_name=customer_name, customer_phone=customer_phone,
                 token_type="dinein", pax=party_size, restaurant_id=restaurant_id,
             )
+            if not portal_token_id:
+                logger.error(
+                    f"[dine-in] Portal token sync failed for {customer_phone} "
+                    f"(restaurant={restaurant_id}) — queue will be empty in manager portal"
+                )
             display_token = portal_token_id or token
             session_state["display_token"] = display_token
 
             await send_whatsapp_message(
                 manager_phone,
-                f"🪑 *New Walk-in* — Token *{display_token}*\n"
-                f"👤 {customer_name}, {party_size} {'person' if party_size == 1 else 'people'}\n"
-                f"🍽️ Dine-in\n🕐 {booking_time}\n\n"
-                f"Open portal to assign table:\n{MANAGER_PORTAL_URL}",
+                f"🪑 *New Dine-in — assign table*\n"
+                f"Token: *{display_token}*\n"
+                f"👤 {customer_name} · {party_size} {'person' if party_size == 1 else 'people'}\n"
+                f"📱 {customer_phone}\n"
+                f"🕐 {booking_time} IST\n\n"
+                f"Review headcount and assign a table in the portal:\n{MANAGER_PORTAL_URL}",
                 restaurant_id,
             )
             await send_whatsapp_message(
@@ -313,10 +322,9 @@ async def handle_dine_in_flow(
                 restaurant_id,
             )
             clear_cart(session_state)
-            session_state["booking_step"] = "awaiting_order"
             await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
             session_state["_catalog_sent_after_party"] = True
-            return {"status": "awaiting_order"}
+            return {"status": status_after_booking_menu(session_state)}
 
         except ValueError:
             await send_whatsapp_message(
@@ -351,12 +359,33 @@ async def handle_dine_in_flow(
         elif reply in ("YES", "CONFIRM") and session_state.get("_pending_combo"):
             combo      = session_state.get("_pending_combo", [])
             party_size = session_state.get("party_size", 1)
+            booking_time = now_display()
+            session_state["booking_time"] = booking_time
             portal_token_id = await sync_token_to_portal_large_party(
                 customer_name=customer_name, customer_phone=customer_phone,
                 pax=party_size, combo=combo, restaurant_id=restaurant_id,
             )
+            if not portal_token_id:
+                logger.error(
+                    f"[dine-in] Large-party portal sync failed for {customer_phone} "
+                    f"(restaurant={restaurant_id})"
+                )
             display_token = portal_token_id or f"#{party_size}pax"
             session_state["display_token"] = display_token
+            table_lines = " + ".join(
+                f"Table {t[0]} ({t[2]}/{t[1]} seats)" for t in combo
+            ) if combo else f"{party_size} seats"
+            await send_whatsapp_message(
+                manager_phone,
+                f"🟣 *Large party — approval needed*\n"
+                f"Token: *{display_token}*\n"
+                f"👤 {customer_name} · {party_size} people\n"
+                f"📱 {customer_phone}\n"
+                f"🕐 {booking_time} IST\n"
+                f"Proposed: {table_lines}\n\n"
+                f"Review and approve in the portal:\n{MANAGER_PORTAL_URL}",
+                restaurant_id,
+            )
             await send_whatsapp_message(
                 customer_phone,
                 f"✅ Your request for *{party_size} people* has been sent to our manager for approval.\n\n"
@@ -397,7 +426,7 @@ async def handle_dine_in_flow(
                     manager_phone, message, session_state, table_number,
                 )
             await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
-            return {"status": "awaiting_order"}
+            return {"status": status_after_booking_menu(session_state)}
 
         await send_whatsapp_message(
             customer_phone,
@@ -432,7 +461,7 @@ async def handle_dine_in_flow(
             if not session_state.get("_catalog_sent_after_party"):
                 await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
                 session_state["_catalog_sent_after_party"] = True
-            return {"status": "awaiting_order"}
+            return {"status": status_after_booking_menu(session_state)}
         else:
             await send_whatsapp_message(
                 customer_phone,
@@ -448,7 +477,7 @@ async def handle_dine_in_flow(
         order_text = message.strip()
         if order_text.upper() == "MENU":
             await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
-            return {"status": "awaiting_order"}
+            return {"status": status_after_booking_menu(session_state)}
 
         # Fix 43: greeting arriving in awaiting_order means the customer has
         # come back to a stale session (e.g. after a failed order).
@@ -457,7 +486,7 @@ async def handle_dine_in_flow(
             logger.info(f"[dine-in] greeting in awaiting_order — clearing stale cart")
             clear_cart(session_state)
             await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
-            return {"status": session_state.get("booking_step", "awaiting_order")}
+            return {"status": status_after_booking_menu(session_state)}
 
         cart = session_state.get("cart", {})
 
@@ -467,7 +496,7 @@ async def handle_dine_in_flow(
         if not cart and len(order_text) < 3:
             logger.info(f"[dine-in] empty cart + short message '{order_text}' — re-sending catalog")
             await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
-            return {"status": session_state.get("booking_step", "awaiting_order")}
+            return {"status": status_after_booking_menu(session_state)}
 
         cart_snapshot = dict(cart)
 

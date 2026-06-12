@@ -29,25 +29,6 @@ is sent using the correct WhatsApp Business Account for each restaurant.
 
 FIX LOG
 -------
-  Bug — current_time_slot() used datetime.now() without timezone, returning
-        UTC time (or server local time) instead of IST. At 10:15 PM IST the
-        function was returning UTC 16:45, which matched "Evening Snacks" or
-        fell through to "Morning Tiffin" depending on the gaps in the original
-        boundaries.
-
-  Two additional problems in the original function:
-    - Slot boundaries had gaps: 11:00 was not covered (fell to default),
-      15:00 was not covered, elif 12 <= missed the 11:00-12:00 hour entirely.
-    - A second copy of current_time_slot() was appended inside the body of
-      schedule_daily_catalog_sync(), making it a nested (unreachable) function
-      that never replaced the module-level definition.
-
-  Fix:
-    - Single module-level current_time_slot() using ZoneInfo("Asia/Kolkata").
-    - Gap-free contiguous slot boundaries: 6-11, 11-15, 15-19, 19-23.
-    - Duplicate/nested copy removed entirely.
-    - ZoneInfo import moved to top-level imports.
-
   Fix (menu source):
     - Static MENU_ITEMS list replaced with live fetch from autom8 backend.
     - New /api/internal/menu-items endpoint on server.js serves the data.
@@ -64,22 +45,6 @@ FIX LOG
     - Empty-items guard log level upgraded from WARNING to ERROR so Railway
       surfaces it clearly when the backend fetch is the root cause.
 
-  Fix (time-slot standardisation — all flows):
-    - send_whatsapp_catalog_message() was filtering items by current_time_slot()
-      and using the slot name ("Morning Tiffin", "Lunch" etc.) as the catalog
-      section header and WhatsApp message header. With all 28 items currently
-      tagged "Morning Tiffin" in the DB, this caused:
-        (a) The catalog header to always read "Munafe Menu — Morning Tiffin"
-            regardless of time of day or service type.
-        (b) items_for_slot() returning 0 results outside morning hours,
-            silently failing the catalog send and triggering the fallback loop.
-    - Fix: time-slot filtering removed from send_whatsapp_catalog_message().
-      ALL items are shown in a single section titled "Today's Menu".
-      current_time_slot() and items_for_slot() are no longer called here.
-      This standardises the catalog across dine-in, takeaway, and delivery.
-    - current_time_slot() and items_for_slot() are kept in the module for
-      use by other callers (cart_tools, scheduling logic etc.).
-
   Fix (dynamic restaurant label in footer):
     - Footer previously hardcoded "Hotel Munafe, Chennai".
     - New _get_restaurant_label() fetches restaurant name from DB via
@@ -94,9 +59,7 @@ import asyncio
 import logging
 import os
 import time
-from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import aiohttp
 import httpx
@@ -118,20 +81,7 @@ _AUTOM8_KDS_SECRET    = os.getenv("AUTOM8_KDS_SECRET", "")
 _PORTAL_RESTAURANT_ID = os.getenv("PORTAL_RESTAURANT_ID", "46fb9b9e-431a-43c9-9edb-d316b0fef216")
 
 _MENU_CACHE: dict = {"items": [], "fetched_at": 0.0}
-_MENU_CACHE_TTL = 60  # seconds — refresh every minute so slot changes propagate
-
-# Mapping from DB time_slot values to the display labels used throughout the bot
-# Must cover every time_slot value stored in menu_items (see catalog.js mapTimeSlot).
-_SLOT_DB_TO_LABEL: dict[str, str] = {
-    "morning_tiffin": "Morning Tiffin",
-    "morning":        "Morning Tiffin",
-    "lunch":          "Lunch",
-    "evening_snacks": "Evening Snacks",
-    "snacks":         "Evening Snacks",
-    "dinner_tiffin":  "Dinner Tiffin",
-    "dinner":         "Dinner Tiffin",
-    "all":            "All Day",
-}
+_MENU_CACHE_TTL = 60  # seconds — refresh every minute so availability changes propagate
 
 
 # ── Live menu fetch ────────────────────────────────────────────────────────────
@@ -145,7 +95,7 @@ async def _fetch_menu_items_from_backend(restaurant_id: str | None = None) -> li
     Items are returned in the same shape as the old static MENU_ITEMS list
     so all callers (cart_tools, booking_agent etc.) work without changes:
       {"id": retailer_id, "title": name, "price": price_paise,
-       "time_slot": slot_label, "description": ..., "image_link": ...}
+       "category": category, "description": ..., "image_link": ...}
     """
     now = time.monotonic()
     if _MENU_CACHE["items"] and (now - _MENU_CACHE["fetched_at"]) < _MENU_CACHE_TTL:
@@ -166,15 +116,13 @@ async def _fetch_menu_items_from_backend(restaurant_id: str | None = None) -> li
                 raw_items = data.get("items", [])
                 mapped = []
                 for item in raw_items:
-                    slot_db    = (item.get("time_slot") or "all").strip().lower()
-                    slot_label = _SLOT_DB_TO_LABEL.get(slot_db, "All Day")
                     # price in DB is rupees (e.g. 60.0); bot expects paise (e.g. 6000)
                     price_paise = int(float(item.get("price", 0)) * 100)
                     mapped.append({
                         "id":           item.get("retailer_id") or item.get("id", ""),
                         "title":        item.get("name", ""),
                         "price":        price_paise,
-                        "time_slot":    slot_label,
+                        "category":     (item.get("category") or "General").strip(),
                         "description":  item.get("description", ""),
                         "image_link":   item.get("image_url", ""),
                         "is_available": bool(item.get("is_available", True)),
@@ -214,56 +162,12 @@ async def fetch_menu_items(restaurant_id: str | None = None) -> list[dict]:
 MENU_ITEMS: list[dict] = _MENU_CACHE["items"]
 
 
-# ── Time-slot helpers ──────────────────────────────────────────────────────────
-
-def current_time_slot() -> str:
-    """
-    Return the active menu slot based on current Indian Standard Time (IST).
-
-    Slot windows (IST) — contiguous, no gaps:
-      06:00 - 10:59  ->  Morning Tiffin
-      11:00 - 14:59  ->  Lunch
-      15:00 - 18:59  ->  Evening Snacks
-      19:00 - 22:59  ->  Dinner Tiffin
-      23:00 - 05:59  ->  Morning Tiffin  (off-hours default)
-
-    Adjust the hour boundaries below to match your actual kitchen schedule.
-
-    NOTE: Uses ZoneInfo("Asia/Kolkata") — always correct IST regardless of
-    where the server is hosted (UTC, US, EU etc.).
-
-    NOTE: send_whatsapp_catalog_message() no longer calls this function.
-    It is kept here for use by other callers (cart_tools, scheduling etc.)
-    and for when time-slot segregation is restored in the MENU_ITEMS table.
-    """
-    ist_now = datetime.now(ZoneInfo("Asia/Kolkata"))
-    hour    = ist_now.hour  # 0-23 in IST
-
-    if 6 <= hour < 11:
-        return "Morning Tiffin"
-    elif 11 <= hour < 15:
-        return "Lunch"
-    elif 15 <= hour < 19:
-        return "Evening Snacks"
-    elif 19 <= hour < 23:
-        return "Dinner Tiffin"
-    else:
-        # 23:00-05:59 — kitchen closed, default to next morning's slot
-        return "Morning Tiffin"
-
-
-def items_for_slot(slot: str | None = None) -> list[dict]:
-    """
-    Return menu items for a given time slot from the current cache.
-    Synchronous — safe to call anywhere. Cache is populated by the first
-    await fetch_menu_items() call (which happens on every incoming message
-    via send_category_list).
-
-    NOTE: send_whatsapp_catalog_message() no longer calls this function.
-    Kept for cart_tools and any other callers that need slot-filtered lists.
-    """
-    slot = slot or current_time_slot()
-    return [i for i in MENU_ITEMS if i["time_slot"] == slot]
+def items_for_category(category: str | None = None) -> list[dict]:
+    """Return menu items for a category from the current cache."""
+    available = [i for i in MENU_ITEMS if i.get("is_available", True)]
+    if not category:
+        return available
+    return [i for i in available if i.get("category", "General") == category]
 
 
 # ── 1. Facebook Catalog sync ───────────────────────────────────────────────────
@@ -425,20 +329,8 @@ async def send_whatsapp_catalog_message(
     restaurant_id: str | None = None,
 ) -> bool:
     """
-    Send an interactive multi-product WhatsApp catalog message showing ALL
-    menu items in a single "Today's Menu" section.
-
-    Time-slot standardisation fix:
-      Previously this function called current_time_slot() to filter items
-      and set section/header labels, producing "Munafe Menu — Morning Tiffin"
-      on every flow at every hour (since all 28 items share the Morning Tiffin
-      tag). This also caused items_for_slot() to return 0 items outside morning
-      hours, silently failing the catalog send.
-
-      Now: ALL items are shown, no time-slot filtering, neutral section title.
-      The slot parameter is removed. current_time_slot() / items_for_slot()
-      are not called here. Re-introduce slot filtering only when real time-slot
-      segregation is restored in the MENU_ITEMS table.
+    Send an interactive multi-product WhatsApp catalog message showing all
+    available menu items in a single "Today's Menu" section.
 
     Returns True on success, False on failure.
     """
@@ -461,23 +353,13 @@ async def send_whatsapp_catalog_message(
     # Fetch restaurant name for footer
     restaurant_label = await _get_restaurant_label(restaurant_id)
 
-    # Load manager-approved items from backend (is_available toggle in portal).
     items = await fetch_menu_items(restaurant_id)
     items = [i for i in items if i.get("is_available", True)]
 
-    # Show only the current serving slot (+ All Day items).
-    slot = current_time_slot()
-    slot_items = [
-        i for i in items
-        if i["time_slot"] == slot or i["time_slot"] == "All Day"
-    ]
-    if slot_items:
-        items = slot_items
-
     if not items:
         logger.error(
-            f"[catalog] No available items for slot {slot!r} ({customer_phone}) — "
-            "check manager availability toggles and time-slot scheduler."
+            f"[catalog] No available menu items for {customer_phone} — "
+            "check manager availability toggles and /api/internal/menu-items."
         )
         return False
 
@@ -495,7 +377,6 @@ async def send_whatsapp_catalog_message(
             "type": "product_list",
             "header": {
                 "type": "text",
-                # Neutral header — no time-slot name, consistent across all flows
                 "text": "🍽️ Munafe Menu",
             },
             "body": {
@@ -510,7 +391,6 @@ async def send_whatsapp_catalog_message(
                 "catalog_id": _CATALOG_ID,
                 "sections": [
                     {
-                        # Neutral section title — no "Morning Tiffin" / slot name
                         "title": "Today's Menu",
                         "product_items": product_items,
                     }
@@ -610,7 +490,7 @@ def schedule_daily_catalog_sync() -> None:
 
     scheduler = AsyncIOScheduler()
 
-    # Run every day at 5:55 AM IST so catalog is fresh before Morning Tiffin
+    # Run every day at 5:55 AM IST so catalog is fresh before service opens
     scheduler.add_job(
         sync_catalog_to_facebook,
         trigger="cron",
