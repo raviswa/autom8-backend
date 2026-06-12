@@ -5,11 +5,15 @@
 // Callers:
 //   • tokens.js  PUT /:id/complete    (manager marks visit done)
 //   • schedulers/index.js             (auto-release after 90 min)
+//   • pos.js     PUT /tables/:id/status (table set to available)
 //   • pos.js     POST /payments       (POS payment checkout)
+//   • feedback.js POST /queue         (API endpoint)
 //
 // Inserts a feedback_pending row with freed_at = now().
 // The feedback scheduler (startFeedbackScheduler) picks it up 2 hours later
 // and dispatches the WhatsApp star-rating invitation.
+//
+// Deduplication: only one open (feedback_sent=false) row per restaurant+phone.
 //
 // All errors are swallowed — a DB failure here must NEVER block the caller.
 // ============================================================================
@@ -46,6 +50,11 @@ async function queueFeedbackForTable({
       return;
     }
 
+    if (!restaurantId) {
+      console.info(`[feedback-queue] Skipped — no restaurant_id (${source})`);
+      return;
+    }
+
     // Resolve table_number for the feedback message if not supplied
     let tableNumber = null;
     if (tableId) {
@@ -55,6 +64,33 @@ async function queueFeedbackForTable({
         .eq('id', tableId)
         .maybeSingle();
       tableNumber = tableRow?.table_number ?? null;
+    }
+
+    // One open feedback invite per customer per restaurant — prevents duplicate
+    // WhatsApp messages when token-complete, auto-release, and table-status
+    // all fire for the same visit.
+    const { data: existing } = await supabaseAdmin
+      .from('feedback_pending')
+      .select('id, table_number')
+      .eq('restaurant_id', restaurantId)
+      .eq('customer_phone', cleanPhone)
+      .eq('feedback_sent', false)
+      .order('freed_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (existing) {
+      if (tableNumber != null && existing.table_number !== String(tableNumber)) {
+        await supabaseAdmin
+          .from('feedback_pending')
+          .update({ table_number: String(tableNumber), freed_at: new Date().toISOString() })
+          .eq('id', existing.id);
+      }
+      console.info(
+        `[feedback-queue] Skipped duplicate for ${cleanPhone}` +
+        ` | existing id ${existing.id} | source: ${source}`
+      );
+      return;
     }
 
     const { error: insertErr } = await supabaseAdmin

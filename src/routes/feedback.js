@@ -88,8 +88,38 @@ function startFeedbackScheduler() {
 
       if (queryErr) { console.error('[feedback-scheduler] Query error:', queryErr.message); return; }
 
+      const sentPhones = new Set();
+
       for (const record of pending ?? []) {
         try {
+          const dedupeKey = `${record.restaurant_id}:${record.customer_phone}`;
+
+          // Extra pending rows for the same customer — mark sent, do not message again
+          if (sentPhones.has(dedupeKey)) {
+            await supabaseAdmin
+              .from('feedback_pending')
+              .update({ feedback_sent: true, feedback_sent_at: new Date().toISOString() })
+              .eq('id', record.id)
+              .eq('feedback_sent', false);
+            continue;
+          }
+
+          // Atomic claim — prevents duplicate sends across scheduler ticks / instances
+          const { data: claimed, error: claimErr } = await supabaseAdmin
+            .from('feedback_pending')
+            .update({ feedback_sent: true, feedback_sent_at: new Date().toISOString() })
+            .eq('id', record.id)
+            .eq('feedback_sent', false)
+            .select('id')
+            .maybeSingle();
+
+          if (claimErr || !claimed) {
+            console.info(`[feedback-scheduler] Skipped ${record.customer_phone} — already claimed`);
+            continue;
+          }
+
+          sentPhones.add(dedupeKey);
+
           await sendWhatsAppMessage(
             record.customer_phone,
             `Hi ${record.customer_name}! 😊\n\n` +
@@ -107,10 +137,13 @@ function startFeedbackScheduler() {
             record.restaurant_id
           );
 
-          await supabaseAdmin.from('feedback_pending').update({
-            feedback_sent:    true,
-            feedback_sent_at: new Date().toISOString(),
-          }).eq('id', record.id);
+          // Close any other open rows for this customer (legacy duplicates)
+          await supabaseAdmin
+            .from('feedback_pending')
+            .update({ feedback_sent: true, feedback_sent_at: new Date().toISOString() })
+            .eq('restaurant_id', record.restaurant_id)
+            .eq('customer_phone', record.customer_phone)
+            .eq('feedback_sent', false);
 
           console.log(`[feedback-scheduler] ✅ Sent to ${record.customer_phone}`);
         } catch (innerErr) {

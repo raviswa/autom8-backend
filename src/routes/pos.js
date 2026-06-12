@@ -10,6 +10,7 @@ const { broadcastToRestaurant }   = require('../websocket');
 const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../helpers/whatsapp');
 const { applySlotAvailability, getCurrentSlotIST } = require('./catalog');
 const { notifyOrderReady }        = require('../helpers/whatsapp');
+const { queueFeedbackForTable }   = require('../helpers/feedback');
 
 // ── Menu items ───────────────────────────────────────────────────────────────
 
@@ -322,8 +323,14 @@ router.put('/tables/:id/status', authenticateToken, getRestaurantId, async (req,
           .eq('table_id', req.params.id).eq('status', 'seated')
           .order('seated_at', { ascending: false }).limit(1).maybeSingle();
         if (recentToken?.phone) {
-          await supabaseAdmin.from('feedback_pending').insert({ restaurant_id: recentToken.restaurant_id, customer_phone: String(recentToken.phone).replace(/\D/g, ''), customer_name: recentToken.name || 'Guest', token_number: recentToken.token_number, table_number: data.table_number, freed_at: new Date().toISOString() });
-          console.log(`[table-freed] Queued feedback for ${recentToken.phone}`);
+          await queueFeedbackForTable({
+            tableId:       req.params.id,
+            customerPhone: recentToken.phone,
+            customerName:  recentToken.name,
+            tokenId:       recentToken.token_number,
+            restaurantId:  recentToken.restaurant_id,
+            source:        'table-status-available',
+          });
         }
       } catch (feedbackQueueErr) {
         console.error('[table-freed] Failed to queue feedback:', feedbackQueueErr.message);
@@ -513,8 +520,14 @@ router.post('/payments', authenticateToken, getRestaurantId, async (req, res) =>
           .eq('table_id', order.table_id).eq('status', 'seated')
           .order('seated_at', { ascending: false }).limit(1).maybeSingle();
         if (recentToken?.phone) {
-          const { data: tableInfo } = await supabaseAdmin.from('tables').select('table_number').eq('id', order.table_id).single();
-          await supabaseAdmin.from('feedback_pending').insert({ restaurant_id: req.restaurant_id, customer_phone: String(recentToken.phone).replace(/\D/g, ''), customer_name: recentToken.name || 'Guest', token_number: recentToken.token_number, table_number: tableInfo?.table_number, freed_at: new Date().toISOString() });
+          await queueFeedbackForTable({
+            tableId:       order.table_id,
+            customerPhone: recentToken.phone,
+            customerName:  recentToken.name,
+            tokenId:       recentToken.token_number,
+            restaurantId:  req.restaurant_id,
+            source:        'payment-complete',
+          });
         }
       } catch (feedbackQueueErr) {
         console.error('[payment-complete] Failed to queue feedback:', feedbackQueueErr.message);
