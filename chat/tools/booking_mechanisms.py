@@ -75,10 +75,11 @@ MechanismType = Literal["catalog", "cart", "cart_text", "none"]
 # PUBLIC CONSTANTS  (imported by flow modules)
 # ─────────────────────────────────────────────
 
-PORTAL_API_URL         = "https://api.autom8.works/api/tokens"
-AUTOM8_KDS_URL         = "https://api.autom8.works/api/kds/notify"
-KDS_SECRET             = "munafe_kds_sync_2026"
-_RECEIPT_REDIRECT_BASE = "https://api.autom8.works/r"
+_AUTOM8_BACKEND_URL    = _os.getenv("AUTOM8_BACKEND_URL", "https://api.autom8.works").rstrip("/")
+PORTAL_API_URL         = f"{_AUTOM8_BACKEND_URL}/api/tokens"
+AUTOM8_KDS_URL         = f"{_AUTOM8_BACKEND_URL}/api/kds/notify"
+KDS_SECRET             = _os.getenv("AUTOM8_KDS_SECRET", "")
+_RECEIPT_REDIRECT_BASE = f"{_AUTOM8_BACKEND_URL}/r"
 
 
 # ─────────────────────────────────────────────
@@ -370,6 +371,7 @@ async def sync_token_to_portal(
                 "restaurant_id": restaurant_id,
                 "name": customer_name, "phone": customer_phone,
                 "type": token_type, "pax": pax,
+                "secret": KDS_SECRET,
             },
             timeout=aiohttp.ClientTimeout(total=5),
         )
@@ -398,6 +400,7 @@ async def sync_token_to_portal_large_party(
                 "name": customer_name, "phone": customer_phone,
                 "type": "large_party", "pax": pax,
                 "meta": {"combo": combo},
+                "secret": KDS_SECRET,
             },
             timeout=aiohttp.ClientTimeout(total=5),
         )
@@ -416,18 +419,28 @@ async def sync_token_to_portal_large_party(
 async def lookup_table_assignment(customer_phone: str, restaurant_id: str) -> str | None:
     try:
         resp = await get_http().get(
-            PORTAL_API_URL,
+            f"{PORTAL_API_URL}/lookup",
             params={"phone": customer_phone, "restaurant_id": restaurant_id},
+            headers={"Authorization": f"Bearer {KDS_SECRET}"},
             timeout=aiohttp.ClientTimeout(total=3),
         )
         if resp.status == 200:
             data = await resp.json()
-            tokens = data if isinstance(data, list) else data.get("tokens", [])
+            tokens = data.get("tokens", []) if isinstance(data, dict) else data
             for token_record in tokens:
+                if token_record.get("status") != "seated":
+                    continue
                 tbl = token_record.get("table_number")
                 if tbl:
                     logger.info(f"[table-check] Found table {tbl} for {customer_phone}")
                     return str(tbl)
+                combo = (token_record.get("meta") or {}).get("combo") or []
+                if combo:
+                    logger.info(
+                        f"[table-check] Found combo tables "
+                        f"{[row[0] for row in combo]} for {customer_phone}"
+                    )
+                    return str(combo[0][0])
     except Exception as e:
         logger.warning(f"[table-check] Portal lookup failed (non-fatal): {e}")
     return None

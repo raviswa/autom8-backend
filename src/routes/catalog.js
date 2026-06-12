@@ -25,7 +25,7 @@ const router  = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 
-const KDS_SECRET = process.env.AUTOM8_KDS_SECRET || 'munafe_kds_sync_2026';
+const { getKdsSecret } = require('../config/internalSecret');
 
 // ── Slot definitions (must match Python agent SLOTS) ─────────────────────────
 const SLOTS = [
@@ -360,7 +360,7 @@ router.get('/feed/template', async (req, res) => {
 
 router.get('/internal-menu', async (req, res) => {
   try {
-    if (req.headers['x-internal-secret'] !== KDS_SECRET)
+    if (req.headers['x-internal-secret'] !== getKdsSecret())
       return res.status(403).json({ error: 'Forbidden' });
     const restaurantId = req.query.restaurant_id;
     if (!restaurantId) return res.status(400).json({ error: 'restaurant_id required' });

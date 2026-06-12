@@ -17,7 +17,7 @@ const { supabaseAdmin }       = require('../config/supabase');
 const { sendWhatsAppMessage } = require('../helpers/whatsapp');
 const { queueFeedbackForTable } = require('../helpers/feedback');
 
-const KDS_SECRET = process.env.AUTOM8_KDS_SECRET || 'munafe_kds_sync_2026';
+const { isValidKdsSecret } = require('../config/internalSecret');
 
 // ── POST /api/feedback/queue ──────────────────────────────────────────────────
 // Accepts two auth schemes:
@@ -29,7 +29,7 @@ router.post('/queue', async (req, res) => {
   const bearer     = authHeader?.split(' ')[1];
 
   // Scheme 1: internal secret (Python agent)
-  const isInternalSecret = bearer === KDS_SECRET;
+  const isInternalSecret = isValidKdsSecret(bearer);
 
   // Scheme 2: Supabase JWT (dashboard)
   let isValidJWT = false;

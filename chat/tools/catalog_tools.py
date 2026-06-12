@@ -113,8 +113,8 @@ _BASE_URL   = f"https://graph.facebook.com/{_API_VER}"
 
 # ── Live menu cache config ─────────────────────────────────────────────────────
 
-_AUTOM8_BACKEND_URL   = os.getenv("AUTOM8_BACKEND_URL", "https://autom8-backend-production.up.railway.app")
-_AUTOM8_KDS_SECRET    = os.getenv("AUTOM8_KDS_SECRET", "munafe_kds_sync_2026")
+_AUTOM8_BACKEND_URL   = os.getenv("AUTOM8_BACKEND_URL", "https://api.autom8.works").rstrip("/")
+_AUTOM8_KDS_SECRET    = os.getenv("AUTOM8_KDS_SECRET", "")
 _PORTAL_RESTAURANT_ID = os.getenv("PORTAL_RESTAURANT_ID", "46fb9b9e-431a-43c9-9edb-d316b0fef216")
 
 _MENU_CACHE: dict = {"items": [], "fetched_at": 0.0}

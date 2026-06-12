@@ -13,6 +13,8 @@ from tools.db_tools import (
     release_table,
     get_bookings_needing_menu_prompt,
     mark_menu_prompt_sent,
+    get_reservation_reminder_candidates,
+    mark_reservation_reminder_sent,
 )
 from tools.personalisation_tools import update_customer_profile
 from tools.campaign_tools import (
@@ -119,19 +121,52 @@ async def start_scheduler():
     logger.info("APScheduler started with jobs")
 
 
-async def send_reservation_reminders():
-    """Send 24h and 1h reminders for reservations."""
-    logger.info("Running send_reservation_reminders job")
-    
+def _format_booking_time_ist(dt) -> str:
+    if not dt:
+        return "your scheduled time"
     try:
-        # TODO: Query bookings where:
-        # - booking_datetime is 24 hours away and reminder_24h_sent = false
-        # - Send: "Hi [name]! Reminder: your table for [pax] is confirmed at [restaurant] at [time]."
-        # - Set reminder_24h_sent = true
-        # - Repeat for 1h with reminder_1h_sent
-        
-        logger.info("Reservation reminders sent")
-    
+        from zoneinfo import ZoneInfo
+        ist = dt.astimezone(ZoneInfo("Asia/Kolkata"))
+        return ist.strftime("%I:%M %p on %d %b").lstrip("0")
+    except Exception:
+        return dt.strftime("%H:%M %d %b")
+
+
+async def send_reservation_reminders():
+    """Send 24h and 1h reminders for reserve_table bookings."""
+    logger.info("Running send_reservation_reminders job")
+
+    try:
+        sent_24h = 0
+        sent_1h = 0
+
+        for row in await get_reservation_reminder_candidates(24, 60, "reminder_24h_sent"):
+            time_label = _format_booking_time_ist(row["booking_datetime"])
+            await send_whatsapp_message(
+                row["customer_phone"],
+                f"Hi {row['customer_name']}! 👋\n\n"
+                f"Reminder: your table for *{row['party_size']}* is confirmed at "
+                f"*{row['restaurant_name']}* on *{time_label}*.\n\n"
+                f"We look forward to seeing you! 🍽️",
+                row["restaurant_id"],
+            )
+            await mark_reservation_reminder_sent(row["id"], "reminder_24h_sent")
+            sent_24h += 1
+
+        for row in await get_reservation_reminder_candidates(1, 30, "reminder_1h_sent"):
+            time_label = _format_booking_time_ist(row["booking_datetime"])
+            await send_whatsapp_message(
+                row["customer_phone"],
+                f"Hi {row['customer_name']}! ⏰\n\n"
+                f"Your table at *{row['restaurant_name']}* is in about an hour "
+                f"(*{time_label}*). See you soon!",
+                row["restaurant_id"],
+            )
+            await mark_reservation_reminder_sent(row["id"], "reminder_1h_sent")
+            sent_1h += 1
+
+        logger.info(f"Reservation reminders sent — 24h: {sent_24h}, 1h: {sent_1h}")
+
     except Exception as e:
         logger.error(f"Error in send_reservation_reminders: {e}")
 

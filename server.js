@@ -12,10 +12,16 @@
 
 'use strict';
 
+const http    = require('http');
 const express = require('express');
 const cors    = require('cors');
 
 const { startAllSchedulers } = require('./src/schedulers/index');
+const { attachWebSocketServer } = require('./src/websocket');
+
+if (process.env.NODE_ENV === 'production' && !process.env.AUTOM8_KDS_SECRET) {
+  throw new Error('AUTOM8_KDS_SECRET must be set in production');
+}
 
 const app = express();
 
@@ -82,7 +88,10 @@ app.get('/health', (req, res) => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
+const server = http.createServer(app);
+attachWebSocketServer(server);
+
+server.listen(PORT, () => {
   console.log(`🚀 Autom8 Backend running on port ${PORT}`);
   console.log(`📍 Region: ${process.env.REGION || 'IN'}`);
   console.log(`🗄️  Database: ${process.env.SUPABASE_URL}`);

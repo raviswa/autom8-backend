@@ -16,7 +16,7 @@ const router  = express.Router();
 const { supabaseAdmin }       = require('../config/supabase');
 const { sendWhatsAppMessage } = require('../helpers/whatsapp');
 
-const KDS_SECRET = process.env.AUTOM8_KDS_SECRET || 'munafe_kds_sync_2026';
+const { getKdsSecret } = require('../config/internalSecret');
 
 const PARTNER_META = {
   dunzo:      { emoji: '🟡', label: 'Dunzo'    },
@@ -42,7 +42,7 @@ router.post('/rider-assigned', async (req, res) => {
       restaurant_id,
     } = req.body;
 
-    if (secret !== KDS_SECRET) {
+    if (secret !== getKdsSecret()) {
       console.warn('[rider-notify] Rejected — bad secret');
       return;
     }

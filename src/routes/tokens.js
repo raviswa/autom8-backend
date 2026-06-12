@@ -22,7 +22,9 @@ const { supabase, supabaseAdmin } = require('../config/supabase');
 const { broadcastToRestaurant }   = require('../websocket');
 const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../helpers/whatsapp');
 const { queueFeedbackForTable }   = require('../helpers/feedback');
+const { syncConversationForTokenApproval } = require('../helpers/conversationState');
 const { authenticateToken }       = require('../middleware/auth');
+const { requireKdsSecretOrJwt, requireKdsSecret } = require('../middleware/internalAuth');
 
 // ── generateTokenId ───────────────────────────────────────────────────────────
 // Returns the next T-001 style sequential ID (collision-safe).
@@ -47,7 +49,7 @@ async function generateTokenId(restaurantId) {
 
 // ── POST /api/tokens ──────────────────────────────────────────────────────────
 
-router.post('/', async (req, res) => {
+router.post('/', requireKdsSecretOrJwt, async (req, res) => {
   try {
     const { name, phone, type, pax, restaurant_id, meta } = req.body;
 
@@ -112,7 +114,12 @@ router.post('/', async (req, res) => {
       }
     }
 
-    broadcastToRestaurant(restaurant_id, { type: 'NEW_TOKEN', token, timestamp: new Date().toISOString() });
+    broadcastToRestaurant(restaurant_id, {
+      type:        'TOKEN_NEW',
+      token_id:    token.id,
+      token,
+      timestamp:   new Date().toISOString(),
+    });
     res.status(201).json({ success: true, token });
   } catch (err) {
     res.status(500).json({ error: err.message || 'Failed to create token' });
@@ -150,6 +157,36 @@ router.get('/', authenticateToken, async (req, res) => {
     res.json({ success: true, tokens: data || [] });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// ── GET /api/tokens/lookup — internal: chat agent table assignment poll ───────
+
+router.get('/lookup', requireKdsSecret, async (req, res) => {
+  try {
+    const { phone, restaurant_id } = req.query;
+    if (!phone || !restaurant_id) {
+      return res.status(400).json({ error: 'phone and restaurant_id are required' });
+    }
+
+    const cleanPhone = String(phone).replace(/\D/g, '');
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const { data, error } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .select('id, table_number, status, type, name, phone, pax, meta, arrived_at, seated_at')
+      .eq('restaurant_id', restaurant_id)
+      .eq('phone', cleanPhone)
+      .in('status', ['waiting', 'seated', 'takeaway', 'pending_approval'])
+      .gte('arrived_at', todayStart.toISOString())
+      .order('arrived_at', { ascending: false })
+      .limit(5);
+
+    if (error) throw error;
+    res.json({ success: true, tokens: data ?? [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -204,6 +241,14 @@ router.put('/:id/assign', authenticateToken, async (req, res) => {
       await sendWhatsAppCatalogMessage(token.phone, restaurantId);
     }
 
+    await syncConversationForTokenApproval({
+      restaurantId,
+      customerPhone: token.phone,
+      tokenId:       token.id,
+      tableNumbers:  [String(table_number)],
+      partySize:     token.pax,
+    });
+
     broadcastToRestaurant(restaurantId, { type: 'TOKEN_ASSIGNED', token: updatedToken, timestamp: new Date().toISOString() });
 
     await supabaseAdmin.from('audit_logs').insert({
@@ -257,6 +302,14 @@ router.put('/:id/approve', authenticateToken, async (req, res) => {
       );
       await sendWhatsAppCatalogMessage(token.phone, restaurantId);
     }
+
+    await syncConversationForTokenApproval({
+      restaurantId,
+      customerPhone: token.phone,
+      tokenId:       token.id,
+      tableNumbers,
+      partySize:     token.pax,
+    });
 
     broadcastToRestaurant(restaurantId, { type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString() });
     res.json({ success: true, token: updatedToken });

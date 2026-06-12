@@ -18,7 +18,7 @@ const router  = express.Router();
 const { supabase, supabaseAdmin }        = require('../config/supabase');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 
-const KDS_SECRET = process.env.AUTOM8_KDS_SECRET || 'munafe_kds_sync_2026';
+const { getKdsSecret } = require('../config/internalSecret');
 
 const GST_RATES = {
   default:          5,   // CGST 2.5% + SGST 2.5%  (restaurant without ITC)
@@ -192,7 +192,7 @@ router.post('/webhook', async (req, res) => {
 
   try {
     const { secret, order_id, payment_status } = req.body;
-    if (secret !== KDS_SECRET) { console.warn('[invoice-webhook] Bad secret'); return; }
+    if (secret !== getKdsSecret()) { console.warn('[invoice-webhook] Bad secret'); return; }
     if (!['paid', 'completed'].includes(payment_status)) return;
     if (!order_id) return;
 

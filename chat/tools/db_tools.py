@@ -727,17 +727,33 @@ def invalidate_tables_cache(restaurant_id: str) -> None:
 
 # ─── Booking tools ────────────────────────────────────────────────────────────
 
+def _coerce_table_number(value) -> int | None:
+    """Accept int, numeric str, or empty/None — never pass '' to the DB."""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned or cleaned.lower() == "none":
+            return None
+        return int(cleaned)
+    return int(value)
+
+
 async def create_booking(
     restaurant_id: str,
     customer_id: str,
     service_type: str,
     party_size: int | None = None,
     booking_datetime: str | None = None,
-    table_number: int | None = None,
+    table_number: int | str | None = None,
     delivery_address: str | None = None,
     token_number: str | None = None,
 ) -> Dict[str, Any]:
     """Create a new booking record."""
+    table_num = _coerce_table_number(table_number)
+
     async with AsyncSessionLocal() as session:
         booking = Booking(
             restaurant_id=UUID(restaurant_id),
@@ -745,7 +761,7 @@ async def create_booking(
             service_type=service_type,
             party_size=party_size,
             booking_datetime=datetime.fromisoformat(booking_datetime) if booking_datetime else None,
-            table_number=table_number,
+            table_number=table_num,
             delivery_address=delivery_address,
             token_number=token_number,
             status="pending",
@@ -1299,3 +1315,175 @@ async def block_customer(restaurant_id: str, phone: str) -> bool:
             logger.warning(f"[block_customer] local mirror failed (non-fatal): {e}")
 
     return True
+
+
+# ─── Reservation reminders ────────────────────────────────────────────────────
+
+async def get_reservation_reminder_candidates(
+    hours_ahead: float,
+    window_minutes: int,
+    reminder_field: str,
+) -> List[Dict[str, Any]]:
+    """Find reserve_table bookings due for a 24h or 1h WhatsApp reminder."""
+    if AsyncSessionLocal is None:
+        return []
+
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+    target = now + timedelta(hours=hours_ahead)
+    window = timedelta(minutes=window_minutes)
+    window_start = target - window
+    window_end = target + window
+
+    sent_col = getattr(Booking, reminder_field)
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Booking)
+            .options(selectinload(Booking.customer), selectinload(Booking.restaurant))
+            .where(
+                and_(
+                    Booking.service_type == "reserve_table",
+                    Booking.status.in_(["pending", "confirmed"]),
+                    Booking.booking_datetime.isnot(None),
+                    Booking.booking_datetime >= window_start,
+                    Booking.booking_datetime <= window_end,
+                    sent_col.is_(False),
+                )
+            )
+            .limit(50)
+        )
+        bookings = result.scalars().all()
+
+        return [
+            {
+                "id": str(b.id),
+                "restaurant_id": str(b.restaurant_id),
+                "customer_phone": b.customer.phone if b.customer else None,
+                "customer_name": b.customer.name if b.customer else "Guest",
+                "restaurant_name": b.restaurant.name if b.restaurant else "the restaurant",
+                "party_size": b.party_size or 1,
+                "booking_datetime": b.booking_datetime,
+            }
+            for b in bookings
+            if b.customer and b.customer.phone
+        ]
+
+
+def _phone_variants(phone: str) -> list[str]:
+    """Build phone variants for walk_in_tokens / conversation_states lookup."""
+    digits = "".join(c for c in str(phone) if c.isdigit())
+    if not digits:
+        return []
+    variants = {digits}
+    if len(digits) == 10:
+        variants.add(f"91{digits}")
+    if len(digits) > 10:
+        variants.add(digits[-10:])
+        if digits.startswith("91") and len(digits) == 12:
+            variants.add(digits[2:])
+    return list(variants)
+
+
+async def get_active_walk_in_token(
+    restaurant_id: str,
+    customer_phone: str,
+) -> dict | None:
+    """
+    Return the most recent active walk_in_token for this customer today.
+    Used to recover session state when the portal approved a table but the
+    chat session was not synced.
+    """
+    if AsyncSessionLocal is None:
+        return None
+
+    phones = _phone_variants(customer_phone)
+    if not phones:
+        return None
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text("""
+                SELECT id, status, pax, table_number, meta, type, phone
+                FROM walk_in_tokens
+                WHERE restaurant_id = CAST(:rid AS uuid)
+                  AND phone = ANY(:phones)
+                  AND status IN ('seated', 'takeaway', 'waiting')
+                  AND arrived_at >= CURRENT_DATE
+                ORDER BY arrived_at DESC
+                LIMIT 1
+            """),
+            {"rid": restaurant_id, "phones": phones},
+        )
+        row = result.mappings().first()
+        if not row:
+            return None
+        return dict(row)
+
+
+def apply_walk_in_token_to_session(session_state: dict, token: dict) -> None:
+    """Merge portal token data into the chat session state."""
+    if token.get("id"):
+        session_state["display_token"] = token["id"]
+        session_state["token_number"] = token["id"]
+
+    if token.get("pax"):
+        session_state["party_size"] = int(token["pax"])
+
+    meta = token.get("meta") or {}
+    if isinstance(meta, str):
+        try:
+            import json
+            meta = json.loads(meta)
+        except Exception:
+            meta = {}
+
+    combo = meta.get("combo") or []
+    if combo:
+        table_numbers = [str(row[0]) for row in combo if row]
+        session_state["assigned_tables"] = table_numbers
+        if table_numbers:
+            try:
+                session_state["table_number"] = int(table_numbers[0])
+            except (TypeError, ValueError):
+                pass
+    elif token.get("table_number") is not None:
+        try:
+            session_state["table_number"] = int(token["table_number"])
+        except (TypeError, ValueError):
+            session_state["table_number"] = token["table_number"]
+
+    session_state["service_type"] = session_state.get("service_type") or "dine_in"
+    session_state["booking_step"] = "awaiting_order"
+    session_state.pop("_order_retry_attempted", None)
+
+
+async def recover_session_from_walk_in_token(
+    restaurant_id: str,
+    customer_phone: str,
+    session_state: dict,
+) -> bool:
+    """Load seated token from portal and apply to session. Returns True if recovered."""
+    token = await get_active_walk_in_token(restaurant_id, customer_phone)
+    if not token or token.get("status") != "seated":
+        return False
+    apply_walk_in_token_to_session(session_state, token)
+    logger.info(
+        f"[token-recovery] Synced session from {token.get('id')} "
+        f"tables={session_state.get('assigned_tables') or session_state.get('table_number')}"
+    )
+    return True
+
+
+async def mark_reservation_reminder_sent(booking_id: str, reminder_field: str) -> None:
+    if AsyncSessionLocal is None:
+        return
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Booking).where(Booking.id == UUID(booking_id)))
+        booking = result.scalar_one_or_none()
+        if not booking:
+            return
+        setattr(booking, reminder_field, True)
+        session.add(booking)
+        await session.commit()

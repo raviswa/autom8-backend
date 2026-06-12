@@ -32,7 +32,7 @@ const { supabaseAdmin }       = require('../config/supabase');
 const { broadcastToRestaurant } = require('../websocket');
 const { sendWhatsAppMessage }  = require('../helpers/whatsapp');
 
-const KDS_SECRET = process.env.AUTOM8_KDS_SECRET || 'munafe_kds_sync_2026';
+const { getKdsSecret } = require('../config/internalSecret');
 
 // ── POST /api/kds/notify ──────────────────────────────────────────────────────
 
@@ -40,7 +40,7 @@ router.post('/notify', async (req, res) => {
 
   // ── Auth (shared secret — same as Python booking agent) ─────────────────────
   const { secret } = req.body;
-  if (secret !== KDS_SECRET) {
+  if (secret !== getKdsSecret()) {
     console.warn('[kds-notify] Rejected — bad secret');
     return res.status(403).json({ error: 'Forbidden' });
   }

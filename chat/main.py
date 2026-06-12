@@ -392,8 +392,17 @@ async def webhook_post(request: Request, background_tasks: BackgroundTasks):
 # ─────────────────────────────────────────────
 
 def _verify_meta_signature(body: bytes, signature: str) -> bool:
+    is_prod = settings.environment == "production"
+
+    if not settings.webhook_secret:
+        if is_prod:
+            logger.error("[webhook] WEBHOOK_SECRET is not set in production")
+            return False
+        return True  # local dev without secret configured
+
     if not signature:
-        return True  # allow local testing without a secret
+        return not is_prod  # production requires x-hub-signature-256
+
     expected = "sha256=" + hmac.new(
         settings.webhook_secret.encode(),
         body,

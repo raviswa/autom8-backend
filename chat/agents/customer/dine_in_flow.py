@@ -19,6 +19,8 @@ from tools.db_tools import (
     get_next_token_number,
     create_booking,
     update_booking_status,
+    recover_session_from_walk_in_token,
+    _coerce_table_number,
 )
 from tools.payment_tools import create_payment_link
 from tools.whatsapp_tools import send_whatsapp_message
@@ -63,6 +65,151 @@ from agents.customer.conversation_helpers import safe_build_order_suggestion
 import aiohttp
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_table_for_booking(session_state: Dict[str, Any]) -> int | None:
+    """Resolve table number for create_booking — handles large-party multi-table."""
+    raw = session_state.get("table_number")
+    if raw is not None and raw != "":
+        try:
+            return _coerce_table_number(raw)
+        except (TypeError, ValueError):
+            pass
+
+    assigned = session_state.get("assigned_tables") or []
+    if assigned:
+        try:
+            return _coerce_table_number(assigned[0])
+        except (TypeError, ValueError):
+            pass
+
+    return None
+
+
+async def _sync_table_from_portal(
+    restaurant_id: str,
+    customer_phone: str,
+    session_state: Dict[str, Any],
+) -> int | None:
+    """Try session recovery + token lookup; return resolved table number."""
+    table_num = _resolve_table_for_booking(session_state)
+    if table_num is not None:
+        return table_num
+
+    await recover_session_from_walk_in_token(restaurant_id, customer_phone, session_state)
+    table_num = _resolve_table_for_booking(session_state)
+    if table_num is not None:
+        return table_num
+
+    lookup = await lookup_table_assignment(customer_phone, restaurant_id)
+    if lookup:
+        try:
+            table_num = _coerce_table_number(lookup)
+            session_state["table_number"] = table_num
+            return table_num
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+async def _confirm_dine_in_order(
+    *,
+    restaurant_id: str,
+    customer_id: str,
+    customer_name: str,
+    customer_phone: str,
+    manager_phone: str,
+    order_text: str,
+    session_state: Dict[str, Any],
+    cart_snapshot: dict,
+) -> Dict[str, Any]:
+    """Create booking + send confirmation. Raises on failure."""
+    total = cart_total(cart_snapshot) if cart_snapshot else 0.0
+    session_state["order_total"] = total
+    token = session_state.get("display_token", session_state.get("token_number", ""))
+    booking_time = session_state.get("booking_time", now_display())
+    table_num = await _sync_table_from_portal(restaurant_id, customer_phone, session_state)
+
+    suggestion, booking = await asyncio.gather(
+        safe_build_order_suggestion(customer_id, restaurant_id),
+        create_booking(
+            restaurant_id, customer_id, "dine_in",
+            party_size=session_state.get("party_size"),
+            table_number=table_num,
+            token_number=token,
+        ),
+    )
+    booking_id = booking["id"]
+    session_state["booking_id"] = booking_id
+
+    try:
+        payment_link = await create_payment_link(
+            booking_id, total, customer_name,
+            f"Dine-in {token} at table {session_state.get('table_number')}",
+        )
+    except Exception as _pl:
+        logger.warning(f"[payment] create_payment_link failed (non-fatal): {_pl}")
+        payment_link = "placeholder"
+    payment_line = (
+        "💳 Payment can be made at the counter."
+        if is_placeholder_payment_link(payment_link)
+        else f"Pay here: {payment_link}"
+    )
+
+    confirmation = (
+        f"Your order has been placed! 🎉\n"
+        f"────────────────────\n"
+        f"Token: {token}\nOrder: {order_text}\n"
+        f"────────────────────\n"
+        f"Total: ₹{total:.0f}\n\n{payment_line}"
+    )
+    if suggestion:
+        confirmation += f"\n\n{suggestion}"
+    await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
+
+    notes_hint = build_notes_hint(order_text)
+    await _send_interactive(customer_phone, {
+        "interactive": {
+            "type": "button",
+            "body": {"text": (
+                f"👨‍🍳 Any requests for the kitchen? (optional)\n\n"
+                f"{notes_hint}\n\n"
+                "Just type it out, or tap below to skip 👇"
+            )},
+            "footer": {"text": "Your order is already being prepared!"},
+            "action": {"buttons": [
+                {"type": "reply", "reply": {"id": "SKIP", "title": "⏭️ No notes"}},
+            ]},
+        }
+    })
+    session_state["special_notes_asked_at"] = time.time()
+    start_special_notes_timer(customer_phone, restaurant_id)
+
+    tables_label = table_num or session_state.get("assigned_tables") or "Multi-table / TBD"
+    await send_whatsapp_message(
+        manager_phone,
+        f"📋 Order Received — Dine-in\n────────────────────\n"
+        f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
+        f"Table: {tables_label}\n"
+        f"Guests: {session_state.get('party_size')}\nBooking Time: {booking_time}\n"
+        f"Order: {order_text}\nTotal: ₹{total:.0f}\n────────────────────",
+        restaurant_id,
+    )
+    session_state["order_confirmed_summary"] = (
+        f"Dine-in Token *{token}* — {order_text} "
+        f"({session_state.get('party_size')} guests, ₹{total:.0f})"
+    )
+    _first_item = order_text.split(",")[0].strip()[:40]
+    session_state["last_order_summary"] = _first_item
+    session_state["is_returning_customer"] = True
+    session_state["visit_count"] = session_state.get("visit_count", 0) + 1
+    session_state["_kds_cart_snapshot"] = cart_snapshot
+    session_state["_kds_order_text"] = order_text
+    session_state["_receipt_cart"] = cart_snapshot
+    session_state["booking_step"] = "awaiting_special_notes"
+    session_state.pop("_order_retry_attempted", None)
+    clear_cart(session_state)
+    return {"status": "awaiting_special_notes", "booking_id": booking_id, "total": total}
 
 
 async def handle_dine_in_flow(
@@ -228,6 +375,27 @@ async def handle_dine_in_flow(
 
     # ── awaiting_manager_approval ─────────────────────────────────────────────
     elif booking_step == "awaiting_manager_approval":
+        if await recover_session_from_walk_in_token(restaurant_id, customer_phone, session_state):
+            tables = session_state.get("assigned_tables") or [session_state.get("table_number")]
+            tables_txt = ", ".join(str(t) for t in tables if t)
+            token = session_state.get("display_token", "")
+            await send_whatsapp_message(
+                customer_phone,
+                f"✅ Great news — your tables are confirmed"
+                + (f" (*{tables_txt}*)" if tables_txt else "")
+                + (f"\nToken: *{token}*" if token else "")
+                + "\n\nBrowse the menu below to place your order 🍽️",
+                restaurant_id,
+            )
+            if session_state.get("cart"):
+                session_state["booking_step"] = "awaiting_order"
+                return await handle_dine_in_flow(
+                    restaurant_id, customer_id, customer_name, customer_phone,
+                    manager_phone, message, session_state, table_number,
+                )
+            await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+            return {"status": "awaiting_order"}
+
         await send_whatsapp_message(
             customer_phone,
             "⏳ We're still waiting for manager confirmation on your table arrangement. "
@@ -292,111 +460,59 @@ async def handle_dine_in_flow(
             return {"status": session_state.get("booking_step", "awaiting_order")}
 
         cart_snapshot = dict(cart)
-        total         = cart_total(cart) if cart else 0.0
-        session_state["order_total"] = total
-        token         = session_state.get("display_token", session_state.get("token_number", ""))
-        booking_time  = session_state.get("booking_time", now_display())
-
-        # Fix 44: large-party path never calls lookup_table_assignment, so
-        # session["table_number"] stays as the Python None from the walk-in
-        # QR parameter.  str(None) = "None" (literal) which breaks create_booking.
-        # Use `or ""` so None → "" instead.
-        _raw_table   = session_state.get("table_number")
-        table_num_str = str(_raw_table) if _raw_table is not None else ""
 
         try:
-            suggestion, booking = await asyncio.gather(
-                safe_build_order_suggestion(customer_id, restaurant_id),
-                create_booking(
-                    restaurant_id, customer_id, "dine_in",
-                    party_size=session_state.get("party_size"),
-                    table_number=table_num_str,
-                    token_number=token,
-                ),
+            return await _confirm_dine_in_order(
+                restaurant_id=restaurant_id,
+                customer_id=customer_id,
+                customer_name=customer_name,
+                customer_phone=customer_phone,
+                manager_phone=manager_phone,
+                order_text=order_text,
+                session_state=session_state,
+                cart_snapshot=cart_snapshot,
             )
-            booking_id = booking["id"]
-            session_state["booking_id"] = booking_id
-
-            try:
-                payment_link = await create_payment_link(
-                    booking_id, total, customer_name,
-                    f"Dine-in {token} at table {session_state.get('table_number')}",
-                )
-            except Exception as _pl:
-                logger.warning(f"[payment] create_payment_link failed (non-fatal): {_pl}")
-                payment_link = "placeholder"
-            payment_line = ("💳 Payment can be made at the counter."
-                            if is_placeholder_payment_link(payment_link)
-                            else f"Pay here: {payment_link}")
-
-            confirmation = (
-                f"Your order has been placed! 🎉\n"
-                f"────────────────────\n"
-                f"Token: {token}\nOrder: {order_text}\n"
-                f"────────────────────\n"
-                f"Total: ₹{total:.0f}\n\n{payment_line}"
-            )
-            if suggestion:
-                confirmation += f"\n\n{suggestion}"
-            await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
-
-            notes_hint = build_notes_hint(order_text)
-            await _send_interactive(customer_phone, {
-                "interactive": {
-                    "type": "button",
-                    "body": {"text": (
-                        f"👨‍🍳 Any requests for the kitchen? (optional)\n\n"
-                        f"{notes_hint}\n\n"
-                        "Just type it out, or tap below to skip 👇"
-                    )},
-                    "footer": {"text": "Your order is already being prepared!"},
-                    "action": {"buttons": [
-                        {"type": "reply", "reply": {"id": "SKIP", "title": "⏭️ No notes"}},
-                    ]},
-                }
-            })
-            session_state["special_notes_asked_at"] = time.time()
-            start_special_notes_timer(customer_phone, restaurant_id)
-
-            await send_whatsapp_message(
-                manager_phone,
-                f"📋 Order Received — Dine-in\n────────────────────\n"
-                f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
-                f"Table: {table_num_str or 'Multi-table / TBD'}\n"
-                f"Guests: {session_state.get('party_size')}\nBooking Time: {booking_time}\n"
-                f"Order: {order_text}\nTotal: ₹{total:.0f}\n────────────────────",
-                restaurant_id,
-            )
-            session_state["order_confirmed_summary"] = (
-                f"Dine-in Token *{token}* — {order_text} "
-                f"({session_state.get('party_size')} guests, ₹{total:.0f})"
-            )
-            _first_item = order_text.split(",")[0].strip()[:40]
-            session_state["last_order_summary"]    = _first_item
-            session_state["is_returning_customer"] = True
-            session_state["visit_count"]           = session_state.get("visit_count", 0) + 1
-            session_state["_kds_cart_snapshot"]    = cart_snapshot
-            session_state["_kds_order_text"]       = order_text
-            session_state["_receipt_cart"]         = cart_snapshot
-            session_state["booking_step"]          = "awaiting_special_notes"
-            clear_cart(session_state)
-            return {"status": "awaiting_special_notes", "booking_id": booking_id, "total": total}
 
         except Exception as e:
             import traceback as _tb
             logger.error(
-                f"[dine-in] create_booking failed | "
-                f"party={session_state.get('party_size')} "
+                f"[dine-in] order failed | party={session_state.get('party_size')} "
                 f"table={session_state.get('table_number')} "
-                f"token={token} total={total} | {e}\n{_tb.format_exc()}"
+                f"token={session_state.get('display_token')} | {e}\n{_tb.format_exc()}"
             )
-            # Clear stale cart so the NEXT message (e.g. "Hi") doesn't
-            # loop back into this handler and hit the same error.
-            clear_cart(session_state)
+
+            # Retry once: sync from walk_in_tokens (manager may have approved
+            # in the portal while the chat session was stale) then re-place order.
+            if not session_state.get("_order_retry_attempted") and cart_snapshot:
+                session_state["_order_retry_attempted"] = True
+                session_state["cart"] = dict(cart_snapshot)
+                if await recover_session_from_walk_in_token(
+                    restaurant_id, customer_phone, session_state
+                ):
+                    logger.info(f"[dine-in] retrying order after token recovery for {customer_phone}")
+                    try:
+                        return await _confirm_dine_in_order(
+                            restaurant_id=restaurant_id,
+                            customer_id=customer_id,
+                            customer_name=customer_name,
+                            customer_phone=customer_phone,
+                            manager_phone=manager_phone,
+                            order_text=order_text,
+                            session_state=session_state,
+                            cart_snapshot=cart_snapshot,
+                        )
+                    except Exception as retry_err:
+                        logger.error(
+                            f"[dine-in] retry also failed for {customer_phone}: {retry_err}"
+                        )
+
             session_state["booking_step"] = "awaiting_order"
+            session_state["cart"] = dict(cart_snapshot)
             await send_whatsapp_message(
                 customer_phone,
-                "Sorry, there was an error processing your order. Please try again." + _HOME_HINT,
+                "Sorry, there was a hiccup placing your order. "
+                "Your cart is saved — please tap *Confirm order* again "
+                "or browse the menu to re-submit. 🙏" + _HOME_HINT,
                 restaurant_id,
             )
             return {"status": "error"}
