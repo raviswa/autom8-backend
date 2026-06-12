@@ -13,6 +13,35 @@
 const { supabaseAdmin } = require('../config/supabase');
 
 const BRAND_ROLES = ['brand_owner', 'brand_manager'];
+const SETTINGS_ROLES = ['owner', 'manager', 'brand_owner', 'brand_manager'];
+
+async function resolveBrandOutletId(brandId, req) {
+  const headerId = req.headers['x-restaurant-id'];
+  if (headerId) {
+    const { data: outlet } = await supabaseAdmin
+      .from('restaurants')
+      .select('id')
+      .eq('id', headerId)
+      .eq('brand_id', brandId)
+      .eq('is_active', true)
+      .maybeSingle();
+    if (outlet?.id) return outlet.id;
+  }
+
+  const { data: outlets } = await supabaseAdmin
+    .from('restaurants')
+    .select('id')
+    .eq('brand_id', brandId)
+    .eq('is_active', true)
+    .limit(2);
+
+  if (outlets?.length === 1) return outlets[0].id;
+  return null;
+}
+
+function canManageRestaurantSettings(role) {
+  return SETTINGS_ROLES.includes(role);
+}
 
 // ── authenticateToken ────────────────────────────────────────────────────────
 // Validates the Bearer JWT via Supabase admin client.
@@ -69,7 +98,7 @@ const getRestaurantId = async (req, res, next) => {
       if (!data.brand_id)
         return res.status(403).json({ error: 'Brand employee has no brand assigned.' });
 
-      req.restaurant_id = null;
+      req.restaurant_id = await resolveBrandOutletId(data.brand_id, req);
       req.brand_id      = data.brand_id;
       req.user_role     = data.role;
       req.scope         = 'brand';
@@ -107,4 +136,9 @@ const getRestaurantId = async (req, res, next) => {
   }
 };
 
-module.exports = { authenticateToken, getRestaurantId };
+module.exports = {
+  authenticateToken,
+  getRestaurantId,
+  canManageRestaurantSettings,
+  SETTINGS_ROLES,
+};

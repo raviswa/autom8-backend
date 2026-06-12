@@ -5,7 +5,19 @@
 const express = require('express');
 const router  = express.Router();
 const { supabaseAdmin }           = require('../config/supabase');
-const { authenticateToken, getRestaurantId } = require('../middleware/auth');
+const {
+  authenticateToken,
+  getRestaurantId,
+  canManageRestaurantSettings,
+} = require('../middleware/auth');
+
+function requireSettingsAccess(req, res, next) {
+  if (!canManageRestaurantSettings(req.user_role))
+    return res.status(403).json({ error: 'Unauthorized' });
+  if (!req.restaurant_id)
+    return res.status(403).json({ error: 'No restaurant outlet linked to this account' });
+  next();
+}
 const { broadcastToRestaurant }   = require('../websocket');
 const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../helpers/whatsapp');
 const { applySlotAvailability, getCurrentSlotIST } = require('./catalog');
@@ -405,11 +417,8 @@ router.delete('/tables/:id', authenticateToken, getRestaurantId, async (req, res
 // ── Owner self-service restaurant update ──────────────────────────────────────
 // Used by SettingsPanel tabs: Restaurant, Services, Kitchen, WhatsApp
 
-router.put('/restaurants/me', authenticateToken, getRestaurantId, async (req, res) => {
+router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
   try {
-    if (req.user_role !== 'owner' && req.user_role !== 'manager')
-      return res.status(403).json({ error: 'Unauthorized' });
-
     const ALLOWED = [
       'name','display_name','legal_name','address_line1','address_line2',
       'city','state','postal_code','country',
@@ -417,6 +426,7 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, async (req, re
       'logo_url','gstin','opening_hours',
       'whatsapp_number','waba_id','manager_phone',
       'timezone','dining_duration_minutes','payment_mode','kitchen_workflow',
+      'takeaway_fulfillment_mode','fulfillment_sections',
       'subscribed_features',
     ];
     const updates = Object.fromEntries(
@@ -434,7 +444,7 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, async (req, re
     if (error) throw error;
 
     await supabaseAdmin.from('audit_logs').insert({
-      user_id: req.user.id, restaurant_id: req.restaurant_id,
+      user_id: req.user.sub, restaurant_id: req.restaurant_id,
       action: 'Restaurant settings updated', details: { fields: Object.keys(updates) },
     }).catch(() => {});
 
@@ -459,10 +469,8 @@ router.get('/restaurants/integration', authenticateToken, getRestaurantId, async
   }
 });
 
-router.put('/restaurants/integration', authenticateToken, getRestaurantId, async (req, res) => {
+router.put('/restaurants/integration', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
   try {
-    if (req.user_role !== 'owner' && req.user_role !== 'manager')
-      return res.status(403).json({ error: 'Unauthorized' });
 
     const { provider = 'meta', channel = 'whatsapp', phone_number_id, access_token, webhook_secret, webhook_verify_token } = req.body;
     const updates = { updated_at: new Date().toISOString() };

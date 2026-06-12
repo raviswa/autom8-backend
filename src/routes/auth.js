@@ -95,6 +95,15 @@ router.post('/login', async (req, res) => {
 
     // Align with getRestaurantId — single-outlet fallback when employee row has no restaurant_id
     let effectiveRestaurantId = emp.restaurant_id ?? null;
+    if (!effectiveRestaurantId && isBrandEmployee && emp.brand_id) {
+      const { data: brandOutlets } = await supabaseAdmin
+        .from('restaurants')
+        .select('id')
+        .eq('brand_id', emp.brand_id)
+        .eq('is_active', true)
+        .limit(2);
+      if (brandOutlets?.length === 1) effectiveRestaurantId = brandOutlets[0].id;
+    }
     if (!effectiveRestaurantId && !isBrandEmployee) {
       const { data: restaurants } = await supabaseAdmin
         .from('restaurants')
