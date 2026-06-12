@@ -20,6 +20,9 @@ from tools.db_tools import (
     update_booking_status,
     recover_session_from_walk_in_token,
     _coerce_table_number,
+    get_session_state,
+    save_session_state,
+    customer_lock,
 )
 from tools.payment_tools import create_payment_link
 from tools.whatsapp_tools import send_whatsapp_message
@@ -112,6 +115,107 @@ async def _sync_table_from_portal(
     return None
 
 
+async def _finalize_special_notes_and_kitchen(
+    *,
+    restaurant_id: str,
+    customer_phone: str,
+    customer_name: str,
+    session_state: Dict[str, Any],
+    special_notes: str | None,
+    notify_customer: bool = True,
+) -> None:
+    """Send order to KDS/KOT + receipt once notes are collected or timed out."""
+    if session_state.get("_kitchen_sent"):
+        return
+
+    pending = session_state.get("_pending_kitchen") or {}
+    order_text = pending.get("order_text") or ""
+    cart_snapshot = pending.get("cart") or {}
+    if not order_text or not cart_snapshot:
+        logger.warning(
+            f"[dine-in] Missing pending kitchen payload for {customer_phone} — skipping KDS"
+        )
+        return
+
+    token = session_state.get("display_token", session_state.get("token_number", ""))
+    table_number = session_state.get("table_number")
+
+    session_state["_kitchen_sent"] = True
+    session_state["special_notes"] = special_notes
+
+    await _fire_kitchen_and_receipt(
+        restaurant_id=restaurant_id,
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        order_text=order_text,
+        cart_snapshot=cart_snapshot,
+        session_state=session_state,
+        token=token,
+        table_number=table_number,
+        special_notes=special_notes,
+    )
+
+    if notify_customer:
+        if special_notes:
+            await send_whatsapp_message(
+                customer_phone,
+                "✅ Got it! Your notes have been saved.\n\n"
+                "Sit back and enjoy — your order is being prepared! 🍽️",
+                restaurant_id,
+            )
+        else:
+            await send_whatsapp_message(
+                customer_phone,
+                "No problem! Your order is being prepared. Enjoy your meal! 🍽️",
+                restaurant_id,
+            )
+
+    try:
+        await get_http().post(
+            "https://api.autom8.works/api/feedback/queue",
+            json={
+                "restaurant_id": restaurant_id,
+                "customer_phone": customer_phone,
+                "customer_name": customer_name,
+                "token_number": token,
+                "table_number": str(table_number or ""),
+            },
+            headers={"Authorization": f"Bearer {KDS_SECRET}"},
+            timeout=aiohttp.ClientTimeout(total=5),
+        )
+    except Exception as fb_err:
+        logger.warning(f"[feedback-queue] Non-fatal: {fb_err}")
+
+    session_state["booking_step"] = "visit_complete"
+    session_state.pop("_pending_kitchen", None)
+
+
+async def _on_special_notes_timeout(
+    restaurant_id: str,
+    customer_phone: str,
+) -> None:
+    """After 2 minutes with no reply, treat as no special notes and send to kitchen."""
+    async with customer_lock(restaurant_id, customer_phone):
+        session_state = await get_session_state(restaurant_id, customer_phone)
+        if not session_state:
+            return
+        if session_state.get("booking_step") != "awaiting_special_notes":
+            return
+        if session_state.get("_kitchen_sent"):
+            return
+
+        customer_name = session_state.get("customer_name", "Guest")
+        await _finalize_special_notes_and_kitchen(
+            restaurant_id=restaurant_id,
+            customer_phone=customer_phone,
+            customer_name=customer_name,
+            session_state=session_state,
+            special_notes=None,
+            notify_customer=True,
+        )
+        await save_session_state(restaurant_id, customer_phone, session_state)
+
+
 async def _fire_kitchen_and_receipt(
     *,
     restaurant_id: str,
@@ -124,7 +228,7 @@ async def _fire_kitchen_and_receipt(
     table_number,
     special_notes: str | None = None,
 ) -> None:
-    """Send order to KDS/KOT immediately; receipt image follows in background."""
+    """Send order to KDS/KOT; receipt image follows in background."""
     await notify_kds(
         customer_name=customer_name,
         customer_phone=customer_phone,
@@ -237,16 +341,26 @@ async def _confirm_dine_in_order(
             "body": {"text": (
                 f"👨‍🍳 Any requests for the kitchen? (optional)\n\n"
                 f"{notes_hint}\n\n"
-                "Just type it out, or tap below to skip 👇"
+                "Type your request, tap *No notes*, or wait 2 minutes — "
+                "we'll send your order to the kitchen automatically 👇"
             )},
-            "footer": {"text": "Your order is already being prepared!"},
+            "footer": {"text": "We'll wait up to 2 minutes for your reply"},
             "action": {"buttons": [
                 {"type": "reply", "reply": {"id": "SKIP", "title": "⏭️ No notes"}},
             ]},
         }
     })
     session_state["special_notes_asked_at"] = time.time()
-    start_special_notes_timer(customer_phone, restaurant_id)
+    session_state["_pending_kitchen"] = {
+        "order_text": order_text,
+        "cart": dict(cart_snapshot),
+    }
+    session_state.pop("_kitchen_sent", None)
+    start_special_notes_timer(
+        customer_phone,
+        restaurant_id,
+        on_timeout=lambda: _on_special_notes_timeout(restaurant_id, customer_phone),
+    )
 
     tables_label = table_num or session_state.get("assigned_tables") or "Multi-table / TBD"
     await send_whatsapp_message(
@@ -269,18 +383,6 @@ async def _confirm_dine_in_order(
     session_state["booking_step"] = "awaiting_special_notes"
     session_state.pop("_order_retry_attempted", None)
     clear_cart(session_state)
-
-    # Kitchen + receipt fire immediately — do not wait for optional notes reply.
-    await _fire_kitchen_and_receipt(
-        restaurant_id=restaurant_id,
-        customer_name=customer_name,
-        customer_phone=customer_phone,
-        order_text=order_text,
-        cart_snapshot=cart_snapshot,
-        session_state=session_state,
-        token=token,
-        table_number=table_num or session_state.get("table_number"),
-    )
 
     return {"status": "awaiting_special_notes", "booking_id": booking_id, "total": total}
 
@@ -670,11 +772,6 @@ async def handle_dine_in_flow(
 
         if not raw_notes or raw_notes.upper() in ("SKIP", "NO", "NONE"):
             special_notes: str | None = None
-            await send_whatsapp_message(
-                customer_phone,
-                "No problem! Your order is being prepared. Enjoy your meal! 🍽️",
-                restaurant_id,
-            )
         else:
             if len(raw_notes) > 500:
                 await send_whatsapp_message(
@@ -694,34 +791,15 @@ async def handle_dine_in_flow(
                 f"Notes: {special_notes}\n────────────────────",
                 restaurant_id,
             )
-            await send_whatsapp_message(
-                customer_phone,
-                "✅ Got it! Your notes have been saved.\n\n"
-                "Sit back and enjoy — your order is being prepared! 🍽️",
-                restaurant_id,
-            )
 
-        session_state["special_notes"] = special_notes
-        # KDS + receipt already sent at order confirm; notes go to manager above.
-
-        # Feedback queue
-        try:
-            await get_http().post(
-                "https://api.autom8.works/api/feedback/queue",
-                json={
-                    "restaurant_id": restaurant_id,
-                    "customer_phone": customer_phone,
-                    "customer_name":  customer_name,
-                    "token_number":   token,
-                    "table_number":   str(session_state.get("table_number", "")),
-                },
-                headers={"Authorization": f"Bearer {KDS_SECRET}"},
-                timeout=aiohttp.ClientTimeout(total=5),
-            )
-        except Exception as fb_err:
-            logger.warning(f"[feedback-queue] Non-fatal: {fb_err}")
-
-        session_state["booking_step"] = "visit_complete"
+        await _finalize_special_notes_and_kitchen(
+            restaurant_id=restaurant_id,
+            customer_phone=customer_phone,
+            customer_name=customer_name,
+            session_state=session_state,
+            special_notes=special_notes,
+            notify_customer=True,
+        )
         return {"status": "visit_complete"}
 
     return {"status": "error"}

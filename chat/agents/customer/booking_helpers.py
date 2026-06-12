@@ -576,17 +576,39 @@ def build_smart_greeting(
 
 
 # ─────────────────────────────────────────────
-# J. SPECIAL-NOTES NUDGE STUBS
-#    auto_nudge_special_notes_loop removed — was a no-op stub never
-#    registered with APScheduler (dead code).
+# J. SPECIAL-NOTES KITCHEN TIMER (2-minute wait before KDS/KOT)
 # ─────────────────────────────────────────────
 
 _nudge_tasks: dict = {}
 
 
-def start_special_notes_timer(customer_phone: str, restaurant_id: str) -> None:
-    """No-op stub — timeout enforced via session special_notes_asked_at."""
-    logger.debug(f"[special-notes-nudge] timer started for {customer_phone}")
+SPECIAL_NOTES_WAIT_SECS = 120
+
+
+def start_special_notes_timer(
+    customer_phone: str,
+    restaurant_id: str,
+    *,
+    on_timeout=None,
+) -> None:
+    """Wait 2 minutes; if customer hasn't replied, run on_timeout coroutine."""
+    stop_special_notes_timer(customer_phone)
+    if on_timeout is None:
+        logger.debug(f"[special-notes] timer skipped (no handler) for {customer_phone}")
+        return
+
+    async def _job() -> None:
+        try:
+            await asyncio.sleep(SPECIAL_NOTES_WAIT_SECS)
+            await on_timeout()
+        except asyncio.CancelledError:
+            logger.debug(f"[special-notes] timer cancelled for {customer_phone}")
+
+    _nudge_tasks[customer_phone] = asyncio.create_task(_job())
+    logger.info(
+        f"[special-notes] {SPECIAL_NOTES_WAIT_SECS}s kitchen timer started "
+        f"for {customer_phone} @ {restaurant_id}"
+    )
 
 
 def stop_special_notes_timer(customer_phone: str) -> None:
