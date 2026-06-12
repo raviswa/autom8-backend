@@ -51,6 +51,7 @@ from agents.customer.booking_helpers import (
     LARGE_PARTY_THRESHOLD,
     _HOME_HINT,
     now_display,
+    is_greeting,
     is_placeholder_payment_link,
     build_notes_hint,
     send_catalog_with_fallback,
@@ -271,6 +272,15 @@ async def handle_dine_in_flow(
             await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
             return {"status": "awaiting_order"}
 
+        # Fix 43: greeting arriving in awaiting_order means the customer has
+        # come back to a stale session (e.g. after a failed order).
+        # Clear any stale cart and resend the catalog rather than crashing.
+        if is_greeting(order_text):
+            logger.info(f"[dine-in] greeting in awaiting_order — clearing stale cart")
+            clear_cart(session_state)
+            await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+            return {"status": session_state.get("booking_step", "awaiting_order")}
+
         cart = session_state.get("cart", {})
 
         # Fix 41: empty-cart guard — mirrors Fix 31 for takeaway/delivery.
@@ -287,13 +297,20 @@ async def handle_dine_in_flow(
         token         = session_state.get("display_token", session_state.get("token_number", ""))
         booking_time  = session_state.get("booking_time", now_display())
 
+        # Fix 44: large-party path never calls lookup_table_assignment, so
+        # session["table_number"] stays as the Python None from the walk-in
+        # QR parameter.  str(None) = "None" (literal) which breaks create_booking.
+        # Use `or ""` so None → "" instead.
+        _raw_table   = session_state.get("table_number")
+        table_num_str = str(_raw_table) if _raw_table is not None else ""
+
         try:
             suggestion, booking = await asyncio.gather(
                 safe_build_order_suggestion(customer_id, restaurant_id),
                 create_booking(
                     restaurant_id, customer_id, "dine_in",
                     party_size=session_state.get("party_size"),
-                    table_number=str(session_state.get("table_number", "")),
+                    table_number=table_num_str,
                     token_number=token,
                 ),
             )
@@ -345,7 +362,7 @@ async def handle_dine_in_flow(
                 manager_phone,
                 f"📋 Order Received — Dine-in\n────────────────────\n"
                 f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
-                f"Table: {session_state.get('table_number', 'TBD')}\n"
+                f"Table: {table_num_str or 'Multi-table / TBD'}\n"
                 f"Guests: {session_state.get('party_size')}\nBooking Time: {booking_time}\n"
                 f"Order: {order_text}\nTotal: ₹{total:.0f}\n────────────────────",
                 restaurant_id,
@@ -366,7 +383,17 @@ async def handle_dine_in_flow(
             return {"status": "awaiting_special_notes", "booking_id": booking_id, "total": total}
 
         except Exception as e:
-            logger.error(f"Failed to create dine-in booking: {e}")
+            import traceback as _tb
+            logger.error(
+                f"[dine-in] create_booking failed | "
+                f"party={session_state.get('party_size')} "
+                f"table={session_state.get('table_number')} "
+                f"token={token} total={total} | {e}\n{_tb.format_exc()}"
+            )
+            # Clear stale cart so the NEXT message (e.g. "Hi") doesn't
+            # loop back into this handler and hit the same error.
+            clear_cart(session_state)
+            session_state["booking_step"] = "awaiting_order"
             await send_whatsapp_message(
                 customer_phone,
                 "Sorry, there was an error processing your order. Please try again." + _HOME_HINT,
@@ -426,7 +453,7 @@ async def handle_dine_in_flow(
             customer_phone=customer_phone,
             order_text=session_state.pop("_kds_order_text", ""),
             cart=session_state.pop("_kds_cart_snapshot", {}),
-            table_number=session_state.get("table_number"),
+            table_number=table_num_str or None,
             token_number=token,
             service_type="dine_in",
             restaurant_id=restaurant_id,
@@ -445,7 +472,7 @@ async def handle_dine_in_flow(
                     restaurant_website=r_info.get("website", ""),
                     receipt_url=receipt_qr_url(token),
                     token_number=token,
-                    table_number=str(session_state.get("table_number", "")),
+                    table_number=table_num_str,
                     service_type="dine_in",
                     customer_name=customer_name,
                     customer_phone=customer_phone,
