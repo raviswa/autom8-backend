@@ -23,8 +23,18 @@ const { broadcastToRestaurant }   = require('../websocket');
 const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../helpers/whatsapp');
 const { queueFeedbackForTable }   = require('../helpers/feedback');
 const { syncConversationForTokenApproval } = require('../helpers/conversationState');
-const { authenticateToken }       = require('../middleware/auth');
+const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { requireKdsSecretOrJwt, requireKdsSecret } = require('../middleware/internalAuth');
+
+/** Same outlet resolution as /api/tables (getRestaurantId + single-restaurant fallback). */
+function requireOutlet(req, res, next) {
+  if (!req.restaurant_id) {
+    return res.status(401).json({ error: 'No restaurant assigned to this account' });
+  }
+  next();
+}
+
+const outletAuth = [authenticateToken, getRestaurantId, requireOutlet];
 
 // ── generateTokenId ───────────────────────────────────────────────────────────
 // Returns the next T-001 style sequential ID (collision-safe).
@@ -140,14 +150,9 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
 
 // ── GET /api/tokens ───────────────────────────────────────────────────────────
 
-router.get('/', authenticateToken, async (req, res) => {
+router.get('/', outletAuth, async (req, res) => {
   try {
-    const { data: userData } = await supabaseAdmin
-      .from('employees').select('restaurant_id').eq('id', req.user.sub).single();
-    const restaurantId = userData?.restaurant_id;
-    if (!restaurantId) return res.status(401).json({ error: 'No restaurant assigned' });
-
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const restaurantId = req.restaurant_id;
     const { status } = req.query;
 
     let query = supabaseAdmin
@@ -156,12 +161,11 @@ router.get('/', authenticateToken, async (req, res) => {
       .order('arrived_at', { ascending: true });
 
     if (status) {
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
       query = query.eq('status', status).gte('arrived_at', todayStart.toISOString());
     } else {
-      query = query.or(
-        `status.in.(waiting,seated,takeaway,pending_approval),` +
-        `and(status.eq.completed,arrived_at.gte.${todayStart.toISOString()})`
-      );
+      query = query.in('status', ['waiting', 'seated', 'takeaway', 'pending_approval']);
     }
 
     const { data, error } = await query;
@@ -220,11 +224,9 @@ router.get('/:id', async (req, res) => {
 
 // ── PUT /api/tokens/:id/assign ────────────────────────────────────────────────
 
-router.put('/:id/assign', authenticateToken, async (req, res) => {
+router.put('/:id/assign', outletAuth, async (req, res) => {
   try {
-    const { data: userData } = await supabaseAdmin
-      .from('employees').select('restaurant_id').eq('id', req.user.sub).single();
-    const restaurantId = userData?.restaurant_id;
+    const restaurantId = req.restaurant_id;
 
     const { table_id, table_number } = req.body;
     if (!table_id || !table_number) return res.status(400).json({ error: 'table_id and table_number required' });
@@ -276,13 +278,11 @@ router.put('/:id/assign', authenticateToken, async (req, res) => {
 
 // ── PUT /api/tokens/:id/approve ───────────────────────────────────────────────
 
-router.put('/:id/approve', authenticateToken, async (req, res) => {
+router.put('/:id/approve', outletAuth, async (req, res) => {
   try {
-    const { data: userData } = await supabaseAdmin
-      .from('employees').select('role, restaurant_id').eq('id', req.user.sub).single();
-    if (!['owner', 'manager', 'brand_owner', 'brand_manager'].includes(userData?.role))
+    if (!['owner', 'manager', 'brand_owner', 'brand_manager'].includes(req.user_role))
       return res.status(403).json({ error: 'Unauthorized' });
-    const restaurantId = userData.restaurant_id;
+    const restaurantId = req.restaurant_id;
 
     const { data: token } = await supabaseAdmin
       .from('walk_in_tokens').select('*').eq('id', req.params.id).eq('restaurant_id', restaurantId).single();
@@ -332,15 +332,14 @@ router.put('/:id/approve', authenticateToken, async (req, res) => {
 
 // ── PUT /api/tokens/:id/reject ────────────────────────────────────────────────
 
-router.put('/:id/reject', authenticateToken, async (req, res) => {
+router.put('/:id/reject', outletAuth, async (req, res) => {
   try {
-    const { data: userData } = await supabaseAdmin
-      .from('employees').select('role, restaurant_id').eq('id', req.user.sub).single();
-    if (!['owner', 'manager', 'brand_owner', 'brand_manager'].includes(userData?.role))
+    if (!['owner', 'manager', 'brand_owner', 'brand_manager'].includes(req.user_role))
       return res.status(403).json({ error: 'Unauthorized' });
 
+    const restaurantId = req.restaurant_id;
     const { data: token } = await supabaseAdmin
-      .from('walk_in_tokens').select('*').eq('id', req.params.id).eq('restaurant_id', userData.restaurant_id).single();
+      .from('walk_in_tokens').select('*').eq('id', req.params.id).eq('restaurant_id', restaurantId).single();
     if (!token) return res.status(404).json({ error: 'Token not found' });
 
     const { data: updatedToken } = await supabaseAdmin
@@ -353,11 +352,11 @@ router.put('/:id/reject', authenticateToken, async (req, res) => {
       await sendWhatsAppMessage(
         token.phone,
         `😔 *We're unable to accommodate your party of ${token.pax} right now.*${reasonLine}\n\nReply *RESERVE* to book for a future date. 🙏`,
-        userData.restaurant_id
+        restaurantId
       );
     }
 
-    broadcastToRestaurant(userData.restaurant_id, { type: 'TOKEN_REJECTED', token: updatedToken, timestamp: new Date().toISOString() });
+    broadcastToRestaurant(restaurantId, { type: 'TOKEN_REJECTED', token: updatedToken, timestamp: new Date().toISOString() });
     res.json({ success: true, token: updatedToken });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -366,11 +365,9 @@ router.put('/:id/reject', authenticateToken, async (req, res) => {
 
 // ── PUT /api/tokens/:id/complete ──────────────────────────────────────────────
 
-router.put('/:id/complete', authenticateToken, async (req, res) => {
+router.put('/:id/complete', outletAuth, async (req, res) => {
   try {
-    const { data: userData } = await supabaseAdmin
-      .from('employees').select('restaurant_id').eq('id', req.user.sub).single();
-    const restaurantId = userData.restaurant_id;
+    const restaurantId = req.restaurant_id;
 
     const { data: token } = await supabaseAdmin
       .from('walk_in_tokens').select('*').eq('id', req.params.id).eq('restaurant_id', restaurantId).single();
@@ -410,12 +407,10 @@ router.put('/:id/complete', authenticateToken, async (req, res) => {
 
 // ── DELETE /api/tokens/:id ────────────────────────────────────────────────────
 
-router.delete('/:id', authenticateToken, async (req, res) => {
+router.delete('/:id', outletAuth, async (req, res) => {
   try {
-    const { data: userData } = await supabaseAdmin
-      .from('employees').select('restaurant_id').eq('id', req.user.sub).single();
     const { error } = await supabaseAdmin
-      .from('walk_in_tokens').delete().eq('id', req.params.id).eq('restaurant_id', userData.restaurant_id);
+      .from('walk_in_tokens').delete().eq('id', req.params.id).eq('restaurant_id', req.restaurant_id);
     if (error) throw error;
     res.json({ success: true, message: 'Token dismissed' });
   } catch (err) {

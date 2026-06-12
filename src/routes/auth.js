@@ -93,10 +93,21 @@ router.post('/login', async (req, res) => {
       brandInfo = brand ?? null;
     }
 
+    // Align with getRestaurantId — single-outlet fallback when employee row has no restaurant_id
+    let effectiveRestaurantId = emp.restaurant_id ?? null;
+    if (!effectiveRestaurantId && !isBrandEmployee) {
+      const { data: restaurants } = await supabaseAdmin
+        .from('restaurants')
+        .select('id')
+        .eq('is_active', true)
+        .limit(2);
+      if (restaurants?.length === 1) effectiveRestaurantId = restaurants[0].id;
+    }
+
     try {
       await supabaseAdmin.from('audit_logs').insert({
         user_id:       data.user.id,
-        restaurant_id: emp.restaurant_id ?? null,
+        restaurant_id: effectiveRestaurantId,
         action:        'User login',
         ip_address:    req.ip,
         details:       { scope: isBrandEmployee ? 'brand' : 'outlet', brand_id: emp.brand_id ?? null },
@@ -109,6 +120,7 @@ router.post('/login', async (req, res) => {
       refreshToken: data.session.refresh_token,
       user: {
         ...emp,
+        restaurant_id: effectiveRestaurantId,
         scope:     isBrandEmployee ? 'brand' : 'outlet',
         brand:     brandInfo,
         outlets,   // populated only for brand employees; undefined for outlet employees

@@ -455,6 +455,17 @@ async def handle_dine_in_flow(
 
     # ── awaiting_table_assignment ─────────────────────────────────────────────
     elif booking_step == "awaiting_table_assignment":
+        token_ref = session_state.get("token_number") or session_state.get("display_token")
+        if not token_ref or str(token_ref).startswith("#"):
+            party_size = session_state.get("party_size") or 1
+            portal_token_id = await sync_token_to_portal(
+                customer_name=customer_name, customer_phone=customer_phone,
+                token_type="dinein", pax=party_size, restaurant_id=restaurant_id,
+            )
+            if portal_token_id:
+                session_state["token_number"]  = portal_token_id
+                session_state["display_token"] = portal_token_id
+
         table_assigned = session_state.get("table_number")
         if not table_assigned:
             table_assigned = await lookup_table_assignment(customer_phone, restaurant_id)
