@@ -11,7 +11,7 @@
 const express  = require('express');
 const router   = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
-const { sendPasswordResetEmail } = require('../helpers/passwordReset');
+const { requestPasswordReset } = require('../helpers/passwordReset');
 
 const BRAND_ROLES = ['brand_owner', 'brand_manager'];
 
@@ -170,17 +170,22 @@ router.post('/forgot-password', async (req, res) => {
 
     const { data: emp } = await supabaseAdmin
       .from('employees')
-      .select('id, is_active')
+      .select('id, is_active, full_name, restaurant_id')
       .eq('email', normalized)
       .maybeSingle();
 
     if (emp?.is_active) {
-      await sendPasswordResetEmail(normalized);
+      await requestPasswordReset({
+        email:          normalized,
+        employeeName:   emp.full_name,
+        restaurantId:   emp.restaurant_id,
+        triggeredBy:    'self',
+      });
     }
 
     res.json({
       success: true,
-      message: 'If an account exists for that email, a password reset link has been sent.',
+      message: 'If an account exists for that email, a password reset has been initiated. Check your inbox (and spam). If you do not receive it, contact your restaurant manager.',
     });
   } catch (err) {
     console.error('[auth/forgot-password]', err.message);
