@@ -74,6 +74,7 @@ from agents.customer.booking_helpers import (
     send_catalog_with_fallback,
     send_service_menu,
     build_smart_greeting,
+    strip_order_quantity,
     ask_continue_or_reset,
     do_reset,
 )
@@ -130,7 +131,7 @@ async def handle_booking_flow(
         if _prev_cname:  session_state["customer_name"]        = _prev_cname
         session_state["is_returning_customer"] = _prev_ret
         if _prev_visits: session_state["visit_count"]          = _prev_visits
-        if _prev_last:   session_state["last_order_summary"]   = _prev_last
+        if _prev_last:   session_state["last_order_summary"]   = strip_order_quantity(_prev_last)
         if _prev_svc:    session_state["last_service_type"]    = _prev_svc
         session_state["booking_step"] = "ask_service"
         current_step = "ask_service"

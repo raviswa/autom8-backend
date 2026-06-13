@@ -1641,6 +1641,55 @@ async def recover_session_from_walk_in_token(
     return True
 
 
+def _display_token_from_order_number(order_number: str) -> str:
+    """ORD-098 → T-098 for customer-facing copy."""
+    on = str(order_number or "").strip()
+    if on.upper().startswith("ORD-"):
+        return f"T-{on[4:]}"
+    return on
+
+
+async def get_ready_takeaway_order(
+    restaurant_id: str,
+    customer_phone: str,
+) -> dict | None:
+    """
+    Return today's takeaway order marked ready by kitchen/captain (status=ready).
+    Used for service-menu pickup line — not shown on mere returning-customer hint.
+    """
+    if AsyncSessionLocal is None:
+        return None
+
+    phones = _phone_variants(customer_phone)
+    if not phones:
+        return None
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text("""
+                SELECT order_number, status, source
+                FROM orders
+                WHERE restaurant_id = CAST(:rid AS uuid)
+                  AND customer_phone = ANY(:phones)
+                  AND status = 'ready'
+                  AND (
+                    source = 'takeaway'
+                    OR source ILIKE '%takeaway%'
+                  )
+                  AND created_at >= CURRENT_DATE
+                ORDER BY created_at DESC
+                LIMIT 1
+            """),
+            {"rid": restaurant_id, "phones": phones},
+        )
+        row = result.mappings().first()
+        if not row:
+            return None
+        data = dict(row)
+        data["display_token"] = _display_token_from_order_number(data.get("order_number", ""))
+        return data
+
+
 async def mark_reservation_reminder_sent(booking_id: str, reminder_field: str) -> None:
     if AsyncSessionLocal is None:
         return

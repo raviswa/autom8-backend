@@ -337,7 +337,7 @@ async def do_reset(
             session_state["is_returning_customer"] = True
             session_state["visit_count"]           = _prev_visits
         if _prev_last:
-            session_state["last_order_summary"] = _prev_last
+            session_state["last_order_summary"] = strip_order_quantity(_prev_last)
         if _prev_svc:
             session_state["last_service_type"] = _prev_svc
         return
@@ -353,7 +353,7 @@ async def do_reset(
     if _cid:    session_state["customer_id"]           = _cid
     if _cname:  session_state["customer_name"]         = _cname
     if _mphone: session_state["manager_phone"]         = _mphone
-    if _last:   session_state["last_order_summary"]    = _last
+    if _last:   session_state["last_order_summary"]    = strip_order_quantity(_last)
     if _ret:    session_state["is_returning_customer"] = _ret
     if _visits: session_state["visit_count"]           = _visits
     if _prev_svc: session_state["last_service_type"]   = _prev_svc
@@ -378,19 +378,30 @@ async def send_service_menu(
 ) -> None:
     rows = await build_service_menu_rows(restaurant_id)
     state = session_state or {}
+    normalize_last_order_summary(state)
     first = _first_name(state.get("customer_name", ""))
     header = f"Welcome back, {first}!" if first else "Welcome!"
 
     body_lines = []
     if greeting and greeting.strip():
         body_lines.append(greeting.strip())
-    last_svc = state.get("last_service_type")
-    if last_svc == "takeaway":
+
+    from tools.db_tools import get_ready_takeaway_order
+
+    ready_takeaway = await get_ready_takeaway_order(restaurant_id, customer_phone)
+    if ready_takeaway:
+        token = ready_takeaway.get("display_token") or ready_takeaway.get("order_number", "")
         body_lines.append(
-            "🛍️ *Takeaway* is ready — order now and pick up at the counter."
+            f"✅ Your takeaway order *{token}* is ready — pick up at the counter."
         )
-    elif last_svc == "dine_in":
-        body_lines.append("🍽️ *Dine-in* is available when you're ready for a table.")
+    else:
+        last_svc = state.get("last_service_type")
+        if last_svc == "takeaway":
+            body_lines.append(
+                "🛍️ *Takeaway* — order now and pick up at the counter."
+            )
+        elif last_svc == "dine_in":
+            body_lines.append("🍽️ *Dine-in* is available when you're ready for a table.")
     body_lines.append("What would you like to do today?")
     body_text = "\n\n".join(body_lines)
 
@@ -516,8 +527,15 @@ def strip_order_quantity(order_fragment: str) -> str:
     s = (order_fragment or "").strip()
     if not s:
         return s
-    m = re.match(r"^\d+\s*x\s+", s, re.IGNORECASE)
+    m = re.match(r"^\d+\s*[x×]\s*", s, re.IGNORECASE)
     return s[m.end() :].strip() if m else s
+
+
+def normalize_last_order_summary(session_state: Dict[str, Any]) -> None:
+    """Strip qty prefix from persisted last_order_summary (legacy sessions)."""
+    raw = session_state.get("last_order_summary")
+    if raw:
+        session_state["last_order_summary"] = strip_order_quantity(str(raw))
 
 
 def build_smart_greeting(
@@ -532,7 +550,8 @@ def build_smart_greeting(
     first = _first_name(customer_name)
     idx   = (len(customer_name) + len(first)) % 4
 
-    last_order   = strip_order_quantity(session_state.get("last_order_summary", ""))
+    normalize_last_order_summary(session_state)
+    last_order   = session_state.get("last_order_summary", "")
     is_returning = session_state.get("is_returning_customer", False)
     visit_count  = session_state.get("visit_count", 0)
 
