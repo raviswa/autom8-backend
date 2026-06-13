@@ -5,6 +5,7 @@ import re
 import logging
 import hmac
 import hashlib
+import os
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -44,7 +45,8 @@ import httpx, os
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting Munafe bot...")
+    sha = os.getenv("RAILWAY_GIT_COMMIT_SHA", "unknown")
+    logger.info(f"Starting Munafe bot... commit={sha} integration_model=no_phone_number")
     await init_db()
     from tools.scheduler_tools import start_scheduler
     await start_scheduler()

@@ -86,6 +86,8 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     uptime:    process.uptime(),
     region:    process.env.REGION || 'IN',
+    commit:    process.env.RAILWAY_GIT_COMMIT_SHA || null,
+    kds:       'orders.notes',
   });
 });
 
@@ -96,6 +98,8 @@ attachWebSocketServer(server);
 
 server.listen(PORT, () => {
   logKdsSecretStatus();
+  const sha = process.env.RAILWAY_GIT_COMMIT_SHA || 'unknown';
+  console.log(`[boot] commit=${sha} | kds orders column=notes`);
   console.log(`🚀 Autom8 Backend running on port ${PORT}`);
   console.log(`📍 Region: ${process.env.REGION || 'IN'}`);
   console.log(`🗄️  Database: ${process.env.SUPABASE_URL}`);
