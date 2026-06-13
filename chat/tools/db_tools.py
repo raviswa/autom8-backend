@@ -227,6 +227,7 @@ async def get_restaurant_by_whatsapp_number(whatsapp_number: str) -> Dict[str, A
                     "dining_duration_minutes": restaurant.dining_duration_minutes,
                     "payment_mode": restaurant.payment_mode,
                     "is_active": restaurant.is_active,
+                    "meta_catalog_id": getattr(restaurant, "meta_catalog_id", None),
                 }
                 _RESTAURANT_CACHE[whatsapp_number] = (data, now)
                 return data
@@ -259,6 +260,7 @@ async def get_restaurant_by_id(restaurant_id: str) -> Dict[str, Any] | None:
                     "manager_phone":   restaurant.manager_phone,
                     "timezone":        restaurant.timezone,
                     "is_active":       restaurant.is_active,
+                    "meta_catalog_id": getattr(restaurant, "meta_catalog_id", None),
                 }
                 _RESTAURANT_CACHE[cache_key] = (data, now)
                 return data
@@ -266,6 +268,55 @@ async def get_restaurant_by_id(restaurant_id: str) -> Dict[str, Any] | None:
             return None
     except Exception as e:
         logger.error(f"Failed to look up restaurant {restaurant_id}: {e}")
+        return cached
+
+
+async def get_restaurant_by_phone_number_id(phone_number_id: str) -> Dict[str, Any] | None:
+    """Resolve outlet from Meta webhook metadata.phone_number_id."""
+    if not phone_number_id or AsyncSessionLocal is None:
+        return None
+
+    cache_key = f"pnid:{phone_number_id}"
+    now = time.monotonic()
+    cached, ts = _RESTAURANT_CACHE.get(cache_key, (None, 0.0))
+    if cached is not None and now - ts < _RESTAURANT_TTL:
+        return cached
+
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Restaurant)
+                .join(
+                    RestaurantIntegration,
+                    RestaurantIntegration.restaurant_id == Restaurant.id,
+                )
+                .where(
+                    RestaurantIntegration.phone_number_id == str(phone_number_id).strip(),
+                    RestaurantIntegration.channel == "whatsapp",
+                    RestaurantIntegration.is_active == True,
+                    Restaurant.is_active == True,
+                )
+                .limit(1)
+            )
+            restaurant = result.scalar_one_or_none()
+            if restaurant:
+                data = {
+                    "id": str(restaurant.id),
+                    "name": restaurant.name,
+                    "whatsapp_number": restaurant.whatsapp_number,
+                    "manager_phone": restaurant.manager_phone,
+                    "timezone": restaurant.timezone,
+                    "dining_duration_minutes": restaurant.dining_duration_minutes,
+                    "payment_mode": restaurant.payment_mode,
+                    "is_active": restaurant.is_active,
+                    "meta_catalog_id": getattr(restaurant, "meta_catalog_id", None),
+                }
+                _RESTAURANT_CACHE[cache_key] = (data, now)
+                return data
+            _RESTAURANT_CACHE[cache_key] = (None, now)
+            return None
+    except Exception as e:
+        logger.error(f"Failed to look up restaurant by phone_number_id {phone_number_id}: {e}")
         return cached
 
 

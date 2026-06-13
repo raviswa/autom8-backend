@@ -271,7 +271,7 @@ async def _fire_kitchen_and_receipt(
     )
 
     if not RECEIPT_AVAILABLE:
-        return
+        return order_id
 
     try:
         r_info = await fetch_restaurant_info(restaurant_id)
@@ -383,7 +383,7 @@ async def _confirm_dine_in_order(
                 {"type": "reply", "reply": {"id": "SKIP", "title": "No notes"}},
             ]},
         }
-    })
+    }, restaurant_id)
     session_state["special_notes_asked_at"] = time.time()
     session_state["_pending_kitchen"] = {
         "order_text": order_text,

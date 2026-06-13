@@ -23,6 +23,7 @@ const express = require('express');
 const router  = express.Router();
 
 const { supabase, supabaseAdmin } = require('../config/supabase');
+const { getMetaCatalogId, getWhatsAppIntegration } = require('../helpers/restaurantConfig');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 
 const { getKdsSecret } = require('../config/internalSecret');
@@ -93,9 +94,12 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
 }
 
 async function syncCatalogFromMeta(restaurantId) {
-  const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
-  const META_CATALOG_ID   = process.env.META_CATALOG_ID;
-  if (!META_ACCESS_TOKEN || !META_CATALOG_ID) return { success: false, error: 'Missing Meta credentials' };
+  const META_CATALOG_ID = await getMetaCatalogId(restaurantId);
+  const creds = await getWhatsAppIntegration(restaurantId);
+  const META_ACCESS_TOKEN = creds?.accessToken || process.env.META_ACCESS_TOKEN;
+  if (!META_ACCESS_TOKEN || !META_CATALOG_ID) {
+    return { success: false, error: 'Missing Meta catalog or access token for this restaurant' };
+  }
 
   console.log(`🔄 [catalog-sync] Starting for restaurant ${restaurantId}...`);
   try {
@@ -185,8 +189,9 @@ async function triggerMetaFeedRefetch() {
 }
 
 async function pushSingleItemToMetaCatalog({ retailerId, isAvailable, restaurantId }) {
-  const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
-  const META_CATALOG_ID   = process.env.META_CATALOG_ID;
+  const META_CATALOG_ID = await getMetaCatalogId(restaurantId);
+  const creds = await getWhatsAppIntegration(restaurantId);
+  const META_ACCESS_TOKEN = creds?.accessToken || process.env.META_ACCESS_TOKEN;
   if (!META_ACCESS_TOKEN || !META_CATALOG_ID) return;
 
   const { data: item } = await supabaseAdmin
@@ -557,7 +562,7 @@ router.put('/menu-items/:id/availability', authenticateToken, getRestaurantId, a
     res.json({ success: true, id: req.params.id, is_available, name: item.name });
 
     // Fire-and-forget Meta Catalog push
-    if (item.retailer_id && process.env.META_ACCESS_TOKEN && process.env.META_CATALOG_ID) {
+    if (item.retailer_id) {
       pushSingleItemToMetaCatalog({
         retailerId:   item.retailer_id,
         isAvailable:  is_available,

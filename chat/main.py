@@ -20,6 +20,7 @@ from config.settings import settings
 from tools.db_tools import (
     init_db,
     get_restaurant_by_whatsapp_number,
+    get_restaurant_by_phone_number_id,
     get_customer,
     update_booking_status,
     get_session_state,
@@ -288,17 +289,27 @@ async def _process_meta_payload(payload: dict):
             )
             return
 
-        # 3. Restaurant lookup
+        # 3. Restaurant lookup (DB is canonical — env phone IDs are dev fallback only)
         parsed = await parse_incoming(payload)
         phone  = message_obj.get("from")
+        metadata = value.get("metadata", {})
 
-        restaurant_whatsapp = (
-            parsed.get("restaurant_whatsapp_number") or settings.whatsapp_phone_number
-        )
-        restaurant = await get_restaurant_by_whatsapp_number(restaurant_whatsapp)
+        restaurant = None
+        phone_number_id = metadata.get("phone_number_id")
+        if phone_number_id:
+            restaurant = await get_restaurant_by_phone_number_id(str(phone_number_id))
 
         if not restaurant:
-            logger.error(f"No restaurant linked to {restaurant_whatsapp}")
+            restaurant_whatsapp = (
+                parsed.get("restaurant_whatsapp_number") or settings.whatsapp_phone_number
+            )
+            restaurant = await get_restaurant_by_whatsapp_number(restaurant_whatsapp)
+
+        if not restaurant:
+            logger.error(
+                f"No restaurant linked to phone_number_id={phone_number_id!r} "
+                f"or whatsapp={parsed.get('restaurant_whatsapp_number')!r}"
+            )
             return
 
         restaurant_id = restaurant["id"]

@@ -12,6 +12,7 @@
 
 const { supabaseAdmin } = require('../config/supabase');
 const { broadcastToRestaurant } = require('../websocket');
+const { getMetaCatalogId, getWhatsAppIntegration } = require('./restaurantConfig');
 
 // ── sendWhatsAppMessage ───────────────────────────────────────────────────────
 // Sends a plain-text WhatsApp message.
@@ -20,22 +21,16 @@ const { broadcastToRestaurant } = require('../websocket');
 
 async function sendWhatsAppMessage(toNumber, message, restaurantId = null) {
   try {
-    let accessToken   = process.env.WHATSAPP_ACCESS_TOKEN;
-    let phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-    let apiUrl        = process.env.WHATSAPP_API_URL;
+    const creds = restaurantId
+      ? await getWhatsAppIntegration(restaurantId)
+      : null;
 
-    if (restaurantId) {
-      const { data: integration } = await supabaseAdmin
-        .from('restaurant_integrations')
-        .select('access_token, phone_number_id, api_endpoint')
-        .eq('restaurant_id', restaurantId)
-        .eq('provider', 'meta')
-        .eq('is_active', true)
-        .maybeSingle();
+    let accessToken   = creds?.accessToken   || process.env.WHATSAPP_ACCESS_TOKEN;
+    let phoneNumberId = creds?.phoneNumberId   || process.env.WHATSAPP_PHONE_NUMBER_ID;
+    let apiUrl        = creds?.apiUrl          || process.env.WHATSAPP_API_URL;
 
-      if (integration?.access_token)    accessToken   = integration.access_token;
-      if (integration?.phone_number_id) phoneNumberId = integration.phone_number_id;
-      if (integration?.api_endpoint)    apiUrl        = integration.api_endpoint;
+    if (restaurantId && !creds) {
+      console.warn(`[WhatsApp] No integration for restaurant ${restaurantId} — trying global env`);
     }
 
     if (!accessToken || !phoneNumberId || !apiUrl) {
@@ -75,8 +70,9 @@ async function sendWhatsAppMessage(toNumber, message, restaurantId = null) {
 
 async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
   try {
-    if (!process.env.META_CATALOG_ID) {
-      console.warn('[catalog-msg] META_CATALOG_ID not set — skipping');
+    const catalogId = await getMetaCatalogId(restaurantId);
+    if (!catalogId) {
+      console.warn(`[catalog-msg] meta_catalog_id not set for restaurant ${restaurantId} — skipping`);
       return;
     }
 
@@ -91,21 +87,15 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
 
     if (!availableItems?.length) return;
 
-    let accessToken   = process.env.WHATSAPP_ACCESS_TOKEN;
-    let phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-    let apiUrl        = process.env.WHATSAPP_API_URL;
+    const creds = await getWhatsAppIntegration(restaurantId);
+    const accessToken   = creds?.accessToken   || process.env.WHATSAPP_ACCESS_TOKEN;
+    const phoneNumberId = creds?.phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const apiUrl        = creds?.apiUrl          || process.env.WHATSAPP_API_URL;
 
-    const { data: integration } = await supabaseAdmin
-      .from('restaurant_integrations')
-      .select('access_token, phone_number_id, api_endpoint')
-      .eq('restaurant_id', restaurantId)
-      .eq('provider', 'meta')
-      .eq('is_active', true)
-      .maybeSingle();
-
-    if (integration?.access_token)    accessToken   = integration.access_token;
-    if (integration?.phone_number_id) phoneNumberId = integration.phone_number_id;
-    if (integration?.api_endpoint)    apiUrl        = integration.api_endpoint;
+    if (!accessToken || !phoneNumberId || !apiUrl) {
+      console.warn(`[catalog-msg] Missing WhatsApp credentials for restaurant ${restaurantId}`);
+      return;
+    }
 
     for (const item of availableItems) {
       const response = await fetch(`${apiUrl}/${phoneNumberId}/messages`, {
@@ -191,23 +181,10 @@ async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
 
 async function sendWhatsAppInteractive(toNumber, interactive, restaurantId = null) {
   try {
-    let accessToken   = process.env.WHATSAPP_ACCESS_TOKEN;
-    let phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-    let apiUrl        = process.env.WHATSAPP_API_URL;
-
-    if (restaurantId) {
-      const { data: integration } = await supabaseAdmin
-        .from('restaurant_integrations')
-        .select('access_token, phone_number_id, api_endpoint')
-        .eq('restaurant_id', restaurantId)
-        .eq('provider', 'meta')
-        .eq('is_active', true)
-        .maybeSingle();
-
-      if (integration?.access_token)    accessToken   = integration.access_token;
-      if (integration?.phone_number_id) phoneNumberId = integration.phone_number_id;
-      if (integration?.api_endpoint)    apiUrl        = integration.api_endpoint;
-    }
+    const creds = restaurantId ? await getWhatsAppIntegration(restaurantId) : null;
+    const accessToken   = creds?.accessToken   || process.env.WHATSAPP_ACCESS_TOKEN;
+    const phoneNumberId = creds?.phoneNumberId   || process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const apiUrl        = creds?.apiUrl          || process.env.WHATSAPP_API_URL;
 
     if (!accessToken || !phoneNumberId || !apiUrl) {
       console.warn(`[WhatsApp] Missing credentials — skipping interactive to ${toNumber}`);

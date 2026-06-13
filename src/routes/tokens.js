@@ -22,6 +22,7 @@ const { supabase, supabaseAdmin } = require('../config/supabase');
 const { broadcastToRestaurant }   = require('../websocket');
 const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../helpers/whatsapp');
 const { queueFeedbackForTable }   = require('../helpers/feedback');
+const { getManagerPhone } = require('../helpers/restaurantConfig');
 const { syncConversationForTokenApproval } = require('../helpers/conversationState');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { requireKdsSecretOrJwt, requireKdsSecret } = require('../middleware/internalAuth');
@@ -110,12 +111,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
     const portalUrl = `${process.env.FRONTEND_URL || 'https://app.autom8.works'}/dashboard/manager`;
 
     // Resolve manager phone (outlet row first, then global env)
-    let managerPhone = process.env.MANAGER_WHATSAPP_NUMBER || null;
-    try {
-      const { data: rest } = await supabaseAdmin
-        .from('restaurants').select('manager_phone').eq('id', restaurant_id).single();
-      if (rest?.manager_phone) managerPhone = rest.manager_phone;
-    } catch (_) {}
+    let managerPhone = await getManagerPhone(restaurant_id);
 
     // notify=false skips the manager alert (e.g. duplicate guard). Default: send from API.
     const shouldNotify = req.query.notify !== 'false';

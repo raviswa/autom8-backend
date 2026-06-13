@@ -248,74 +248,9 @@ async def sync_catalog_to_facebook() -> dict[str, Any]:
 # ── 2. WhatsApp interactive catalog message ────────────────────────────────────
 
 async def _get_catalog_credentials(restaurant_id: str | None = None) -> dict[str, str] | None:
-    """
-    Resolve WhatsApp credentials for catalog messages.
-
-    Priority:
-    1. Per-restaurant integration from database (botbiz WhatsApp integration)
-    2. Global environment variables (fallback for local demos / single-tenant)
-
-    Returns dict with 'api_endpoint', 'phone_number_id', 'access_token' or None.
-    """
-    # Try per-restaurant integration first
-    if restaurant_id:
-        try:
-            from tools.db_tools import get_restaurant_integration
-            integration = await get_restaurant_integration(
-                restaurant_id=restaurant_id,
-                provider="botbiz",
-                channel="whatsapp",
-            )
-            if integration:
-                api_endpoint    = integration.get("api_endpoint")
-                phone_number_id = integration.get("phone_number_id")
-                access_token    = integration.get("access_token")
-                if phone_number_id and access_token:
-                    return {
-                        "api_endpoint":    (api_endpoint or "https://graph.facebook.com/v22.0").rstrip("/"),
-                        "phone_number_id": phone_number_id,
-                        "access_token":    access_token,
-                    }
-                logger.warning(
-                    f"Restaurant {restaurant_id} has WhatsApp integration but "
-                    "missing phone_number_id or access_token"
-                )
-        except Exception as e:
-            logger.warning(f"Failed to get restaurant integration for {restaurant_id}: {e}")
-
-    # Fallback to global environment variables
-    from config.settings import settings
-    if (
-        settings.botbiz_phone_number_id != "your_phone_number_id_here"
-        and settings.botbiz_access_token != "your_access_token_here"
-    ):
-        logger.warning(
-            f"Using global BotBiz env credentials for catalog message "
-            f"(restaurant_id={restaurant_id})"
-        )
-        return {
-            "api_endpoint":    settings.botbiz_api_endpoint.rstrip("/"),
-            "phone_number_id": settings.botbiz_phone_number_id,
-            "access_token":    settings.botbiz_access_token,
-        }
-
-    # Last resort: use module-level env vars (for backward compatibility)
-    if _TOKEN and _PHONE_ID and _PHONE_ID != "your_phone_number_id_here":
-        logger.warning(
-            f"Using module-level env vars for catalog message "
-            f"(restaurant_id={restaurant_id})"
-        )
-        return {
-            "api_endpoint":    _BASE_URL,
-            "phone_number_id": _PHONE_ID,
-            "access_token":    _TOKEN,
-        }
-
-    logger.error(
-        f"No WhatsApp credentials available for catalog message "
-        f"(restaurant_id={restaurant_id})"
-    )
-    return None
+    """Resolve WhatsApp credentials — DB restaurant_integrations is canonical."""
+    from tools.restaurant_config import get_whatsapp_credentials
+    return await get_whatsapp_credentials(restaurant_id)
 
 
 async def _get_restaurant_label(restaurant_id: str | None) -> str:
@@ -379,6 +314,12 @@ async def send_whatsapp_catalog_message(
     access_token    = credentials.get("access_token") or _TOKEN
     phone_number_id = credentials.get("phone_number_id") or _PHONE_ID
 
+    from tools.restaurant_config import get_meta_catalog_id
+    catalog_id = await get_meta_catalog_id(restaurant_id)
+    if not catalog_id:
+        logger.error(f"[catalog] meta_catalog_id not set for restaurant {restaurant_id}")
+        return False
+
     payload = {
         "messaging_product": "whatsapp",
         "recipient_type":    "individual",
@@ -399,7 +340,7 @@ async def send_whatsapp_catalog_message(
             },
             "footer": {"text": f"Prices excl. GST • {restaurant_label}"},
             "action": {
-                "catalog_id": _CATALOG_ID,
+                "catalog_id": catalog_id,
                 "sections": [
                     {
                         "title": "Today's Menu",

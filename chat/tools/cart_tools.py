@@ -260,22 +260,25 @@ def cart_to_order_text(cart: dict[str, Any]) -> str:
 
 # ── Low-level senders ─────────────────────────────────────────────────────────
 
-async def _send_interactive(customer_phone: str, payload: dict[str, Any]) -> bool:
-    """POST an interactive message to the WhatsApp Cloud API.
+async def _send_interactive(
+    customer_phone: str,
+    payload: dict[str, Any],
+    restaurant_id: str | None = None,
+) -> bool:
+    """POST an interactive message to the WhatsApp Cloud API."""
+    from tools.restaurant_config import get_whatsapp_credentials
 
-    PERF: Uses the module-level shared httpx.AsyncClient from whatsapp_tools
-    instead of creating a new client (and TCP connection) on every call.
-    """
-    if not _TOKEN or not _PHONE_ID:
+    creds = await get_whatsapp_credentials(restaurant_id)
+    if not creds:
         logger.warning(
-            "META_GRAPH_API_TOKEN or WABA_PHONE_NUMBER_ID not set — "
-            "skipping interactive msg"
+            f"No WhatsApp credentials for restaurant {restaurant_id} — skipping interactive msg"
         )
         return False
 
-    url = f"{_BASE_URL}/{_PHONE_ID}/messages"
+    api_endpoint = creds["api_endpoint"].rstrip("/")
+    url = f"{api_endpoint}/{creds['phone_number_id']}/messages"
     headers = {
-        "Authorization": f"Bearer {_TOKEN}",
+        "Authorization": f"Bearer {creds['access_token']}",
         "Content-Type":  "application/json",
     }
 
@@ -297,21 +300,25 @@ async def _send_interactive(customer_phone: str, payload: dict[str, Any]) -> boo
         return False
 
 
-async def _send_text(customer_phone: str, text: str) -> bool:
-    """POST a plain-text message to the WhatsApp Cloud API.
+async def _send_text(
+    customer_phone: str,
+    text: str,
+    restaurant_id: str | None = None,
+) -> bool:
+    """POST a plain-text message to the WhatsApp Cloud API."""
+    from tools.restaurant_config import get_whatsapp_credentials
 
-    PERF: Uses the module-level shared httpx.AsyncClient from whatsapp_tools.
-    """
-    if not _TOKEN or not _PHONE_ID:
+    creds = await get_whatsapp_credentials(restaurant_id)
+    if not creds:
         logger.warning(
-            "META_GRAPH_API_TOKEN or WABA_PHONE_NUMBER_ID not set — "
-            "skipping text msg"
+            f"No WhatsApp credentials for restaurant {restaurant_id} — skipping text msg"
         )
         return False
 
-    url = f"{_BASE_URL}/{_PHONE_ID}/messages"
+    api_endpoint = creds["api_endpoint"].rstrip("/")
+    url = f"{api_endpoint}/{creds['phone_number_id']}/messages"
     headers = {
-        "Authorization": f"Bearer {_TOKEN}",
+        "Authorization": f"Bearer {creds['access_token']}",
         "Content-Type":  "application/json",
     }
 
@@ -333,7 +340,11 @@ async def _send_text(customer_phone: str, text: str) -> bool:
 
 # ── Quantity error helper ─────────────────────────────────────────────────────
 
-async def _qty_error_message(customer_phone: str, item_title: str) -> None:
+async def _qty_error_message(
+    customer_phone: str,
+    item_title: str,
+    restaurant_id: str | None = None,
+) -> None:
     """
     Send a friendly, consistent rejection when quantity is out of bounds.
     Bug 9 fix: single place to update the error wording if limits change.
@@ -342,6 +353,7 @@ async def _qty_error_message(customer_phone: str, item_title: str) -> None:
         customer_phone,
         f"Please enter a quantity between {MIN_QTY} and {MAX_QTY} for "
         f"*{item_title}* (e.g. tap 1, 2, or 3, or type a number).",
+        restaurant_id=restaurant_id,
     )
 
 
@@ -404,7 +416,7 @@ async def send_category_list(
         }
     }
 
-    ok = await _send_interactive(customer_phone, payload)
+    ok = await _send_interactive(customer_phone, payload, session_state.get("restaurant_id"))
     if ok:
         session_state["booking_step"] = "awaiting_category_selection"
     return ok
@@ -476,7 +488,7 @@ async def send_item_list(
         }
     }
 
-    ok = await _send_interactive(customer_phone, payload)
+    ok = await _send_interactive(customer_phone, payload, session_state.get("restaurant_id"))
     if ok:
         session_state["booking_step"]     = "awaiting_item_selection"
         session_state["current_category"] = category
@@ -522,7 +534,7 @@ async def send_cart_summary_buttons(
         }
     }
 
-    ok = await _send_interactive(customer_phone, payload)
+    ok = await _send_interactive(customer_phone, payload, session_state.get("restaurant_id"))
     if ok:
         session_state["booking_step"] = "awaiting_cart_action"
     return ok
@@ -580,11 +592,12 @@ async def send_quantity_buttons(
                 ]
             },
         }
-    })
+    }, session_state.get("restaurant_id"))
 
     await _send_text(
         customer_phone,
         f"Or reply with any number from *1 to {MAX_QTY}* e.g. *4*, *5* …",
+        restaurant_id=session_state.get("restaurant_id"),
     )
 
     return ok
@@ -619,7 +632,7 @@ async def send_quantity_prompt(
         f"How many would you like?\n"
         f"Reply with a number from *1 to {MAX_QTY}*"
     )
-    return await _send_text(customer_phone, text)
+    return await _send_text(customer_phone, text, restaurant_id=session_state.get("restaurant_id"))
 
 
 def _resolve_qty_input(
@@ -741,6 +754,7 @@ async def send_done_or_more_buttons(
     customer_phone: str,
     added_item_title: str,
     cart: dict[str, Any],
+    restaurant_id: str | None = None,
 ) -> bool:
     """
     After an item is confirmed into the cart, offer two quick-action buttons:
@@ -767,7 +781,7 @@ async def send_done_or_more_buttons(
                 ]
             },
         }
-    })
+    }, restaurant_id)
 
 
 # ── Incoming message parser ───────────────────────────────────────────────────
@@ -852,6 +866,7 @@ async def handle_incoming_message(
                             },
                         }
                     },
+                    session_state.get("restaurant_id"),
                 )
                 return True
         return False
@@ -871,14 +886,20 @@ async def handle_incoming_message(
             qty = _resolve_qty_input(message, session_state)
             if qty is None:
                 pending = session_state.get("pending_item", {})
-                await _qty_error_message(customer_phone, pending.get("title", "item"))
+                await _qty_error_message(
+                    customer_phone, pending.get("title", "item"),
+                    restaurant_id=session_state.get("restaurant_id"),
+                )
                 return True
 
             title = confirm_pending_item(session_state, qty)
             if title is None:
                 # confirm_pending_item bounds check rejected it
                 pending = session_state.get("pending_item", {})
-                await _qty_error_message(customer_phone, pending.get("title", "item"))
+                await _qty_error_message(
+                    customer_phone, pending.get("title", "item"),
+                    restaurant_id=session_state.get("restaurant_id"),
+                )
                 return True
 
             queue = session_state.get("pending_item_queue", [])
@@ -888,7 +909,9 @@ async def handle_incoming_message(
                 await send_quantity_buttons(customer_phone, next_item, session_state)
             else:
                 cart = get_cart(session_state)
-                await send_done_or_more_buttons(customer_phone, title, cart)
+                await send_done_or_more_buttons(
+                    customer_phone, title, cart, session_state.get("restaurant_id"),
+                )
             return True
 
         if reply_id.startswith("CAT:"):
@@ -927,7 +950,10 @@ async def handle_incoming_message(
             if title is None:
                 # Bounds check in confirm_pending_item rejected it
                 pending = session_state.get("pending_item", {})
-                await _qty_error_message(customer_phone, pending.get("title", "item"))
+                await _qty_error_message(
+                    customer_phone, pending.get("title", "item"),
+                    restaurant_id=session_state.get("restaurant_id"),
+                )
                 return True
 
             queue = session_state.get("pending_item_queue", [])
@@ -937,13 +963,18 @@ async def handle_incoming_message(
                 await send_quantity_buttons(customer_phone, next_item, session_state)
             else:
                 cart = get_cart(session_state)
-                await send_done_or_more_buttons(customer_phone, title, cart)
+                await send_done_or_more_buttons(
+                    customer_phone, title, cart, session_state.get("restaurant_id"),
+                )
             return True
 
         else:
             # qty is None — either unparseable or out of range
             pending = session_state.get("pending_item", {})
-            await _qty_error_message(customer_phone, pending.get("title", "item"))
+            await _qty_error_message(
+                customer_phone, pending.get("title", "item"),
+                restaurant_id=session_state.get("restaurant_id"),
+            )
             return True
 
     # ── 3. Numbered-text reply while browsing items ───────────────────────────

@@ -270,7 +270,8 @@ async function sendCommentPrompt(record) {
 }
 
 async function notifyManager(record, { rating, aspects, aspectLabelsList, comment, phone }) {
-  const managerPhone = process.env.MANAGER_WHATSAPP_NUMBER;
+  const { getManagerPhone } = require('./restaurantConfig');
+  const managerPhone = await getManagerPhone(record.restaurant_id);
   if (!managerPhone) return;
 
   const { contextLine, visitType } = await resolveVisitContext(record);

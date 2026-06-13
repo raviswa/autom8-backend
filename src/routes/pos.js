@@ -5,6 +5,7 @@
 const express = require('express');
 const router  = express.Router();
 const { supabaseAdmin }           = require('../config/supabase');
+const { invalidateRestaurantConfigCache } = require('../helpers/restaurantConfig');
 const {
   authenticateToken,
   getRestaurantId,
@@ -429,7 +430,7 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
       'city','state','postal_code','country',
       'contact_phone','contact_email','website_url','cuisine_type',
       'logo_url','gstin','opening_hours',
-      'whatsapp_number','waba_id','manager_phone',
+      'whatsapp_number','waba_id','manager_phone','meta_catalog_id',
       'timezone','dining_duration_minutes','payment_mode','kitchen_workflow',
       'kot_printer_ip','kot_printer_port','kot_printer_enabled',
       'takeaway_fulfillment_mode','fulfillment_sections',
@@ -472,6 +473,8 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
       }
     }
     if (error) throw error;
+
+    invalidateRestaurantConfigCache(req.restaurant_id);
 
     await supabaseAdmin.from('audit_logs').insert({
       user_id: req.user.sub, restaurant_id: req.restaurant_id,
@@ -529,6 +532,7 @@ router.put('/restaurants/integration', authenticateToken, getRestaurantId, requi
       if (error) throw error;
       result = data;
     }
+    invalidateRestaurantConfigCache(req.restaurant_id);
     res.json({ success: true, integration: result });
   } catch (err) {
     res.status(400).json({ error: err.message });

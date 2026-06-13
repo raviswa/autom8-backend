@@ -205,27 +205,11 @@ async function sendWhatsAppMessage(toNumber, message, restaurantId = null) {
       return;
     }
 
-    let accessToken   = process.env.WHATSAPP_ACCESS_TOKEN;
-    let phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-    let apiUrl        = process.env.WHATSAPP_API_URL;
-
-    // Per-restaurant credential override via restaurant_integrations
-    if (restaurantId) {
-      try {
-        const { data: integration } = await supabaseAdmin
-          .from('restaurant_integrations')
-          .select('access_token, phone_number_id, api_endpoint')
-          .eq('restaurant_id', restaurantId)
-          .eq('provider', 'whatsapp')
-          .eq('is_active', true)
-          .maybeSingle();
-        if (integration?.access_token)    accessToken   = integration.access_token;
-        if (integration?.phone_number_id) phoneNumberId = integration.phone_number_id;
-        if (integration?.api_endpoint)    apiUrl        = integration.api_endpoint;
-      } catch (integErr) {
-        console.warn('[waHandlers:WA] Integration lookup failed, using global creds:', integErr.message);
-      }
-    }
+    const { getWhatsAppIntegration } = require('../helpers/restaurantConfig');
+    const creds = restaurantId ? await getWhatsAppIntegration(restaurantId) : null;
+    const accessToken   = creds?.accessToken   || process.env.WHATSAPP_ACCESS_TOKEN;
+    const phoneNumberId = creds?.phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const apiUrl        = creds?.apiUrl          || process.env.WHATSAPP_API_URL;
 
     if (!accessToken || !phoneNumberId || !apiUrl) {
       console.warn('[waHandlers:WA] Missing WA credentials — message not sent to', toNumber);
@@ -617,14 +601,17 @@ async function handleWhatsAppOrder(message, metadata, preResolvedRestaurantId = 
     }
 
     // ── Manager notification ──────────────────────────────────────────────────
-    if (process.env.MANAGER_WHATSAPP_NUMBER) {
+    const { getManagerPhone } = require('../helpers/restaurantConfig');
+    const managerPhone = await getManagerPhone(restaurantId);
+    if (managerPhone) {
       const itemLines = productItems
         .map(i => `• ${i.quantity ?? 1}x ${i.product_retailer_id}`)
         .join('\n');
       sendWhatsAppMessage(
-        process.env.MANAGER_WHATSAPP_NUMBER,
+        managerPhone,
         `🍽️ *New WhatsApp Order*\nOrder: *${orderNumber}*\nTable: *${token.table_number}*\n` +
-        `Customer: ${token.name}\n\n${itemLines}\n\nTotal: ₹${total.toFixed(2)}`
+        `Customer: ${token.name}\n\n${itemLines}\n\nTotal: ₹${total.toFixed(2)}`,
+        restaurantId,
       ).catch(e => console.error('[waHandlers:order] Manager notify failed:', e.message));
     }
 

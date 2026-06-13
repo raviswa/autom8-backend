@@ -17,6 +17,7 @@ const { sendWhatsAppMessage }   = require('../helpers/whatsapp');
 const { queueFeedbackForTable } = require('../helpers/feedback');
 const { startFeedbackScheduler } = require('../routes/feedback');
 const { notifyKdsFromSessionContext } = require('../helpers/kdsNotifyClient');
+const { getManagerPhone } = require('../helpers/restaurantConfig');
 
 // Slot helpers live in catalog.js (single source of truth — shared with POST /catalog/slot-sync)
 const {
@@ -160,10 +161,12 @@ function startSpecialNotesTimeoutMonitor() {
             );
           }
 
-          if (process.env.MANAGER_WHATSAPP_NUMBER) {
+          const managerPhone = await getManagerPhone(session.restaurant_id);
+          if (managerPhone) {
             sendWhatsAppMessage(
-              process.env.MANAGER_WHATSAPP_NUMBER,
-              `⏰ *Auto-Confirmed (Notes Timeout)*\nCustomer: ${customerName}\nToken: ${tokenNumber || '—'}\nBooking: ${bookingId || '—'}`
+              managerPhone,
+              `⏰ *Auto-Confirmed (Notes Timeout)*\nCustomer: ${customerName}\nToken: ${tokenNumber || '—'}\nBooking: ${bookingId || '—'}`,
+              session.restaurant_id,
             ).catch(() => {});
           }
 

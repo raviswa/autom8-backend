@@ -15,6 +15,7 @@ const router  = express.Router();
 
 const { supabaseAdmin }       = require('../config/supabase');
 const { sendWhatsAppMessage } = require('../helpers/whatsapp');
+const { getManagerPhone } = require('../helpers/restaurantConfig');
 
 const { getKdsSecret } = require('../config/internalSecret');
 
@@ -103,10 +104,12 @@ async function sendRiderAssignedNotification({ orderId, deliveryPartner, riderNa
 
     console.log(`[rider-notify] ✅ Sent to ${customerPhone} (order ${orderId})`);
 
-    if (process.env.MANAGER_WHATSAPP_NUMBER) {
+    const managerPhone = await getManagerPhone(restaurantId);
+    if (managerPhone) {
       sendWhatsAppMessage(
-        process.env.MANAGER_WHATSAPP_NUMBER,
-        `🛵 *Rider Assigned*\nOrder: *${order?.order_number ?? orderId}*\nPartner: ${partnerMeta.emoji} ${partnerMeta.label}\nRider: ${riderName} (${riderPhone})\nTracking: ${trackingUrl}`
+        managerPhone,
+        `🛵 *Rider Assigned*\nOrder: *${order?.order_number ?? orderId}*\nPartner: ${partnerMeta.emoji} ${partnerMeta.label}\nRider: ${riderName} (${riderPhone})\nTracking: ${trackingUrl}`,
+        restaurantId,
       ).catch(e => console.error('[rider-notify] Manager mirror failed:', e.message));
     }
   } catch (err) {

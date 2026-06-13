@@ -16,7 +16,6 @@ from typing import Dict, Any, Optional
 import httpx
 
 from config.settings import settings
-from tools.db_tools import get_restaurant_integration
 
 logger = logging.getLogger(__name__)
 
@@ -46,27 +45,10 @@ async def close_http_client() -> None:
 # ---------------------------------------------------------------------------
 
 async def _get_whatsapp_credentials(restaurant_id: str) -> Dict[str, str] | None:
-    integration = await get_restaurant_integration(
-        restaurant_id=restaurant_id,
-        provider="botbiz",
-        channel="whatsapp",
-    )
-
-    if integration:
-        api_endpoint    = integration.get("api_endpoint") or settings.botbiz_api_endpoint
-        phone_number_id = integration.get("phone_number_id")
-        access_token    = integration.get("access_token")
-        if phone_number_id and access_token:
-            return {
-                "api_endpoint":    api_endpoint.rstrip("/"),
-                "phone_number_id": phone_number_id,
-                "access_token":    access_token,
-            }
-        logger.error(
-            "WhatsApp integration for restaurant %s is missing phone_number_id or access_token",
-            restaurant_id,
-        )
-        return None
+    from tools.restaurant_config import get_whatsapp_credentials
+    creds = await get_whatsapp_credentials(restaurant_id)
+    if creds:
+        return creds
 
     if (
         settings.botbiz_phone_number_id != "your_phone_number_id_here"

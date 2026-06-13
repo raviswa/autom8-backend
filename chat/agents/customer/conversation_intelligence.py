@@ -162,16 +162,25 @@ _API_VER  = os.getenv("META_GRAPH_VERSION", "v20.0")
 _BASE_URL = f"https://graph.facebook.com/{_API_VER}"
 
 
-async def _send_interactive_ci(customer_phone: str, payload: dict) -> bool:
+async def _send_interactive_ci(
+    customer_phone: str,
+    payload: dict,
+    restaurant_id: str | None = None,
+) -> bool:
     """POST an interactive WhatsApp message from conversation_intelligence context."""
-    if not _TOKEN or not _PHONE_ID:
+    from tools.restaurant_config import get_whatsapp_credentials
+
+    creds = await get_whatsapp_credentials(restaurant_id)
+    if not creds:
         logger.warning(
-            "_send_interactive_ci: META_GRAPH_API_TOKEN or WABA_PHONE_NUMBER_ID not set"
+            "_send_interactive_ci: no WhatsApp credentials for restaurant %s",
+            restaurant_id,
         )
         return False
-    url     = f"{_BASE_URL}/{_PHONE_ID}/messages"
+    api_endpoint = creds["api_endpoint"].rstrip("/")
+    url     = f"{api_endpoint}/{creds['phone_number_id']}/messages"
     headers = {
-        "Authorization": f"Bearer {_TOKEN}",
+        "Authorization": f"Bearer {creds['access_token']}",
         "Content-Type":  "application/json",
     }
     try:
@@ -410,7 +419,7 @@ async def handle_fallback(
                         ]
                     },
                 }
-            })
+            }, restaurant_id)
             if sent:
                 return ""
         # fallback if interactive send failed
@@ -448,7 +457,7 @@ async def handle_fallback(
                         ]
                     },
                 }
-            })
+            }, restaurant_id)
             if sent:
                 return ""
         return (
@@ -500,7 +509,7 @@ async def handle_fallback(
                         ]
                     },
                 }
-            })
+            }, restaurant_id)
             if sent:
                 return ""
         # fallback plain text if interactive failed

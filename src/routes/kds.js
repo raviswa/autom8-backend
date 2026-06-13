@@ -93,8 +93,8 @@ router.post('/notify', async (req, res) => {
         order_number:         orderNumber,
         status:               'pending',
         source:               service_type || 'whatsapp_booking',
-        customer_phone:       cleanPhone,
-        special_instructions: special_notes || null,
+        customer_phone: cleanPhone,
+        notes:          special_notes || null,
       })
       .select('id, order_number')
       .single();
@@ -340,7 +340,7 @@ router.patch('/order-notes', async (req, res) => {
   try {
     if (order_id) {
       await supabaseAdmin.from('orders')
-        .update({ special_instructions: special_notes })
+        .update({ notes: special_notes })
         .eq('id', order_id)
         .eq('restaurant_id', restaurant_id);
     }

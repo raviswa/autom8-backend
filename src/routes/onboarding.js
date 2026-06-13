@@ -36,6 +36,7 @@ router.post('/register', async (req, res) => {
     dining_duration_minutes = 90,
     payment_mode         = 'prepay',
     manager_phone        = null,
+    meta_catalog_id      = null,
     table_count          = 0,
 
     // ── Chain mode (new) ──────────────────────────────────────────────────────
@@ -112,6 +113,7 @@ async function registerStandalone(req, res, opts) {
         dining_duration_minutes,
         payment_mode,
         manager_phone:          manager_phone    || null,
+        meta_catalog_id:        meta_catalog_id  || null,
         is_active:              true,
         subscribed_features:    DEFAULT_FEATURES,
       })
