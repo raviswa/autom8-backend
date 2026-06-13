@@ -496,6 +496,53 @@ async def _rebroadcast_portal_token(restaurant_id: str, token_id: str) -> None:
         logger.warning(f"[portal-sync] Rebroadcast error (non-fatal): {e}")
 
 
+async def notify_manager_order_alert(
+    restaurant_id: str,
+    *,
+    token_number: str,
+    customer_name: str,
+    customer_phone: str,
+    order_text: str,
+    total: float,
+    table_number,
+    party_size,
+    booking_time: str,
+) -> bool:
+    """Send manager order alert via Node API — same WhatsApp path as walk-in tokens."""
+    secret = _get_kds_secret()
+    if not secret:
+        logger.error("[manager-order-alert] AUTOM8_KDS_SECRET not set")
+        return False
+
+    url = f"{_AUTOM8_BACKEND_URL}/api/tokens/manager-order-alert"
+    payload = {
+        "restaurant_id": restaurant_id,
+        "token_number": token_number,
+        "customer_name": customer_name,
+        "customer_phone": customer_phone,
+        "order_text": order_text,
+        "total": total,
+        "table_number": table_number,
+        "party_size": party_size,
+        "booking_time": booking_time,
+    }
+    try:
+        resp = await get_http().post(
+            url,
+            json=payload,
+            headers=_portal_auth_headers(),
+            timeout=aiohttp.ClientTimeout(total=8),
+        )
+        if resp.status in (200, 201):
+            logger.info(f"[manager-order-alert] ✅ API sent for {token_number}")
+            return True
+        body = (await resp.text())[:300]
+        logger.error(f"[manager-order-alert] API {resp.status}: {body}")
+    except Exception as e:
+        logger.warning(f"[manager-order-alert] API error for {token_number}: {e}")
+    return False
+
+
 async def sync_token_to_portal(
     customer_name: str, customer_phone: str, token_type: str, pax: int,
     restaurant_id: str,

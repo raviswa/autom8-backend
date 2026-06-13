@@ -54,6 +54,24 @@ async def get_meta_catalog_id(restaurant_id: str | None) -> str | None:
     return None
 
 
+async def get_manager_phone(restaurant_id: str | None) -> str | None:
+    """Canonical manager alert number — DB first, then MANAGER_WHATSAPP_NUMBER env."""
+    if restaurant_id:
+        row = await get_restaurant_row(restaurant_id)
+        if row and row.get("manager_phone"):
+            return str(row["manager_phone"]).strip()
+
+    env = (os.getenv("MANAGER_WHATSAPP_NUMBER") or "").strip()
+    if env:
+        if restaurant_id:
+            logger.warning(
+                "[restaurant_config] manager_phone missing for %s — env fallback",
+                restaurant_id,
+            )
+        return env
+    return None
+
+
 async def get_whatsapp_credentials(restaurant_id: str | None) -> dict[str, str] | None:
     """Resolve outbound WhatsApp credentials. DB integration is canonical."""
     if not restaurant_id:

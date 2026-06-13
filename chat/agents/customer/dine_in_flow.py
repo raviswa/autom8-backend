@@ -25,6 +25,7 @@ from tools.db_tools import (
     customer_lock,
 )
 from tools.payment_tools import create_payment_link
+from tools.restaurant_config import get_manager_phone
 from tools.whatsapp_tools import send_whatsapp_message
 from tools.cart_tools import (
     cart_to_order_text,
@@ -41,6 +42,7 @@ from tools.booking_mechanisms import (
     KDS_SECRET,
     get_http,
     notify_kds,
+    notify_manager_order_alert,
     update_kds_order_notes,
     sync_token_to_portal,
     sync_token_to_portal_large_party,
@@ -130,34 +132,52 @@ async def _notify_manager_order_received(
     booking_time: str,
     table_num,
 ) -> None:
-    """Alert manager once per order (idempotent across webhook retries / replicas)."""
-    if session_state.get("_manager_order_notified"):
+    """Alert manager once per token (idempotent across webhook retries / replicas)."""
+    if session_state.get("_manager_order_notified_for") == token:
         return
 
     phone = (manager_phone or session_state.get("manager_phone") or "").strip()
     if not phone:
-        row = await fetch_restaurant_info(restaurant_id)
-        phone = (row.get("manager_phone") or "").strip()
+        resolved = await get_manager_phone(restaurant_id)
+        phone = (resolved or "").strip()
     if not phone:
         logger.warning(f"[dine-in] No manager phone — skipping order alert for {token}")
         return
 
     tables_label = table_num or session_state.get("assigned_tables") or "Multi-table / TBD"
-    try:
-        await send_whatsapp_message(
-            phone,
-            f"📋 Order Received — Dine-in\n────────────────────\n"
-            f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
-            f"Table: {tables_label}\n"
-            f"Guests: {session_state.get('party_size')}\nBooking Time: {booking_time}\n"
-            f"Order: {order_text}\nTotal: ₹{total:.0f}\n────────────────────",
-            restaurant_id,
-        )
-        session_state["_manager_order_notified"] = True
+    party_size = session_state.get("party_size")
+
+    ok = await notify_manager_order_alert(
+        restaurant_id,
+        token_number=token,
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        order_text=order_text,
+        total=total,
+        table_number=tables_label,
+        party_size=party_size,
+        booking_time=booking_time,
+    )
+    if ok:
+        session_state["_manager_order_notified_for"] = token
         session_state["manager_phone"] = phone
         logger.info(f"[dine-in] Manager order alert sent for {token} → {phone}")
-    except Exception as exc:
-        logger.warning(f"[dine-in] Manager order alert failed for {token}: {exc}")
+        return
+
+    body = (
+        f"📋 Order Received — Dine-in\n────────────────────\n"
+        f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
+        f"Table: {tables_label}\n"
+        f"Guests: {party_size}\nBooking Time: {booking_time}\n"
+        f"Order: {order_text}\nTotal: ₹{total:.0f}\n────────────────────"
+    )
+    fallback_ok = await send_whatsapp_message(phone, body, restaurant_id)
+    if fallback_ok:
+        session_state["_manager_order_notified_for"] = token
+        session_state["manager_phone"] = phone
+        logger.info(f"[dine-in] Manager order alert (fallback) sent for {token} → {phone}")
+    else:
+        logger.warning(f"[dine-in] Manager order alert failed for {token} → {phone}")
 
 
 async def _finalize_special_notes_and_kitchen(

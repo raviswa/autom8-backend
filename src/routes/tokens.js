@@ -156,6 +156,50 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
   }
 });
 
+// ── POST /api/tokens/manager-order-alert — internal: same WA path as walk-in alerts ─
+
+router.post('/manager-order-alert', requireKdsSecret, async (req, res) => {
+  try {
+    const {
+      restaurant_id,
+      token_number,
+      customer_name,
+      customer_phone,
+      order_text,
+      total,
+      table_number,
+      party_size,
+      booking_time,
+    } = req.body;
+
+    if (!restaurant_id || !token_number) {
+      return res.status(400).json({ error: 'restaurant_id and token_number are required' });
+    }
+
+    const managerPhone = await getManagerPhone(restaurant_id);
+    if (!managerPhone) {
+      console.warn(`[manager-order-alert] No manager phone for restaurant ${restaurant_id}`);
+      return res.status(400).json({ error: 'manager_phone not configured' });
+    }
+
+    const tablesLabel = table_number ?? 'Multi-table / TBD';
+    const body =
+      `📋 Order Received — Dine-in\n────────────────────\n` +
+      `Token: ${token_number}\nCustomer: ${customer_name || 'Guest'}\n` +
+      `Phone: ${customer_phone || '—'}\nTable: ${tablesLabel}\n` +
+      `Guests: ${party_size ?? '—'}\nBooking Time: ${booking_time || '—'}\n` +
+      `Order: ${order_text || '—'}\nTotal: ₹${Number(total || 0).toFixed(0)}\n` +
+      `────────────────────`;
+
+    await sendWhatsAppMessage(managerPhone, body, restaurant_id);
+    console.log(`[manager-order-alert] ✅ ${token_number} → ${managerPhone}`);
+    return res.json({ success: true, manager_phone: managerPhone });
+  } catch (err) {
+    console.error('[manager-order-alert]', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ── POST /api/tokens/rebroadcast — internal: WS notify after chat DB fallback ─
 
 router.post('/rebroadcast', requireKdsSecret, async (req, res) => {
