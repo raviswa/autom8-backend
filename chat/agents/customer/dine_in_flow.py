@@ -117,6 +117,49 @@ async def _sync_table_from_portal(
     return None
 
 
+async def _notify_manager_order_received(
+    *,
+    manager_phone: str,
+    restaurant_id: str,
+    session_state: Dict[str, Any],
+    customer_name: str,
+    customer_phone: str,
+    order_text: str,
+    total: float,
+    token: str,
+    booking_time: str,
+    table_num,
+) -> None:
+    """Alert manager once per order (idempotent across webhook retries / replicas)."""
+    if session_state.get("_manager_order_notified"):
+        return
+
+    phone = (manager_phone or session_state.get("manager_phone") or "").strip()
+    if not phone:
+        row = await fetch_restaurant_info(restaurant_id)
+        phone = (row.get("manager_phone") or "").strip()
+    if not phone:
+        logger.warning(f"[dine-in] No manager phone — skipping order alert for {token}")
+        return
+
+    tables_label = table_num or session_state.get("assigned_tables") or "Multi-table / TBD"
+    try:
+        await send_whatsapp_message(
+            phone,
+            f"📋 Order Received — Dine-in\n────────────────────\n"
+            f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
+            f"Table: {tables_label}\n"
+            f"Guests: {session_state.get('party_size')}\nBooking Time: {booking_time}\n"
+            f"Order: {order_text}\nTotal: ₹{total:.0f}\n────────────────────",
+            restaurant_id,
+        )
+        session_state["_manager_order_notified"] = True
+        session_state["manager_phone"] = phone
+        logger.info(f"[dine-in] Manager order alert sent for {token} → {phone}")
+    except Exception as exc:
+        logger.warning(f"[dine-in] Manager order alert failed for {token}: {exc}")
+
+
 async def _finalize_special_notes_and_kitchen(
     *,
     restaurant_id: str,
@@ -127,6 +170,9 @@ async def _finalize_special_notes_and_kitchen(
     notify_customer: bool = True,
 ) -> None:
     """Send order to KDS/KOT + receipt once notes are collected or timed out."""
+    if session_state.get("_customer_finalize_sent"):
+        return
+
     if session_state.get("_kitchen_sent"):
         token = session_state.get("display_token", session_state.get("token_number", ""))
         if special_notes:
@@ -152,6 +198,19 @@ async def _finalize_special_notes_and_kitchen(
                 )
         session_state["special_notes"] = special_notes
         session_state["booking_step"] = "visit_complete"
+        session_state["_customer_finalize_sent"] = True
+        session_state.pop("_pending_kitchen", None)
+        return
+
+    if session_state.get("_kitchen_send_claimed"):
+        if notify_customer:
+            await send_whatsapp_message(
+                customer_phone,
+                "No problem! Your order is being prepared. Enjoy your meal! 🍽️",
+                restaurant_id,
+            )
+        session_state["booking_step"] = "visit_complete"
+        session_state["_customer_finalize_sent"] = True
         session_state.pop("_pending_kitchen", None)
         return
 
@@ -167,8 +226,10 @@ async def _finalize_special_notes_and_kitchen(
     token = session_state.get("display_token", session_state.get("token_number", ""))
     table_number = session_state.get("table_number")
 
+    session_state["_kitchen_send_claimed"] = True
     session_state["_kitchen_sent"] = True
     session_state["special_notes"] = special_notes
+    await save_session_state(restaurant_id, customer_phone, session_state)
 
     order_id = await _fire_kitchen_and_receipt(
         restaurant_id=restaurant_id,
@@ -183,6 +244,21 @@ async def _finalize_special_notes_and_kitchen(
     )
     if order_id:
         session_state["_kds_order_id"] = order_id
+    else:
+        session_state["_kitchen_sent"] = False
+
+    await _notify_manager_order_received(
+        manager_phone=session_state.get("manager_phone", ""),
+        restaurant_id=restaurant_id,
+        session_state=session_state,
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        order_text=order_text,
+        total=cart_total(cart_snapshot) if cart_snapshot else 0.0,
+        token=token,
+        booking_time=session_state.get("booking_time", now_display()),
+        table_num=table_number,
+    )
 
     if notify_customer:
         if special_notes:
@@ -216,6 +292,7 @@ async def _finalize_special_notes_and_kitchen(
         logger.warning(f"[feedback-queue] Non-fatal: {fb_err}")
 
     session_state["booking_step"] = "visit_complete"
+    session_state["_customer_finalize_sent"] = True
     session_state.pop("_pending_kitchen", None)
 
 
@@ -273,6 +350,9 @@ async def _fire_kitchen_and_receipt(
     if not RECEIPT_AVAILABLE:
         return order_id
 
+    if session_state.get("_receipt_sent"):
+        return order_id
+
     try:
         r_info = await fetch_restaurant_info(restaurant_id)
         table_label = str(table_number) if table_number else ""
@@ -297,6 +377,7 @@ async def _fire_kitchen_and_receipt(
         )
         receipt_path = _generate_receipt(receipt_data)
         logger.info(f"[receipt] Dine-in receipt saved: {receipt_path}")
+        session_state["_receipt_sent"] = True
         asyncio.create_task(
             upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, token)
         )
@@ -368,6 +449,19 @@ async def _confirm_dine_in_order(
         confirmation += f"\n\n{suggestion}"
     await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
 
+    await _notify_manager_order_received(
+        manager_phone=manager_phone,
+        restaurant_id=restaurant_id,
+        session_state=session_state,
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        order_text=order_text,
+        total=total,
+        token=token,
+        booking_time=booking_time,
+        table_num=table_num,
+    )
+
     notes_hint = await build_notes_hint(order_text, cart_snapshot, restaurant_id)
     await _send_interactive(customer_phone, {
         "interactive": {
@@ -390,6 +484,9 @@ async def _confirm_dine_in_order(
         "cart": dict(cart_snapshot),
     }
 
+    session_state["_kitchen_send_claimed"] = True
+    await save_session_state(restaurant_id, customer_phone, session_state)
+
     # Send to KDS immediately — kitchen should see the order without waiting for notes.
     kds_order_id = await _fire_kitchen_and_receipt(
         restaurant_id=restaurant_id,
@@ -407,10 +504,12 @@ async def _confirm_dine_in_order(
         session_state["_kds_order_id"] = kds_order_id
         await save_session_state(restaurant_id, customer_phone, session_state)
     else:
+        session_state["_kitchen_send_claimed"] = False
         logger.error(
             f"[dine-in] KDS notify failed for token {token} — "
             "kitchen board will stay empty until retry"
         )
+        await save_session_state(restaurant_id, customer_phone, session_state)
 
     start_special_notes_timer(
         customer_phone,
@@ -418,16 +517,6 @@ async def _confirm_dine_in_order(
         on_timeout=lambda: _on_special_notes_timeout(restaurant_id, customer_phone),
     )
 
-    tables_label = table_num or session_state.get("assigned_tables") or "Multi-table / TBD"
-    await send_whatsapp_message(
-        manager_phone,
-        f"📋 Order Received — Dine-in\n────────────────────\n"
-        f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
-        f"Table: {tables_label}\n"
-        f"Guests: {session_state.get('party_size')}\nBooking Time: {booking_time}\n"
-        f"Order: {order_text}\nTotal: ₹{total:.0f}\n────────────────────",
-        restaurant_id,
-    )
     session_state["order_confirmed_summary"] = (
         f"Dine-in Token *{token}* — {order_text} "
         f"({session_state.get('party_size')} guests, ₹{total:.0f})"
