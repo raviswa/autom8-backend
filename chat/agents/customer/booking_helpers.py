@@ -510,6 +510,16 @@ def _first_name(full_name: str) -> str:
     return full_name.strip().split()[0].capitalize() if full_name.strip() else full_name
 
 
+def strip_order_quantity(order_fragment: str) -> str:
+    """'1x Vada Pav' → 'Vada Pav' for greeting / last-order memory."""
+    import re
+    s = (order_fragment or "").strip()
+    if not s:
+        return s
+    m = re.match(r"^\d+\s*x\s+", s, re.IGNORECASE)
+    return s[m.end() :].strip() if m else s
+
+
 def build_smart_greeting(
     customer_name: str,
     raw_greeting: str,
@@ -522,7 +532,7 @@ def build_smart_greeting(
     first = _first_name(customer_name)
     idx   = (len(customer_name) + len(first)) % 4
 
-    last_order   = session_state.get("last_order_summary", "")
+    last_order   = strip_order_quantity(session_state.get("last_order_summary", ""))
     is_returning = session_state.get("is_returning_customer", False)
     visit_count  = session_state.get("visit_count", 0)
 

@@ -541,7 +541,8 @@ async def _confirm_dine_in_order(
         f"Dine-in Token *{token}* — {order_text} "
         f"({session_state.get('party_size')} guests, ₹{total:.0f})"
     )
-    _first_item = order_text.split(",")[0].strip()[:40]
+    from agents.customer.booking_helpers import strip_order_quantity
+    _first_item = strip_order_quantity(order_text.split(",")[0].strip())[:40]
     session_state["last_order_summary"] = _first_item
     session_state["is_returning_customer"] = True
     session_state["visit_count"] = session_state.get("visit_count", 0) + 1

@@ -65,8 +65,7 @@ async function sendWhatsAppMessage(toNumber, message, restaurantId = null) {
 }
 
 // ── sendWhatsAppCatalogMessage ────────────────────────────────────────────────
-// Sends a WhatsApp catalog interactive message so the customer can browse items.
-// Tries each stocked item as thumbnail until one succeeds (avoids 131009 errors).
+// Sends a WhatsApp product_list catalog (same format as Python chat takeaway menu).
 
 async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
   try {
@@ -79,16 +78,26 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
       return;
     }
 
+    const { data: restaurant } = await supabaseAdmin
+      .from('restaurants')
+      .select('name')
+      .eq('id', restaurantId)
+      .maybeSingle();
+    const label = restaurant?.name || 'Hotel Munafe';
+
     const { data: availableItems } = await supabaseAdmin
       .from('menu_items')
-      .select('retailer_id, name')
+      .select('retailer_id')
       .eq('restaurant_id', restaurantId)
       .eq('is_stocked', true)
       .not('retailer_id', 'is', null)
       .order('name', { ascending: true })
-      .limit(10);
+      .limit(30);
 
-    if (!availableItems?.length) return;
+    if (!availableItems?.length) {
+      console.warn(`[catalog-msg] No stocked items for restaurant ${restaurantId}`);
+      return;
+    }
 
     const creds = await getWhatsAppIntegration(restaurantId);
     const accessToken   = creds?.accessToken   || process.env.WHATSAPP_ACCESS_TOKEN;
@@ -100,40 +109,46 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
       return;
     }
 
-    for (const item of availableItems) {
-      const response = await fetch(`${apiUrl}/${phoneNumberId}/messages`, {
-        method:  'POST',
-        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messaging_product: 'whatsapp',
-          to:   String(toNumber),
-          type: 'interactive',
-          interactive: {
-            type:   'catalog_message',
-            body:   { text: "🍽️ Browse today's menu and add items to your basket 🛒" },
-            footer: { text: 'Tap any item to see details and order' },
-            action: { name: 'catalog_message', parameters: { thumbnail_product_retailer_id: item.retailer_id } },
-          },
-        }),
-        signal: AbortSignal.timeout(8_000),
-      });
+    const productItems = availableItems.map((i) => ({
+      product_retailer_id: i.retailer_id,
+    }));
 
-      if (response.ok) {
-        console.log(`[catalog-msg] ✅ Sent to ${toNumber}`);
-        return;
-      }
+    const interactive = {
+      type: 'product_list',
+      header: { type: 'text', text: `🍽️ ${label} Menu` },
+      body: {
+        text:
+          "Browse today's items below 👇\n" +
+          'Tap any item to see details and add to your basket.\n' +
+          'When done, send us your basket to place the order.',
+      },
+      footer: { text: `Prices excl. GST • ${label}` },
+      action: {
+        catalog_id: catalogId,
+        sections: [{ title: "Today's Menu", product_items: productItems }],
+      },
+    };
 
-      const errBody = await response.json().catch(() => ({}));
-      const errCode = errBody?.error?.code;
-      // 131009 = product not found in catalog — try next item
-      if (errCode === 131009 || errBody?.error?.details?.includes('not found')) continue;
+    const response = await fetch(`${apiUrl}/${phoneNumberId}/messages`, {
+      method:  'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        recipient_type:    'individual',
+        to:                String(toNumber),
+        type:              'interactive',
+        interactive,
+      }),
+      signal: AbortSignal.timeout(8_000),
+    });
 
-      console.error('[catalog-msg] API error:', JSON.stringify(errBody).slice(0, 300));
+    if (response.ok) {
+      console.log(`[catalog-msg] ✅ product_list sent to ${toNumber} (${productItems.length} items)`);
       return;
     }
 
-    // All items failed — trigger catalog re-sync in background
-    console.warn('[catalog-msg] All catalog items failed — scheduling re-sync');
+    const errBody = await response.json().catch(() => ({}));
+    console.error('[catalog-msg] API error:', JSON.stringify(errBody).slice(0, 300));
   } catch (err) {
     console.error('[catalog-msg] Failed:', err.message);
   }

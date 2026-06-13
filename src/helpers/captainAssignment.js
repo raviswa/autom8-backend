@@ -10,8 +10,13 @@ const { validateAndNormalizeWhatsApp } = require('./phoneFormat');
 function captainDisplayName(fullName) {
   const name = String(fullName || '').trim();
   if (!name) return 'your captain';
-  const first = name.split(/\s+/)[0];
-  return first;
+  const parts = name.split(/\s+/);
+  // "Field Captain" → use full name; "Ravi Sharma" → first name only
+  if (parts.length >= 2 && parts[parts.length - 1].toLowerCase() === 'captain') {
+    return name;
+  }
+  if (parts.length === 1) return name;
+  return parts[0];
 }
 
 async function getActiveCaptains(restaurantId) {

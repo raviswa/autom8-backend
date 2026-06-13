@@ -37,6 +37,7 @@ from agents.customer.booking_helpers import (
     now_display,
     is_placeholder_payment_link,
     send_catalog_with_fallback,
+    strip_order_quantity,
 )
 from agents.customer.conversation_helpers import safe_build_order_suggestion
 
@@ -151,7 +152,7 @@ async def handle_delivery_flow(
                 f"Delivery Token *{token}* — {order_text} "
                 f"to {session_state.get('delivery_address', '')[:40]} (₹{total:.0f})"
             )
-            _first_item = order_text.split(",")[0].strip()[:40]
+            _first_item = strip_order_quantity(order_text.split(",")[0].strip())[:40]
             session_state["last_order_summary"]    = _first_item
             session_state["is_returning_customer"] = True
             session_state["visit_count"]           = session_state.get("visit_count", 0) + 1
