@@ -158,6 +158,83 @@ async function autoAssignCaptainForTakeaway(restaurantId, tokenId) {
   return assignCaptainToToken(restaurantId, tokenId, captain);
 }
 
+function orderNumberToToken(orderNumber) {
+  const on = String(orderNumber || '').trim();
+  if (/^ORD-/i.test(on)) return `T-${on.slice(4)}`;
+  if (/^T-/i.test(on)) return on;
+  return null;
+}
+
+async function getCaptainContactForToken(restaurantId, tokenNumber) {
+  const tid = orderNumberToToken(tokenNumber) || String(tokenNumber || '').trim();
+  if (!tid || !restaurantId) return null;
+
+  const { data: token } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .select('meta, name, phone')
+    .eq('id', tid)
+    .eq('restaurant_id', restaurantId)
+    .maybeSingle();
+
+  if (!token) return null;
+
+  const captainId = token.meta?.captain_id;
+  if (!captainId) return null;
+
+  const { data: emp } = await supabaseAdmin
+    .from('employees')
+    .select('id, full_name, whatsapp_number, phone')
+    .eq('id', captainId)
+    .eq('restaurant_id', restaurantId)
+    .maybeSingle();
+
+  if (!emp) return null;
+
+  const waResult = validateAndNormalizeWhatsApp(emp.whatsapp_number || emp.phone || '');
+  if (!waResult.value) return null;
+
+  return {
+    captain_id:   emp.id,
+    captain_name: emp.full_name,
+    whatsapp:     waResult.value,
+    customer_name: token.name,
+    customer_phone: token.phone,
+  };
+}
+
+async function notifyCaptainTakeawayReady({
+  restaurantId,
+  tokenNumber,
+  orderNumber,
+  customerName,
+  customerPhone,
+}) {
+  const contact = await getCaptainContactForToken(restaurantId, tokenNumber);
+  if (!contact) {
+    console.warn(
+      `[captain-ready] No captain on token ${tokenNumber} for restaurant ${restaurantId}`,
+    );
+    return false;
+  }
+
+  const displayToken = orderNumberToToken(tokenNumber) || tokenNumber;
+  const portalUrl = `${process.env.FRONTEND_URL || 'https://app.autom8.works'}/dashboard/captain`;
+  const body =
+    `✅ *Takeaway ready for pickup* — Token *${displayToken}*\n` +
+    `👤 Customer: ${customerName || contact.customer_name || 'Guest'}\n` +
+    `📞 Phone: ${customerPhone || contact.customer_phone || '—'}\n` +
+    `Order: ${orderNumber || '—'}\n` +
+    `────────────────────\n` +
+    `Hand over at the counter, then scan the receipt QR to mark collected.\n` +
+    portalUrl;
+
+  await sendWhatsAppMessage(contact.whatsapp, body, restaurantId);
+  console.log(
+    `[captain-ready] ✅ ${displayToken} → captain ${contact.captain_name} (${contact.whatsapp})`,
+  );
+  return true;
+}
+
 async function notifyCaptainTakeawayOrder({
   restaurantId,
   captain,
@@ -239,4 +316,6 @@ module.exports = {
   assignAndNotifyCaptainTakeaway,
   autoAssignCaptainForTakeaway,
   captainDisplayName,
+  notifyCaptainTakeawayReady,
+  orderNumberToToken,
 };

@@ -13,6 +13,10 @@
 const { supabaseAdmin } = require('../config/supabase');
 const { broadcastToRestaurant } = require('../websocket');
 const { getMetaCatalogId, getWhatsAppIntegration } = require('./restaurantConfig');
+const {
+  notifyCaptainTakeawayReady,
+  orderNumberToToken,
+} = require('./captainAssignment');
 
 // ── sendWhatsAppMessage ───────────────────────────────────────────────────────
 // Sends a plain-text WhatsApp message.
@@ -155,8 +159,14 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
 }
 
 // ── notifyOrderReady ──────────────────────────────────────────────────────────
-// Marks the order as 'ready', sends a WA notification to the customer,
+// Marks the order as 'ready', notifies customer (+ assigned captain for takeaway),
 // and broadcasts ORDER_READY to all KDS screens.
+
+function isTakeawayOrder(serviceType, orderSource) {
+  const svc = String(serviceType || '').toLowerCase();
+  const src = String(orderSource || '').toLowerCase();
+  return svc === 'takeaway' || src === 'takeaway' || src.includes('takeaway');
+}
 
 async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
   try {
@@ -166,20 +176,44 @@ async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
       .eq('id', orderId)
       .neq('status', 'ready')
       .neq('status', 'cancelled')
-      .select('order_number, table:table_id!left(table_number), walk_in_tokens(phone)')
+      .select('order_number, source, customer_phone, table:table_id!left(table_number)')
       .single();
 
     if (updateErr || !updated) return;
 
-    const phone = updated.walk_in_tokens?.[0]?.phone ?? kdsItem?.customer_phone ?? null;
+    const isTakeaway = isTakeawayOrder(kdsItem?.service_type, updated.source);
+    const tokenNumber = kdsItem?.token_number || orderNumberToToken(updated.order_number);
+    const phone = updated.customer_phone ?? kdsItem?.customer_phone ?? null;
+
     if (phone) {
-      await sendWhatsAppMessage(
-        phone,
-        `✅ *Your order is ready!*\n\nOrder: *${updated.order_number}*\n` +
-        (updated.table?.table_number ? `Table: *${updated.table.table_number}*\n` : '') +
-        `\nYour food will be served shortly. Enjoy! 🍽️`,
-        restaurantId
-      );
+      if (isTakeaway) {
+        const tokenLabel = tokenNumber || updated.order_number;
+        await sendWhatsAppMessage(
+          phone,
+          `✅ *Your takeaway order is ready!*\n\n` +
+          `Token: *${tokenLabel}*\n` +
+          `Order: *${updated.order_number}*\n\n` +
+          `Please pick up at the counter. Show your receipt QR when you collect. 🛍️`,
+          restaurantId,
+        );
+      } else {
+        await sendWhatsAppMessage(
+          phone,
+          `✅ *Your order is ready!*\n\nOrder: *${updated.order_number}*\n` +
+          (updated.table?.table_number ? `Table: *${updated.table.table_number}*\n` : '') +
+          `\nYour food will be served shortly. Enjoy! 🍽️`,
+          restaurantId,
+        );
+      }
+    }
+
+    if (isTakeaway && tokenNumber) {
+      await notifyCaptainTakeawayReady({
+        restaurantId,
+        tokenNumber,
+        orderNumber:  updated.order_number,
+        customerPhone: phone,
+      });
     }
 
     broadcastToRestaurant(restaurantId, {
