@@ -85,23 +85,68 @@ router.post('/notify', async (req, res) => {
       ? String(customer_phone).replace(/\D/g, '')
       : null;
 
-    const { data: orderRow, error: orderErr } = await supabaseAdmin
+    // ── Dedup: one KDS ticket per token/order_number (Meta webhooks can retry) ─
+    const { data: existingOrder } = await supabaseAdmin
       .from('orders')
-      .insert({
-        restaurant_id,
-        table_id:             tableId,
-        order_number:         orderNumber,
-        status:               'pending',
-        source:               service_type || 'whatsapp_booking',
-        customer_phone: cleanPhone,
-        notes:          special_notes || null,
-      })
       .select('id, order_number')
-      .single();
+      .eq('restaurant_id', restaurant_id)
+      .eq('order_number', orderNumber)
+      .maybeSingle();
 
-    if (orderErr) {
-      console.error('[kds-notify] orders insert failed:', orderErr.message);
-      return res.status(500).json({ error: orderErr.message });
+    if (existingOrder?.id) {
+      const { data: existingOrderItems } = await supabaseAdmin
+        .from('order_items')
+        .select('id')
+        .eq('order_id', existingOrder.id);
+      const oiIds = (existingOrderItems ?? []).map((r) => r.id);
+      let existingKdsCount = 0;
+      if (oiIds.length) {
+        const { count } = await supabaseAdmin
+          .from('kds_items')
+          .select('id', { count: 'exact', head: true })
+          .in('order_item_id', oiIds);
+        existingKdsCount = count ?? 0;
+      }
+      if (existingKdsCount > 0) {
+        console.log(
+          `[kds-notify] ♻️ deduped ${orderNumber} — ${existingKdsCount} item(s) already on KDS`
+        );
+        return res.json({
+          success:           true,
+          order_id:          existingOrder.id,
+          order_number:      existingOrder.order_number,
+          kds_items_created: existingKdsCount,
+          deduplicated:      true,
+        });
+      }
+    }
+
+    let orderRow = existingOrder;
+    if (!orderRow) {
+      const { data: inserted, error: orderErr } = await supabaseAdmin
+        .from('orders')
+        .insert({
+          restaurant_id,
+          table_id:       tableId,
+          order_number:   orderNumber,
+          status:         'pending',
+          source:         service_type || 'whatsapp_booking',
+          customer_phone: cleanPhone,
+          notes:          special_notes || null,
+        })
+        .select('id, order_number')
+        .single();
+
+      if (orderErr) {
+        console.error('[kds-notify] orders insert failed:', orderErr.message);
+        return res.status(500).json({ error: orderErr.message });
+      }
+      orderRow = inserted;
+    } else if (special_notes) {
+      await supabaseAdmin.from('orders')
+        .update({ notes: special_notes })
+        .eq('id', orderRow.id)
+        .eq('restaurant_id', restaurant_id);
     }
 
     // ── Step 3: Per-item: resolve menu_item_id → order_item → kds_item ────────
@@ -266,18 +311,8 @@ router.post('/notify', async (req, res) => {
       timestamp:        new Date().toISOString(),
     });
 
-    // ── Step 6: Send receipt URL to customer ──────────────────────────────────
-    if (cleanPhone && kdsItemsCreated > 0) {
-      const receiptUrl  = `${process.env.API_BASE_URL ?? 'https://api.autom8.works'}/verify/${orderRow.id}`;
-      const advanceLine = advance_credit > 0
-        ? `\n🎟️ Reservation advance applied: -₹${Number(advance_credit).toFixed(0)}`
-        : '';
-      sendWhatsAppMessage(
-        cleanPhone,
-        `🧾 *Your receipt is ready!*\n\nOrder: *${orderRow.order_number}*${advanceLine}\nTap to view your itemised bill:\n${receiptUrl}`,
-        restaurant_id
-      ).catch(e => console.error('[kds-notify] Receipt send failed (non-fatal):', e.message));
-    }
+    // Receipt WhatsApp is sent by the Python chat agent (upload_and_send_receipt).
+    // Sending here as well caused duplicate messages on webhook retries.
 
     // ── Step 7: Fulfillment groups (multi-counter takeaway) ───────────────────
     const isTA = service_type === 'takeaway' || service_type === 'whatsapp_booking';

@@ -405,6 +405,7 @@ async def _confirm_dine_in_order(
     if kds_order_id:
         session_state["_kitchen_sent"] = True
         session_state["_kds_order_id"] = kds_order_id
+        await save_session_state(restaurant_id, customer_phone, session_state)
     else:
         logger.error(
             f"[dine-in] KDS notify failed for token {token} — "

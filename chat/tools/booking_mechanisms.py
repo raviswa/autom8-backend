@@ -647,9 +647,10 @@ async def notify_kds(
                 )
                 if resp.status in (200, 201):
                     data = await resp.json()
+                    tag = "deduped" if data.get("deduplicated") else "created"
                     logger.info(
                         f"[kds-notify] ✅ {data.get('kds_items_created', '?')} item(s) "
-                        f"for token {token_number} | table {table_number} | "
+                        f"({tag}) for token {token_number} | table {table_number} | "
                         f"order {data.get('order_id', '?')}"
                     )
                     return data.get("order_id")
