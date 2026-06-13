@@ -402,9 +402,14 @@ async def _confirm_dine_in_order(
         table_number=table_num,
         special_notes=None,
     )
-    session_state["_kitchen_sent"] = True
     if kds_order_id:
+        session_state["_kitchen_sent"] = True
         session_state["_kds_order_id"] = kds_order_id
+    else:
+        logger.error(
+            f"[dine-in] KDS notify failed for token {token} — "
+            "kitchen board will stay empty until retry"
+        )
 
     start_special_notes_timer(
         customer_phone,

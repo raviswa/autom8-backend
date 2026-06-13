@@ -16,6 +16,7 @@ const { supabaseAdmin }         = require('../config/supabase');
 const { sendWhatsAppMessage }   = require('../helpers/whatsapp');
 const { queueFeedbackForTable } = require('../helpers/feedback');
 const { startFeedbackScheduler } = require('../routes/feedback');
+const { notifyKdsFromSessionContext } = require('../helpers/kdsNotifyClient');
 
 // Slot helpers live in catalog.js (single source of truth — shared with POST /catalog/slot-sync)
 const {
@@ -109,7 +110,7 @@ function startSpecialNotesTimeoutMonitor() {
       const { data: staleSessions, error } = await supabaseAdmin
         .from('conversation_states')
         .select('id, restaurant_id, customer_phone, current_state, context')
-        .eq('current_state', 'awaiting_special_notes')
+        .filter('context->>booking_step', 'eq', 'awaiting_special_notes')
         .filter('context->>special_notes_asked_at', 'lt', String(epochNowMinus2Min))
         .limit(50);
 
@@ -121,7 +122,13 @@ function startSpecialNotesTimeoutMonitor() {
           const bookingId     = ctx.booking_id  || null;
           const customerPhone = session.customer_phone;
           const customerName  = ctx.customer_name || ctx.name || 'Guest';
-          const tokenNumber   = ctx.token_number  || null;
+          const tokenNumber   = ctx.token_number  || ctx.display_token || null;
+
+          // Push order to KDS if Python chat notify failed (e.g. secret mismatch).
+          const kdsOk = await notifyKdsFromSessionContext(session);
+          if (!kdsOk && ctx._pending_kitchen) {
+            console.warn(`[notes-timeout] KDS notify failed for session ${session.id} — check AUTOM8_KDS_SECRET`);
+          }
 
           if (bookingId) {
             await supabaseAdmin.from('bookings').update({
@@ -132,9 +139,16 @@ function startSpecialNotesTimeoutMonitor() {
 
           await supabaseAdmin.from('conversation_states').update({
             current_state: 'visit_complete',
-            context: { ...ctx, booking_step: 'visit_complete', special_notes: null, special_notes_asked_at: null, auto_confirmed_at: new Date().toISOString() },
+            context: {
+              ...ctx,
+              booking_step: 'visit_complete',
+              special_notes: null,
+              special_notes_asked_at: null,
+              _kitchen_sent: kdsOk || ctx._kitchen_sent || false,
+              auto_confirmed_at: new Date().toISOString(),
+            },
             updated_at: new Date().toISOString(),
-          }).eq('id', session.id).eq('current_state', 'awaiting_special_notes');
+          }).eq('id', session.id);
 
           if (customerPhone && process.env.WHATSAPP_ACCESS_TOKEN) {
             await sendWhatsAppMessage(

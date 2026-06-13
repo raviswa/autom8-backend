@@ -19,6 +19,7 @@ const cors    = require('cors');
 const { startAllSchedulers } = require('./src/schedulers/index');
 const { attachWebSocketServer } = require('./src/websocket');
 const { handleInternalMenuItems } = require('./src/routes/catalog');
+const { logKdsSecretStatus } = require('./src/config/internalSecret');
 
 if (process.env.NODE_ENV === 'production' && !process.env.AUTOM8_KDS_SECRET) {
   throw new Error('AUTOM8_KDS_SECRET must be set in production');
@@ -94,6 +95,7 @@ const server = http.createServer(app);
 attachWebSocketServer(server);
 
 server.listen(PORT, () => {
+  logKdsSecretStatus();
   console.log(`🚀 Autom8 Backend running on port ${PORT}`);
   console.log(`📍 Region: ${process.env.REGION || 'IN'}`);
   console.log(`🗄️  Database: ${process.env.SUPABASE_URL}`);

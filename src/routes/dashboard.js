@@ -17,21 +17,47 @@ function requireOutlet(req, res, next) {
   next();
 }
 
-const RESTAURANT_SELECT = [
+const RESTAURANT_SELECT_FULL = [
   'id', 'name', 'waba_id', 'whatsapp_number', 'display_name', 'manager_phone',
   'timezone', 'dining_duration_minutes', 'payment_mode', 'kitchen_workflow',
   'kot_printer_ip', 'kot_printer_port', 'kot_printer_enabled',
   'takeaway_fulfillment_mode', 'fulfillment_sections', 'opening_hours',
 ].join(', ');
 
+const RESTAURANT_SELECT_BASE = [
+  'id', 'name', 'waba_id', 'whatsapp_number', 'display_name', 'manager_phone',
+  'timezone', 'dining_duration_minutes', 'payment_mode',
+  'takeaway_fulfillment_mode', 'fulfillment_sections', 'opening_hours',
+].join(', ');
+
+async function fetchRestaurantRow(restaurantId) {
+  const { data, error } = await supabaseAdmin
+    .from('restaurants')
+    .select(RESTAURANT_SELECT_FULL)
+    .eq('id', restaurantId)
+    .maybeSingle();
+
+  if (!error) return { data, error: null };
+
+  if (/kitchen_workflow|kot_printer/i.test(error.message)) {
+    const fallback = await supabaseAdmin
+      .from('restaurants')
+      .select(RESTAURANT_SELECT_BASE)
+      .eq('id', restaurantId)
+      .maybeSingle();
+    if (fallback.data) {
+      fallback.data.kitchen_workflow = 'Both_KOT_and_KDS';
+      fallback.data.kot_printer_enabled = false;
+    }
+    return fallback;
+  }
+  return { data: null, error };
+}
+
 // ── GET /api/dashboard/waba ───────────────────────────────────────────────────
 router.get('/waba', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
   try {
-    const { data, error } = await supabaseAdmin
-      .from('restaurants')
-      .select(RESTAURANT_SELECT)
-      .eq('id', req.restaurant_id)
-      .maybeSingle();
+    const { data, error } = await fetchRestaurantRow(req.restaurant_id);
 
     if (error) console.error('[dashboard/waba]', error.message);
     res.json({ success: true, restaurant: data ?? null });

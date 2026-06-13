@@ -41,7 +41,10 @@ router.post('/notify', async (req, res) => {
 
   // ── Auth (Bearer / x-internal-secret / body.secret — same as portal sync) ─
   if (!isValidKdsSecret(extractInternalSecret(req))) {
-    console.warn('[kds-notify] Rejected — bad secret');
+    const got = extractInternalSecret(req);
+    console.warn(
+      `[kds-notify] Rejected — bad secret (present=${!!got}, len=${got ? String(got).length : 0})`
+    );
     return res.status(403).json({ error: 'Forbidden' });
   }
 
@@ -202,22 +205,28 @@ router.post('/notify', async (req, res) => {
     }
 
     // ── Step 5: Broadcast ORDER_NEW → KDSScreen.jsx ───────────────────────────
-    let kitchenWorkflow = 'KOT_only';
+    let kitchenWorkflow = 'Both_KOT_and_KDS';
     let kotPrinterIp = null;
     let kotPrinterPort = 9100;
     let kotPrinterEnabled = false;
     let restaurantName = '';
     try {
-      const { data: restRow } = await supabaseAdmin
+      const { data: restRow, error: restErr } = await supabaseAdmin
         .from('restaurants')
         .select('kitchen_workflow, kot_printer_ip, kot_printer_port, kot_printer_enabled, name')
         .eq('id', restaurant_id)
         .single();
-      kitchenWorkflow = restRow?.kitchen_workflow || 'KOT_only';
-      kotPrinterIp = restRow?.kot_printer_ip || null;
-      kotPrinterPort = restRow?.kot_printer_port || 9100;
-      kotPrinterEnabled = !!restRow?.kot_printer_enabled;
-      restaurantName = restRow?.name || '';
+      if (!restErr && restRow) {
+        kitchenWorkflow = restRow.kitchen_workflow || 'Both_KOT_and_KDS';
+        kotPrinterIp = restRow.kot_printer_ip || null;
+        kotPrinterPort = restRow.kot_printer_port || 9100;
+        kotPrinterEnabled = !!restRow.kot_printer_enabled;
+        restaurantName = restRow.name || '';
+      } else if (restErr && /kitchen_workflow/i.test(restErr.message)) {
+        const { data: baseRow } = await supabaseAdmin
+          .from('restaurants').select('name').eq('id', restaurant_id).single();
+        restaurantName = baseRow?.name || '';
+      }
     } catch (_) {}
 
     const shouldPrintKot =

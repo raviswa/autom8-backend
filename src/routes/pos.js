@@ -442,11 +442,35 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
       return res.status(400).json({ error: 'No valid fields provided' });
 
     updates.updated_at = new Date().toISOString();
-    const { data, error } = await supabaseAdmin
+    let { data, error } = await supabaseAdmin
       .from('restaurants')
       .update(updates)
       .eq('id', req.restaurant_id)
       .select().single();
+
+    if (error && /kitchen_workflow|kot_printer/i.test(error.message)) {
+      const kitchenKeys = ['kitchen_workflow', 'kot_printer_ip', 'kot_printer_port', 'kot_printer_enabled'];
+      const stripped = Object.fromEntries(
+        Object.entries(updates).filter(([k]) => !kitchenKeys.includes(k))
+      );
+      const skippedKitchen = Object.keys(updates).filter(k => kitchenKeys.includes(k));
+      if (Object.keys(stripped).length > 1) {
+        ({ data, error } = await supabaseAdmin
+          .from('restaurants')
+          .update(stripped)
+          .eq('id', req.restaurant_id)
+          .select().single());
+      }
+      if (!error) {
+        return res.json({
+          success: true,
+          restaurant: data,
+          warning: skippedKitchen.length
+            ? 'Kitchen settings not saved — run migrations/add_restaurant_kitchen_settings.sql in Supabase first.'
+            : undefined,
+        });
+      }
+    }
     if (error) throw error;
 
     await supabaseAdmin.from('audit_logs').insert({

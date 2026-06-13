@@ -12,12 +12,22 @@ function getKdsSecret() {
   if (process.env.NODE_ENV === 'production') {
     throw new Error(
       'AUTOM8_KDS_SECRET must be set in production. ' +
-      'Configure it in Railway for both api and chat services.'
+      'Configure the SAME value on Railway for both api and chat services.'
     );
   }
 
   console.warn('[security] AUTOM8_KDS_SECRET not set — using dev fallback');
   return DEV_FALLBACK;
+}
+
+/** Log once at startup — helps verify api service has the secret configured. */
+function logKdsSecretStatus() {
+  try {
+    const s = getKdsSecret();
+    console.log(`[security] AUTOM8_KDS_SECRET configured (length=${s.length})`);
+  } catch (e) {
+    console.error(`[security] ${e.message}`);
+  }
 }
 
 /** Returns true if the request carries a valid internal secret. */
@@ -37,4 +47,4 @@ function extractInternalSecret(req) {
   );
 }
 
-module.exports = { getKdsSecret, isValidKdsSecret, extractInternalSecret };
+module.exports = { getKdsSecret, isValidKdsSecret, extractInternalSecret, logKdsSecretStatus };
