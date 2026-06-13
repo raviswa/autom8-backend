@@ -20,6 +20,7 @@ function requireOutlet(req, res, next) {
 const RESTAURANT_SELECT = [
   'id', 'name', 'waba_id', 'whatsapp_number', 'display_name', 'manager_phone',
   'timezone', 'dining_duration_minutes', 'payment_mode', 'kitchen_workflow',
+  'kot_printer_ip', 'kot_printer_port', 'kot_printer_enabled',
   'takeaway_fulfillment_mode', 'fulfillment_sections', 'opening_hours',
 ].join(', ');
 

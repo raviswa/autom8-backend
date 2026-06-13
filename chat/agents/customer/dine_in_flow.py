@@ -338,19 +338,19 @@ async def _confirm_dine_in_order(
         confirmation += f"\n\n{suggestion}"
     await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
 
-    notes_hint = build_notes_hint(order_text)
+    notes_hint = await build_notes_hint(order_text, cart_snapshot, restaurant_id)
     await _send_interactive(customer_phone, {
         "interactive": {
             "type": "button",
             "body": {"text": (
-                f"👨‍🍳 Any requests for the kitchen? (optional)\n\n"
+                "Anything you'd like us to pass to the kitchen? (totally optional)\n\n"
                 f"{notes_hint}\n\n"
-                "Type your request, tap *No notes*, or wait 2 minutes — "
-                "we'll send your order to the kitchen automatically 👇"
+                "Just reply in your own words, or tap *No notes* if you're all set; "
+                "otherwise we'll send your order along in about 2 minutes."
             )},
-            "footer": {"text": "We'll wait up to 2 minutes for your reply"},
+            "footer": {"text": "No rush — take your time"},
             "action": {"buttons": [
-                {"type": "reply", "reply": {"id": "SKIP", "title": "⏭️ No notes"}},
+                {"type": "reply", "reply": {"id": "SKIP", "title": "No notes"}},
             ]},
         }
     })

@@ -339,7 +339,7 @@ router.get('/feed/template', async (req, res) => {
     const restaurantId = req.query.restaurant_id || process.env.DEFAULT_RESTAURANT_ID;
     const { data: rawItems, error } = await supabaseAdmin
       .from('menu_items')
-      .select('retailer_id, name, description, price, image_url, time_slot, is_stocked, is_available')
+      .select('retailer_id, name, description, price, image_url, time_slot, is_stocked, is_available, category')
       .eq('restaurant_id', restaurantId).not('retailer_id', 'is', null)
       .order('time_slot', { ascending: true }).order('name', { ascending: true });
 
@@ -358,6 +358,7 @@ router.get('/feed/template', async (req, res) => {
       title:         item.name || '',
       description:   item.description || '',
       price:         Number(item.price) || 0,
+      category:      item.category || 'General',
       custom_label_0: SLOT_LABEL[item.time_slot] || 'All Day',
       image_link:    item.image_url || '',
       is_available:  (item.is_stocked !== false && item.is_available !== false) ? 'TRUE' : 'FALSE',
@@ -383,7 +384,6 @@ async function handleInternalMenuItems(req, res) {
     const { data, error } = await supabaseAdmin.from('menu_items')
       .select('id, name, description, price, image_url, time_slot, retailer_id, is_available, is_stocked, category')
       .eq('restaurant_id', restaurantId)
-      .eq('is_stocked', true)
       .eq('is_available', true)
       .order('time_slot', { ascending: true }).order('name', { ascending: true });
 

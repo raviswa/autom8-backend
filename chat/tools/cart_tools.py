@@ -223,6 +223,7 @@ async def enrich_cart_titles(cart: dict[str, Any], restaurant_id: str) -> None:
             by_id[rid.upper()] = name
             by_id[rid.lower()] = name
 
+    unresolved: list[str] = []
     for item_id, line in cart.items():
         rid = (item_id or "").strip()
         current = (line.get("title") or "").strip()
@@ -233,6 +234,22 @@ async def enrich_cart_titles(cart: dict[str, Any], restaurant_id: str) -> None:
             or _looks_like_retailer_sku(current)
         ):
             line["title"] = resolved
+        elif _looks_like_retailer_sku(current) or current == rid:
+            unresolved.append(rid or current)
+
+    if unresolved:
+        from tools.db_tools import lookup_menu_names_by_retailer_ids
+        extra = await lookup_menu_names_by_retailer_ids(restaurant_id, unresolved)
+        for item_id, line in cart.items():
+            rid = (item_id or "").strip()
+            current = (line.get("title") or "").strip()
+            resolved = extra.get(rid) or extra.get(rid.upper()) or extra.get(current)
+            if resolved and (
+                not current
+                or current == rid
+                or _looks_like_retailer_sku(current)
+            ):
+                line["title"] = resolved
 
 
 def cart_to_order_text(cart: dict[str, Any]) -> str:

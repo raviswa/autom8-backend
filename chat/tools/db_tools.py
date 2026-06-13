@@ -1057,6 +1057,52 @@ def invalidate_menu_cache(restaurant_id: str) -> None:
     _MENU_CACHE.pop(restaurant_id, None)
 
 
+async def lookup_menu_names_by_retailer_ids(
+    restaurant_id: str, retailer_ids: list[str]
+) -> dict[str, str]:
+    """Resolve retailer SKUs (e.g. E003) to display names without stock filters."""
+    ids = sorted({(rid or "").strip() for rid in retailer_ids if (rid or "").strip()})
+    if not ids:
+        return {}
+
+    _autom8_url = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
+    _autom8_key = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
+    if not _autom8_url or not _autom8_key:
+        return {}
+
+    quoted = ",".join(f'"{rid}"' for rid in ids)
+    params = (
+        f"select=retailer_id,name"
+        f"&restaurant_id=eq.{restaurant_id}"
+        f"&retailer_id=in.({quoted})"
+    )
+    url = f"{_autom8_url}/rest/v1/menu_items?{params}"
+
+    try:
+        async with _httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                url,
+                headers={
+                    "apikey": _autom8_key,
+                    "Authorization": f"Bearer {_autom8_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+        if resp.status_code != 200:
+            return {}
+        out: dict[str, str] = {}
+        for row in resp.json():
+            rid = (row.get("retailer_id") or "").strip()
+            name = (row.get("name") or "").strip()
+            if rid and name:
+                out[rid] = name
+                out[rid.upper()] = name
+                out[rid.lower()] = name
+        return out
+    except Exception:
+        return {}
+
+
 async def add_menu_item(
     restaurant_id: str, name: str, price: float, category: str
 ) -> Dict[str, Any]:

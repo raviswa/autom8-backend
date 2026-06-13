@@ -259,6 +259,11 @@ router.delete('/orders/:id', authenticateToken, getRestaurantId, async (req, res
 
 router.get('/kds/feed', authenticateToken, getRestaurantId, async (req, res) => {
   try {
+    if (!req.restaurant_id) {
+      return res.status(403).json({
+        error: 'No outlet linked to this account. Select an outlet or log in with an outlet-specific profile.',
+      });
+    }
     const { status = 'pending' } = req.query;
     const statusFilter = status === 'all' ? ['pending', 'in_progress', 'ready'] : [status];
     const { data, error } = await supabaseAdmin.from('kds_items')
@@ -426,6 +431,7 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
       'logo_url','gstin','opening_hours',
       'whatsapp_number','waba_id','manager_phone',
       'timezone','dining_duration_minutes','payment_mode','kitchen_workflow',
+      'kot_printer_ip','kot_printer_port','kot_printer_enabled',
       'takeaway_fulfillment_mode','fulfillment_sections',
       'subscribed_features',
     ];

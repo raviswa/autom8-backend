@@ -31,6 +31,7 @@ const router  = express.Router();
 const { supabaseAdmin }       = require('../config/supabase');
 const { broadcastToRestaurant } = require('../websocket');
 const { sendWhatsAppMessage }  = require('../helpers/whatsapp');
+const { printKotEscPos, buildKotLines } = require('../helpers/kotEscPos');
 
 const { isValidKdsSecret, extractInternalSecret } = require('../config/internalSecret');
 
@@ -202,11 +203,42 @@ router.post('/notify', async (req, res) => {
 
     // ── Step 5: Broadcast ORDER_NEW → KDSScreen.jsx ───────────────────────────
     let kitchenWorkflow = 'KOT_only';
+    let kotPrinterIp = null;
+    let kotPrinterPort = 9100;
+    let kotPrinterEnabled = false;
+    let restaurantName = '';
     try {
       const { data: restRow } = await supabaseAdmin
-        .from('restaurants').select('kitchen_workflow').eq('id', restaurant_id).single();
+        .from('restaurants')
+        .select('kitchen_workflow, kot_printer_ip, kot_printer_port, kot_printer_enabled, name')
+        .eq('id', restaurant_id)
+        .single();
       kitchenWorkflow = restRow?.kitchen_workflow || 'KOT_only';
+      kotPrinterIp = restRow?.kot_printer_ip || null;
+      kotPrinterPort = restRow?.kot_printer_port || 9100;
+      kotPrinterEnabled = !!restRow?.kot_printer_enabled;
+      restaurantName = restRow?.name || '';
     } catch (_) {}
+
+    const shouldPrintKot =
+      kotPrinterEnabled &&
+      kotPrinterIp &&
+      (kitchenWorkflow === 'KOT_only' || kitchenWorkflow === 'Both_KOT_and_KDS');
+
+    if (shouldPrintKot && kdsItemsCreated > 0) {
+      const kotLines = buildKotLines({
+        restaurant_name: restaurantName,
+        order_number: orderRow.order_number,
+        token_number: token_number ?? null,
+        table_number: table_number ?? null,
+        service_type: service_type ?? null,
+        special_notes: special_notes ?? null,
+        items,
+      });
+      printKotEscPos({ ip: kotPrinterIp, port: kotPrinterPort, lines: kotLines })
+        .then(() => console.log(`[kds-notify] 🖨 Network KOT sent to ${kotPrinterIp}:${kotPrinterPort}`))
+        .catch((e) => console.warn(`[kds-notify] Network KOT failed (non-fatal): ${e.message}`));
+    }
 
     broadcastToRestaurant(restaurant_id, {
       type:             'ORDER_NEW',

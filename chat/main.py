@@ -314,6 +314,15 @@ async def _process_meta_payload(payload: dict):
             if session_state is None:
                 session_state = {}
 
+            from agents.customer.dine_in_flow import _on_special_notes_timeout
+            from agents.customer.booking_helpers import ensure_special_notes_kitchen_delivery
+            await ensure_special_notes_kitchen_delivery(
+                restaurant_id,
+                phone,
+                session_state,
+                on_timeout=lambda: _on_special_notes_timeout(restaurant_id, phone),
+            )
+
             # 5a. Catalog order bridge
             if is_catalog_order(message_obj):
                 logger.info(f"[CATALOG] Catalog order detected from {phone}")

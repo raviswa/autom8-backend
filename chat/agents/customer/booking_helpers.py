@@ -65,70 +65,10 @@ def now_display() -> str:
 
 
 # ─────────────────────────────────────────────
-# C. MENU KEYWORD SETS + SPECIAL-NOTES HINT
+# C. SPECIAL-NOTES HINT (catalog-aware — see tools/kitchen_notes.py)
 # ─────────────────────────────────────────────
 
-_VEG_KEYWORDS = {
-    "paneer","veg","vegetable","dal","rajma","chole","aloo","gobi","palak",
-    "mushroom","tofu","idli","dosa","uttapam","upma","pongal","parotta",
-    "chapati","roti","naan","salad","soup",
-}
-_SOUTH_INDIAN_KEYWORDS = {
-    "idli","dosa","uttapam","upma","pongal","vada","medu vada","sambar","rasam",
-    "kootu","kuzhambu","rice","biryani","biriyani","parotta","kothu","appam","puttu",
-    "idiyappam","pesarattu","curd rice","lemon rice","tamarind rice","puliyodharai",
-    "chicken curry","fish curry","prawn masala","mutton kuzhambu",
-}
-_SIDES_KEYWORDS   = {"biryani","biriyani","rice","parotta","kothu","idli","dosa","pongal","upma","appam","puttu","roti","naan","chapati"}
-_MEAT_KEYWORDS    = {"chicken","mutton","fish","prawn","egg","beef","pork","lamb","seafood","crab","squid","tuna","sardine","anchovy","meat","non-veg","nonveg"}
-_RICE_KEYWORDS    = {"biriyani","biryani","fried rice","pulao","rice"}
-_BREAD_KEYWORDS   = {"naan","roti","parotta","chapati","kulcha","paratha"}
-_DESSERT_KEYWORDS = {"ice cream","halwa","kheer","gulab","jalebi","payasam","pudding","cake","brownie","sweet"}
-_DRINK_KEYWORDS   = {"juice","lassi","buttermilk","tea","coffee","shake","smoothie","soda","water"}
-
-
-def build_notes_hint(order_text: str) -> str:
-    lower = order_text.lower()
-    has_meat         = any(k in lower for k in _MEAT_KEYWORDS)
-    has_veg          = any(k in lower for k in _VEG_KEYWORDS)
-    has_rice         = any(k in lower for k in _RICE_KEYWORDS)
-    has_bread        = any(k in lower for k in _BREAD_KEYWORDS)
-    has_dessert      = any(k in lower for k in _DESSERT_KEYWORDS)
-    has_drink        = any(k in lower for k in _DRINK_KEYWORDS)
-    has_south_indian = any(k in lower for k in _SOUTH_INDIAN_KEYWORDS)
-    has_sides        = any(k in lower for k in _SIDES_KEYWORDS)
-    hints = []
-    if has_meat or has_rice or has_veg or has_south_indian:
-        hints.append("🌶️ Spice level (less spicy / medium / extra spicy)")
-    if has_south_indian and has_sides:
-        hints.append("🥣 Extra sambar on the side?")
-        hints.append("🥛 Extra chutney (coconut / tomato / mint)?")
-    if "biryani" in lower or "biriyani" in lower or "rice" in lower:
-        hints.append("🥗 Extra raita or salan on the side?")
-        hints.append("🍚 Less oil / less ghee?")
-    if "parotta" in lower or "kothu" in lower:
-        hints.append("🥣 Salna or kurma on the side?")
-    if "idli" in lower or "dosa" in lower or "uttapam" in lower:
-        hints.append("🥣 Extra sambar or chutney?")
-        hints.append("🧈 Butter on top?")
-    if "curd rice" in lower or "rasam" in lower:
-        hints.append("🌿 Less spice / plain preferred?")
-    if has_meat:
-        hints.append("🍗 Cooking preference (well-done / medium)")
-        hints.append("🧅 Remove onion or garlic?")
-    if has_veg and not has_meat:
-        hints.append("🧅 No onion / no garlic?")
-    if has_bread and not has_south_indian:
-        hints.append("🫓 Butter / plain / whole-wheat preference?")
-    if has_dessert:
-        hints.append("🍬 Sugar-free or less sweet?")
-    if has_drink:
-        hints.append("🧊 Less sugar / no ice?")
-    hints.append("⚠️ Any allergies we should know about?")
-    if not hints:
-        return ("e.g. less spicy, extra sambar, no onion, allergies — "
-                "anything that helps the kitchen prepare it just right for you.")
-    return "e.g.\n" + "\n".join(f"• {h}" for h in hints)
+from tools.kitchen_notes import build_notes_hint  # noqa: F401 — re-exported
 
 
 # ─────────────────────────────────────────────
@@ -590,24 +530,75 @@ def start_special_notes_timer(
     restaurant_id: str,
     *,
     on_timeout=None,
+    wait_secs: int | None = None,
 ) -> None:
-    """Wait 2 minutes; if customer hasn't replied, run on_timeout coroutine."""
+    """Wait up to 2 minutes; if customer hasn't replied, run on_timeout coroutine."""
     stop_special_notes_timer(customer_phone)
     if on_timeout is None:
         logger.debug(f"[special-notes] timer skipped (no handler) for {customer_phone}")
         return
 
+    delay = wait_secs if wait_secs is not None else SPECIAL_NOTES_WAIT_SECS
+    delay = max(1, min(delay, SPECIAL_NOTES_WAIT_SECS))
+
     async def _job() -> None:
         try:
-            await asyncio.sleep(SPECIAL_NOTES_WAIT_SECS)
+            await asyncio.sleep(delay)
             await on_timeout()
         except asyncio.CancelledError:
             logger.debug(f"[special-notes] timer cancelled for {customer_phone}")
 
     _nudge_tasks[customer_phone] = asyncio.create_task(_job())
     logger.info(
-        f"[special-notes] {SPECIAL_NOTES_WAIT_SECS}s kitchen timer started "
+        f"[special-notes] {delay}s kitchen timer started "
         f"for {customer_phone} @ {restaurant_id}"
+    )
+
+
+async def ensure_special_notes_kitchen_delivery(
+    restaurant_id: str,
+    customer_phone: str,
+    session_state: dict,
+    *,
+    on_timeout,
+) -> None:
+    """
+    Resume or complete the kitchen handoff after chat-service restarts.
+    Orders stay invisible on KDS until notify_kds runs (after notes or 2-min wait).
+    """
+    if session_state.get("booking_step") != "awaiting_special_notes":
+        return
+    if session_state.get("_kitchen_sent"):
+        return
+    pending = session_state.get("_pending_kitchen") or {}
+    if not pending.get("order_text") or not pending.get("cart"):
+        logger.warning(
+            f"[special-notes] awaiting notes but no pending kitchen payload "
+            f"for {customer_phone}"
+        )
+        return
+
+    asked_at = float(session_state.get("special_notes_asked_at") or 0)
+    if not asked_at:
+        start_special_notes_timer(
+            customer_phone, restaurant_id, on_timeout=on_timeout,
+        )
+        return
+
+    elapsed = time.time() - asked_at
+    if elapsed >= SPECIAL_NOTES_WAIT_SECS:
+        logger.info(
+            f"[special-notes] overdue ({int(elapsed)}s) — sending {customer_phone} to KDS"
+        )
+        await on_timeout()
+        return
+
+    remaining = int(SPECIAL_NOTES_WAIT_SECS - elapsed)
+    start_special_notes_timer(
+        customer_phone,
+        restaurant_id,
+        on_timeout=on_timeout,
+        wait_secs=remaining,
     )
 
 
