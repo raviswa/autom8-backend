@@ -48,7 +48,7 @@ async function fetchRestaurantRow(restaurantId) {
     if (fallback.data) {
       fallback.data.kitchen_workflow = 'Both_KOT_and_KDS';
       fallback.data.kot_printer_enabled = false;
-      fallback.data.meta_catalog_id = process.env.META_CATALOG_ID || null;
+      fallback.data.meta_catalog_id = null;
     }
     return fallback;
   }

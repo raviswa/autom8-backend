@@ -23,6 +23,7 @@ const { broadcastToRestaurant }   = require('../websocket');
 const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../helpers/whatsapp');
 const { queueFeedbackForTable }   = require('../helpers/feedback');
 const { getManagerPhone } = require('../helpers/restaurantConfig');
+const { assignAndNotifyCaptainTakeaway } = require('../helpers/captainAssignment');
 const { syncConversationForTokenApproval } = require('../helpers/conversationState');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { requireKdsSecretOrJwt, requireKdsSecret } = require('../middleware/internalAuth');
@@ -170,6 +171,7 @@ router.post('/manager-order-alert', requireKdsSecret, async (req, res) => {
       table_number,
       party_size,
       booking_time,
+      service_type,
     } = req.body;
 
     if (!restaurant_id || !token_number) {
@@ -182,12 +184,16 @@ router.post('/manager-order-alert', requireKdsSecret, async (req, res) => {
       return res.status(400).json({ error: 'manager_phone not configured' });
     }
 
-    const tablesLabel = table_number ?? 'Multi-table / TBD';
+    const isTakeaway = service_type === 'takeaway';
+    const header = isTakeaway ? '📋 Order Received — Takeaway' : '📋 Order Received — Dine-in';
+    const tablesLabel = isTakeaway ? 'Takeaway / Counter' : (table_number ?? 'Multi-table / TBD');
+    const guestsLine = isTakeaway ? '' : `Guests: ${party_size ?? '—'}\n`;
     const body =
-      `📋 Order Received — Dine-in\n────────────────────\n` +
+      `${header}\n────────────────────\n` +
       `Token: ${token_number}\nCustomer: ${customer_name || 'Guest'}\n` +
       `Phone: ${customer_phone || '—'}\nTable: ${tablesLabel}\n` +
-      `Guests: ${party_size ?? '—'}\nBooking Time: ${booking_time || '—'}\n` +
+      guestsLine +
+      `Booking Time: ${booking_time || '—'}\n` +
       `Order: ${order_text || '—'}\nTotal: ₹${Number(total || 0).toFixed(0)}\n` +
       `────────────────────`;
 
@@ -196,6 +202,51 @@ router.post('/manager-order-alert', requireKdsSecret, async (req, res) => {
     return res.json({ success: true, manager_phone: managerPhone });
   } catch (err) {
     console.error('[manager-order-alert]', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/tokens/captain-takeaway-alert — internal: auto-assign + notify captain ─
+
+router.post('/captain-takeaway-alert', requireKdsSecret, async (req, res) => {
+  try {
+    const {
+      restaurant_id,
+      token_number,
+      customer_name,
+      customer_phone,
+      order_text,
+      total,
+      booking_time,
+    } = req.body;
+
+    if (!restaurant_id || !token_number) {
+      return res.status(400).json({ error: 'restaurant_id and token_number are required' });
+    }
+
+    const result = await assignAndNotifyCaptainTakeaway({
+      restaurantId:   restaurant_id,
+      tokenNumber:    token_number,
+      customerName:   customer_name,
+      customerPhone:  customer_phone,
+      orderText:      order_text,
+      total,
+      bookingTime:    booking_time,
+    });
+
+    if (!result.assigned) {
+      console.warn(`[captain-takeaway-alert] No captain assigned for ${token_number}`);
+      return res.json({
+        success:      true,
+        assigned:     false,
+        notified:     false,
+        captain_name: null,
+      });
+    }
+
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[captain-takeaway-alert]', err.message);
     return res.status(500).json({ error: err.message });
   }
 });

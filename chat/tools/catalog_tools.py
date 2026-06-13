@@ -15,7 +15,7 @@ Environment variables required (add to your .env):
   META_GRAPH_API_TOKEN   — long-lived System User token with
                            catalog_management + whatsapp_business_messaging
                            (used as fallback if restaurant integration not found)
-  META_CATALOG_ID        — 974962481719952
+  META_CATALOG_ID        — per-restaurant in DB; env only when no restaurant_id (dev)
   WABA_PHONE_NUMBER_ID   — 10866188812090069
   META_GRAPH_VERSION     — v20.0  (or latest stable)
   AUTOM8_BACKEND_URL     — https://autom8-backend-production.up.railway.app
@@ -69,7 +69,6 @@ logger = logging.getLogger(__name__)
 # ── Config (read from environment) ────────────────────────────────────────────
 
 _TOKEN      = os.getenv("META_GRAPH_API_TOKEN", "")
-_CATALOG_ID = os.getenv("META_CATALOG_ID", "974962481719952")
 _PHONE_ID   = os.getenv("WABA_PHONE_NUMBER_ID", "10866188812090069")
 _API_VER    = os.getenv("META_GRAPH_VERSION", "v20.0")
 _BASE_URL   = f"https://graph.facebook.com/{_API_VER}"
@@ -183,7 +182,7 @@ def items_for_category(category: str | None = None) -> list[dict]:
 
 # ── 1. Facebook Catalog sync ───────────────────────────────────────────────────
 
-async def sync_catalog_to_facebook() -> dict[str, Any]:
+async def sync_catalog_to_facebook(restaurant_id: str | None = None) -> dict[str, Any]:
     """
     Push / update all MENU_ITEMS to Facebook Catalog via Batch Products API.
     Call daily via APScheduler or cron.
@@ -193,8 +192,19 @@ async def sync_catalog_to_facebook() -> dict[str, Any]:
     if not _TOKEN:
         raise EnvironmentError("META_GRAPH_API_TOKEN is not set in environment.")
 
+    rid = restaurant_id or _PORTAL_RESTAURANT_ID
+    from tools.restaurant_config import get_meta_catalog_id
+
+    catalog_id = await get_meta_catalog_id(rid)
+    if not catalog_id:
+        logger.error(
+            f"[catalog-sync] meta_catalog_id not set for {rid} — aborting sync "
+            "(refusing global env fallback)"
+        )
+        return {"uploaded": 0, "errors": ["meta_catalog_id not configured for restaurant"]}
+
     # Ensure cache is warm before syncing
-    items = await fetch_menu_items()
+    items = await fetch_menu_items(rid)
     if not items:
         # Upgraded from WARNING to ERROR — surface clearly in Railway logs when
         # the backend fetch is the root cause of items showing as out of stock.
@@ -204,7 +214,7 @@ async def sync_catalog_to_facebook() -> dict[str, Any]:
         )
         return {"uploaded": 0, "errors": ["No items to sync"]}
 
-    batch_url = f"{_BASE_URL}/{_CATALOG_ID}/batch"
+    batch_url = f"{_BASE_URL}/{catalog_id}/batch"
     requests_payload = []
 
     for item in items:

@@ -38,18 +38,24 @@ def invalidate_restaurant_config_cache(restaurant_id: str | None = None) -> None
 
 
 async def get_meta_catalog_id(restaurant_id: str | None) -> str | None:
+    """Per-restaurant Meta catalog ID. Never env-fallback when restaurant_id is set."""
     if restaurant_id:
         row = await get_restaurant_row(restaurant_id)
         if row and row.get("meta_catalog_id"):
-            return row["meta_catalog_id"]
+            return str(row["meta_catalog_id"]).strip()
+
+        logger.error(
+            "[restaurant_config] meta_catalog_id missing for %s — "
+            "refusing env fallback (wrong catalog is a showstopper)",
+            restaurant_id,
+        )
+        return None
 
     env = (os.getenv("META_CATALOG_ID") or "").strip()
     if env:
-        if restaurant_id:
-            logger.warning(
-                "[restaurant_config] meta_catalog_id missing for %s — env fallback",
-                restaurant_id,
-            )
+        logger.warning(
+            "[restaurant_config] using META_CATALOG_ID env (no restaurant_id — dev only)"
+        )
         return env
     return None
 

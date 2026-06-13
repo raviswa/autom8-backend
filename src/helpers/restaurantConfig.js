@@ -46,13 +46,21 @@ async function getManagerPhone(restaurantId) {
   return null;
 }
 
-/** Meta Commerce catalog ID for this outlet. */
+/** Meta Commerce catalog ID for this outlet. Never env-fallback when restaurantId is set. */
 async function getMetaCatalogId(restaurantId) {
-  const row = await _loadRow(restaurantId);
-  if (row?.meta_catalog_id) return row.meta_catalog_id;
+  if (restaurantId) {
+    const row = await _loadRow(restaurantId);
+    if (row?.meta_catalog_id) return row.meta_catalog_id;
+
+    console.error(
+      `[restaurantConfig] meta_catalog_id missing for ${restaurantId} — ` +
+      'refusing env fallback (wrong catalog is a showstopper)',
+    );
+    return null;
+  }
 
   if (process.env.META_CATALOG_ID) {
-    console.warn(`[restaurantConfig] meta_catalog_id missing for ${restaurantId} — using env fallback`);
+    console.warn('[restaurantConfig] using META_CATALOG_ID env (no restaurantId — dev only)');
     return process.env.META_CATALOG_ID;
   }
   return null;

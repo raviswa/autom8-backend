@@ -35,6 +35,8 @@ from tools.booking_mechanisms import (
     upload_and_send_receipt,
     receipt_qr_url,
     AUTOM8_KDS_URL,
+    notify_manager_order_alert,
+    assign_and_notify_captain_takeaway,
 )
 from agents.customer.booking_helpers import (
     MANAGER_PORTAL_URL,
@@ -102,31 +104,57 @@ async def handle_takeaway_flow(
                             if is_placeholder_payment_link(payment_link)
                             else f"Pay here: {payment_link}")
 
+            order_text_display = cart_to_order_text(cart) if cart else order_text
+
+            captain_result = await assign_and_notify_captain_takeaway(
+                restaurant_id,
+                token_number=display_token,
+                customer_name=customer_name,
+                customer_phone=customer_phone,
+                order_text=order_text_display,
+                total=total,
+                booking_time=booking_time,
+            )
+            captain_line = ""
+            if captain_result and captain_result.get("captain_name"):
+                display = captain_result.get("display_name") or captain_result["captain_name"]
+                captain_line = (
+                    f"\n\n👤 *{display}* is your captain and will coordinate "
+                    f"your pickup at the counter."
+                )
+
             confirmation = (
                 f"Your order has been placed! 🎉\n────────────────────\n"
                 f"Token: {display_token}\nBooking Time: {booking_time}\n"
-                f"Order: {order_text}\n────────────────────\n"
-                f"Total: ₹{total:.0f}\n\n{payment_line}"
+                f"Order: {order_text_display}\n────────────────────\n"
+                f"Total: ₹{total:.0f}\n\n{payment_line}{captain_line}"
             )
             if suggestion:
                 confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
 
-            # Manager order details
+            # Manager order alert via Node API (same WA path as walk-in)
             try:
-                await send_whatsapp_message(
-                    manager_phone,
-                    f"📋 Order Details — Takeaway\n────────────────────\n"
-                    f"Token: {display_token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
-                    f"Booking Time: {booking_time}\nOrder: {order_text}\nTotal: ₹{total:.0f}\n"
-                    f"────────────────────",
+                await notify_manager_order_alert(
                     restaurant_id,
+                    token_number=display_token,
+                    customer_name=customer_name,
+                    customer_phone=customer_phone,
+                    order_text=order_text_display,
+                    total=total,
+                    table_number=None,
+                    party_size=None,
+                    booking_time=booking_time,
+                    service_type="takeaway",
                 )
-            except Exception as _md:
-                logger.warning(f"[takeaway] manager order details notify failed (non-fatal): {_md}")
+            except Exception as _ma:
+                logger.warning(f"[takeaway] manager order alert failed (non-fatal): {_ma}")
+
+            if captain_result and captain_result.get("captain_name"):
+                session_state["assigned_captain"] = captain_result["captain_name"]
 
             session_state["order_confirmed_summary"] = (
-                f"Takeaway Token *{display_token}* — {order_text} (₹{total:.0f})"
+                f"Takeaway Token *{display_token}* — {order_text_display} (₹{total:.0f})"
             )
             _first_item = order_text.split(",")[0].strip()[:40]
             session_state["last_order_summary"]    = _first_item
@@ -139,7 +167,7 @@ async def handle_takeaway_flow(
 
             await notify_kds(
                 customer_name=customer_name, customer_phone=customer_phone,
-                order_text=order_text, cart=cart_snapshot, table_number=None,
+                order_text=order_text_display, cart=cart_snapshot, table_number=None,
                 token_number=display_token, service_type="takeaway",
                 restaurant_id=restaurant_id,
             )

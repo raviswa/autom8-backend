@@ -507,6 +507,7 @@ async def notify_manager_order_alert(
     table_number,
     party_size,
     booking_time: str,
+    service_type: str = "dine_in",
 ) -> bool:
     """Send manager order alert via Node API — same WhatsApp path as walk-in tokens."""
     secret = _get_kds_secret()
@@ -525,6 +526,7 @@ async def notify_manager_order_alert(
         "table_number": table_number,
         "party_size": party_size,
         "booking_time": booking_time,
+        "service_type": service_type,
     }
     try:
         resp = await get_http().post(
@@ -541,6 +543,60 @@ async def notify_manager_order_alert(
     except Exception as e:
         logger.warning(f"[manager-order-alert] API error for {token_number}: {e}")
     return False
+
+
+async def assign_and_notify_captain_takeaway(
+    restaurant_id: str,
+    *,
+    token_number: str,
+    customer_name: str,
+    customer_phone: str,
+    order_text: str,
+    total: float,
+    booking_time: str,
+) -> dict[str, Any] | None:
+    """
+    Auto-assign least-loaded captain and WhatsApp-notify them.
+    Returns {captain_name, display_name, assigned, notified} or None on failure.
+    """
+    secret = _get_kds_secret()
+    if not secret:
+        logger.error("[captain-takeaway] AUTOM8_KDS_SECRET not set")
+        return None
+
+    url = f"{_AUTOM8_BACKEND_URL}/api/tokens/captain-takeaway-alert"
+    payload = {
+        "restaurant_id": restaurant_id,
+        "token_number": token_number,
+        "customer_name": customer_name,
+        "customer_phone": customer_phone,
+        "order_text": order_text,
+        "total": total,
+        "booking_time": booking_time,
+    }
+    try:
+        resp = await get_http().post(
+            url,
+            json=payload,
+            headers=_portal_auth_headers(),
+            timeout=aiohttp.ClientTimeout(total=8),
+        )
+        if resp.status in (200, 201):
+            data = await resp.json()
+            if data.get("assigned"):
+                logger.info(
+                    f"[captain-takeaway] ✅ {token_number} → {data.get('captain_name')}"
+                )
+            else:
+                logger.warning(
+                    f"[captain-takeaway] No captain on duty for {token_number}"
+                )
+            return data
+        body = (await resp.text())[:300]
+        logger.error(f"[captain-takeaway] API {resp.status}: {body}")
+    except Exception as e:
+        logger.warning(f"[captain-takeaway] API error for {token_number}: {e}")
+    return None
 
 
 async def sync_token_to_portal(
@@ -939,8 +995,30 @@ async def bridge_catalog_order_to_cart(
     """
     from tools.catalog_tools import fetch_menu_items
     from tools.cart_tools import enrich_cart_titles
+    from tools.restaurant_config import get_meta_catalog_id
 
-    await fetch_menu_items(restaurant_id)
+    expected_catalog_id = await get_meta_catalog_id(restaurant_id)
+    if not expected_catalog_id:
+        logger.error(
+            f"[CATALOG] refusing order for {restaurant_id} — meta_catalog_id not in DB"
+        )
+        return False
+
+    order_payload = webhook_message.get("order") or {}
+    order_catalog_id = str(order_payload.get("catalog_id") or "").strip()
+    if order_catalog_id and order_catalog_id != expected_catalog_id:
+        logger.error(
+            f"[CATALOG] catalog_id mismatch for {restaurant_id}: "
+            f"order={order_catalog_id} expected={expected_catalog_id}"
+        )
+        return False
+
+    menu_items = await fetch_menu_items(restaurant_id)
+    allowed_ids = {
+        str(i.get("id") or "").strip()
+        for i in menu_items
+        if i.get("id")
+    }
 
     parsed_order = parse_whatsapp_order(webhook_message)
     if parsed_order is None:
@@ -952,6 +1030,17 @@ async def bridge_catalog_order_to_cart(
 
     if not items:
         logger.warning("Catalog order has no items")
+        return False
+
+    unknown = [
+        item_line["id"]
+        for item_line in items
+        if item_line["id"] not in allowed_ids
+    ]
+    if unknown:
+        logger.error(
+            f"[CATALOG] order contains items not in restaurant menu: {unknown[:5]}"
+        )
         return False
 
     cart = {}

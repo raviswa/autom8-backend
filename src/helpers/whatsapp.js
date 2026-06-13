@@ -72,7 +72,10 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
   try {
     const catalogId = await getMetaCatalogId(restaurantId);
     if (!catalogId) {
-      console.warn(`[catalog-msg] meta_catalog_id not set for restaurant ${restaurantId} — skipping`);
+      console.error(
+        `[catalog-msg] meta_catalog_id not set for restaurant ${restaurantId} — ` +
+        'skipping (refusing env fallback; wrong catalog is a showstopper)',
+      );
       return;
     }
 
