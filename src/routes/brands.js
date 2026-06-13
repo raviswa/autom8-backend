@@ -28,6 +28,7 @@ const router         = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
 const { authenticateToken } = require('../middleware/auth');
 const { invalidatePhoneCache } = require('../helpers/resolveRestaurant');
+const { ensureRestaurantSubscription } = require('../helpers/subscriptionBilling');
 
 const BRAND_ROLES       = ['brand_owner', 'brand_manager'];
 const DEFAULT_FEATURES  = ['dine_in', 'takeaway', 'delivery', 'reserve_table'];
@@ -676,6 +677,11 @@ async function createOutlet(brandId, opts) {
 
   if (restErr) throw restErr;
   const restaurantId = restaurant.id;
+
+  await ensureRestaurantSubscription(supabaseAdmin, restaurantId, {
+    paidFeatures:    opts.paid_features,
+    enabledServices: opts.enabled_services,
+  });
 
   // Create restaurant_integrations row if phone_number_id provided
   let integrationId = null;

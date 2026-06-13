@@ -24,6 +24,13 @@ const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../helpers/
 const { applySlotAvailability, getCurrentSlotIST } = require('./catalog');
 const { notifyOrderReady }        = require('../helpers/whatsapp');
 const { queueFeedbackForTable }   = require('../helpers/feedback');
+const {
+  ORDER_SERVICES,
+  resolvePaidFeatures,
+  mergeEnabledFeatures,
+  validateEnabledFeatures,
+  enabledOrderServices,
+} = require('../helpers/subscriptionFeatures');
 
 // ── Menu items ───────────────────────────────────────────────────────────────
 
@@ -434,13 +441,44 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
       'timezone','dining_duration_minutes','payment_mode','kitchen_workflow',
       'kot_printer_ip','kot_printer_port','kot_printer_enabled',
       'takeaway_fulfillment_mode','fulfillment_sections',
-      'subscribed_features',
+      'subscribed_features', 'enabled_services',
     ];
     const updates = Object.fromEntries(
       Object.entries(req.body).filter(([k]) => ALLOWED.includes(k))
     );
     if (Object.keys(updates).length === 0)
       return res.status(400).json({ error: 'No valid fields provided' });
+
+    // ── Validate service toggles against paid plan ───────────────────────────
+    if (updates.subscribed_features !== undefined || updates.enabled_services !== undefined) {
+      const { data: sub } = await supabaseAdmin
+        .from('restaurant_subscriptions')
+        .select('features')
+        .eq('restaurant_id', req.restaurant_id)
+        .maybeSingle();
+
+      const paidFeatures = resolvePaidFeatures(sub);
+
+      let nextEnabled;
+      if (updates.enabled_services !== undefined) {
+        if (!Array.isArray(updates.enabled_services)) {
+          return res.status(400).json({ error: 'enabled_services must be an array' });
+        }
+        const invalidSvc = updates.enabled_services.filter(s => !ORDER_SERVICES.includes(s));
+        if (invalidSvc.length) {
+          return res.status(400).json({ error: `Invalid services: ${invalidSvc.join(', ')}` });
+        }
+        nextEnabled = mergeEnabledFeatures(updates.enabled_services, paidFeatures);
+        delete updates.enabled_services;
+      } else {
+        nextEnabled = updates.subscribed_features;
+      }
+
+      const check = validateEnabledFeatures(nextEnabled, paidFeatures);
+      if (!check.ok) return res.status(403).json({ error: check.error });
+
+      updates.subscribed_features = nextEnabled;
+    }
 
     updates.updated_at = new Date().toISOString();
     let { data, error } = await supabaseAdmin

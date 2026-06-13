@@ -11,8 +11,9 @@
 const express = require('express');
 const router  = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
+const { ensureRestaurantSubscription, DEFAULT_SERVICES } = require('../helpers/subscriptionBilling');
 
-const DEFAULT_FEATURES = ['dine_in', 'takeaway', 'delivery', 'reserve_table'];
+const DEFAULT_FEATURES = DEFAULT_SERVICES;
 
 // ── POST /api/onboarding/register ─────────────────────────────────────────────
 
@@ -121,6 +122,12 @@ async function registerStandalone(req, res, opts) {
       .single();
     if (restError) throw restError;
     restaurantId = restaurant.id;
+
+    // Paid plan (billing) — optional at signup; defaults to full trial access
+    await ensureRestaurantSubscription(supabaseAdmin, restaurantId, {
+      paidFeatures:    req.body.paid_features,
+      enabledServices: req.body.enabled_services,
+    });
 
     // 2. Create restaurant_integrations if phone_number_id provided
     if (phone_number_id) {
@@ -293,6 +300,11 @@ async function registerChain(req, res, opts) {
         .single();
       if (restErr) throw restErr;
       restaurantId = restaurant.id;
+
+      await ensureRestaurantSubscription(supabaseAdmin, restaurantId, {
+        paidFeatures:    first_outlet.paid_features,
+        enabledServices: first_outlet.enabled_services,
+      });
 
       // Integration row for first outlet
       if (first_outlet.phone_number_id) {

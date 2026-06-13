@@ -23,6 +23,7 @@ const {
   validateAndNormalizeWhatsApp,
   roleRequiresWhatsApp,
 } = require('../helpers/phoneFormat');
+const { sendPasswordResetEmail } = require('../helpers/passwordReset');
 
 // Roles a manager is allowed to manage (cannot touch own level or above)
 const MANAGER_CAN_MANAGE = ['kitchen_staff', 'captain', 'waiter', 'marketing'];
@@ -134,10 +135,9 @@ router.post('/', authenticateToken, getRestaurantId, async (req, res) => {
       throw empErr;
     }
 
-    // ── Send password reset link via Supabase (employee sets own password) ───
-    await supabaseAdmin.auth.admin
-      .generateLink({ type: 'recovery', email: email.trim().toLowerCase() })
-      .catch(e => console.warn('[staff/create] generateLink failed (non-fatal):', e.message));
+    // ── Send password reset email (employee sets own password) ───────────────
+    await sendPasswordResetEmail(email)
+      .catch(e => console.warn('[staff/create] password reset email failed (non-fatal):', e.message));
 
     // ── Send WhatsApp welcome message if number provided ─────────────────────
     if (whatsapp_number && process.env.WHATSAPP_ACCESS_TOKEN) {
@@ -255,6 +255,53 @@ router.put('/:id', authenticateToken, getRestaurantId, async (req, res) => {
     res.json({ success: true, employee: data });
   } catch (err) {
     console.error('[staff/update]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ── POST /api/staff/:id/send-password-reset ─────────────────────────────────
+// Owner/manager can trigger a password reset email for an active employee.
+
+router.post('/:id/send-password-reset', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const isOwner   = ['owner', 'brand_owner', 'brand_manager'].includes(req.user_role);
+    const isManager = req.user_role === 'manager';
+    if (!isOwner && !isManager) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    const { data: target } = await supabaseAdmin
+      .from('employees')
+      .select('id, full_name, email, role, is_active')
+      .eq('id', req.params.id)
+      .eq('restaurant_id', req.restaurant_id)
+      .single();
+
+    if (!target) return res.status(404).json({ error: 'Employee not found' });
+    if (!target.is_active) {
+      return res.status(400).json({ error: 'Cannot reset password for a terminated employee' });
+    }
+
+    if (isManager && !MANAGER_CAN_MANAGE.includes(target.role)) {
+      return res.status(403).json({ error: 'You cannot reset this employee\'s password' });
+    }
+
+    await sendPasswordResetEmail(target.email);
+
+    supabaseAdmin.from('audit_logs').insert({
+      user_id: req.user.sub,
+      restaurant_id: req.restaurant_id,
+      action: 'Password reset sent',
+      details: { employee_id: target.id, email: target.email },
+    }).catch(() => {});
+
+    res.json({
+      success: true,
+      message: `Password reset email sent to ${target.email}`,
+    });
+  } catch (err) {
+    console.error('[staff/send-password-reset]', err.message);
     res.status(500).json({ error: err.message });
   }
 });

@@ -11,6 +11,7 @@
 const express  = require('express');
 const router   = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
+const { sendPasswordResetEmail } = require('../helpers/passwordReset');
 
 const BRAND_ROLES = ['brand_owner', 'brand_manager'];
 
@@ -151,6 +152,39 @@ router.post('/login', async (req, res) => {
     });
   } catch (err) {
     res.status(401).json({ error: err.message });
+  }
+});
+
+// ── POST /api/auth/forgot-password ──────────────────────────────────────────
+// Sends a Supabase recovery email for any active employee account.
+// Always returns the same message (no email enumeration).
+
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email?.trim()) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    const normalized = email.trim().toLowerCase();
+
+    const { data: emp } = await supabaseAdmin
+      .from('employees')
+      .select('id, is_active')
+      .eq('email', normalized)
+      .maybeSingle();
+
+    if (emp?.is_active) {
+      await sendPasswordResetEmail(normalized);
+    }
+
+    res.json({
+      success: true,
+      message: 'If an account exists for that email, a password reset link has been sent.',
+    });
+  } catch (err) {
+    console.error('[auth/forgot-password]', err.message);
+    res.status(500).json({ error: 'Could not send reset email. Please try again later.' });
   }
 });
 
