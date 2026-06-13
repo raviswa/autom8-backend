@@ -316,4 +316,45 @@ router.post('/notify', async (req, res) => {
   }
 });
 
+// ── PATCH /api/kds/order-notes — append kitchen notes to an existing order ──
+
+router.patch('/order-notes', async (req, res) => {
+  if (!isValidKdsSecret(extractInternalSecret(req))) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const { restaurant_id, order_id, token_number, special_notes } = req.body;
+  if (!restaurant_id || !special_notes) {
+    return res.status(400).json({ error: 'restaurant_id and special_notes required' });
+  }
+
+  try {
+    if (order_id) {
+      await supabaseAdmin.from('orders')
+        .update({ special_instructions: special_notes })
+        .eq('id', order_id)
+        .eq('restaurant_id', restaurant_id);
+    }
+
+    let q = supabaseAdmin.from('kds_items')
+      .update({ special_instructions: special_notes })
+      .eq('restaurant_id', restaurant_id);
+    if (order_id) {
+      const { data: orderItems } = await supabaseAdmin.from('order_items')
+        .select('id').eq('order_id', order_id);
+      const ids = (orderItems ?? []).map(r => r.id);
+      if (ids.length) q = q.in('order_item_id', ids);
+    } else if (token_number) {
+      q = q.eq('token_number', token_number);
+    }
+    const { error } = await q;
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[kds-notes] update failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
