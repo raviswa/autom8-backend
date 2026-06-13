@@ -124,12 +124,14 @@ async def handle_booking_flow(
         _prev_ret    = session_state.get("is_returning_customer", True)
         _prev_visits = session_state.get("visit_count", 0)
         _prev_last   = session_state.get("last_order_summary", "")
+        _prev_svc    = session_state.get("service_type") or session_state.get("last_service_type")
         session_state.clear()
         if _prev_cid:    session_state["customer_id"]          = _prev_cid
         if _prev_cname:  session_state["customer_name"]        = _prev_cname
         session_state["is_returning_customer"] = _prev_ret
         if _prev_visits: session_state["visit_count"]          = _prev_visits
         if _prev_last:   session_state["last_order_summary"]   = _prev_last
+        if _prev_svc:    session_state["last_service_type"]    = _prev_svc
         session_state["booking_step"] = "ask_service"
         current_step = "ask_service"
 
@@ -179,7 +181,7 @@ async def handle_booking_flow(
             raw_greeting = await safe_build_greeting(customer_id, restaurant_id)
             session_state["is_returning_customer"] = True
             ret_greeting = build_smart_greeting(customer_name, raw_greeting, session_state)
-            await send_service_menu(customer_phone, restaurant_id, ret_greeting)
+            await send_service_menu(customer_phone, restaurant_id, ret_greeting, session_state)
             session_state["booking_step"] = "awaiting_service_selection"
             return {"status": "awaiting_service_selection"}
         summary = session_state.get("order_confirmed_summary",
@@ -201,7 +203,7 @@ async def handle_booking_flow(
         if not session_state.get("_menu_sent"):
             raw_greeting = await safe_build_greeting(customer_id, restaurant_id)
             greeting     = build_smart_greeting(customer_name, raw_greeting, session_state)
-            await send_service_menu(customer_phone, restaurant_id, greeting)
+            await send_service_menu(customer_phone, restaurant_id, greeting, session_state)
             session_state["_menu_sent"]   = True
             session_state["booking_step"] = "awaiting_service_selection"
         return {"status": "menu_sent"}
@@ -236,17 +238,14 @@ async def handle_booking_flow(
         session_state["manager_phone"] = manager_phone
 
         if service_type == "dine_in":
+            session_state["last_service_type"] = "dine_in"
             await send_whatsapp_message(customer_phone, "How many people are dining today?", restaurant_id)
             session_state["booking_step"] = "awaiting_party_size"
             session_state["table_number"] = table_number
         elif service_type == "takeaway":
-            await send_whatsapp_message(
-                customer_phone,
-                "Great! You've selected Takeaway 🛍️\n\nBrowse today's menu and add items to your basket 🛒",
-                restaurant_id,
-            )
             clear_cart(session_state)
             session_state["booking_step"] = "awaiting_order"
+            session_state["last_service_type"] = "takeaway"
             await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
         elif service_type == "delivery":
             from tools.whatsapp_tools import send_location_request
@@ -452,7 +451,7 @@ async def handle_booking_flow(
         if raw_greeting and raw_greeting.strip().lower() not in _GENERIC_GREETINGS
         else f"Welcome, {customer_name}! 😊"
     )
-    await send_service_menu(customer_phone, restaurant_id, greeting)
+    await send_service_menu(customer_phone, restaurant_id, greeting, session_state)
     session_state["booking_step"] = "awaiting_service_selection"
     return {"status": "menu_sent"}
 

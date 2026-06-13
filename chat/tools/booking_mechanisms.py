@@ -909,7 +909,7 @@ async def send_unified_booking_menu(
     session_state["restaurant_id"] = restaurant_id
     from tools.catalog_tools import invalidate_menu_cache, fetch_menu_items
     invalidate_menu_cache(restaurant_id)
-    await fetch_menu_items(restaurant_id)
+    items = await fetch_menu_items(restaurant_id)
 
     # Dine-in: never send menu until a table is assigned (portal or chat poll).
     if session_state.get("service_type") == "dine_in":
@@ -938,6 +938,31 @@ async def send_unified_booking_menu(
     # ── Attempt 3: Interactive cart ───────────────────────────────────────────
     if await send_cart_booking(customer_phone, restaurant_id, session_state):
         return "cart"
+
+    # ── Attempt 3b: Menu empty (e.g. kitchen closed / slot gap) ───────────────
+    available = [i for i in items if i.get("is_available", True)] if items else []
+    if not available:
+        logger.error(
+            f"[BOOKING] {customer_phone} → no available menu items for {restaurant_id}"
+        )
+        try:
+            svc = session_state.get("service_type")
+            svc_line = (
+                "🛍️ Takeaway ordering is paused — the kitchen menu is closed for this hour.\n"
+                if svc == "takeaway"
+                else "🍽️ The kitchen menu is closed for this hour.\n"
+            )
+            await send_whatsapp_message(
+                customer_phone,
+                (
+                    f"{svc_line}"
+                    "Please try again during service hours, or ask a team member at the counter. 🙏"
+                ),
+                restaurant_id,
+            )
+        except Exception as e:
+            logger.warning(f"[BOOKING] closed-hours message failed: {e}")
+        return "none"
 
     # ── Attempt 4: Plain-text menu ────────────────────────────────────────────
     if await send_cart_fallback_text(customer_phone, restaurant_id, session_state):
@@ -1013,6 +1038,8 @@ async def bridge_catalog_order_to_cart(
         )
         return False
 
+    from tools.catalog_tools import invalidate_menu_cache
+
     menu_items = await fetch_menu_items(restaurant_id)
     allowed_ids = {
         str(i.get("id") or "").strip()
@@ -1032,16 +1059,26 @@ async def bridge_catalog_order_to_cart(
         logger.warning("Catalog order has no items")
         return False
 
-    unknown = [
-        item_line["id"]
-        for item_line in items
-        if item_line["id"] not in allowed_ids
-    ]
-    if unknown:
-        logger.error(
-            f"[CATALOG] order contains items not in restaurant menu: {unknown[:5]}"
+    # When slot rotation zeros is_available (e.g. dinner ended at 23:00 IST), the
+    # internal menu API returns 0 items but Meta's WABA shop still sells them.
+    # If catalog_id already matched above, trust the order payload in that case.
+    if allowed_ids:
+        unknown = [
+            item_line["id"]
+            for item_line in items
+            if item_line["id"] not in allowed_ids
+        ]
+        if unknown:
+            logger.error(
+                f"[CATALOG] order contains items not in restaurant menu: {unknown[:5]}"
+            )
+            return False
+    else:
+        logger.warning(
+            f"[CATALOG] menu cache empty for {restaurant_id} — "
+            f"accepting {len(items)} catalog items (catalog_id verified)"
         )
-        return False
+        invalidate_menu_cache(restaurant_id)
 
     cart = {}
     for item_line in items:

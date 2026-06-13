@@ -342,6 +342,12 @@ async def _process_meta_payload(payload: dict):
                 bridge_success = await bridge_catalog_order_to_cart(
                     message_obj, session_state, restaurant_id
                 )
+                if not bridge_success:
+                    from tools.catalog_tools import invalidate_menu_cache
+                    invalidate_menu_cache(restaurant_id)
+                    bridge_success = await bridge_catalog_order_to_cart(
+                        message_obj, session_state, restaurant_id
+                    )
                 if bridge_success:
                     logger.info(f"[CATALOG] Successfully bridged order to cart for {phone}")
                     message_body = "CART:CONFIRM"
@@ -350,7 +356,7 @@ async def _process_meta_payload(payload: dict):
                     await send_whatsapp_message(
                         phone,
                         "We had trouble processing your catalog order. "
-                        "Please try again or use our menu. 🙏",
+                        "Please try again, or type *MENU* to order from our list. 🙏",
                         restaurant_id,
                     )
                     return

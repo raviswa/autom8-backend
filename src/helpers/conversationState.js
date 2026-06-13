@@ -64,12 +64,17 @@ async function syncConversationForTokenApproval({
     const context = {
       ...prev,
       booking_step:    'awaiting_order',
-      service_type:    prev.service_type ?? 'dine_in',
+      service_type:    'dine_in',
+      last_service_type: 'dine_in',
       display_token:   tokenId,
       token_number:    tokenId,
       party_size:      partySize ?? prev.party_size,
       table_number:    Number.isFinite(primaryTable) ? primaryTable : prev.table_number ?? null,
       assigned_tables: tableNumbers,
+      cart:            {},
+      assigned_captain: null,
+      order_from_cart:  false,
+      booking_mechanism_order_source: null,
       // Portal sends catalog on assign — avoid duplicate from chat poll path
       _catalog_sent_after_party: true,
     };

@@ -33,7 +33,7 @@ const SLOTS = [
   { startHour:  6, endHour: 11, dbValue: 'morning_tiffin' },
   { startHour: 11, endHour: 15, dbValue: 'lunch'          },
   { startHour: 15, endHour: 19, dbValue: 'snacks'         },
-  { startHour: 19, endHour: 23, dbValue: 'dinner'         },
+  { startHour: 19, endHour: 24, dbValue: 'dinner'         },
 ];
 
 function getCurrentSlotIST() {

@@ -152,6 +152,7 @@ async def handle_takeaway_flow(
 
             if captain_result and captain_result.get("captain_name"):
                 session_state["assigned_captain"] = captain_result["captain_name"]
+            session_state["last_service_type"] = "takeaway"
 
             session_state["order_confirmed_summary"] = (
                 f"Takeaway Token *{display_token}* — {order_text_display} (₹{total:.0f})"

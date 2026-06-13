@@ -383,6 +383,13 @@ async def send_category_list(
         i.get("category", "General") for i in available
     ))
 
+    if not categories:
+        logger.error(
+            f"[cart] No menu categories for {customer_phone} (restaurant={rid}) — "
+            "kitchen may be closed or menu cache empty; skipping empty list"
+        )
+        return False
+
     rows = []
     for cat in categories[:10]:
         count = sum(1 for i in available if i.get("category", "General") == cat)

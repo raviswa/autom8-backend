@@ -329,6 +329,7 @@ async def do_reset(
         _prev_ret    = session_state.get("is_returning_customer", False)
         _prev_visits = session_state.get("visit_count", 0)
         _prev_last   = session_state.get("last_order_summary", "")
+        _prev_svc    = session_state.get("service_type") or session_state.get("last_service_type")
         session_state.clear()
         session_state["next_state"]    = "identity"
         session_state["identity_step"] = "initial"
@@ -337,6 +338,8 @@ async def do_reset(
             session_state["visit_count"]           = _prev_visits
         if _prev_last:
             session_state["last_order_summary"] = _prev_last
+        if _prev_svc:
+            session_state["last_service_type"] = _prev_svc
         return
 
     _cid     = session_state.get("customer_id")
@@ -345,6 +348,7 @@ async def do_reset(
     _last    = session_state.get("last_order_summary")
     _ret     = session_state.get("is_returning_customer")
     _visits  = session_state.get("visit_count", 0)
+    _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
     session_state.clear()
     if _cid:    session_state["customer_id"]           = _cid
     if _cname:  session_state["customer_name"]         = _cname
@@ -352,27 +356,49 @@ async def do_reset(
     if _last:   session_state["last_order_summary"]    = _last
     if _ret:    session_state["is_returning_customer"] = _ret
     if _visits: session_state["visit_count"]           = _visits
+    if _prev_svc: session_state["last_service_type"]   = _prev_svc
     session_state["booking_step"]          = "awaiting_service_selection"
     session_state["is_returning_customer"] = True
 
     from agents.customer.conversation_helpers import safe_build_greeting
     raw_greeting   = await safe_build_greeting(customer_id, restaurant_id) if customer_id else ""
     reset_greeting = build_smart_greeting(customer_name, raw_greeting, session_state)
-    await send_service_menu(customer_phone, restaurant_id, reset_greeting)
+    await send_service_menu(customer_phone, restaurant_id, reset_greeting, session_state)
 
 
 # ─────────────────────────────────────────────
 # G. SERVICE MENU SENDER
 # ─────────────────────────────────────────────
 
-async def send_service_menu(customer_phone: str, restaurant_id: str, greeting: str) -> None:
+async def send_service_menu(
+    customer_phone: str,
+    restaurant_id: str,
+    greeting: str,
+    session_state: Dict[str, Any] | None = None,
+) -> None:
     rows = await build_service_menu_rows(restaurant_id)
-    _header_text = greeting[:57] + "..." if len(greeting) > 60 else greeting
+    state = session_state or {}
+    first = _first_name(state.get("customer_name", ""))
+    header = f"Welcome back, {first}!" if first else "Welcome!"
+
+    body_lines = []
+    if greeting and greeting.strip():
+        body_lines.append(greeting.strip())
+    last_svc = state.get("last_service_type")
+    if last_svc == "takeaway":
+        body_lines.append(
+            "🛍️ *Takeaway* is ready — order now and pick up at the counter."
+        )
+    elif last_svc == "dine_in":
+        body_lines.append("🍽️ *Dine-in* is available when you're ready for a table.")
+    body_lines.append("What would you like to do today?")
+    body_text = "\n\n".join(body_lines)
+
     ok = await _send_interactive(customer_phone, {
         "interactive": {
             "type": "list",
-            "header": {"type": "text", "text": _header_text},
-            "body":   {"text": "What would you like to do today?"},
+            "header": {"type": "text", "text": header[:60]},
+            "body":   {"text": body_text[:1024]},
             "footer": {"text": "Tap below to choose"},
             "action": {
                 "button": "View options",
@@ -384,7 +410,7 @@ async def send_service_menu(customer_phone: str, restaurant_id: str, greeting: s
         lines = "\n".join(f"{r['id']}. {r['title']}" for r in rows)
         await send_whatsapp_message(
             customer_phone,
-            f"{greeting}\n\nWhat would you like to do today?\n\n{lines}\n\nReply with a number.",
+            f"{body_text}\n\n{lines}\n\nReply with a number.",
             restaurant_id,
         )
 
@@ -506,7 +532,8 @@ def build_smart_greeting(
         if last_order:
             suffix_idx = idx % len(_LAST_ORDER_SUFFIXES)
             suffix = _LAST_ORDER_SUFFIXES[suffix_idx].format(last_order=last_order)
-            if len(greeting) + len(suffix) <= 300:
+            # Keep order memory in the greeting body (service menu body), not a truncated header.
+            if len(greeting) + len(suffix) <= 280:
                 greeting += suffix
     else:
         variants = _FIRST_TIME_VARIANTS.get(tod, _FIRST_TIME_VARIANTS["evening"])
