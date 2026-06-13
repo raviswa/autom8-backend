@@ -124,6 +124,25 @@ function startSpecialNotesTimeoutMonitor() {
           const customerPhone = session.customer_phone;
           const customerName  = ctx.customer_name || ctx.name || 'Guest';
           const tokenNumber   = ctx.token_number  || ctx.display_token || null;
+          const kitchenAlreadySent = !!(ctx._kitchen_sent || ctx._customer_finalize_sent);
+
+          if (kitchenAlreadySent) {
+            // KDS + manager order alert already fired at confirm — just close the session.
+            await supabaseAdmin.from('conversation_states').update({
+              current_state: 'visit_complete',
+              context: {
+                ...ctx,
+                booking_step: 'visit_complete',
+                special_notes: null,
+                special_notes_asked_at: null,
+                _customer_finalize_sent: true,
+                auto_confirmed_at: new Date().toISOString(),
+              },
+              updated_at: new Date().toISOString(),
+            }).eq('id', session.id);
+            console.log(`[notes-timeout] Session ${session.id} closed (kitchen already sent)`);
+            continue;
+          }
 
           // Push order to KDS if Python chat notify failed (e.g. secret mismatch).
           const kdsOk = await notifyKdsFromSessionContext(session);
@@ -163,11 +182,15 @@ function startSpecialNotesTimeoutMonitor() {
 
           const managerPhone = await getManagerPhone(session.restaurant_id);
           if (managerPhone) {
-            sendWhatsAppMessage(
-              managerPhone,
-              `⏰ *Auto-Confirmed (Notes Timeout)*\nCustomer: ${customerName}\nToken: ${tokenNumber || '—'}\nBooking: ${bookingId || '—'}`,
-              session.restaurant_id,
-            ).catch(() => {});
+            try {
+              await sendWhatsAppMessage(
+                managerPhone,
+                `⏰ *Auto-Confirmed (Notes Timeout)*\nCustomer: ${customerName}\nToken: ${tokenNumber || '—'}\nBooking: ${bookingId || '—'}`,
+                session.restaurant_id,
+              );
+            } catch (waErr) {
+              console.warn(`[notes-timeout] Manager notify failed: ${waErr.message}`);
+            }
           }
 
           console.log(`[notes-timeout] ✅ Auto-confirmed session ${session.id}`);

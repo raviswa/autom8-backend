@@ -332,12 +332,21 @@ router.post('/notify', async (req, res) => {
       }
     }
 
-    // ── Step 8: Audit log ─────────────────────────────────────────────────────
-    supabaseAdmin.from('audit_logs').insert({
-      restaurant_id,
-      action:  'KDS items created via booking agent',
-      details: { order_id: orderRow.id, order_number: orderRow.order_number, token_number, service_type, kds_items: kdsItemsCreated },
-    }).catch(() => {});
+    // ── Step 8: Audit log (non-blocking) ────────────────────────────────────
+    void (async () => {
+      try {
+        const { error: auditErr } = await supabaseAdmin.from('audit_logs').insert({
+          restaurant_id,
+          action:  'KDS items created via booking agent',
+          details: { order_id: orderRow.id, order_number: orderRow.order_number, token_number, service_type, kds_items: kdsItemsCreated },
+        });
+        if (auditErr) {
+          console.warn(`[kds-notify] audit log failed (non-fatal): ${auditErr.message}`);
+        }
+      } catch (auditEx) {
+        console.warn(`[kds-notify] audit log failed (non-fatal): ${auditEx.message}`);
+      }
+    })();
 
     console.log(
       `[kds-notify] ✅ ${kdsItemsCreated} KDS item(s)` +

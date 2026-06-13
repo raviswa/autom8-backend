@@ -90,15 +90,61 @@ def _parse_item_kitchen_hints(description: str) -> list[str]:
     return [h.strip() for h in match.group(1).split(",") if h.strip()]
 
 
+_MAIN_MEAL_RE = re.compile(
+    r"\b(biryani|biriyani|thali|platter|combo|meal|pav|burger|pizza|noodles)\b",
+    re.I,
+)
+_RICE_DISH_RE = re.compile(r"\b\w+\s+rice\b", re.I)
+
+
+def _looks_like_main_meal(name_lower: str) -> bool:
+    """Full dishes/combos — not optional add-on sides."""
+    if "+" in name_lower:
+        return True
+    if _MAIN_MEAL_RE.search(name_lower):
+        return True
+    if _RICE_DISH_RE.search(name_lower):
+        return True
+    if re.search(r"\bparotta\b", name_lower) and re.search(r"\b(kurma|korma|salna)\b", name_lower):
+        return True
+    return False
+
+
+def _catalog_side_suggestion(side_name: str, names_lower: str) -> str | None:
+    """Only suggest a catalog side when it pairs with something in the order."""
+    s = side_name.lower()
+    if any(k in s for k in ("sambar", "chutney", "rasam")):
+        if any(k in names_lower for k in ("idli", "dosa", "uttapam", "vada", "medu")):
+            return f"extra {side_name}"
+        return None
+    if "raita" in s:
+        if any(k in names_lower for k in ("biryani", "biriyani", "pulao")):
+            return f"extra {side_name}"
+        return None
+    if any(k in s for k in ("kurma", "korma", "salna", "gravy")):
+        if any(k in names_lower for k in ("parotta", "kothu", "chapati", "roti", "naan")):
+            return f"extra {side_name}"
+        return None
+    if any(k in s for k in ("papad", "pickle")):
+        if any(k in names_lower for k in ("biryani", "biriyani", "rice", "thali", "meal")):
+            return f"extra {side_name}"
+        return None
+    return None
+
+
 def _is_catalog_side(item: dict[str, Any]) -> bool:
     category = (item.get("category") or "").strip()
     name = (item.get("title") or "").strip()
+    name_lower = name.lower()
     description = (item.get("description") or "").strip().lower()
-    if _SIDE_CATEGORY_RE.search(category):
-        return True
+
+    if _looks_like_main_meal(name_lower):
+        return False
     if description.startswith("[side]") or "type:side" in description[:48]:
         return True
-    if name and _ACCOMPANIMENT_NAME_RE.search(name.lower()) and len(name.split()) <= 4:
+    if _SIDE_CATEGORY_RE.search(category):
+        return len(name.split()) <= 2
+    if name and _ACCOMPANIMENT_NAME_RE.search(name_lower) and len(name.split()) <= 2:
         return True
     return False
 
@@ -199,9 +245,12 @@ async def build_notes_hint(
                 side_name = (item.get("title") or "").strip()
                 if not side_name or side_name.lower() in ordered_titles:
                     continue
+                suggestion = _catalog_side_suggestion(side_name, names_lower)
+                if not suggestion:
+                    continue
                 catalog_side_names.append(side_name)
-                examples.append(f"extra {side_name}")
+                examples.append(suggestion)
 
     skip_side_phrases = bool(catalog_side_names)
     examples.extend(_keyword_supplements(names_lower, skip_side_phrases=skip_side_phrases))
-    return _format_examples(_dedupe_limit(examples))
+    return _format_examples(_dedupe_limit(examples, limit=3))

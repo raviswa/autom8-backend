@@ -327,7 +327,7 @@ async def _on_special_notes_timeout(
             return
         if session_state.get("booking_step") != "awaiting_special_notes":
             return
-        if session_state.get("_kitchen_sent"):
+        if session_state.get("_customer_finalize_sent"):
             return
 
         customer_name = session_state.get("customer_name", "Guest")
