@@ -41,6 +41,7 @@ from tools.booking_mechanisms import (
     KDS_SECRET,
     get_http,
     notify_kds,
+    update_kds_order_notes,
     sync_token_to_portal,
     sync_token_to_portal_large_party,
     lookup_table_assignment,
@@ -127,6 +128,31 @@ async def _finalize_special_notes_and_kitchen(
 ) -> None:
     """Send order to KDS/KOT + receipt once notes are collected or timed out."""
     if session_state.get("_kitchen_sent"):
+        token = session_state.get("display_token", session_state.get("token_number", ""))
+        if special_notes:
+            await update_kds_order_notes(
+                restaurant_id,
+                session_state.get("_kds_order_id"),
+                token,
+                special_notes,
+            )
+        if notify_customer:
+            if special_notes:
+                await send_whatsapp_message(
+                    customer_phone,
+                    "✅ Got it! Your notes have been saved.\n\n"
+                    "Sit back and enjoy — your order is being prepared! 🍽️",
+                    restaurant_id,
+                )
+            else:
+                await send_whatsapp_message(
+                    customer_phone,
+                    "No problem! Your order is being prepared. Enjoy your meal! 🍽️",
+                    restaurant_id,
+                )
+        session_state["special_notes"] = special_notes
+        session_state["booking_step"] = "visit_complete"
+        session_state.pop("_pending_kitchen", None)
         return
 
     pending = session_state.get("_pending_kitchen") or {}
@@ -144,7 +170,7 @@ async def _finalize_special_notes_and_kitchen(
     session_state["_kitchen_sent"] = True
     session_state["special_notes"] = special_notes
 
-    await _fire_kitchen_and_receipt(
+    order_id = await _fire_kitchen_and_receipt(
         restaurant_id=restaurant_id,
         customer_name=customer_name,
         customer_phone=customer_phone,
@@ -155,6 +181,8 @@ async def _finalize_special_notes_and_kitchen(
         table_number=table_number,
         special_notes=special_notes,
     )
+    if order_id:
+        session_state["_kds_order_id"] = order_id
 
     if notify_customer:
         if special_notes:
@@ -228,9 +256,9 @@ async def _fire_kitchen_and_receipt(
     token: str,
     table_number,
     special_notes: str | None = None,
-) -> None:
-    """Send order to KDS/KOT; receipt image follows in background."""
-    await notify_kds(
+) -> str | None:
+    """Send order to KDS/KOT; receipt image follows in background. Returns order_id."""
+    order_id = await notify_kds(
         customer_name=customer_name,
         customer_phone=customer_phone,
         order_text=order_text,
@@ -278,6 +306,8 @@ async def _fire_kitchen_and_receipt(
     except Exception as _re:
         import traceback as _tb
         logger.warning(f"[receipt] Generation failed (non-fatal): {_re}\n{_tb.format_exc()}")
+
+    return order_id
 
 
 async def _confirm_dine_in_order(
@@ -359,7 +389,23 @@ async def _confirm_dine_in_order(
         "order_text": order_text,
         "cart": dict(cart_snapshot),
     }
-    session_state.pop("_kitchen_sent", None)
+
+    # Send to KDS immediately — kitchen should see the order without waiting for notes.
+    kds_order_id = await _fire_kitchen_and_receipt(
+        restaurant_id=restaurant_id,
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        order_text=order_text,
+        cart_snapshot=cart_snapshot,
+        session_state=session_state,
+        token=token,
+        table_number=table_num,
+        special_notes=None,
+    )
+    session_state["_kitchen_sent"] = True
+    if kds_order_id:
+        session_state["_kds_order_id"] = kds_order_id
+
     start_special_notes_timer(
         customer_phone,
         restaurant_id,

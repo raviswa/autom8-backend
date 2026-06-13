@@ -610,7 +610,8 @@ async def notify_kds(
     table_number: str | int | None, token_number: str, service_type: str,
     restaurant_id: str,
     special_notes: str | None = None,
-) -> None:
+) -> str | None:
+    """POST order to Node KDS API. Returns order_id on success, else None."""
     try:
         items = []
         for item_id, line in cart.items():
@@ -622,6 +623,10 @@ async def notify_kds(
             items = [{"retailer_id": "manual", "name": order_text, "qty": 1, "unit_price": 0}]
 
         secret = _get_kds_secret()
+        if not secret:
+            logger.error("[kds-notify] AUTOM8_KDS_SECRET not set — cannot reach KDS API")
+            return None
+
         payload = {
             "restaurant_id": restaurant_id,
             "customer_name": customer_name, "customer_phone": customer_phone,
@@ -630,22 +635,71 @@ async def notify_kds(
             "service_type": service_type, "items": items,
             "special_notes": special_notes, "secret": secret,
         }
-        resp = await get_http().post(
-            AUTOM8_KDS_URL,
-            json=payload,
-            headers=_portal_auth_headers(),
-            timeout=aiohttp.ClientTimeout(total=8),
-        )
-        if resp.status in (200, 201):
-            data = await resp.json()
-            logger.info(
-                f"[kds-notify] ✅ {data.get('kds_items_created', '?')} item(s) "
-                f"for token {token_number} | table {table_number}"
-            )
-        else:
-            logger.warning(f"[kds-notify] Non-2xx {resp.status}: {(await resp.text())[:200]}")
+        headers = _portal_auth_headers()
+
+        for attempt in range(3):
+            try:
+                resp = await get_http().post(
+                    AUTOM8_KDS_URL,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=8),
+                )
+                if resp.status in (200, 201):
+                    data = await resp.json()
+                    logger.info(
+                        f"[kds-notify] ✅ {data.get('kds_items_created', '?')} item(s) "
+                        f"for token {token_number} | table {table_number} | "
+                        f"order {data.get('order_id', '?')}"
+                    )
+                    return data.get("order_id")
+                body = await resp.text()
+                logger.error(
+                    f"[kds-notify] attempt {attempt + 1}/3 failed {resp.status}: {body[:300]}"
+                )
+            except Exception as e:
+                logger.error(f"[kds-notify] attempt {attempt + 1}/3 error: {e}")
+            if attempt < 2:
+                await asyncio.sleep(0.75 * (attempt + 1))
     except Exception as e:
         logger.warning(f"[kds-notify] Failed (non-fatal): {e}")
+    return None
+
+
+async def update_kds_order_notes(
+    restaurant_id: str,
+    order_id: str | None,
+    token_number: str,
+    special_notes: str,
+) -> None:
+    """Patch kitchen notes onto an order already on KDS."""
+    if not special_notes:
+        return
+    secret = _get_kds_secret()
+    if not secret:
+        return
+    url = f"{_AUTOM8_BACKEND_URL}/api/kds/order-notes"
+    try:
+        resp = await get_http().patch(
+            url,
+            json={
+                "restaurant_id": restaurant_id,
+                "order_id": order_id,
+                "token_number": token_number,
+                "special_notes": special_notes,
+                "secret": secret,
+            },
+            headers=_portal_auth_headers(),
+            timeout=aiohttp.ClientTimeout(total=5),
+        )
+        if resp.status == 200:
+            logger.info(f"[kds-notify] ✅ notes updated for token {token_number}")
+        else:
+            logger.warning(
+                f"[kds-notify] notes update failed {resp.status}: {(await resp.text())[:200]}"
+            )
+    except Exception as e:
+        logger.warning(f"[kds-notify] notes update error (non-fatal): {e}")
 
 
 # ─────────────────────────────────────────────

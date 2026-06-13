@@ -563,8 +563,8 @@ async def ensure_special_notes_kitchen_delivery(
     on_timeout,
 ) -> None:
     """
-    Resume or complete the kitchen handoff after chat-service restarts.
-    Orders stay invisible on KDS until notify_kds runs (after notes or 2-min wait).
+    Resume kitchen handoff after chat-service restarts.
+    KDS is sent at order confirm; this only recovers missed customer-note timeouts.
     """
     if session_state.get("booking_step") != "awaiting_special_notes":
         return
