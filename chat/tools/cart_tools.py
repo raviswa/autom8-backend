@@ -350,6 +350,7 @@ async def _qty_error_message(customer_phone: str, item_title: str) -> None:
 async def send_category_list(
     customer_phone: str,
     session_state: dict[str, Any],
+    restaurant_id: str | None = None,
 ) -> bool:
     """
     Send a WhatsApp list message showing available menu categories.
@@ -357,8 +358,13 @@ async def send_category_list(
 
     Returns True on API success.
     """
-    restaurant_id = session_state.get("restaurant_id")
-    await fetch_menu_items(restaurant_id)
+    rid = restaurant_id or session_state.get("restaurant_id")
+    if rid:
+        session_state["restaurant_id"] = rid
+    await fetch_menu_items(rid)
+
+    from tools.catalog_tools import _get_restaurant_label
+    menu_label = await _get_restaurant_label(rid)
 
     available = [i for i in MENU_ITEMS if i.get("is_available", True)]
     categories = list(dict.fromkeys(
@@ -377,7 +383,7 @@ async def send_category_list(
     payload = {
         "interactive": {
             "type": "list",
-            "header": {"type": "text", "text": "🍽️ Munafe Menu"},
+            "header": {"type": "text", "text": f"🍽️ {menu_label} Menu"},
             "body": {
                 "text": (
                     "What would you like to eat? 🍽️\n\n"

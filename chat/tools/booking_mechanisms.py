@@ -688,7 +688,7 @@ async def send_cart_booking(
     Returns True if successful, False if both mechanisms fail.
     """
     try:
-        success = await send_category_list(customer_phone, session_state)
+        success = await send_category_list(customer_phone, session_state, restaurant_id)
         if success:
             session_state["booking_mechanism"] = "cart"
             logger.info(f"[BOOKING] {customer_phone} → FALLBACK: Cart (interactive list) sent")
@@ -707,6 +707,8 @@ async def send_cart_fallback_text(
 ) -> bool:
     """Last-resort plain-text menu when both catalog and interactive fail."""
     try:
+        from tools.catalog_tools import fetch_menu_items
+        await fetch_menu_items(restaurant_id)
         menu_text = plain_text_menu()
         if menu_text and menu_text.strip():
             await send_whatsapp_message(customer_phone, menu_text, restaurant_id)
@@ -745,6 +747,11 @@ async def send_unified_booking_menu(
     Sets session_state["booking_mechanism"] accordingly.
     """
     logger.info(f"[BOOKING] send_unified_booking_menu called for {customer_phone}")
+
+    session_state["restaurant_id"] = restaurant_id
+    from tools.catalog_tools import invalidate_menu_cache, fetch_menu_items
+    invalidate_menu_cache(restaurant_id)
+    await fetch_menu_items(restaurant_id)
 
     # Dine-in: never send menu until a table is assigned (portal or chat poll).
     if session_state.get("service_type") == "dine_in":

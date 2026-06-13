@@ -80,8 +80,16 @@ _AUTOM8_BACKEND_URL   = os.getenv("AUTOM8_BACKEND_URL", "https://api.autom8.work
 _AUTOM8_KDS_SECRET    = os.getenv("AUTOM8_KDS_SECRET", "")
 _PORTAL_RESTAURANT_ID = os.getenv("PORTAL_RESTAURANT_ID", "46fb9b9e-431a-43c9-9edb-d316b0fef216")
 
-_MENU_CACHE: dict = {"items": [], "fetched_at": 0.0}
+_MENU_CACHE: dict[str, dict] = {}  # restaurant_id -> {items, fetched_at}
 _MENU_CACHE_TTL = 60  # seconds — refresh every minute so availability changes propagate
+
+
+def invalidate_menu_cache(restaurant_id: str | None = None) -> None:
+    """Drop cached menu so the next fetch loads live data from the API."""
+    if restaurant_id:
+        _MENU_CACHE.pop(restaurant_id, None)
+    else:
+        _MENU_CACHE.clear()
 
 
 # ── Live menu fetch ────────────────────────────────────────────────────────────
@@ -98,10 +106,13 @@ async def _fetch_menu_items_from_backend(restaurant_id: str | None = None) -> li
        "category": category, "description": ..., "image_link": ...}
     """
     now = time.monotonic()
-    if _MENU_CACHE["items"] and (now - _MENU_CACHE["fetched_at"]) < _MENU_CACHE_TTL:
-        return _MENU_CACHE["items"]
-
     rid = restaurant_id or _PORTAL_RESTAURANT_ID
+    bucket = _MENU_CACHE.get(rid, {})
+    if bucket.get("items") and (now - bucket.get("fetched_at", 0.0)) < _MENU_CACHE_TTL:
+        MENU_ITEMS.clear()
+        MENU_ITEMS.extend(bucket["items"])
+        return bucket["items"]
+
     url = f"{_AUTOM8_BACKEND_URL}/api/internal/menu-items"
     try:
         async with aiohttp.ClientSession() as http:
@@ -127,12 +138,12 @@ async def _fetch_menu_items_from_backend(restaurant_id: str | None = None) -> li
                         "image_link":   item.get("image_url", ""),
                         "is_available": bool(item.get("is_available", True)),
                     })
-                _MENU_CACHE["items"]      = mapped
-                _MENU_CACHE["fetched_at"] = now
-                # Keep the module-level MENU_ITEMS alias in sync
+                _MENU_CACHE[rid] = {"items": mapped, "fetched_at": now}
                 MENU_ITEMS.clear()
                 MENU_ITEMS.extend(mapped)
-                logger.info(f"[menu-cache] Refreshed — {len(mapped)} items loaded from backend")
+                logger.info(
+                    f"[menu-cache] Refreshed — {len(mapped)} items for {rid}"
+                )
                 return mapped
             else:
                 text = await resp.text()
@@ -143,7 +154,7 @@ async def _fetch_menu_items_from_backend(restaurant_id: str | None = None) -> li
     except Exception as e:
         logger.warning(f"[menu-cache] Fetch failed (non-fatal): {e} — using stale cache")
 
-    return _MENU_CACHE["items"]  # stale or empty — never crashes the bot
+    return _MENU_CACHE.get(rid, {}).get("items") or []  # stale or empty — never crashes
 
 
 async def fetch_menu_items(restaurant_id: str | None = None) -> list[dict]:
@@ -159,7 +170,7 @@ async def fetch_menu_items(restaurant_id: str | None = None) -> list[dict]:
 # imports working. This is the same list object that _fetch_menu_items_from_backend()
 # mutates in-place via .clear() + .extend(), so importers always see fresh data
 # after the next cache refresh without needing to re-import.
-MENU_ITEMS: list[dict] = _MENU_CACHE["items"]
+MENU_ITEMS: list[dict] = []
 
 
 def items_for_category(category: str | None = None) -> list[dict]:
@@ -377,7 +388,7 @@ async def send_whatsapp_catalog_message(
             "type": "product_list",
             "header": {
                 "type": "text",
-                "text": "🍽️ Munafe Menu",
+                "text": f"🍽️ {restaurant_label} Menu",
             },
             "body": {
                 "text": (

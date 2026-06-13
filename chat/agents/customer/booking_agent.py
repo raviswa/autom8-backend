@@ -107,6 +107,7 @@ async def handle_booking_flow(
     ))
 
     current_step = session_state.get("booking_step", "ask_service")
+    session_state["restaurant_id"] = restaurant_id
 
     # ── visit_complete: treat any new message as fresh visit ─────────────────
     if current_step == "visit_complete":
