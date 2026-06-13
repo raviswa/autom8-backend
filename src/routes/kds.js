@@ -30,7 +30,6 @@ const router  = express.Router();
 
 const { supabaseAdmin }       = require('../config/supabase');
 const { broadcastToRestaurant } = require('../websocket');
-const { sendWhatsAppMessage }  = require('../helpers/whatsapp');
 const { printKotEscPos, buildKotLines } = require('../helpers/kotEscPos');
 
 const { isValidKdsSecret, extractInternalSecret } = require('../config/internalSecret');
