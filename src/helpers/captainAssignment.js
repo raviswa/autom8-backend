@@ -5,6 +5,7 @@
 
 const { supabaseAdmin } = require('../config/supabase');
 const { sendWhatsAppMessage } = require('./whatsapp');
+const { validateAndNormalizeWhatsApp } = require('./phoneFormat');
 
 function captainDisplayName(fullName) {
   const name = String(fullName || '').trim();
@@ -162,7 +163,8 @@ async function notifyCaptainTakeawayOrder({
   total,
   bookingTime,
 }) {
-  const wa = String(captain.whatsapp || '').replace(/\D/g, '');
+  const waResult = validateAndNormalizeWhatsApp(captain.whatsapp || '');
+  const wa = waResult.value || '';
   if (!wa) {
     console.warn(`[captain-assign] Captain ${captain.captain_name} has no WhatsApp number`);
     return false;

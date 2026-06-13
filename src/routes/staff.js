@@ -18,13 +18,18 @@ const express = require('express');
 const router  = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
+const {
+  NOTIFY_ROLES,
+  validateAndNormalizeWhatsApp,
+  roleRequiresWhatsApp,
+} = require('../helpers/phoneFormat');
 
 // Roles a manager is allowed to manage (cannot touch own level or above)
 const MANAGER_CAN_MANAGE = ['kitchen_staff', 'captain', 'waiter', 'marketing'];
 const ALL_ROLES           = ['owner', 'manager', 'kitchen_staff', 'captain', 'waiter', 'marketing'];
 
 // Notification roles — default whatsapp_number collection is relevant for these
-const NOTIFY_ROLES = ['manager', 'kitchen_staff', 'captain', 'waiter', 'owner'];
+// (canonical list lives in helpers/phoneFormat.js)
 
 // ── GET /api/staff ────────────────────────────────────────────────────────────
 // Returns active + terminated employees for this restaurant.
@@ -84,6 +89,11 @@ router.post('/', authenticateToken, getRestaurantId, async (req, res) => {
     if (isManager && !MANAGER_CAN_MANAGE.includes(role))
       return res.status(403).json({ error: `Managers cannot create a ${role} account` });
 
+    const waRequired = roleRequiresWhatsApp(role);
+    const waResult = validateAndNormalizeWhatsApp(whatsapp_number, { required: waRequired });
+    if (waResult.error) return res.status(400).json({ error: waResult.error });
+    const normalizedWhatsApp = waResult.value;
+
     // ── Create Supabase Auth user with a temporary password ─────────────────
     // Employee will reset on first login (send them a magic link or temp pw)
     const tempPassword = Math.random().toString(36).slice(-10) + 'Mm1!';
@@ -110,7 +120,7 @@ router.post('/', authenticateToken, getRestaurantId, async (req, res) => {
         email:           email.trim().toLowerCase(),
         full_name:       full_name.trim(),
         phone:           phone           || null,
-        whatsapp_number: whatsapp_number || null,
+        whatsapp_number: normalizedWhatsApp,
         role,
         is_active:       true,
         hired_at:        new Date().toISOString(),
@@ -134,7 +144,7 @@ router.post('/', authenticateToken, getRestaurantId, async (req, res) => {
       const { sendWhatsAppMessageInternal } = require('../whatsapp');
       const loginUrl = process.env.FRONTEND_URL || 'https://app.autom8.works';
       sendWhatsAppMessageInternal(
-        whatsapp_number,
+        normalizedWhatsApp,
         `👋 Hi ${full_name.split(' ')[0]}!\n\n` +
         `You've been added to *Munafe* as *${role.replace('_', ' ')}*.\n\n` +
         `🔗 Set your password and log in here:\n${loginUrl}/login\n\n` +
@@ -163,7 +173,7 @@ router.post('/', authenticateToken, getRestaurantId, async (req, res) => {
         role:     employee.role,
         hired_at: employee.hired_at,
       },
-      message: whatsapp_number
+      message: normalizedWhatsApp
         ? 'Employee created. Login link sent via WhatsApp.'
         : 'Employee created. Ask them to use the login link.',
     });
@@ -189,7 +199,7 @@ router.put('/:id', authenticateToken, getRestaurantId, async (req, res) => {
     // Fetch target employee
     const { data: target } = await supabaseAdmin
       .from('employees')
-      .select('id, role, is_active')
+      .select('id, role, is_active, whatsapp_number')
       .eq('id', req.params.id)
       .eq('restaurant_id', req.restaurant_id)
       .single();
@@ -201,11 +211,23 @@ router.put('/:id', authenticateToken, getRestaurantId, async (req, res) => {
       return res.status(403).json({ error: 'You cannot edit this employee' });
 
     const { full_name, phone, whatsapp_number, role } = req.body;
+    const effectiveRole = role || target.role;
     const updates = { updated_at: new Date().toISOString() };
 
     if (full_name)       updates.full_name       = full_name.trim();
     if (phone !== undefined) updates.phone        = phone || null;
-    if (whatsapp_number !== undefined) updates.whatsapp_number = whatsapp_number || null;
+
+    if (whatsapp_number !== undefined || role) {
+      const rawWa = whatsapp_number !== undefined
+        ? whatsapp_number
+        : target.whatsapp_number;
+
+      const waResult = validateAndNormalizeWhatsApp(rawWa, {
+        required: roleRequiresWhatsApp(effectiveRole),
+      });
+      if (waResult.error) return res.status(400).json({ error: waResult.error });
+      updates.whatsapp_number = waResult.value;
+    }
 
     if (role) {
       if (!ALL_ROLES.includes(role))
