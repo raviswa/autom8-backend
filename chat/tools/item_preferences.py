@@ -97,6 +97,8 @@ from tools.personalisation_tools import (
     build_order_suggestion,
 )
 from tools.catalog_tools import send_whatsapp_catalog_message
+from tools.order_pricing import compute_order_totals, format_order_total_lines
+from tools.booking_mechanisms import cache_restaurant_pricing
 from tools.cart_tools import (
     add_to_cart,
     clear_cart,
@@ -598,6 +600,7 @@ async def handle_booking_flow(
             session_state["table_number"] = table_number
 
         elif service_type == "takeaway":
+            await cache_restaurant_pricing(session_state, restaurant_id)
             await send_whatsapp_message(
                 customer_phone,
                 "Great! You've selected Takeaway now 🛍️\n\n"
@@ -1179,7 +1182,12 @@ async def handle_takeaway_flow(
             return {"status": session_state.get("booking_step", "awaiting_order")}
 
         cart  = session_state.get("cart", {})
-        total = cart_total(cart) if cart else 0.0
+        await cache_restaurant_pricing(session_state, restaurant_id)
+        parcel_rate = float(session_state.get("parcel_charge_per_item") or 0)
+        totals = compute_order_totals(
+            cart, "takeaway", parcel_per_item=parcel_rate,
+        )
+        total = totals["grand_total"]
 
         logger.info(f"Cart at order time for takeaway: {cart}")
         logger.info(f"Computed takeaway total: {total}")
@@ -1208,7 +1216,7 @@ async def handle_takeaway_flow(
                 f"Booking Time: {booking_time}\n"
                 f"Order: {order_text}\n"
                 f"────────────────────\n"
-                f"Total: ₹{total:.0f}\n\n"
+                f"{format_order_total_lines(totals)}\n\n"
                 f"Pay here: {payment_link}"
             )
             if suggestion:
@@ -1278,6 +1286,7 @@ async def handle_delivery_flow(
             delivery_address = raw
 
         session_state["delivery_address"] = delivery_address
+        await cache_restaurant_pricing(session_state, restaurant_id)
         await send_whatsapp_message(
             customer_phone,
             "Thank you! Estimated delivery: 30-45 mins.\n\n"
@@ -1300,8 +1309,14 @@ async def handle_delivery_flow(
             return {"status": session_state.get("booking_step", "awaiting_order")}
 
         cart         = session_state.get("cart", {})
-        items_total  = cart_total(cart) if cart else 0.0
-        total        = items_total + DELIVERY_CHARGE
+        await cache_restaurant_pricing(session_state, restaurant_id)
+        parcel_rate  = float(session_state.get("parcel_charge_per_item") or 0)
+        totals       = compute_order_totals(
+            cart, "delivery",
+            parcel_per_item=parcel_rate,
+            delivery_charge=DELIVERY_CHARGE,
+        )
+        total        = totals["grand_total"]
         token        = await get_next_token_number(restaurant_id)
         booking_time = _now_display()
         session_state["token_number"] = token
@@ -1326,10 +1341,8 @@ async def handle_delivery_flow(
                 f"Token: {token}\n"
                 f"Booking Time: {booking_time}\n"
                 f"Order: {order_text}\n"
-                f"Items: ₹{items_total:.0f}\n"
-                f"Delivery charge: ₹{DELIVERY_CHARGE:.0f}\n"
                 f"────────────────────\n"
-                f"Total: ₹{total:.0f}\n\n"
+                f"{format_order_total_lines(totals)}\n\n"
                 f"Pay here: {payment_link}"
             )
             if suggestion:
@@ -1346,7 +1359,7 @@ async def handle_delivery_flow(
                 f"Address: {session_state.get('delivery_address')}\n"
                 f"Booking Time: {booking_time}\n"
                 f"Order: {order_text}\n"
-                f"Total: ₹{total:.0f} (incl. ₹{DELIVERY_CHARGE:.0f} delivery)\n"
+                f"Total: ₹{total:.0f} (incl. delivery & GST)\n"
                 f"────────────────────",
                 restaurant_id,
             )
