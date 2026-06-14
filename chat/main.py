@@ -1,7 +1,6 @@
 """FastAPI application entry point with webhook handlers."""
 
 import json
-import re
 import logging
 import hmac
 import hashlib
@@ -30,6 +29,7 @@ from tools.db_tools import (
 )
 from tools.whatsapp_tools import parse_incoming, send_whatsapp_message
 from tools.payment_tools import verify_webhook_signature
+from tools.auto_reply_filter import is_whatsapp_auto_reply
 from tools.booking_mechanisms import (
     is_catalog_order,
     bridge_catalog_order_to_cart,
@@ -182,59 +182,6 @@ def _extract_message_body(message_obj: dict) -> str:
 
 
 # ─────────────────────────────────────────────
-# AUTO-REPLY DETECTION
-# ─────────────────────────────────────────────
-
-_AUTO_REPLY_RE = re.compile(
-    r"(?:"
-    r"hi,?\s+thanks\s+for\s+contacting|"
-    r"thank\s+you\s+for\s+(?:contacting|reaching|your\s+message)|"
-    r"we(?:'ve|\s+have)\s+received\s+your\s+message|"
-    r"we(?:\s+will|'ll)\s+get\s+back\s+to\s+you|"
-    r"auto.?reply|"
-    r"automatic\s+(?:reply|response)|"
-    r"out\s+of\s+(?:office|town)|"
-    r"currently\s+(?:unavailable|away|busy)|"
-    r"this\s+is\s+an\s+automated\s+(?:message|response)|"
-    r"do\s+not\s+reply\s+to\s+this"
-    r")",
-    re.IGNORECASE,
-)
-
-
-def _is_auto_reply(message_obj: dict, our_phone: str, message_body: str) -> bool:
-    """
-    Return True if this message is an auto-reply that should be silently ignored.
-
-    Signals checked (any one is sufficient):
-      1. message_obj has a "system" field — Meta system-generated message
-      2. message text matches known auto-reply patterns (business OOO, auto-responders)
-      3. message context.from == our own phone number AND message is plain text
-         (button taps also reply to our messages but are interactive type — excluded)
-    """
-    if message_obj.get("system"):
-        return True
-
-    msg_type = message_obj.get("type", "")
-
-    # Pattern match on text content
-    if msg_type == "text" and _AUTO_REPLY_RE.search(message_body):
-        return True
-
-    # Reply-to-us signal: context.from is our own number
-    # This catches auto-replies that don't match patterns but are replies to our msg
-    if msg_type == "text":
-        context_from = message_obj.get("context", {}).get("from", "")
-        if context_from and our_phone:
-            _cf = context_from.replace("+", "").replace(" ", "")
-            _op = our_phone.replace("+", "").replace(" ", "")
-            if _cf == _op or _cf.endswith(_op[-10:]):
-                return True
-
-    return False
-
-
-# ─────────────────────────────────────────────
 # Webhook Handlers
 # ─────────────────────────────────────────────
 
@@ -284,7 +231,7 @@ async def _process_meta_payload(payload: dict):
         # Responding to them creates a confusing conversation loop.
         # We detect them by text pattern OR by context.from == our own number.
         _our_phone = settings.whatsapp_phone_number
-        if _is_auto_reply(message_obj, _our_phone, message_body):
+        if is_whatsapp_auto_reply(message_obj, message_body, _our_phone):
             logger.info(
                 f"[auto-reply] Ignoring auto-reply from {message_obj.get('from')} "
                 f"body={message_body[:80]!r}"

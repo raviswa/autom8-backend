@@ -26,8 +26,10 @@ const { resolveRestaurantByPhone } = require('../helpers/resolveRestaurant');
 
 const { handleWhatsAppOrder, handleFeedbackReply, validateReferralCode }
   = require('../handlers/waHandlers');
+const { isWhatsAppAutoReply } = require('../helpers/whatsappAutoReply');
 
 const CHAT_SERVICE_URL  = process.env.CHAT_SERVICE_URL || 'http://localhost:8001';
+const OUR_WHATSAPP_PHONE = process.env.WHATSAPP_PHONE_NUMBER || '';
 const REFERRAL_CODE_REGEX = /^\s*([A-Z0-9]{6})\s*$/i;
 
 // ── GET /api/whatsapp/webhook — Meta verification ────────────────────────────
@@ -62,6 +64,19 @@ router.post('/webhook', async (req, res) => {
         for (const message of value.messages ?? []) {
           console.log(`[WA Webhook] type=${message.type} from=${message.from}`);
 
+          const messageText = message.text?.body
+            || message.button?.text
+            || message.interactive?.list_reply?.title
+            || message.interactive?.button_reply?.title
+            || '';
+
+          if (isWhatsAppAutoReply(message, messageText, OUR_WHATSAPP_PHONE)) {
+            console.info(
+              `[WA Webhook] Ignoring auto-reply from ${message.from}: ${messageText.slice(0, 80)}`
+            );
+            continue;
+          }
+
           // ── Resolve restaurant_id from phone_number_id ───────────────────
           // Uses restaurant_integrations table via cached helper.
           // Falls back to DEFAULT_RESTAURANT_ID env var for dev/staging.
@@ -86,12 +101,6 @@ router.post('/webhook', async (req, res) => {
             );
 
           } else if (message.type === 'text' || message.type === 'button' || message.type === 'interactive') {
-            const messageText = message.text?.body
-              || message.button?.text
-              || message.interactive?.list_reply?.title
-              || message.interactive?.button_reply?.title
-              || '';
-
             // ── Priority 1: Feedback reply ─────────────────────────────────
             const wasFeedback = restaurantId
               ? await handleFeedbackReply(message.from, message, restaurantId).catch(err => {

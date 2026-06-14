@@ -14,6 +14,7 @@
 
 const { supabaseAdmin } = require('../config/supabase');
 const { sendWhatsAppMessage, sendWhatsAppInteractive } = require('./whatsapp');
+const { isWhatsAppAutoReply } = require('./whatsappAutoReply');
 
 const POSITIVE_ASPECTS = [
   ['food_quality',        '🍽️ Food quality'],
@@ -349,6 +350,10 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
     if (!phone) return false;
 
     const text = extractMessageText(message);
+
+    if (isWhatsAppAutoReply(message, text, process.env.WHATSAPP_PHONE_NUMBER || null)) {
+      return false;
+    }
 
     const { data: record } = await supabaseAdmin
       .from('feedback_pending')
