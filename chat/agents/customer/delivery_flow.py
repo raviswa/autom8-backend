@@ -38,6 +38,7 @@ from agents.customer.booking_helpers import (
     is_placeholder_payment_link,
     send_catalog_with_fallback,
     strip_order_quantity,
+    gate_ordering_service,
 )
 from agents.customer.conversation_helpers import safe_build_order_suggestion
 
@@ -69,9 +70,16 @@ async def handle_delivery_flow(
             delivery_address = raw
 
         session_state["delivery_address"] = delivery_address
+        from tools.kitchen_hours import is_kitchen_open
+        if not is_kitchen_open():
+            if await gate_ordering_service(
+                customer_phone, restaurant_id, session_state, "delivery",
+            ):
+                return {"status": "awaiting_service_selection"}
+
         await send_whatsapp_message(
             customer_phone,
-            "Thank you! Estimated delivery: 30-45 mins.\n\nBrowse today's menu below and add items to your basket 🛒",
+            "Thank you! Estimated delivery: 30-45 mins.\n\nBrowse today's menu below and add items to your basket.",
             restaurant_id,
         )
         clear_cart(session_state)

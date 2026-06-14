@@ -42,6 +42,27 @@ function getCurrentSlotIST() {
   return SLOTS.find(s => hour >= s.startHour && hour < s.endHour)?.dbValue ?? null;
 }
 
+const SLOT_DISPLAY_LABELS = {
+  morning_tiffin: 'Morning Tiffin',
+  lunch:          'Lunch',
+  snacks:         'Evening Snacks',
+  dinner:         'Dinner',
+};
+
+function nextOpenLabelIST() {
+  const hour = new Date(Date.now() + 5.5 * 60 * 60 * 1000).getUTCHours();
+  for (const s of SLOTS) {
+    if (hour < s.startHour) {
+      const h12 = s.startHour % 12 || 12;
+      const ampm = s.startHour < 12 ? 'AM' : 'PM';
+      return `${h12}:00 ${ampm}`;
+    }
+  }
+  const first = SLOTS[0];
+  const h12 = first.startHour % 12 || 12;
+  return `${h12}:00 AM`;
+}
+
 function mapTimeSlot(raw) {
   if (!raw) return 'all';
   const MAP = {
@@ -271,6 +292,67 @@ router.post('/webhook', async (req, res) => {
       syncCatalogFromMeta(r.id).catch(err => console.error(`[catalog-webhook] Sync failed for ${r.id}:`, err.message));
   } catch (err) {
     console.error('[catalog-webhook] Handler error:', err.message);
+  }
+});
+
+// ── GET /api/catalog/kitchen-status — Manager portal kitchen open/closed ─────
+
+router.get('/kitchen-status', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const currentSlot = getCurrentSlotIST();
+    const { count, error } = await supabaseAdmin.from('menu_items')
+      .select('id', { count: 'exact', head: true })
+      .eq('restaurant_id', req.restaurant_id)
+      .eq('is_available', true)
+      .eq('is_stocked', true);
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      is_open: (count ?? 0) > 0,
+      available_items: count ?? 0,
+      current_slot: currentSlot,
+      current_slot_label: currentSlot ? SLOT_DISPLAY_LABELS[currentSlot] : null,
+      schedule_open: currentSlot != null,
+      next_open_label: nextOpenLabelIST(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/catalog/kitchen-toggle — Manager open/close for WhatsApp orders ─
+
+router.post('/kitchen-toggle', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (!['owner', 'manager', 'brand_owner'].includes(req.user_role))
+      return res.status(403).json({ error: 'Unauthorized' });
+
+    const { open } = req.body;
+    if (typeof open !== 'boolean')
+      return res.status(400).json({ error: 'open (boolean) required' });
+
+    let result;
+    if (open) {
+      const slot = getCurrentSlotIST();
+      if (slot) {
+        result = await applySlotAvailability(req.restaurant_id, slot);
+      } else {
+        const { data, error } = await supabaseAdmin.from('menu_items')
+          .update({ is_available: true, updated_at: new Date().toISOString() })
+          .eq('restaurant_id', req.restaurant_id)
+          .eq('is_stocked', true)
+          .select('id');
+        if (error) throw error;
+        result = { slot: 'manual', available: data?.length ?? 0 };
+      }
+    } else {
+      result = await applySlotAvailability(req.restaurant_id, null);
+    }
+
+    res.json({ success: true, is_open: open, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

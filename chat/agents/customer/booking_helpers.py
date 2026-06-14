@@ -375,12 +375,23 @@ async def send_service_menu(
     restaurant_id: str,
     greeting: str,
     session_state: Dict[str, Any] | None = None,
+    *,
+    announce_closed: bool = True,
 ) -> None:
+    from tools.kitchen_hours import is_kitchen_open, next_open_label
+
     rows = await build_service_menu_rows(restaurant_id)
     state = session_state or {}
     normalize_last_order_summary(state)
     first = _first_name(state.get("customer_name", ""))
     header = f"Welcome back, {first}!" if first else "Welcome!"
+
+    recall = build_recall_message(state)
+    if recall:
+        await send_whatsapp_message(customer_phone, recall, restaurant_id)
+
+    if not is_kitchen_open() and announce_closed:
+        await send_closed_kitchen_notice(customer_phone, restaurant_id, state)
 
     body_lines = []
     if greeting and greeting.strip():
@@ -392,16 +403,13 @@ async def send_service_menu(
     if ready_takeaway:
         token = ready_takeaway.get("display_token") or ready_takeaway.get("order_number", "")
         body_lines.append(
-            f"✅ Your takeaway order *{token}* is ready — pick up at the counter."
+            f"Your takeaway order *{token}* is ready — pick up at the counter."
         )
-    else:
-        last_svc = state.get("last_service_type")
-        if last_svc == "takeaway":
-            body_lines.append(
-                "🛍️ *Takeaway* — order now and pick up at the counter."
-            )
-        elif last_svc == "dine_in":
-            body_lines.append("🍽️ *Dine-in* is available when you're ready for a table.")
+    elif not is_kitchen_open():
+        body_lines.append(
+            f"Takeaway and delivery open at *{next_open_label()}*. "
+            f"Dine-in and reservations are still available."
+        )
     body_lines.append("What would you like to do today?")
     body_text = "\n\n".join(body_lines)
 
@@ -483,11 +491,11 @@ _RETURNING_VARIANTS: dict[str, list[str]] = {
         "Good to see you, {first}! 😊 What are we having tonight?",
     ],
 }
-_LAST_ORDER_SUFFIXES = [
-    " Your {last_order} last time was a great choice — want to go again?",
-    " Loved the {last_order} on your last visit?",
-    " The {last_order} was popular last time — it's on the menu again today! 😋",
-    " Coming back for the {last_order} again? 😄",
+_RECALL_BUBBLES = [
+    "Loved the {last_order} last time! 🌟",
+    "The {last_order} was a great pick on your last visit.",
+    "{last_order} is on the menu again today — fancy a repeat?",
+    "Coming back for the {last_order}? 😊",
 ]
 _FIRST_TIME_VARIANTS: dict[str, list[str]] = {
     "morning": [
@@ -558,17 +566,63 @@ def build_smart_greeting(
     if is_returning or visit_count > 1:
         base     = _RETURNING_VARIANTS.get(tod, _RETURNING_VARIANTS["evening"])[idx]
         greeting = base.format(first=first)
-        if last_order:
-            suffix_idx = idx % len(_LAST_ORDER_SUFFIXES)
-            suffix = _LAST_ORDER_SUFFIXES[suffix_idx].format(last_order=last_order)
-            # Keep order memory in the greeting body (service menu body), not a truncated header.
-            if len(greeting) + len(suffix) <= 280:
-                greeting += suffix
     else:
         variants = _FIRST_TIME_VARIANTS.get(tod, _FIRST_TIME_VARIANTS["evening"])
         greeting = variants[idx % len(variants)].format(first=first)
 
     return greeting
+
+
+def build_recall_message(session_state: Dict[str, Any]) -> str | None:
+    """Short standalone bubble for last-order memory (sent before the service menu)."""
+    normalize_last_order_summary(session_state)
+    last_order = session_state.get("last_order_summary", "")
+    if not last_order:
+        return None
+    first = _first_name(session_state.get("customer_name", ""))
+    idx = (len(last_order) + len(first)) % len(_RECALL_BUBBLES)
+    return _RECALL_BUBBLES[idx].format(last_order=last_order)
+
+
+async def send_closed_kitchen_notice(
+    customer_phone: str,
+    restaurant_id: str,
+    session_state: Dict[str, Any],
+    *,
+    service_type: str | None = None,
+) -> None:
+    """Increment attempt counter and send a warmer closed-hours notice."""
+    from tools.kitchen_hours import build_closed_notice
+
+    attempt = int(session_state.get("closed_kitchen_attempts") or 0) + 1
+    session_state["closed_kitchen_attempts"] = attempt
+    await send_whatsapp_message(
+        customer_phone,
+        build_closed_notice(attempt=attempt, service_type=service_type),
+        restaurant_id,
+    )
+
+
+async def gate_ordering_service(
+    customer_phone: str,
+    restaurant_id: str,
+    session_state: Dict[str, Any],
+    service_type: str,
+) -> bool:
+    """
+    Block takeaway/delivery when the kitchen slot is closed.
+    Returns True if the service was blocked (caller should return early).
+    """
+    from tools.kitchen_hours import ordering_blocked_for_service
+
+    if not ordering_blocked_for_service(service_type):
+        return False
+
+    await send_closed_kitchen_notice(
+        customer_phone, restaurant_id, session_state, service_type=service_type,
+    )
+    session_state["booking_step"] = "awaiting_service_selection"
+    return True
 
 
 # ─────────────────────────────────────────────

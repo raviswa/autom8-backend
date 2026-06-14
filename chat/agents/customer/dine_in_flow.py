@@ -662,11 +662,11 @@ async def handle_dine_in_flow(
             # Menu catalog is sent only after table assignment (portal or chat poll below).
             await send_whatsapp_message(
                 customer_phone,
-                f"You're all checked in! 🍽️\n\n"
-                f"*Token: {portal_token_id}*\n"
-                f"*Party size: {party_size}*\n\n"
-                f"We're assigning your table — you'll get a WhatsApp when it's ready "
-                f"with our menu to place your order. 🙏",
+                (
+                    f"Party of *{party_size}* — perfect! We're finding you a table... 🍽️\n\n"
+                    f"*Token: {portal_token_id}*\n\n"
+                    f"We'll send you our menu on WhatsApp once your table is ready. 🙏"
+                ),
                 restaurant_id,
             )
             clear_cart(session_state)

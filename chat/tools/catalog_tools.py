@@ -343,9 +343,9 @@ async def send_whatsapp_catalog_message(
             },
             "body": {
                 "text": (
-                    "Browse today's items below 👇\n"
-                    "Tap any item to see details and add to your basket.\n"
-                    "When done, send us your basket to place the order."
+                    "Browse today's items below.\n"
+                    "Tap any item to add it to your basket.\n"
+                    "When you're done, tap *Review your order* to send us your basket."
                 ),
             },
             "footer": {"text": f"Prices excl. GST • {restaurant_label}"},

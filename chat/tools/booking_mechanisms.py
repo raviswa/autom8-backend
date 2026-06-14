@@ -946,18 +946,10 @@ async def send_unified_booking_menu(
             f"[BOOKING] {customer_phone} → no available menu items for {restaurant_id}"
         )
         try:
-            svc = session_state.get("service_type")
-            svc_line = (
-                "🛍️ Takeaway ordering is paused — the kitchen menu is closed for this hour.\n"
-                if svc == "takeaway"
-                else "🍽️ The kitchen menu is closed for this hour.\n"
-            )
+            from tools.kitchen_hours import build_menu_closed_message
             await send_whatsapp_message(
                 customer_phone,
-                (
-                    f"{svc_line}"
-                    "Please try again during service hours, or ask a team member at the counter. 🙏"
-                ),
+                build_menu_closed_message(session_state.get("service_type")),
                 restaurant_id,
             )
         except Exception as e:
