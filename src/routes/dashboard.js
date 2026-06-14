@@ -9,6 +9,7 @@
 const express = require('express');
 const router  = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
+const { computeDashboardInsights } = require('../helpers/dashboardAnalytics');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 
 function requireOutlet(req, res, next) {
@@ -163,6 +164,21 @@ router.get('/cancel-stats', authenticateToken, getRestaurantId, requireOutlet, a
     });
   } catch (err) {
     console.error('[dashboard/cancel-stats]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/dashboard/insights — Owner analytics pack ───────────────────────
+
+router.get('/insights', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
+  try {
+    const { start, end } = req.query;
+    if (!start || !end) return res.status(400).json({ error: 'start and end required' });
+
+    const insights = await computeDashboardInsights(supabaseAdmin, req.restaurant_id, start, end);
+    res.json({ success: true, ...insights });
+  } catch (err) {
+    console.error('[dashboard/insights]', err.message);
     res.status(500).json({ error: err.message });
   }
 });
