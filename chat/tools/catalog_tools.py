@@ -136,6 +136,7 @@ async def _fetch_menu_items_from_backend(restaurant_id: str | None = None) -> li
                         "description":  item.get("description", ""),
                         "image_link":   item.get("image_url", ""),
                         "is_available": bool(item.get("is_available", True)),
+                        "is_special_today": bool(item.get("is_special_today", False)),
                     })
                 _MENU_CACHE[rid] = {"items": mapped, "fetched_at": now}
                 MENU_ITEMS.clear()

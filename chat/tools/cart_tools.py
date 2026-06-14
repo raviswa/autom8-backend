@@ -172,15 +172,35 @@ def cart_total(cart: dict[str, Any]) -> float:
     return sum(line["qty"] * line["unit_price"] for line in cart.values())
 
 
-def cart_summary_text(cart: dict[str, Any]) -> str:
-    """Human-readable cart summary."""
+def cart_summary_text(
+    cart: dict[str, Any],
+    session_state: dict[str, Any] | None = None,
+) -> str:
+    """Human-readable cart summary with optional parcel/GST estimate for takeaway/delivery."""
     if not cart:
         return "Your cart is empty."
+
+    from tools.order_pricing import compute_order_totals, format_order_total_lines
+
     lines = ["🛒 *Your cart:*\n"]
     for line in cart.values():
         subtotal = line["qty"] * line["unit_price"]
         lines.append(f"• {line['qty']}x {line['title']} — ₹{subtotal:.0f}")
-    lines.append(f"\n*Total: ₹{cart_total(cart):.0f}*")
+
+    service_type = (session_state or {}).get("service_type", "")
+    parcel_rate = float((session_state or {}).get("parcel_charge_per_item") or 0)
+
+    if service_type in ("takeaway", "delivery") and (parcel_rate > 0 or service_type == "delivery"):
+        totals = compute_order_totals(
+            cart,
+            service_type,
+            parcel_per_item=parcel_rate,
+        )
+        lines.append("")
+        lines.append(format_order_total_lines(totals))
+    else:
+        lines.append(f"\n*Total: ₹{cart_total(cart):.0f}*")
+
     return "\n".join(lines)
 
 
@@ -518,7 +538,7 @@ async def send_cart_summary_buttons(
     Returns True on API success.
     """
     cart    = get_cart(session_state)
-    summary = cart_summary_text(cart)
+    summary = cart_summary_text(cart, session_state)
     header  = f"Added: {added_item_title}" if added_item_title else "Your cart"
 
     body_text = summary

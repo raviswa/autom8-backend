@@ -22,6 +22,7 @@ from tools.db_tools import get_next_token_number, create_booking, update_booking
 from tools.payment_tools import create_payment_link
 from tools.whatsapp_tools import send_whatsapp_message
 from tools.cart_tools import cart_to_order_text, cart_total, clear_cart
+from tools.order_pricing import compute_order_totals, format_order_total_lines
 from tools.booking_mechanisms import (
     RECEIPT_AVAILABLE,
     _generate_receipt,
@@ -74,8 +75,11 @@ async def handle_takeaway_flow(
 
         try:
             cart_snapshot = dict(cart)
-            total         = cart_total(cart) if cart else 0.0
+            parcel_rate   = float(session_state.get("parcel_charge_per_item") or 0)
+            totals        = compute_order_totals(cart, "takeaway", parcel_per_item=parcel_rate)
+            total         = totals["grand_total"]
             session_state["order_total"] = total
+            session_state["order_totals"] = totals
 
             token, portal_token_id, suggestion = await asyncio.gather(
                 get_next_token_number(restaurant_id),
@@ -128,7 +132,7 @@ async def handle_takeaway_flow(
                 f"Your order has been placed! 🎉\n────────────────────\n"
                 f"Token: {display_token}\nBooking Time: {booking_time}\n"
                 f"Order: {order_text_display}\n────────────────────\n"
-                f"Total: ₹{total:.0f}\n\n{payment_line}{captain_line}"
+                f"{format_order_total_lines(totals)}\n\n{payment_line}{captain_line}"
             )
             if suggestion:
                 confirmation += f"\n\n{suggestion}"
@@ -209,6 +213,7 @@ async def handle_takeaway_flow(
                         items=_LineItem.from_cart(cart_snapshot),
                         gst_rate=5.0,
                         gst_inclusive=False,
+                        parcel_charge=totals.get("parcel_charge", 0),
                         payment_mode=session_state.get("payment_mode", "Cash"),
                     )
                     receipt_path = _generate_receipt(receipt_data)

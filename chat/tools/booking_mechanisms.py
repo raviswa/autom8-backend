@@ -165,7 +165,7 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict:
         resp = await get_http().get(
             f"{base}/rest/v1/restaurants",
             params={
-                "select": "name,whatsapp_number,address,phone,gstin,website",
+                "select": "name,whatsapp_number,address,phone,gstin,website,parcel_charge_per_item",
                 "id":     f"eq.{restaurant_id}",
                 "limit":  "1",
             },
@@ -178,6 +178,41 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict:
     except Exception as e:
         logger.debug(f"[receipt] restaurant info fetch failed (non-fatal): {e}")
     return {}
+
+
+async def cache_restaurant_pricing(session_state: dict, restaurant_id: str) -> None:
+    """Store parcel rate in session for cart summaries and checkout."""
+    info = await fetch_restaurant_info(restaurant_id)
+    try:
+        session_state["parcel_charge_per_item"] = float(info.get("parcel_charge_per_item") or 0)
+    except (TypeError, ValueError):
+        session_state["parcel_charge_per_item"] = 0.0
+
+
+async def send_special_dishes_note(customer_phone: str, restaurant_id: str) -> None:
+    """
+    Friendly WhatsApp note for today's specials — not pushed to Meta catalog.
+    """
+    from tools.catalog_tools import fetch_menu_items
+
+    await fetch_menu_items(restaurant_id)
+    from tools.catalog_tools import MENU_ITEMS
+
+    specials = [
+        i for i in MENU_ITEMS
+        if i.get("is_special_today") and i.get("is_available", True)
+    ]
+    if not specials:
+        return
+
+    names = ", ".join(i.get("title", "Special") for i in specials[:8])
+    extra = f" (+{len(specials) - 8} more)" if len(specials) > 8 else ""
+    await send_whatsapp_message(
+        customer_phone,
+        f"🌟 *Today's specials:* {names}{extra}\n"
+        "Ask us to add any of these while you order — we'd love to serve you! 😊",
+        restaurant_id,
+    )
 
 
 async def upload_and_send_receipt(
@@ -910,6 +945,7 @@ async def send_unified_booking_menu(
     from tools.catalog_tools import invalidate_menu_cache, fetch_menu_items
     invalidate_menu_cache(restaurant_id)
     items = await fetch_menu_items(restaurant_id)
+    await cache_restaurant_pricing(session_state, restaurant_id)
 
     # Dine-in: never send menu until a table is assigned (portal or chat poll).
     if session_state.get("service_type") == "dine_in":
@@ -925,6 +961,7 @@ async def send_unified_booking_menu(
     if await send_catalog_booking(customer_phone, restaurant_id, session_state):
         if session_state.get("service_type") in ("dine_in", "takeaway", "delivery"):
             session_state["booking_step"] = "awaiting_order"
+        await send_special_dishes_note(customer_phone, restaurant_id)
         return "catalog"
 
     # ── Attempt 2: Retry catalog after 2 s ───────────────────────────────────
@@ -933,10 +970,12 @@ async def send_unified_booking_menu(
     if await send_catalog_booking(customer_phone, restaurant_id, session_state):
         if session_state.get("service_type") in ("dine_in", "takeaway", "delivery"):
             session_state["booking_step"] = "awaiting_order"
+        await send_special_dishes_note(customer_phone, restaurant_id)
         return "catalog"
 
     # ── Attempt 3: Interactive cart ───────────────────────────────────────────
     if await send_cart_booking(customer_phone, restaurant_id, session_state):
+        await send_special_dishes_note(customer_phone, restaurant_id)
         return "cart"
 
     # ── Attempt 3b: Menu empty (e.g. kitchen closed / slot gap) ───────────────
@@ -958,6 +997,7 @@ async def send_unified_booking_menu(
 
     # ── Attempt 4: Plain-text menu ────────────────────────────────────────────
     if await send_cart_fallback_text(customer_phone, restaurant_id, session_state):
+        await send_special_dishes_note(customer_phone, restaurant_id)
         return "cart_text"
 
     # ── Last resort: Fix 40 — direct to Shop icon, never leave silence ────────

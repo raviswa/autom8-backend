@@ -469,7 +469,7 @@ async function handleInternalMenuItems(req, res) {
     if (!restaurantId) return res.status(400).json({ error: 'restaurant_id required' });
 
     const { data, error } = await supabaseAdmin.from('menu_items')
-      .select('id, name, description, price, image_url, time_slot, retailer_id, is_available, is_stocked, category')
+      .select('id, name, description, price, image_url, time_slot, retailer_id, is_available, is_stocked, category, is_special_today')
       .eq('restaurant_id', restaurantId)
       .eq('is_available', true)
       .order('time_slot', { ascending: true }).order('name', { ascending: true });
@@ -657,11 +657,66 @@ router.put('/menu-items/:id/availability', authenticateToken, getRestaurantId, a
   }
 });
 
+// ── PUT /api/menu-items/:id/special-today — Mark special dish (no Meta push) ─
+
+router.put('/menu-items/:id/special-today', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (!['owner', 'manager', 'brand_owner'].includes(req.user_role))
+      return res.status(403).json({ error: 'Unauthorized' });
+
+    const { is_special_today } = req.body;
+    if (typeof is_special_today !== 'boolean')
+      return res.status(400).json({ error: 'is_special_today (boolean) required' });
+
+    const { data: item, error: fetchErr } = await supabaseAdmin
+      .from('menu_items').select('id, name')
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).single();
+
+    if (fetchErr || !item) return res.status(404).json({ error: 'Menu item not found' });
+
+    const { error: updateErr } = await supabaseAdmin.from('menu_items').update({
+      is_special_today,
+      updated_at: new Date().toISOString(),
+    }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id);
+
+    if (updateErr) throw updateErr;
+
+    supabaseAdmin.from('audit_logs').insert({
+      user_id: req.user.sub, restaurant_id: req.restaurant_id,
+      action: is_special_today ? "Marked today's special" : "Removed today's special",
+      details: { item_id: req.params.id, item_name: item.name, is_special_today },
+    }).catch(() => {});
+
+    res.json({ success: true, id: req.params.id, is_special_today, name: item.name });
+  } catch (err) {
+    console.error('[menu-item-special-today]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Clear all is_special_today flags (called daily at midnight IST). */
+async function resetDailySpecialDishes() {
+  const { data, error } = await supabaseAdmin
+    .from('menu_items')
+    .update({ is_special_today: false, updated_at: new Date().toISOString() })
+    .eq('is_special_today', true)
+    .select('id');
+
+  if (error) {
+    console.error('[special-dish-reset] Error:', error.message);
+    return 0;
+  }
+  const n = data?.length ?? 0;
+  if (n) console.log(`[special-dish-reset] Cleared ${n} special-dish flag(s)`);
+  return n;
+}
+
 // Export helpers for use by schedulers/index.js
 module.exports = router;
 module.exports.getCurrentSlotIST = getCurrentSlotIST;
 module.exports.applySlotAvailability = applySlotAvailability;
 module.exports.handleInternalMenuItems = handleInternalMenuItems;
+module.exports.resetDailySpecialDishes = resetDailySpecialDishes;
 module.exports.applySlotForAllRestaurants = async function() {
   const slot = getCurrentSlotIST();
   const { data: restaurants } = await supabaseAdmin.from('restaurants').select('id').eq('is_active', true);

@@ -20,6 +20,7 @@ from tools.db_tools import get_next_token_number, create_booking, update_booking
 from tools.payment_tools import create_payment_link
 from tools.whatsapp_tools import send_whatsapp_message, send_location_request
 from tools.cart_tools import cart_to_order_text, cart_total, clear_cart
+from tools.order_pricing import compute_order_totals, format_order_total_lines, DEFAULT_DELIVERY_CHARGE
 from tools.booking_mechanisms import (
     RECEIPT_AVAILABLE,
     _generate_receipt,
@@ -103,9 +104,16 @@ async def handle_delivery_flow(
 
         try:
             cart_snapshot = dict(cart)
-            items_total   = cart_total(cart) if cart else 0.0
-            total         = items_total + DELIVERY_CHARGE
+            parcel_rate   = float(session_state.get("parcel_charge_per_item") or 0)
+            totals        = compute_order_totals(
+                cart, "delivery",
+                parcel_per_item=parcel_rate,
+                delivery_charge=DELIVERY_CHARGE,
+            )
+            total         = totals["grand_total"]
+            items_total   = totals["items_subtotal"]
             session_state["order_total"] = total
+            session_state["order_totals"] = totals
 
             token, suggestion = await asyncio.gather(
                 get_next_token_number(restaurant_id),
@@ -136,8 +144,8 @@ async def handle_delivery_flow(
             confirmation = (
                 f"Your order has been placed! 🎉\n────────────────────\n"
                 f"Token: {token}\nBooking Time: {booking_time}\nOrder: {order_text}\n"
-                f"Items: ₹{items_total:.0f}\nDelivery charge: ₹{DELIVERY_CHARGE:.0f}\n"
-                f"────────────────────\nTotal: ₹{total:.0f}\n\n{payment_line}"
+                f"────────────────────\n"
+                f"{format_order_total_lines(totals)}\n\n{payment_line}"
             )
             if suggestion:
                 confirmation += f"\n\n{suggestion}"
@@ -212,7 +220,8 @@ async def handle_delivery_flow(
                         items=_LineItem.from_cart(cart_snapshot),
                         gst_rate=5.0,
                         gst_inclusive=False,
-                        delivery_charge=DELIVERY_CHARGE,
+                        delivery_charge=totals.get("delivery_charge", DELIVERY_CHARGE),
+                        parcel_charge=totals.get("parcel_charge", 0),
                         payment_mode=session_state.get("payment_mode", "Cash"),
                     )
                     receipt_path = _generate_receipt(receipt_data)

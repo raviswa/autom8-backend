@@ -25,6 +25,7 @@ const {
   getCurrentSlotIST,
   applySlotAvailability,
   applySlotForAllRestaurants,
+  resetDailySpecialDishes,
 } = require('../routes/catalog');
 
 // Accounting push lives in invoices.js
@@ -83,6 +84,7 @@ function startSlotScheduler() {
 
   // Slot rotation — runs every minute, applies on change
   let lastAppliedSlot = Symbol('init');
+  let lastSpecialResetDate = null;
   applySlotForAllRestaurants().catch(e => console.error('[slot] Initial apply failed:', e.message));
   setInterval(async () => {
     try {
@@ -91,6 +93,15 @@ function startSlotScheduler() {
         console.log(`🔄 Slot changed: ${String(lastAppliedSlot)} → ${currentSlot}`);
         lastAppliedSlot = currentSlot;
         await applySlotForAllRestaurants();
+      }
+
+      const nowIST = new Date(Date.now() + 330 * 60 * 1000);
+      const todayKey = nowIST.toISOString().slice(0, 10);
+      const istHour = nowIST.getUTCHours();
+      const istMin = nowIST.getUTCMinutes();
+      if (istHour === 0 && istMin < 2 && lastSpecialResetDate !== todayKey) {
+        lastSpecialResetDate = todayKey;
+        await resetDailySpecialDishes();
       }
     } catch (err) {
       console.error('[slot-rotation] Error:', err.message);

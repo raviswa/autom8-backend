@@ -441,6 +441,7 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
       'timezone','dining_duration_minutes','payment_mode','kitchen_workflow',
       'kot_printer_ip','kot_printer_port','kot_printer_enabled',
       'takeaway_fulfillment_mode','fulfillment_sections',
+      'parcel_charge_per_item',
       'subscribed_features', 'enabled_services',
     ];
     const updates = Object.fromEntries(

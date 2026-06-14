@@ -140,6 +140,7 @@ class ReceiptData:
     # ── Financials ─────────────────────────────────────────────────────────
     gst_rate: float = 5.0
     gst_inclusive: bool = False
+    parcel_charge: float = 0.0
     delivery_charge: float = 0.0
     discount: float = 0.0
     discount_label: str = "Discount"
@@ -162,15 +163,16 @@ class ReceiptData:
 
     @property
     def taxable_amount(self) -> float:
+        base = self.items_subtotal + self.parcel_charge + self.delivery_charge
         if self.gst_inclusive and self.gst_rate > 0:
-            return round(self.items_subtotal / (1 + self.gst_rate / 100), 2)
-        return self.items_subtotal
+            return round(base / (1 + self.gst_rate / 100), 2)
+        return round(base, 2)
 
     @property
     def gst_amount(self) -> float:
-        return round(self.items_subtotal - self.taxable_amount
-                     if self.gst_inclusive
-                     else self.taxable_amount * self.gst_rate / 100, 2)
+        if self.gst_inclusive and self.gst_rate > 0:
+            return round(self.taxable_amount * self.gst_rate / 100, 2)
+        return round(self.taxable_amount * self.gst_rate / 100, 2)
 
     @property
     def cgst(self) -> float:
@@ -182,9 +184,8 @@ class ReceiptData:
 
     @property
     def grand_total(self) -> float:
-        base = (self.items_subtotal if self.gst_inclusive
-                else self.taxable_amount + self.gst_amount)
-        return round(base + self.delivery_charge - self.discount, 2)
+        base = self.taxable_amount + self.gst_amount
+        return round(base - self.discount, 2)
 
     @classmethod
     def from_booking_session(cls, session_state: dict, cart: dict, restaurant: dict) -> "ReceiptData":
@@ -353,16 +354,19 @@ class ReceiptRenderer:
         d = self.data
         self._divider("solid")
         if d.items and any(i.unit_price > 0 for i in d.items):
-            self._two_col("Subtotal", f"Rs.{d.taxable_amount:.2f}",
+            self._two_col("Items subtotal", f"Rs.{d.items_subtotal:.2f}",
+                          color_l=COLOR_MID, color_r=COLOR_MID)
+        if d.parcel_charge > 0:
+            self._two_col("Parcel / packaging", f"Rs.{d.parcel_charge:.2f}",
+                          color_l=COLOR_MID, color_r=COLOR_MID)
+        if d.delivery_charge > 0:
+            self._two_col("Delivery charge", f"Rs.{d.delivery_charge:.2f}",
                           color_l=COLOR_MID, color_r=COLOR_MID)
         if d.gst_rate > 0 and d.gst_amount > 0:
             half = d.gst_rate / 2
             self._two_col(f"CGST ({half:.1f}%)", f"Rs.{d.cgst:.2f}",
                           color_l=COLOR_MID, color_r=COLOR_MID)
             self._two_col(f"SGST ({half:.1f}%)", f"Rs.{d.sgst:.2f}",
-                          color_l=COLOR_MID, color_r=COLOR_MID)
-        if d.delivery_charge > 0:
-            self._two_col("Delivery charge", f"Rs.{d.delivery_charge:.2f}",
                           color_l=COLOR_MID, color_r=COLOR_MID)
         if d.discount > 0:
             self._two_col(d.discount_label, f"- Rs.{d.discount:.2f}",
