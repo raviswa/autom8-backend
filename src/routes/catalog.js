@@ -300,17 +300,29 @@ router.post('/webhook', async (req, res) => {
 router.get('/kitchen-status', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const currentSlot = getCurrentSlotIST();
-    const { count, error } = await supabaseAdmin.from('menu_items')
-      .select('id', { count: 'exact', head: true })
-      .eq('restaurant_id', req.restaurant_id)
-      .eq('is_available', true)
-      .eq('is_stocked', true);
-    if (error) throw error;
+    const [itemsResult, restResult] = await Promise.all([
+      supabaseAdmin.from('menu_items')
+        .select('id', { count: 'exact', head: true })
+        .eq('restaurant_id', req.restaurant_id)
+        .eq('is_available', true)
+        .eq('is_stocked', true),
+      supabaseAdmin.from('restaurants')
+        .select('kitchen_busy, takeaway_ready_range, delivery_ready_range')
+        .eq('id', req.restaurant_id)
+        .maybeSingle(),
+    ]);
+    if (itemsResult.error) throw itemsResult.error;
+    if (restResult.error) throw restResult.error;
+    const rest = restResult.data;
+    const count = itemsResult.count;
 
     res.json({
       success: true,
       is_open: (count ?? 0) > 0,
       available_items: count ?? 0,
+      kitchen_busy: !!rest?.kitchen_busy,
+      takeaway_ready_range: rest?.takeaway_ready_range ?? null,
+      delivery_ready_range: rest?.delivery_ready_range ?? null,
       current_slot: currentSlot,
       current_slot_label: currentSlot ? SLOT_DISPLAY_LABELS[currentSlot] : null,
       schedule_open: currentSlot != null,
@@ -351,6 +363,36 @@ router.post('/kitchen-toggle', authenticateToken, getRestaurantId, async (req, r
     }
 
     res.json({ success: true, is_open: open, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/catalog/kitchen-busy-toggle — Manager rush-hour flag ───────────
+
+router.post('/kitchen-busy-toggle', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (!['owner', 'manager', 'brand_owner'].includes(req.user_role))
+      return res.status(403).json({ error: 'Unauthorized' });
+
+    const { busy } = req.body;
+    if (typeof busy !== 'boolean')
+      return res.status(400).json({ error: 'busy (boolean) required' });
+
+    const { data, error } = await supabaseAdmin.from('restaurants').update({
+      kitchen_busy: busy,
+      updated_at: new Date().toISOString(),
+    }).eq('id', req.restaurant_id).select('kitchen_busy').single();
+
+    if (error) throw error;
+
+    supabaseAdmin.from('audit_logs').insert({
+      user_id: req.user.sub, restaurant_id: req.restaurant_id,
+      action: busy ? 'Kitchen marked busy' : 'Kitchen marked normal',
+      details: { kitchen_busy: busy },
+    }).catch(() => {});
+
+    res.json({ success: true, kitchen_busy: data.kitchen_busy });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -23,6 +23,7 @@ from tools.payment_tools import create_payment_link
 from tools.whatsapp_tools import send_whatsapp_message
 from tools.cart_tools import cart_to_order_text, cart_total, clear_cart
 from tools.order_pricing import compute_order_totals, format_order_total_lines
+from tools.order_timing import ready_time_note_from_session
 from tools.booking_mechanisms import (
     RECEIPT_AVAILABLE,
     _generate_receipt,
@@ -38,6 +39,7 @@ from tools.booking_mechanisms import (
     AUTOM8_KDS_URL,
     notify_manager_order_alert,
     assign_and_notify_captain_takeaway,
+    cache_restaurant_pricing,
 )
 from agents.customer.booking_helpers import (
     MANAGER_PORTAL_URL,
@@ -74,6 +76,7 @@ async def handle_takeaway_flow(
             return {"status": session_state.get("booking_step", "awaiting_order")}
 
         try:
+            await cache_restaurant_pricing(session_state, restaurant_id)
             cart_snapshot = dict(cart)
             parcel_rate   = float(session_state.get("parcel_charge_per_item") or 0)
             totals        = compute_order_totals(cart, "takeaway", parcel_per_item=parcel_rate)
@@ -134,6 +137,9 @@ async def handle_takeaway_flow(
                 f"Order: {order_text_display}\n────────────────────\n"
                 f"{format_order_total_lines(totals)}\n\n{payment_line}{captain_line}"
             )
+            timing_note = ready_time_note_from_session(session_state, "takeaway")
+            if timing_note:
+                confirmation += f"\n\n{timing_note}"
             if suggestion:
                 confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)

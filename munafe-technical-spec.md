@@ -1,7 +1,7 @@
 # Munafe Platform — Technical Specification
-**Version:** 1.1  
+**Version:** 1.3  
 **Maintained by:** Autom8 Works  
-**Last updated:** June 2026  
+**Last updated:** 12 June 2026  
 **Purpose:** Authoritative reference for engineers, technical support, and the AI chatbot. All feature specs, API contracts, data models, agent flow states, and scheduler ownership documented here are derived directly from the production codebase (`autom8-backend` + `autom8-frontend` on GitHub).
 
 **Chatbot usage:** When answering questions about Munafe, prefer this document over assumptions. If code and this doc disagree, the deployed code wins — file a doc update. Key rule: **Node.js owns staff API, feedback scheduler, marketing scheduler, and the primary WhatsApp webhook ingress; Python owns conversational booking flows and session state.**
@@ -286,7 +286,7 @@ Incoming message
 | **Feedback session** | `awaiting_feedback_rating`, `awaiting_feedback_aspects`, `awaiting_feedback_comment` |
 | **Identity (separate key)** | `identity_step`: `awaiting_name`, `awaiting_name_confirm`, `awaiting_name_text` |
 
-**Key session context keys:** `service_type`, `customer_name`, `cart`, `table_number`, `party_size`, `token_number`, `booking_id`, `special_notes_asked_at`, `_kitchen_sent`, `_catalog_sent_after_party`
+**Key session context keys:** `service_type`, `customer_name`, `cart`, `table_number`, `party_size`, `token_number`, `booking_id`, `special_notes_asked_at`, `parcel_charge_per_item`, `_kitchen_sent`, `_catalog_sent_after_party`
 
 ### Identity Agent (`identity_agent.py`)
 
@@ -344,6 +344,8 @@ Services: `dine_in`, `takeaway`, `delivery`, `reserve_table`
 
 Same as dine-in but skips party size and table assignment. Token number assigned from `get_next_token_number()`. Customer receives token notification. Manager receives alert when order is ready to collect.
 
+On flow start, `cache_restaurant_pricing()` loads `restaurants.parcel_charge_per_item` into session. Cart summary and checkout use `compute_order_totals()` (see **Takeaway & delivery order pricing** below).
+
 #### Delivery Flow (`handle_delivery_flow`)
 
 | Step | Action |
@@ -352,6 +354,64 @@ Same as dine-in but skips party size and table assignment. Token number assigned
 | `awaiting_order` | Cart interaction (same as dine-in) |
 | `awaiting_special_notes` | Same notes flow |
 | `visit_complete` | Confirm order; notify kitchen; assign rider (manual via manager command) |
+
+Same parcel/GST pricing as takeaway, plus a flat **delivery charge** (default ₹40). Legacy text-order path in `item_preferences.py` uses the same `order_pricing` module.
+
+#### Takeaway & delivery order pricing (`chat/tools/order_pricing.py`)
+
+Owner-configurable **parcel / packaging charge** applies only to `takeaway` and `delivery` — not dine-in.
+
+| Step | Formula |
+|---|---|
+| Items subtotal | Sum of `qty × unit_price` per cart line |
+| Parcel charge | `Σ (qty × parcel_charge_per_item)` per line |
+| Delivery charge | Flat fee (default ₹40) — delivery only |
+| Pre-GST total | items + parcel + delivery |
+| GST | 5% on pre-GST total |
+| Grand total | pre-GST + GST |
+
+**Example** (parcel ₹10/item): 2× Dosa + 3× Idly → parcel = ₹50 (2×10 + 3×10). GST is calculated on items + parcel (+ delivery if applicable).
+
+**Where applied:** `takeaway_flow.py`, `delivery_flow.py`, `cart_tools.py` (cart summary), `generate_receipt.py` (receipt line item), `item_preferences.py` (legacy interactive-list flow).
+
+**Owner setting:** `restaurants.parcel_charge_per_item` — configured in SettingsPanel Kitchen tab; persisted via `PUT /api/restaurants/me`.
+
+#### Special dish of the day (customer-facing)
+
+Managers mark items with `is_special_today = true` in ManagerPortal (see Section 9). This flag is **not** pushed to the Meta WhatsApp catalog.
+
+After the menu or catalog is sent, `send_special_dishes_note()` in `booking_mechanisms.py` sends a friendly WhatsApp suggestion, e.g.:
+
+> 🌟 *Today's specials:* Rava Idly, Kanchipuram Idly  
+> Ask us to add any of these while you order — we'd love to serve you! 😊
+
+All `is_special_today` flags reset daily at ~00:00 IST via `resetDailySpecialDishes()` in the Node slot scheduler.
+
+#### Order ready-time messaging (takeaway & delivery)
+
+Owners configure optional soft ETA ranges in Settings; managers toggle **Busy kitchen** during rush hour.
+
+| Setting | Configured by | Stored in |
+|---|---|---|
+| `takeaway_ready_range` | Owner (Settings → Kitchen) | `restaurants` — e.g. `"20-30"` |
+| `delivery_ready_range` | Owner (Settings → Kitchen) | `restaurants` — e.g. `"30-45"` |
+| `kitchen_busy` | Manager (Manager Portal) | `restaurants` boolean |
+
+**Customer messages** (`chat/tools/order_timing.py`), appended to order confirmations only — not at address capture, not in Meta catalog:
+
+| Condition | Message |
+|---|---|
+| Range set, kitchen normal | `⏱ Usually ready/delivered in {range} mins. We'll WhatsApp you when it's ready.` |
+| Range set, kitchen busy | `⏱ Normally it takes {range} mins, but due to high volumes there could be some delay in preparing your food. We'll WhatsApp you when it's ready.` |
+| No range, kitchen busy | `⏱ Kitchen is busy — please allow a little extra time preparing your order. We'll WhatsApp you when it's ready.` |
+| No range, kitchen normal | *(no timing line)* |
+
+`cache_restaurant_pricing()` loads ranges + `kitchen_busy` into session; refreshed again at checkout so busy toggle mid-order is respected.
+
+**API:** `POST /api/catalog/kitchen-busy-toggle` — body `{ "busy": true|false }` (manager/owner).  
+`GET /api/catalog/kitchen-status` includes `kitchen_busy`, `takeaway_ready_range`, `delivery_ready_range`.
+
+**Migration:** `migrations/add_kitchen_ready_ranges.sql`
 
 #### Reservation Flow (`handle_reserve_table_flow`)
 
@@ -704,6 +764,8 @@ created_at     timestamptz
 ### Overview
 Menu items are stored in `menu_items`. Each item has a `time_slot` field for scheduling visibility. The Meta Catalog is kept in sync so customers ordering via WhatsApp see the same menu. Owners can also upload menus via Excel.
 
+Managers can toggle **availability** (syncs to Meta catalog) and **special dish of the day** (WhatsApp suggestion only). Owners configure **parcel/packaging charge per item** for takeaway and delivery orders.
+
 ### Database (`menu_items`)
 ```sql
 id                  uuid PK
@@ -715,6 +777,7 @@ price               numeric NOT NULL
 image_url           text
 is_available        boolean DEFAULT true
 is_stocked          boolean DEFAULT true
+is_special_today    boolean DEFAULT false  -- manager-marked daily special; NOT in Meta catalog
 prep_time_minutes   integer DEFAULT 15
 meta_product_id     text           -- Meta Catalog product ID
 retailer_id         text           -- unique retailer SKU
@@ -725,6 +788,15 @@ brand_override      jsonb          -- per-outlet overrides on brand menu item
 created_at          timestamptz
 updated_at          timestamptz
 ```
+
+**Index:** `idx_menu_items_special_today` — partial index on `restaurant_id` where `is_special_today = true`.
+
+### Parcel charge (`restaurants`)
+```sql
+parcel_charge_per_item  numeric(8,2) NOT NULL DEFAULT 0
+-- Extra ₹ per cart line qty for takeaway/delivery, added before GST. 0 = disabled.
+```
+**Migration:** `migrations/add_catalog_parcel_and_specials.sql`
 
 ### Time Slot Schedule (IST)
 | Slot | Window |
@@ -741,7 +813,9 @@ updated_at          timestamptz
 |---|---|---|---|
 | `GET` | `/api/menu-items` | `authenticateToken` | List items for restaurant (optionally `?ignore_slot=true`) |
 | `POST` | `/api/menu-items` | `authenticateToken` | Create single item |
-| `PUT` | `/api/menu-items/:id/availability` | `authenticateToken` | Toggle availability; push to Meta Catalog |
+| `PUT` | `/api/menu-items/:id/availability` | `authenticateToken` | Toggle `is_stocked` + `is_available`; push to Meta Catalog (see below) |
+| `PUT` | `/api/menu-items/:id/special-today` | `authenticateToken` | Toggle `is_special_today`; **no** Meta catalog push |
+| `POST` | `/api/catalog/kitchen-busy-toggle` | `authenticateToken` | Manager rush flag `kitchen_busy` on restaurant |
 | `POST` | `/api/catalog/sync` | `authenticateToken` | Pull catalog from Meta; upsert to `menu_items` |
 | `POST` | `/api/catalog/slot-sync` | `authenticateToken` | Manual slot override for restaurant |
 | `POST` | `/api/catalog/menu-upload` | `authenticateToken` | Excel upload → parse → upsert → push to Meta |
@@ -751,6 +825,31 @@ updated_at          timestamptz
 **`applySlotAvailability(restaurant_id, slot)`:** Sets `is_available = false` for items whose `time_slot` does not match `slot`, and `is_available = true` for those that do. Runs every minute via slot scheduler.
 
 **`applySlotForAllRestaurants()`:** Iterates all active restaurants and calls `applySlotAvailability` for each.
+
+### Availability toggle → Meta Catalog sync
+
+`PUT /api/menu-items/:id/availability` is the **authoritative** availability endpoint (supersedes any legacy route in `pos.js`).
+
+**Flow:**
+1. Updates `menu_items.is_stocked` and `menu_items.is_available` in Supabase.
+2. Responds immediately to the dashboard (does not block on Meta).
+3. If the item has a `retailer_id` and Meta credentials (`META_ACCESS_TOKEN`, catalog ID) are configured, fire-and-forget `pushSingleItemToMetaCatalog()` calls Meta Batch API `UPDATE` with `availability: 'in stock' | 'out of stock'`.
+
+**Requirements for Meta sync:** Item must have `retailer_id`; restaurant must have valid WABA/Meta integration. If either is missing, DB toggle still succeeds but catalog is unchanged.
+
+**Log signature:** `[meta-single-push] ✅ {retailerId} → in stock|out of stock`
+
+### Special dish of the day (manager toggle)
+
+`PUT /api/menu-items/:id/special-today`  
+Body: `{ "is_special_today": true | false }`  
+Roles: `owner`, `manager`, `brand_owner`
+
+- Updates `menu_items.is_special_today` only.
+- Writes `audit_logs` entry.
+- **Does not** call `pushSingleItemToMetaCatalog()` — specials are surfaced via WhatsApp ordering suggestion only (Section 5).
+- `GET /api/menu-items` and Python `fetch_menu_items()` include `is_special_today` in responses.
+- `resetDailySpecialDishes()` clears all `is_special_today = true` rows once per calendar day (~00:00–00:02 IST) in the Node slot rotation job.
 
 ### Takeaway fulfillment (`add_takeaway_fulfillment.sql`)
 ```sql
@@ -775,11 +874,24 @@ sort_order   integer DEFAULT 0
 ```
 Brand menu items can be pushed to all outlets under a brand via `POST /api/brands/:id/menu/push`.
 
-### Frontend (`MenuPage.jsx`)
+### Frontend
+
+**`MenuPage.jsx` (owner)**
 - Tabs: Items list / Sync from Meta / Upload Excel.
 - Toggle availability per item (sends `PUT /api/menu-items/:id/availability`).
 - Time slot badge per item.
-- `SettingsPanel TabKitchen`: assign items to fulfillment sections (calls `PUT /api/menu-items/bulk-section` — **route not yet implemented**).
+
+**`ManagerPortal.jsx` — Menu tab**
+- **Availability** toggle per item → `PUT /api/menu-items/:id/availability` (syncs Meta catalog when `retailer_id` present).
+- **Special today** toggle per item → `PUT /api/menu-items/:id/special-today` (WhatsApp suggestion only).
+- **Mark busy** button → `POST /api/catalog/kitchen-busy-toggle` (rush-hour delay note on confirmations).
+- Kitchen open/closed status from `GET /api/catalog/kitchen-status`.
+- Excel template download / upload via `POST /api/catalog/menu-upload`.
+
+**`SettingsPanel.jsx` — Kitchen tab**
+- **Parcel / packaging charge (₹ per item)** → `PUT /api/restaurants/me` (`parcel_charge_per_item`). Common values: 10, 15, 20; 0 disables.
+- **Takeaway ready time / Delivery time** ranges → `PUT /api/restaurants/me` (`takeaway_ready_range`, `delivery_ready_range`). e.g. `20-30`.
+- Assign items to fulfillment sections (calls `PUT /api/menu-items/bulk-section` — **route not yet implemented**).
 
 ---
 
@@ -953,6 +1065,15 @@ Updates `orders` with rider details; sends WhatsApp dispatch notification to cus
 
 ### Python: Location Capture
 `send_location_request(phone, restaurant_id)` sends a WhatsApp native location-request message. The customer's response (`message.type == "location"`) is parsed in `_process_meta_payload` and stored in session context as `delivery_lat`, `delivery_lng`, `delivery_address`.
+
+### Order totals (WhatsApp delivery)
+Delivery orders placed via WhatsApp use `compute_order_totals()` (`chat/tools/order_pricing.py`):
+
+```
+grand_total = (items_subtotal + parcel_charge + delivery_charge) × 1.05   -- 5% GST
+```
+
+Default delivery charge: ₹40 (`DEFAULT_DELIVERY_CHARGE`). Parcel charge comes from `restaurants.parcel_charge_per_item` (owner setting). Breakdown shown in cart summary, confirmation message, and receipt image.
 
 ### Database (`orders` delivery columns)
 ```sql
@@ -1250,7 +1371,7 @@ Seven tabs; visible tabs depend on role:
 | **Tables** | owner, manager | `GET/POST/PUT/DELETE /api/tables` |
 | **Restaurant** | owner | `GET/PUT /api/restaurants/me` |
 | **Services** | owner | `GET/PUT /api/restaurants/me` (services config) |
-| **Kitchen** | owner, manager | `GET /api/menu-items`, `PUT /api/menu-items/bulk-section` (⚠️ not yet implemented) |
+| **Kitchen** | owner, manager | `GET /api/menu-items`, `PUT /api/restaurants/me` (`parcel_charge_per_item`), `PUT /api/menu-items/bulk-section` (⚠️ not yet implemented) |
 | **WhatsApp** | owner | `GET/PUT /api/restaurants/integration` |
 | **Staff** | owner | `GET/POST/PUT /api/staff` |
 | **Brand** | brand_owner | `GET/PUT /api/brands/:id` |
@@ -1265,6 +1386,10 @@ restaurants:
   waba_id                  text    -- WhatsApp Business Account ID
   whatsapp_number          text    -- display number for customers
   gstin                    varchar -- for invoice GST
+  parcel_charge_per_item   numeric DEFAULT 0  -- ₹ per cart qty for takeaway/delivery packaging
+  takeaway_ready_range     text               -- optional e.g. 20-30 (soft ETA, takeaway)
+  delivery_ready_range     text               -- optional e.g. 30-45 (soft ETA, delivery)
+  kitchen_busy             boolean DEFAULT false  -- manager rush toggle
   opening_hours            jsonb   -- e.g. {"mon": "09:00-23:00", ...}
   cuisine_type             varchar
   subscribed_features      text[]  -- feature gate array
@@ -1283,6 +1408,7 @@ Calls `GET /api/dashboard/waba` → shows Meta App Review status, phone number v
 2. Invoice payload stored in `invoices` table with `accounting_sync_status = "PENDING_DAILY_ROLLUP_ZOHO_TALLY"`.
 3. Python `_upload_and_send_receipt()` in booking_agent:
    - Generates receipt image via Pillow/qrcode.
+   - For takeaway/delivery: includes **Parcel / packaging** line when `parcel_charge > 0`; GST base = items + parcel + delivery.
    - Uploads to Supabase Storage `Receipts` bucket.
    - Stores token `→` object name mapping.
    - Sends WhatsApp message with receipt image + stable QR URL.
@@ -1441,7 +1567,7 @@ Started once via `startAllSchedulers()` at server boot (`server.js`).
 | Job | Interval | Owner | What it does |
 |---|---|---|---|
 | **Slot auto-release** | 5 min | Node | Completes `walk_in_tokens` seated > 90 min; frees `tables`; queues feedback; completes stale `orders` |
-| **Slot rotation** | 1 min | Node | `getCurrentSlotIST()` → `applySlotForAllRestaurants()` menu availability |
+| **Slot rotation** | 1 min | Node | `getCurrentSlotIST()` → `applySlotForAllRestaurants()` menu availability; ~00:00 IST → `resetDailySpecialDishes()` |
 | **Special notes timeout** | 60 s | Node | Auto-confirms `conversation_states` at `awaiting_special_notes` > 2 min; KDS fallback notify; manager alert |
 | **Feedback scheduler** | 10 min | Node | Sends post-visit WhatsApp invites from `feedback_pending` (2 hr delay, 24 hr dedup, send lease) |
 | **Accounting sync** | Daily 23:30 IST | Node | Pushes `invoices` with `PENDING_DAILY_ROLLUP_ZOHO_TALLY` to Zoho Books |

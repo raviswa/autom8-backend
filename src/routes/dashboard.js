@@ -22,7 +22,8 @@ const RESTAURANT_SELECT_FULL = [
   'id', 'name', 'waba_id', 'whatsapp_number', 'display_name', 'manager_phone', 'meta_catalog_id',
   'timezone', 'dining_duration_minutes', 'payment_mode', 'kitchen_workflow',
   'kot_printer_ip', 'kot_printer_port', 'kot_printer_enabled',
-  'takeaway_fulfillment_mode', 'fulfillment_sections', 'parcel_charge_per_item', 'opening_hours',
+  'takeaway_fulfillment_mode', 'fulfillment_sections', 'parcel_charge_per_item',
+  'takeaway_ready_range', 'delivery_ready_range', 'kitchen_busy', 'opening_hours',
 ].join(', ');
 
 const RESTAURANT_SELECT_BASE = [
@@ -40,7 +41,7 @@ async function fetchRestaurantRow(restaurantId) {
 
   if (!error) return { data, error: null };
 
-  if (/kitchen_workflow|kot_printer|meta_catalog_id|parcel_charge_per_item/i.test(error.message)) {
+  if (/kitchen_workflow|kot_printer|meta_catalog_id|parcel_charge_per_item|takeaway_ready_range|delivery_ready_range|kitchen_busy/i.test(error.message)) {
     const fallback = await supabaseAdmin
       .from('restaurants')
       .select(RESTAURANT_SELECT_BASE)
@@ -51,6 +52,9 @@ async function fetchRestaurantRow(restaurantId) {
       fallback.data.kot_printer_enabled = false;
       fallback.data.meta_catalog_id = null;
       fallback.data.parcel_charge_per_item = 0;
+      fallback.data.takeaway_ready_range = null;
+      fallback.data.delivery_ready_range = null;
+      fallback.data.kitchen_busy = false;
     }
     return fallback;
   }

@@ -165,7 +165,7 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict:
         resp = await get_http().get(
             f"{base}/rest/v1/restaurants",
             params={
-                "select": "name,whatsapp_number,address,phone,gstin,website,parcel_charge_per_item",
+                "select": "name,whatsapp_number,address,phone,gstin,website,parcel_charge_per_item,takeaway_ready_range,delivery_ready_range,kitchen_busy",
                 "id":     f"eq.{restaurant_id}",
                 "limit":  "1",
             },
@@ -181,12 +181,15 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict:
 
 
 async def cache_restaurant_pricing(session_state: dict, restaurant_id: str) -> None:
-    """Store parcel rate in session for cart summaries and checkout."""
+    """Store parcel rate and timing settings in session for cart summaries and checkout."""
     info = await fetch_restaurant_info(restaurant_id)
     try:
         session_state["parcel_charge_per_item"] = float(info.get("parcel_charge_per_item") or 0)
     except (TypeError, ValueError):
         session_state["parcel_charge_per_item"] = 0.0
+    session_state["takeaway_ready_range"] = (info.get("takeaway_ready_range") or "").strip() or None
+    session_state["delivery_ready_range"] = (info.get("delivery_ready_range") or "").strip() or None
+    session_state["kitchen_busy"] = bool(info.get("kitchen_busy"))
 
 
 async def send_special_dishes_note(customer_phone: str, restaurant_id: str) -> None:

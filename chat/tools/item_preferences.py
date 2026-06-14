@@ -98,6 +98,7 @@ from tools.personalisation_tools import (
 )
 from tools.catalog_tools import send_whatsapp_catalog_message
 from tools.order_pricing import compute_order_totals, format_order_total_lines
+from tools.order_timing import ready_time_note_from_session
 from tools.booking_mechanisms import cache_restaurant_pricing
 from tools.cart_tools import (
     add_to_cart,
@@ -1219,6 +1220,9 @@ async def handle_takeaway_flow(
                 f"{format_order_total_lines(totals)}\n\n"
                 f"Pay here: {payment_link}"
             )
+            timing_note = ready_time_note_from_session(session_state, "takeaway")
+            if timing_note:
+                confirmation += f"\n\n{timing_note}"
             if suggestion:
                 confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
@@ -1289,8 +1293,7 @@ async def handle_delivery_flow(
         await cache_restaurant_pricing(session_state, restaurant_id)
         await send_whatsapp_message(
             customer_phone,
-            "Thank you! Estimated delivery: 30-45 mins.\n\n"
-            "Browse today's menu below and add items to your basket 🛒",
+            "Thank you! Browse today's menu below and add items to your basket 🛒",
             restaurant_id,
         )
         clear_cart(session_state)
@@ -1345,6 +1348,9 @@ async def handle_delivery_flow(
                 f"{format_order_total_lines(totals)}\n\n"
                 f"Pay here: {payment_link}"
             )
+            timing_note = ready_time_note_from_session(session_state, "delivery")
+            if timing_note:
+                confirmation += f"\n\n{timing_note}"
             if suggestion:
                 confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)

@@ -21,6 +21,7 @@ from tools.payment_tools import create_payment_link
 from tools.whatsapp_tools import send_whatsapp_message, send_location_request
 from tools.cart_tools import cart_to_order_text, cart_total, clear_cart
 from tools.order_pricing import compute_order_totals, format_order_total_lines, DEFAULT_DELIVERY_CHARGE
+from tools.order_timing import ready_time_note_from_session
 from tools.booking_mechanisms import (
     RECEIPT_AVAILABLE,
     _generate_receipt,
@@ -32,6 +33,7 @@ from tools.booking_mechanisms import (
     fetch_restaurant_info,
     upload_and_send_receipt,
     receipt_qr_url,
+    cache_restaurant_pricing,
 )
 from agents.customer.booking_helpers import (
     _HOME_HINT,
@@ -71,6 +73,7 @@ async def handle_delivery_flow(
             delivery_address = raw
 
         session_state["delivery_address"] = delivery_address
+        await cache_restaurant_pricing(session_state, restaurant_id)
         from tools.kitchen_hours import is_kitchen_open
         if not is_kitchen_open():
             if await gate_ordering_service(
@@ -80,7 +83,7 @@ async def handle_delivery_flow(
 
         await send_whatsapp_message(
             customer_phone,
-            "Thank you! Estimated delivery: 30-45 mins.\n\nBrowse today's menu below and add items to your basket.",
+            "Thank you! Browse today's menu below and add items to your basket 🛒",
             restaurant_id,
         )
         clear_cart(session_state)
@@ -103,6 +106,7 @@ async def handle_delivery_flow(
             return {"status": session_state.get("booking_step", "awaiting_order")}
 
         try:
+            await cache_restaurant_pricing(session_state, restaurant_id)
             cart_snapshot = dict(cart)
             parcel_rate   = float(session_state.get("parcel_charge_per_item") or 0)
             totals        = compute_order_totals(
@@ -147,6 +151,9 @@ async def handle_delivery_flow(
                 f"────────────────────\n"
                 f"{format_order_total_lines(totals)}\n\n{payment_line}"
             )
+            timing_note = ready_time_note_from_session(session_state, "delivery")
+            if timing_note:
+                confirmation += f"\n\n{timing_note}"
             if suggestion:
                 confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
