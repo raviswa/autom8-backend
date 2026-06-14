@@ -74,6 +74,8 @@ from agents.customer.booking_helpers import (
     send_catalog_with_fallback,
     send_service_menu,
     build_smart_greeting,
+    is_name_correction_trigger,
+    prompt_name_verification,
     gate_ordering_service,
     send_closed_kitchen_notice,
     strip_order_quantity,
@@ -264,6 +266,10 @@ async def handle_booking_flow(
             "reserve":"4","reservation":"4","book":"4","booking":"4","book a table":"4","reserve a table":"4",
         }
         _raw_choice = message.strip()
+        if is_name_correction_trigger(_raw_choice, customer_name):
+            return await prompt_name_verification(
+                customer_phone, restaurant_id, customer_name, session_state,
+            )
         choice = _SERVICE_TEXT_MAP.get(_raw_choice.lower(), _raw_choice)
         try:
             service_type = await resolve_service_choice(restaurant_id, choice)

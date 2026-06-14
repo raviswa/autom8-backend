@@ -383,8 +383,8 @@ async def send_service_menu(
     rows = await build_service_menu_rows(restaurant_id)
     state = session_state or {}
     normalize_last_order_summary(state)
-    first = _first_name(state.get("customer_name", ""))
-    header = f"Welcome back, {first}!" if first else "Welcome!"
+    tod = _time_of_day_label()
+    header = _MENU_HEADERS.get(tod, "Welcome")
 
     recall = build_recall_message(state)
     if recall:
@@ -413,12 +413,14 @@ async def send_service_menu(
     body_lines.append("What would you like to do today?")
     body_text = "\n\n".join(body_lines)
 
+    footer = "Reply *Update name* to fix your name"
+
     ok = await _send_interactive(customer_phone, {
         "interactive": {
             "type": "list",
             "header": {"type": "text", "text": header[:60]},
             "body":   {"text": body_text[:1024]},
-            "footer": {"text": "Tap below to choose"},
+            "footer": {"text": footer[:60]},
             "action": {
                 "button": "View options",
                 "sections": [{"title": "Our services", "rows": rows}],
@@ -492,11 +494,64 @@ _RETURNING_VARIANTS: dict[str, list[str]] = {
     ],
 }
 _RECALL_BUBBLES = [
-    "Loved the {last_order} last time! 🌟",
-    "The {last_order} was a great pick on your last visit.",
-    "{last_order} is on the menu again today — fancy a repeat?",
-    "Coming back for the {last_order}? 😊",
+    "Hope you enjoyed the {last_order} last time — it's on the menu today 🌟",
+    "Last visit you had {last_order} — happy to add it again if you'd like.",
+    "{last_order} is available today whenever you're in the mood.",
+    "You ordered {last_order} before — tap the menu to order again anytime.",
 ]
+_MENU_HEADERS: dict[str, str] = {
+    "morning":   "Good morning",
+    "afternoon": "Good afternoon",
+    "evening":   "Good evening",
+    "night":     "Good evening",
+}
+
+
+def is_name_correction_trigger(message: str, customer_name: str) -> bool:
+    """Detect when a customer questions or wants to update their stored name."""
+    text = (message or "").strip()
+    if not text:
+        return False
+    lower = text.lower().rstrip("?").strip()
+    first = _first_name(customer_name).lower()
+    if first and len(lower) <= max(len(first) + 2, 8):
+        if lower == first or lower in (f"not {first}", f"im not {first}", f"i'm not {first}"):
+            return True
+        if text.endswith("?") and lower.split()[0] == first:
+            return True
+    keywords = (
+        "wrong name", "not my name", "update name", "update my name",
+        "change name", "change my name", "correct name", "name is wrong",
+        "my name is", "call me",
+    )
+    return any(k in lower for k in keywords)
+
+
+async def prompt_name_verification(
+    customer_phone: str,
+    restaurant_id: str,
+    customer_name: str,
+    session_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Re-verify stored name mid-booking (buttons → identity agent on next turn)."""
+    from agents.customer.identity_agent import BTN_RET_EDIT, BTN_RET_YES
+    from tools.whatsapp_buttons_helper import send_whatsapp_buttons
+
+    first = _first_name(customer_name) or customer_name
+    await send_whatsapp_buttons(
+        to=customer_phone,
+        body=f"We have your name as *{first}*. Is that right?",
+        buttons=[
+            {"id": BTN_RET_YES,  "title": "✅ Yes, that's me"},
+            {"id": BTN_RET_EDIT, "title": "✏️ Update name"},
+        ],
+        restaurant_id=restaurant_id,
+    )
+    session_state["identity_step"] = "awaiting_name_confirm"
+    session_state["pending_button_step"] = "awaiting_name_confirm"
+    return {"status": "awaiting_name_confirmation", "next_state": "identity"}
+
+
 _FIRST_TIME_VARIANTS: dict[str, list[str]] = {
     "morning": [
         "Good morning, {first}! ☀️ Welcome to Munafe — so glad you're here.",

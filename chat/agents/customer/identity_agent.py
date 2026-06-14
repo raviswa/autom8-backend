@@ -372,9 +372,7 @@ async def handle_returning_customer(
                 "pending_button_step": "awaiting_name_confirm",
             }
 
-        # Standard returning customer — no confirmation needed, send greeting
-        greeting = _returning_greeting(customer_name, days_since_visit)
-        await send_whatsapp_message(customer_phone, greeting, restaurant_id)
+        # Standard returning customer — service menu greeting is sent by booking_agent
         await update_last_visit(customer["id"])
 
         return {

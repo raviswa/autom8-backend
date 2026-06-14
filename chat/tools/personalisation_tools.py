@@ -532,7 +532,7 @@ def _build_greeting_text(
         return f"You have visited us {visit_streak} weeks in a row — you are truly one of our favourites! "
 
     if rfm_segment == "champion" and favourite_item:
-        return f"Shall we get your usual {favourite_item} started? "
+        return f"Your favourite {favourite_item} is on the menu today — just say the word if you'd like it. "
 
     if rfm_segment == "loyal":
         return "Great to see you again! Always a pleasure having you. "
@@ -616,7 +616,7 @@ async def build_order_suggestion(
                 if items:
                     top_item = items[0].get("name")
                     if top_item:
-                        return f"Shall we add your usual {top_item}?"
+                        return f"{top_item} is a popular pick — happy to add it if you'd like."
 
             # Second visit — show last order
             result = await session.execute(
