@@ -205,17 +205,17 @@ async function sendFeedbackInvite(record) {
     record.restaurant_id,
   );
 
-  if (!sent) {
-    await sendWhatsAppMessage(
-      record.customer_phone,
-      `Hi ${name}! 😊\n\n${thanksLine}${ctxSuffix}\n\n` +
-      `*How was your experience?*\n\n` +
-      `⭐ Reply with a rating from *1 to 5*:\n` +
-      `5 ⭐ — Excellent\n4 ⭐ — Good\n3 ⭐ — Average\n` +
-      `2 ⭐ — Below average\n1 ⭐ — Poor`,
-      record.restaurant_id,
-    );
-  }
+  if (sent) return true;
+
+  return sendWhatsAppMessage(
+    record.customer_phone,
+    `Hi ${name}! 😊\n\n${thanksLine}${ctxSuffix}\n\n` +
+    `*How was your experience?*\n\n` +
+    `⭐ Reply with a rating from *1 to 5*:\n` +
+    `5 ⭐ — Excellent\n4 ⭐ — Good\n3 ⭐ — Average\n` +
+    `2 ⭐ — Below average\n1 ⭐ — Poor`,
+    record.restaurant_id,
+  );
 }
 
 async function sendAspectPrompt(record, rating) {

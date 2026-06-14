@@ -21,6 +21,7 @@
 'use strict';
 
 const { supabaseAdmin } = require('../config/supabase');
+const { wasInviteSentRecently } = require('./feedbackDedup');
 
 /**
  * Queue a post-visit feedback request for a table.
@@ -76,6 +77,15 @@ async function queueFeedbackForTable({
       tableNumber = tableRow?.table_number ?? null;
     }
 
+    // Skip if an invite was already sent recently — prevents re-queue spam from
+    // token-complete + auto-release + table-status firing for the same visit.
+    if (await wasInviteSentRecently(restaurantId, cleanPhone)) {
+      console.info(
+        `[feedback-queue] Skipped — invite already sent recently for ${cleanPhone} | source: ${source}`
+      );
+      return;
+    }
+
     // One open feedback invite per customer per restaurant — prevents duplicate
     // WhatsApp messages when token-complete, auto-release, and table-status
     // all fire for the same visit.
@@ -117,6 +127,13 @@ async function queueFeedbackForTable({
       });
 
     if (insertErr) {
+      // Unique index (feedback_pending_one_open_per_customer) — concurrent queue race
+      if (insertErr.code === '23505') {
+        console.info(
+          `[feedback-queue] Skipped duplicate race for ${cleanPhone} | source: ${source}`
+        );
+        return;
+      }
       console.error(`[feedback-queue] Insert failed (${source}):`, insertErr.message);
       return;
     }

@@ -39,7 +39,7 @@ async function sendWhatsAppMessage(toNumber, message, restaurantId = null) {
 
     if (!accessToken || !phoneNumberId || !apiUrl) {
       console.warn(`[WhatsApp] Missing credentials — skipping message to ${toNumber}`);
-      return;
+      return false;
     }
 
     const response = await fetch(`${apiUrl}/${phoneNumberId}/messages`, {
@@ -60,11 +60,13 @@ async function sendWhatsAppMessage(toNumber, message, restaurantId = null) {
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       console.error('[WhatsApp] API error:', JSON.stringify(err).slice(0, 300));
-    } else {
-      console.log(`[WhatsApp] ✅ Sent to ${toNumber}`);
+      return false;
     }
+    console.log(`[WhatsApp] ✅ Sent to ${toNumber}`);
+    return true;
   } catch (err) {
     console.error('[WhatsApp] Failed to send message:', err.message);
+    return false;
   }
 }
 
