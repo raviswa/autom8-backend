@@ -1,3 +1,11 @@
+-- feedback_pending may have set_updated_at() trigger without an updated_at column.
+ALTER TABLE feedback_pending
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+
+UPDATE feedback_pending
+SET updated_at = COALESCE(feedback_sent_at, freed_at, NOW())
+WHERE updated_at IS NULL;
+
 -- Dedup existing open rows (keep oldest freed_at per customer) before adding constraint.
 WITH ranked AS (
   SELECT
@@ -12,7 +20,8 @@ WITH ranked AS (
 UPDATE feedback_pending
 SET
   feedback_sent    = true,
-  feedback_sent_at = NOW()
+  feedback_sent_at = COALESCE(feedback_sent_at, NOW()),
+  updated_at       = NOW()
 WHERE id IN (SELECT id FROM ranked WHERE rn > 1);
 
 -- Prevent multiple open feedback_pending rows per customer per restaurant.
