@@ -413,7 +413,7 @@ async def send_service_menu(
     body_lines.append("What would you like to do today?")
     body_text = "\n\n".join(body_lines)
 
-    footer = "Reply *Update name* to fix your name"
+    footer = "Reply *Update name* or *I'm not [name]* to fix"
 
     ok = await _send_interactive(customer_phone, {
         "interactive": {
@@ -512,19 +512,50 @@ def is_name_correction_trigger(message: str, customer_name: str) -> bool:
     text = (message or "").strip()
     if not text:
         return False
-    lower = text.lower().rstrip("?").strip()
+    lower = text.lower()
+    compact = re.sub(r"[^\w\s]", "", lower).strip()
     first = _first_name(customer_name).lower()
-    if first and len(lower) <= max(len(first) + 2, 8):
-        if lower == first or lower in (f"not {first}", f"im not {first}", f"i'm not {first}"):
-            return True
-        if text.endswith("?") and lower.split()[0] == first:
-            return True
+
     keywords = (
         "wrong name", "not my name", "update name", "update my name",
         "change name", "change my name", "correct name", "name is wrong",
-        "my name is", "call me",
+        "my name is", "call me", "that's not me", "thats not me",
+        "not me", "wrong person", "wrong number", "who is this",
+        "not my number", "you have the wrong", "got the wrong",
     )
-    return any(k in lower for k in keywords)
+    if any(k in lower for k in keywords):
+        return True
+
+    # Brief confusion right after a mis-addressed greeting
+    if compact in ("sorry", "what", "huh", "no", "nope", "excuse me"):
+        return True
+    if compact in ("sorry", "what", "huh") and text.endswith("?"):
+        return True
+
+    # "I'm not Vishal", "who is Vishal?", "who's Vishal" — any stated name
+    if re.search(r"i(?:'m| am)\s+not\s+[a-z]{2,}", lower):
+        return True
+    if re.search(r"who(?:'s| is)\s+(?!this\b|that\b|the\b|it\b)[a-z]{2,}", lower):
+        return True
+
+    if first and len(first) >= 1:
+        name_pat = re.escape(first)
+        if re.search(rf"i(?:'m| am)\s+not\s+{name_pat}\b", lower):
+            return True
+        if re.search(rf"im\s+not\s+{name_pat}\b", lower):
+            return True
+        if re.search(rf"not\s+{name_pat}\b", lower):
+            return True
+        if re.search(rf"who(?:'s| is)\s+{name_pat}\b", lower):
+            return True
+        # "Vs?", "Vs??", "Vishal?"
+        bare = re.sub(r"[^\w]", "", lower)
+        if bare == first and "?" in text:
+            return True
+        if text.endswith("?") and lower.split()[0].rstrip("?") == first:
+            return True
+
+    return False
 
 
 async def prompt_name_verification(

@@ -274,6 +274,10 @@ async def handle_booking_flow(
         try:
             service_type = await resolve_service_choice(restaurant_id, choice)
         except ValueError:
+            if is_name_correction_trigger(_raw_choice, customer_name):
+                return await prompt_name_verification(
+                    customer_phone, restaurant_id, customer_name, session_state,
+                )
             await send_whatsapp_message(
                 customer_phone, "Sorry, I did not catch that. Please tap one of the options above." + _HOME_HINT, restaurant_id
             )
