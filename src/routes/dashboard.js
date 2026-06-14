@@ -114,7 +114,7 @@ router.get('/cancel-stats', authenticateToken, getRestaurantId, requireOutlet, a
     const { start, end } = req.query;
     if (!start || !end) return res.status(400).json({ error: 'start and end required' });
 
-    const [cancelRes, totalRes, bcRes, btRes] = await Promise.all([
+    const [cancelRes, totalRes, sessionRes, completedRes, abandonedRes] = await Promise.all([
       supabaseAdmin.from('orders').select('total_amount')
         .eq('restaurant_id', req.restaurant_id).eq('status', 'cancelled')
         .gte('created_at', start).lte('created_at', end),
@@ -125,19 +125,25 @@ router.get('/cancel-stats', authenticateToken, getRestaurantId, requireOutlet, a
       supabaseAdmin.from('walk_in_tokens')
         .select('id', { count: 'exact', head: true })
         .eq('restaurant_id', req.restaurant_id)
-        .in('status', ['completed', 'cancelled'])
         .gte('arrived_at', start).lte('arrived_at', end),
       supabaseAdmin.from('walk_in_tokens')
         .select('id', { count: 'exact', head: true })
         .eq('restaurant_id', req.restaurant_id)
+        .eq('status', 'completed')
+        .gte('arrived_at', start).lte('arrived_at', end),
+      supabaseAdmin.from('walk_in_tokens')
+        .select('id', { count: 'exact', head: true })
+        .eq('restaurant_id', req.restaurant_id)
+        .eq('status', 'cancelled')
         .gte('arrived_at', start).lte('arrived_at', end),
     ]);
 
-    const orderCancels   = cancelRes.data ?? [];
-    const totalOrders    = totalRes.count  ?? 0;
-    const orderRevLost   = orderCancels.reduce((s, o) => s + (o.total_amount ?? 0), 0);
-    const bookingCancels = bcRes.count ?? 0;
-    const totalBookings  = btRes.count ?? 0;
+    const orderCancels    = cancelRes.data ?? [];
+    const totalOrders     = totalRes.count ?? 0;
+    const orderRevLost    = orderCancels.reduce((s, o) => s + (o.total_amount ?? 0), 0);
+    const totalSessions   = sessionRes.count ?? 0;
+    const sessionsCompleted = completedRes.count ?? 0;
+    const sessionAborts   = abandonedRes.count ?? 0;
 
     res.json({
       success:       true,
@@ -145,9 +151,15 @@ router.get('/cancel-stats', authenticateToken, getRestaurantId, requireOutlet, a
       orderRevLost,
       totalOrders,
       orderRate:     totalOrders > 0 ? Math.round((orderCancels.length / totalOrders) * 100) : 0,
-      bookingCancels,
-      totalBookings,
-      bookingRate:   totalBookings > 0 ? Math.round((bookingCancels / totalBookings) * 100) : 0,
+      // WhatsApp session outcomes (walk_in_tokens)
+      totalSessions,
+      sessionsCompleted,
+      sessionAborts,
+      sessionAbortRate: totalSessions > 0 ? Math.round((sessionAborts / totalSessions) * 100) : 0,
+      // Legacy keys — kept for older clients; now map to corrected semantics
+      bookingCancels:  sessionAborts,
+      totalBookings:   totalSessions,
+      bookingRate:     totalSessions > 0 ? Math.round((sessionAborts / totalSessions) * 100) : 0,
     });
   } catch (err) {
     console.error('[dashboard/cancel-stats]', err.message);
