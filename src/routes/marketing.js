@@ -2,17 +2,22 @@
 // ============================================================================
 // Marketing & CRM API — bridges walk_in_tokens + orders to the dashboard.
 // ENDPOINTS:
-//   GET  /api/marketing/subscribers        — stats + segment counts
+//   GET  /api/marketing/subscribers        — stats + segment counts + preview name
 //   GET  /api/marketing/templates          — Meta WABA templates
 //   POST /api/marketing/templates/create   — submit template to Meta
+//   GET  /api/marketing/template-drafts    — list saved drafts
+//   POST /api/marketing/template-drafts    — save draft
+//   DELETE /api/marketing/template-drafts/:id
 //   POST /api/marketing/media/upload       — upload header media to Meta
-//   POST /api/marketing/broadcast          — send campaign to a segment
-//   GET  /api/marketing/campaigns          — campaign history
+//   POST /api/marketing/broadcast          — send or schedule campaign
+//   GET  /api/marketing/campaigns          — campaign history + ROI
+//   GET  /api/marketing/automations        — list automations
+//   POST /api/marketing/automations        — create automation
+//   PATCH /api/marketing/automations/:id   — toggle active
 //   POST /api/marketing/ai-suggest         — AI segment + message suggestion
 //   POST /api/marketing/ai-rewrite         — AI copy rewrite
+//   POST /api/marketing/ai-generate        — AI template from scratch
 //   GET  /api/marketing/restaurants/:id/waba — WABA connection info
-//   GET  /api/restaurants                  — list all active restaurants
-//   GET  /api/restaurants/:id              — get single restaurant (WABAStrip)
 // ============================================================================
 
 'use strict';
@@ -20,6 +25,15 @@
 const express = require('express');
 const router  = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
+const {
+  SEGMENT_KEYS,
+  buildCustomerMap,
+  filterSegment,
+  computeStats,
+  getPreviewSampleName,
+  computeCampaignRoi,
+  executeBroadcast,
+} = require('../helpers/marketingCampaign');
 
 let multer;
 try { multer = require('multer'); } catch (_) { /* optional */ }
@@ -27,14 +41,17 @@ const upload = multer
   ? multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } })
   : null;
 
-// ─── Env constants ────────────────────────────────────────────────────────────
 const WA_API_URL  = process.env.WHATSAPP_API_URL || 'https://graph.facebook.com/v20.0';
 const WA_PHONE_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const WA_TOKEN    = process.env.WHATSAPP_ACCESS_TOKEN;
 const META_TOKEN  = process.env.META_ACCESS_TOKEN || WA_TOKEN;
 const GROQ_KEY    = process.env.GROQ_API_KEY;
 
-const SEGMENT_KEYS = ['all', 'recent', 'lapsed', 'takeaway', 'high_value', 'never_returned'];
+const AUTOMATION_TRIGGERS = {
+  lapsed_14d:       { label: 'No order in 14 days',        segment: 'lapsed',         defaultMessage: 'Hi {{name}}, we miss you at our restaurant! 🍽️ Come back this week — we have something special waiting for you.' },
+  loyalty_5th_order:{ label: 'Completed 5th order',        segment: 'high_value',     defaultMessage: 'Hi {{name}}, thank you for being a loyal guest! ⭐ Enjoy a complimentary dessert on your next visit — you\'ve earned it.' },
+  first_order:      { label: 'First order completed',      segment: 'never_returned', defaultMessage: 'Hi {{name}}, welcome! 👋 Thanks for your first visit. Here\'s what regulars love — ask us for today\'s chef\'s pick on your next order.' },
+};
 
 // ─── Auth helper ──────────────────────────────────────────────────────────────
 async function requireAuth(req, res) {
@@ -48,118 +65,30 @@ async function requireAuth(req, res) {
   return { user, role: u.role, restaurantId: u.restaurant_id };
 }
 
-// ─── WhatsApp send helpers ────────────────────────────────────────────────────
-async function sendWAText(to, body) {
-  if (!WA_TOKEN || !WA_PHONE_ID) {
-    console.warn('[marketing] WA not configured — skipping send to', to);
-    return;
-  }
-  const r = await fetch(`${WA_API_URL}/${WA_PHONE_ID}/messages`, {
-    method:  'POST',
-    headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp', to: String(to), type: 'text', text: { body },
-    }),
-  });
-  if (!r.ok) {
-    const e = await r.json().catch(() => ({}));
-    throw new Error(e?.error?.message || `WA send failed (${r.status})`);
-  }
-}
-
-async function sendWATemplate(to, templateName, languageCode = 'en', components = []) {
-  if (!WA_TOKEN || !WA_PHONE_ID) {
-    console.warn('[marketing] WA not configured — skipping template send to', to);
-    return;
-  }
-  const r = await fetch(`${WA_API_URL}/${WA_PHONE_ID}/messages`, {
-    method:  'POST',
-    headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      to: String(to), type: 'template',
-      template: { name: templateName, language: { code: languageCode }, components },
-    }),
-  });
-  if (!r.ok) {
-    const e = await r.json().catch(() => ({}));
-    throw new Error(e?.error?.message || `WA template send failed (${r.status})`);
-  }
-}
-
-// ─── Customer map builder ─────────────────────────────────────────────────────
-async function buildCustomerMap(restaurantId) {
-  const [{ data: tokens, error: tokErr }, { data: orders, error: ordErr }] = await Promise.all([
-    supabaseAdmin.from('walk_in_tokens')
-      .select('phone, name, type, arrived_at')
-      .eq('restaurant_id', restaurantId).not('phone', 'is', null),
-    supabaseAdmin.from('orders')
-      .select('customer_phone, created_at, total_amount, status')
-      .eq('restaurant_id', restaurantId).not('customer_phone', 'is', null),
-  ]);
-  if (tokErr) console.error('[marketing] walk_in_tokens query failed:', tokErr.message);
-  if (ordErr) console.error('[marketing] orders query failed:', ordErr.message);
-
-  const map = new Map();
-  const touch = (rawPhone, { name, ts, isTakeaway = false, spend = 0 }) => {
-    const phone = String(rawPhone).replace(/\D/g, '');
-    if (phone.length < 10) return;
-    const p = map.get(phone) ?? {
-      phone, name: 'Customer', firstActivity: null, lastActivity: null,
-      visitCount: 0, takeawayCount: 0, totalSpend: 0,
+async function enrichCampaignsWithRoi(restaurantId, campaigns) {
+  return Promise.all((campaigns ?? []).map(async (c) => {
+    let orders48h = c.roi_orders_48h;
+    let revenue48h = c.roi_revenue_48h;
+    if (c.status === 'completed' && orders48h == null) {
+      const roi = await computeCampaignRoi(restaurantId, c);
+      orders48h = roi.orders_48h;
+      revenue48h = roi.revenue_48h;
+    }
+    return {
+      ...c,
+      roi: {
+        sent_to: c.sent_count ?? c.recipient_count ?? 0,
+        orders_48h: orders48h ?? 0,
+        revenue_48h: revenue48h ?? 0,
+      },
     };
-    if (name && name !== 'Guest' && name !== 'Customer') p.name = name;
-    if (ts) {
-      if (!p.firstActivity || ts < p.firstActivity) p.firstActivity = ts;
-      if (!p.lastActivity  || ts > p.lastActivity)  p.lastActivity  = ts;
-    }
-    p.visitCount    += 1;
-    p.takeawayCount += isTakeaway ? 1 : 0;
-    p.totalSpend    += spend;
-    map.set(phone, p);
-  };
-  for (const t of tokens ?? []) touch(t.phone, { name: t.name, ts: t.arrived_at, isTakeaway: t.type === 'takeaway' });
-  for (const o of orders ?? []) touch(o.customer_phone, { ts: o.created_at, spend: o.status === 'completed' ? (parseFloat(o.total_amount) || 0) : 0 });
-  return map;
-}
-
-// ─── Segment filter ───────────────────────────────────────────────────────────
-function filterSegment(customerMap, segKey) {
-  const now = Date.now(), DAY = 86_400_000, out = [];
-  for (const p of customerMap.values()) {
-    const lastMs  = p.lastActivity  ? new Date(p.lastActivity).getTime()  : 0;
-    const firstMs = p.firstActivity ? new Date(p.firstActivity).getTime() : 0;
-    const lastDays = lastMs ? (now - lastMs) / DAY : Infinity;
-    switch (segKey) {
-      case 'all':            out.push(p); break;
-      case 'recent':         if (lastDays <= 7) out.push(p); break;
-      case 'lapsed':         if (lastDays >= 14 && lastDays <= 30) out.push(p); break;
-      case 'takeaway':       if (p.takeawayCount >= 3) out.push(p); break;
-      case 'high_value':     if (p.totalSpend >= 500) out.push(p); break;
-      case 'never_returned': if (p.visitCount === 1 && lastDays > 7) out.push(p); break;
-    }
-  }
-  return out;
-}
-
-// ─── Stats from map ───────────────────────────────────────────────────────────
-function computeStats(customerMap) {
-  const now = Date.now(), DAY = 86_400_000;
-  let newThisWeek = 0, active30d = 0;
-  for (const p of customerMap.values()) {
-    const firstMs = p.firstActivity ? new Date(p.firstActivity).getTime() : 0;
-    const lastMs  = p.lastActivity  ? new Date(p.lastActivity).getTime()  : 0;
-    if (firstMs && (now - firstMs) / DAY <= 7)  newThisWeek++;
-    if (lastMs  && (now - lastMs)  / DAY <= 30) active30d++;
-  }
-  return { total: customerMap.size, new_this_week: newThisWeek, active_30d: active30d, opted_out: 0 };
+  }));
 }
 
 // ============================================================================
 // ROUTES
 // ============================================================================
 
-// ─── GET /api/marketing/subscribers ──────────────────────────────────────────
 router.get('/subscribers', async (req, res) => {
   try {
     const auth = await requireAuth(req, res);
@@ -168,14 +97,16 @@ router.get('/subscribers', async (req, res) => {
     const stats    = computeStats(map);
     const segments = {};
     for (const key of SEGMENT_KEYS) segments[key] = filterSegment(map, key).length;
-    res.json({ success: true, stats, segments });
+    res.json({
+      success: true, stats, segments,
+      preview_name: getPreviewSampleName(map),
+    });
   } catch (err) {
     console.error('[marketing/subscribers]', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── GET /api/marketing/templates ────────────────────────────────────────────
 router.get('/templates', async (req, res) => {
   try {
     const auth = await requireAuth(req, res);
@@ -199,7 +130,6 @@ router.get('/templates', async (req, res) => {
   }
 });
 
-// ─── POST /api/marketing/templates/create ────────────────────────────────────
 router.post('/templates/create', async (req, res) => {
   try {
     const auth = await requireAuth(req, res);
@@ -210,14 +140,13 @@ router.post('/templates/create', async (req, res) => {
       .from('restaurants').select('waba_id').eq('id', auth.restaurantId).single();
     const wabaId = rest?.waba_id;
     if (!wabaId || !META_TOKEN) return res.status(400).json({ error: 'WhatsApp Business Account not configured' });
-    // Sanitize components: Meta rejects 'text' on COPY_CODE buttons
     const sanitizedComponents = (components || []).map(comp => {
       if (comp.type !== 'BUTTONS') return comp;
       return {
         ...comp,
         buttons: (comp.buttons || []).map(btn => {
           if (btn.type !== 'COPY_CODE') return btn;
-          const { text, ...rest } = btn; // strip 'text' — Meta sets it automatically
+          const { text, ...rest } = btn;
           return rest;
         }),
       };
@@ -237,7 +166,79 @@ router.post('/templates/create', async (req, res) => {
   }
 });
 
-// ─── POST /api/marketing/media/upload ────────────────────────────────────────
+router.get('/template-drafts', async (req, res) => {
+  try {
+    const auth = await requireAuth(req, res);
+    if (!auth) return;
+    const { data, error } = await supabaseAdmin
+      .from('marketing_template_drafts')
+      .select('id, name, payload, updated_at')
+      .eq('restaurant_id', auth.restaurantId)
+      .order('updated_at', { ascending: false })
+      .limit(20);
+    if (error) {
+      if (error.message?.includes('marketing_template_drafts')) {
+        return res.json({ success: true, drafts: [] });
+      }
+      throw error;
+    }
+    res.json({ success: true, drafts: data ?? [] });
+  } catch (err) {
+    console.error('[marketing/template-drafts GET]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/template-drafts', async (req, res) => {
+  try {
+    const auth = await requireAuth(req, res);
+    if (!auth) return;
+    const { id, name, payload } = req.body;
+    if (!payload) return res.status(400).json({ error: 'payload is required' });
+    const row = {
+      restaurant_id: auth.restaurantId,
+      name: (name || 'untitled_draft').trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'untitled_draft',
+      payload,
+      created_by: auth.user.id,
+      updated_at: new Date().toISOString(),
+    };
+    let result;
+    if (id) {
+      result = await supabaseAdmin.from('marketing_template_drafts')
+        .update(row).eq('id', id).eq('restaurant_id', auth.restaurantId).select().single();
+    } else {
+      result = await supabaseAdmin.from('marketing_template_drafts').insert(row).select().single();
+    }
+    if (result.error) {
+      if (result.error.message?.includes('marketing_template_drafts')) {
+        return res.status(503).json({ error: 'Drafts not available — run migrations/add_marketing_features.sql' });
+      }
+      throw result.error;
+    }
+    res.json({ success: true, draft: result.data });
+  } catch (err) {
+    console.error('[marketing/template-drafts POST]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/template-drafts/:id', async (req, res) => {
+  try {
+    const auth = await requireAuth(req, res);
+    if (!auth) return;
+    const { error } = await supabaseAdmin
+      .from('marketing_template_drafts')
+      .delete()
+      .eq('id', req.params.id)
+      .eq('restaurant_id', auth.restaurantId);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[marketing/template-drafts DELETE]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/media/upload', (req, res, next) => {
   if (!upload) return res.status(503).json({ error: 'multer not installed — run: npm install multer' });
   upload.single('file')(req, res, next);
@@ -266,60 +267,75 @@ router.post('/media/upload', (req, res, next) => {
   }
 });
 
-// ─── POST /api/marketing/broadcast ───────────────────────────────────────────
 router.post('/broadcast', async (req, res) => {
   try {
     const auth = await requireAuth(req, res);
     if (!auth) return;
-    const { name, segment, template_name, custom_message } = req.body;
+    const { name, segment, template_name, custom_message, scheduled_at } = req.body;
     if (!name?.trim()) return res.status(400).json({ error: 'Campaign name is required' });
     if (!SEGMENT_KEYS.includes(segment)) return res.status(400).json({ error: `Invalid segment. Must be one of: ${SEGMENT_KEYS.join(', ')}` });
     if (!template_name && !custom_message?.trim()) return res.status(400).json({ error: 'Either template_name or custom_message is required' });
+
     const map        = await buildCustomerMap(auth.restaurantId);
     const recipients = filterSegment(map, segment);
     if (recipients.length === 0) return res.status(400).json({ error: 'No recipients found for this segment' });
-    const { data: campaign, error: campErr } = await supabaseAdmin
-      .from('broadcast_campaigns')
-      .insert({
-        restaurant_id: auth.restaurantId, name: name.trim(), segment_type: segment,
-        template_name: template_name || null, recipient_count: recipients.length,
-        sent_count: 0, failed_count: 0, status: 'sending', created_by: auth.user.id,
-      })
-      .select().single();
+
+    const scheduleMs = scheduled_at ? new Date(scheduled_at).getTime() : 0;
+    const isScheduled = scheduleMs > Date.now() + 60_000;
+
+    const insertPayload = {
+      restaurant_id: auth.restaurantId,
+      name: name.trim(),
+      segment_type: segment,
+      template_name: template_name || null,
+      custom_message: custom_message || null,
+      recipient_count: recipients.length,
+      sent_count: 0,
+      failed_count: 0,
+      status: isScheduled ? 'scheduled' : 'sending',
+      created_by: auth.user.id,
+      ...(isScheduled ? { scheduled_at: new Date(scheduleMs).toISOString() } : {}),
+    };
+
+    let campaign;
+    let campErr;
+    ({ data: campaign, error: campErr } = await supabaseAdmin
+      .from('broadcast_campaigns').insert(insertPayload).select().single());
+
+    if (campErr?.message?.includes('custom_message') || campErr?.message?.includes('scheduled_at')) {
+      const { custom_message: _cm, scheduled_at: _sa, ...fallback } = insertPayload;
+      if (isScheduled) return res.status(503).json({ error: 'Scheduling requires migration — run add_marketing_features.sql' });
+      ({ data: campaign, error: campErr } = await supabaseAdmin
+        .from('broadcast_campaigns').insert(fallback).select().single());
+    }
     if (campErr) throw campErr;
-    res.json({ success: true, campaign_id: campaign.id, sent_count: recipients.length });
-    // Background send
-    ;(async () => {
-      let sent = 0, failed = 0;
-      for (const customer of recipients) {
-        try {
-          if (template_name) {
-            await sendWATemplate(customer.phone, template_name, 'en');
-          } else {
-            const msg = (custom_message || '').replace(/\{\{name\}\}/gi, customer.name || 'Customer');
-            await sendWAText(customer.phone, msg);
-          }
-          sent++;
-        } catch (e) {
-          console.error(`[broadcast] ❌ Failed for ${customer.phone}:`, e.message);
-          failed++;
-        }
-        await new Promise(r => setTimeout(r, 100));
-      }
-      await supabaseAdmin.from('broadcast_campaigns').update({
-        sent_count: sent, failed_count: failed,
-        status: failed === recipients.length ? 'failed' : 'completed',
-        sent_at: new Date().toISOString(),
-      }).eq('id', campaign.id);
-      console.log(`[broadcast] ✅ "${name}" complete — sent: ${sent}, failed: ${failed}`);
-    })().catch(e => console.error('[broadcast] Background error:', e.message));
+
+    if (isScheduled) {
+      return res.json({
+        success: true,
+        scheduled: true,
+        campaign_id: campaign.id,
+        scheduled_at: campaign.scheduled_at,
+        recipient_count: recipients.length,
+      });
+    }
+
+    res.json({
+      success: true,
+      campaign_id: campaign.id,
+      sent_count: recipients.length,
+      recipient_count: recipients.length,
+    });
+
+    executeBroadcast(campaign.id, auth.restaurantId, {
+      name: name.trim(), segment, template_name, custom_message,
+    }).catch(e => console.error('[broadcast] Background error:', e.message));
   } catch (err) {
     console.error('[marketing/broadcast]', err.message);
     if (!res.headersSent) res.status(500).json({ error: err.message });
   }
 });
 
-// ─── GET /api/marketing/campaigns ────────────────────────────────────────────
 router.get('/campaigns', async (req, res) => {
   try {
     const auth = await requireAuth(req, res);
@@ -329,14 +345,92 @@ router.get('/campaigns', async (req, res) => {
       .eq('restaurant_id', auth.restaurantId)
       .order('created_at', { ascending: false }).limit(50);
     if (error) throw error;
-    res.json({ success: true, campaigns: data ?? [] });
+    const campaigns = await enrichCampaignsWithRoi(auth.restaurantId, data);
+    res.json({ success: true, campaigns });
   } catch (err) {
     console.error('[marketing/campaigns]', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── POST /api/marketing/ai-suggest ──────────────────────────────────────────
+router.get('/automations', async (req, res) => {
+  try {
+    const auth = await requireAuth(req, res);
+    if (!auth) return;
+    const { data, error } = await supabaseAdmin
+      .from('marketing_automations')
+      .select('*')
+      .eq('restaurant_id', auth.restaurantId)
+      .order('created_at', { ascending: false });
+    if (error) {
+      if (error.message?.includes('marketing_automations')) {
+        return res.json({ success: true, automations: [], triggers: AUTOMATION_TRIGGERS });
+      }
+      throw error;
+    }
+    res.json({ success: true, automations: data ?? [], triggers: AUTOMATION_TRIGGERS });
+  } catch (err) {
+    console.error('[marketing/automations GET]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/automations', async (req, res) => {
+  try {
+    const auth = await requireAuth(req, res);
+    if (!auth) return;
+    const { name, trigger_type, segment, template_name, custom_message } = req.body;
+    if (!name?.trim()) return res.status(400).json({ error: 'name is required' });
+    if (!AUTOMATION_TRIGGERS[trigger_type]) return res.status(400).json({ error: 'Invalid trigger_type' });
+    const seg = segment || AUTOMATION_TRIGGERS[trigger_type].segment;
+    if (!SEGMENT_KEYS.includes(seg)) return res.status(400).json({ error: 'Invalid segment' });
+    if (!template_name && !custom_message?.trim()) {
+      return res.status(400).json({ error: 'template_name or custom_message required' });
+    }
+
+    const { data, error } = await supabaseAdmin.from('marketing_automations').insert({
+      restaurant_id: auth.restaurantId,
+      name: name.trim(),
+      trigger_type,
+      segment_type: seg,
+      template_name: template_name || null,
+      custom_message: custom_message || null,
+      is_active: true,
+      created_by: auth.user.id,
+    }).select().single();
+
+    if (error) {
+      if (error.message?.includes('marketing_automations')) {
+        return res.status(503).json({ error: 'Automations require migration — run add_marketing_features.sql' });
+      }
+      throw error;
+    }
+    res.json({ success: true, automation: data });
+  } catch (err) {
+    console.error('[marketing/automations POST]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/automations/:id', async (req, res) => {
+  try {
+    const auth = await requireAuth(req, res);
+    if (!auth) return;
+    const { is_active } = req.body;
+    const { data, error } = await supabaseAdmin
+      .from('marketing_automations')
+      .update({ is_active: !!is_active, updated_at: new Date().toISOString() })
+      .eq('id', req.params.id)
+      .eq('restaurant_id', auth.restaurantId)
+      .select().single();
+    if (error) throw error;
+    res.json({ success: true, automation: data });
+  } catch (err) {
+    console.error('[marketing/automations PATCH]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/ai-suggest', async (req, res) => {
   try {
     const auth = await requireAuth(req, res);
@@ -392,7 +486,6 @@ Given a marketing goal, respond ONLY with a valid JSON object (no markdown fence
   }
 });
 
-// ─── POST /api/marketing/ai-rewrite ──────────────────────────────────────────
 router.post('/ai-rewrite', async (req, res) => {
   try {
     const auth = await requireAuth(req, res);
@@ -407,7 +500,7 @@ router.post('/ai-rewrite', async (req, res) => {
       body: JSON.stringify({
         model: 'llama-3.3-70b-versatile', max_tokens: 300,
         messages: [
-          { role: 'system', content: `You are a WhatsApp marketing copy editor for an Indian restaurant. Rewrite the provided message to be more concise, warm, and engaging. Keep all {{variable}} placeholders intact. Use *bold* sparingly. Max 200 characters. Sound human, not corporate. Respond with ONLY the rewritten message — no explanation, no quotes.` },
+          { role: 'system', content: `You are a WhatsApp marketing copy editor for an Indian restaurant. Rewrite the provided message to be more concise, warm, and engaging while keeping it Meta/WhatsApp compliant (no misleading claims). Keep all {{variable}} placeholders intact. Use *bold* sparingly. Max 400 characters. Sound human, not corporate. Respond with ONLY the rewritten message — no explanation, no quotes.` },
           { role: 'user',   content: `Category: ${category}\nMessage: ${text.trim()}` },
         ],
       }),
@@ -421,8 +514,67 @@ router.post('/ai-rewrite', async (req, res) => {
   }
 });
 
-// ─── GET /api/marketing/restaurants/:id/waba ─────────────────────────────────
-// Called by WABAStrip component
+const AI_GENERATE_GOALS = {
+  win_back:    'Bring back lapsed customers who have not visited recently',
+  special:     'Announce a limited-time special offer or promotion',
+  loyalty:     'Reward loyal high-value customers',
+  welcome:     'Welcome first-time customers and suggest what to try next',
+};
+
+router.post('/ai-generate', async (req, res) => {
+  try {
+    const auth = await requireAuth(req, res);
+    if (!auth) return;
+    const { goal_key, goal_text, language = 'en', category = 'MARKETING', restaurant_name } = req.body;
+    const goal = goal_text?.trim() || AI_GENERATE_GOALS[goal_key] || goal_key;
+    if (!goal) return res.status(400).json({ error: 'goal_key or goal_text is required' });
+    if (!GROQ_KEY) return res.status(503).json({ error: 'AI not configured — add GROQ_API_KEY to Railway' });
+
+    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method:  'POST',
+      headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile', max_tokens: 600,
+        messages: [
+          {
+            role: 'system',
+            content: `You create WhatsApp Business message templates for an Indian restaurant (${restaurant_name || 'the restaurant'}).
+Respond ONLY with valid JSON (no markdown):
+{
+  "template_name": "lowercase_with_underscores max 40 chars",
+  "body": "Message body under 400 chars. Use {{name}} for customer name. WhatsApp formatting: *bold* _italic_. Must be Meta-compliant — no false urgency, include opt-out friendly tone.",
+  "footer": "Reply STOP to opt out",
+  "category": "MARKETING or UTILITY"
+}
+Language: ${language}. Category hint: ${category}.`,
+          },
+          { role: 'user', content: `Goal: ${goal}` },
+        ],
+      }),
+    });
+    const aiData = await r.json();
+    if (!r.ok) throw new Error(aiData.error?.message || 'Groq API request failed');
+    const raw = aiData.choices?.[0]?.message?.content || '{}';
+    let parsed;
+    try { parsed = JSON.parse(raw.replace(/```json|```/g, '').trim()); }
+    catch {
+      return res.status(502).json({ error: 'AI returned invalid JSON — try again' });
+    }
+    const templateName = (parsed.template_name || 'campaign_message')
+      .toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '').slice(0, 40);
+    res.json({
+      success: true,
+      template_name: templateName,
+      body: parsed.body || '',
+      footer: parsed.footer || 'Reply STOP to opt out',
+      category: parsed.category === 'UTILITY' ? 'UTILITY' : 'MARKETING',
+    });
+  } catch (err) {
+    console.error('[marketing/ai-generate]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get('/restaurants/:id/waba', async (req, res) => {
   try {
     const auth = await requireAuth(req, res);
@@ -444,7 +596,6 @@ router.get('/restaurants/:id/waba', async (req, res) => {
   }
 });
 
-// ─── GET /api/restaurants/:id  (WABAStrip — reads whatsapp_number column) ────
 router.get('/:id', async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -459,7 +610,6 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// ─── GET /api/restaurants  (list all active) ─────────────────────────────────
 router.get('/', async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin

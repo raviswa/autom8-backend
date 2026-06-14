@@ -82,9 +82,9 @@ function matchAutomationTrigger(customer, triggerType) {
   const firstDays = firstMs ? (now - firstMs) / DAY : Infinity;
 
   switch (triggerType) {
-    case 'lapsed_14d':       return lastDays >= 14 && lastDays < 15;
-    case 'loyalty_5th_order': return customer.orderCount >= 5 && customer.orderCount <= 6;
-    case 'first_order':      return customer.orderCount === 1 && firstDays <= 1;
+    case 'lapsed_14d':        return lastDays >= 14 && lastDays <= 16;
+    case 'loyalty_5th_order': return customer.orderCount >= 5 && lastDays <= 3;
+    case 'first_order':       return customer.orderCount === 1 && firstDays <= 3;
     default:                 return false;
   }
 }
@@ -270,6 +270,11 @@ async function runMarketingAutomations() {
 
   for (const auto of automations ?? []) {
     try {
+      if (auto.last_run_at) {
+        const hoursSince = (Date.now() - new Date(auto.last_run_at).getTime()) / (60 * 60 * 1000);
+        if (hoursSince < 24) continue;
+      }
+
       const map = await buildCustomerMap(auto.restaurant_id);
       const matches = [...map.values()].filter(c => matchAutomationTrigger(c, auto.trigger_type));
       if (matches.length === 0) continue;

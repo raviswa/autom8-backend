@@ -8,6 +8,7 @@
 //   startSpecialNotesTimeoutMonitor() — auto-confirm stale notes prompts (every 60s)
 //   startFeedbackScheduler()          — 2-hr post-visit feedback (every 10 min)
 //   startAccountingSyncScheduler()    — nightly Zoho/Tally push at 23:30 IST
+//   startMarketingScheduler()         — scheduled campaigns + automations (every 5 min)
 // ============================================================================
 
 'use strict';
@@ -270,6 +271,24 @@ async function pushInvoiceToAccountingStub_DELETE_ME() {
   // Left as a reminder: delete this placeholder.
 }
 
+// ── startMarketingScheduler ───────────────────────────────────────────────────
+
+const { dispatchScheduledCampaigns, runMarketingAutomations } = require('../helpers/marketingCampaign');
+
+function startMarketingScheduler() {
+  const tick = async () => {
+    try {
+      await dispatchScheduledCampaigns();
+      await runMarketingAutomations();
+    } catch (err) {
+      console.error('[marketing-scheduler] Error:', err.message);
+    }
+  };
+  tick();
+  setInterval(tick, 5 * 60 * 1000);
+  console.log('📣 Marketing scheduler started (scheduled sends + automations every 5 min)');
+}
+
 // ── startAllSchedulers ────────────────────────────────────────────────────────
 
 function startAllSchedulers() {
@@ -277,6 +296,7 @@ function startAllSchedulers() {
   startSpecialNotesTimeoutMonitor();
   startFeedbackScheduler();
   startAccountingSyncScheduler();
+  startMarketingScheduler();
 }
 
 module.exports = { startAllSchedulers };
