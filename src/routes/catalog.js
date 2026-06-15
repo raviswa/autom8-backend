@@ -25,6 +25,7 @@ const router  = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const { getMetaCatalogId, getWhatsAppIntegration } = require('../helpers/restaurantConfig');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
+const { writeAuditLog } = require('../helpers/auditLog');
 
 const { getKdsSecret } = require('../config/internalSecret');
 
@@ -386,11 +387,11 @@ router.post('/kitchen-busy-toggle', authenticateToken, getRestaurantId, async (r
 
     if (error) throw error;
 
-    supabaseAdmin.from('audit_logs').insert({
+    await writeAuditLog({
       user_id: req.user.sub, restaurant_id: req.restaurant_id,
       action: busy ? 'Kitchen marked busy' : 'Kitchen marked normal',
       details: { kitchen_busy: busy },
-    }).catch(() => {});
+    });
 
     res.json({ success: true, kitchen_busy: data.kitchen_busy });
   } catch (err) {
@@ -633,10 +634,10 @@ router.post('/menu-upload', authenticateToken, getRestaurantId, async (req, res)
     if (slot) await applySlotAvailability(restaurantId, slot).catch(() => {});
 
     // Phase 5: audit
-    supabaseAdmin.from('audit_logs').insert({
+    await writeAuditLog({
       user_id: req.user.sub, restaurant_id: restaurantId,
       action: 'Menu items uploaded via Excel', details: { upserted, skipped, purged },
-    }).catch(() => {});
+    });
 
     // Phase 6: trigger Meta feed refetch
     triggerMetaFeedRefetch().catch(e => console.warn('[menu/upload] Meta trigger failed:', e.message));
@@ -676,11 +677,11 @@ router.put('/menu-items/:id/availability', authenticateToken, getRestaurantId, a
 
     if (updateErr) throw updateErr;
 
-    supabaseAdmin.from('audit_logs').insert({
+    await writeAuditLog({
       user_id: req.user.sub, restaurant_id: req.restaurant_id,
       action: `Menu item ${is_available ? 'marked in stock' : 'marked out of stock'}`,
       details: { item_id: req.params.id, item_name: item.name, is_available },
-    }).catch(() => {});
+    });
 
     // Respond immediately — don't block on Meta API
     res.json({ success: true, id: req.params.id, is_available, name: item.name });
@@ -723,11 +724,11 @@ router.put('/menu-items/:id/special-today', authenticateToken, getRestaurantId, 
 
     if (updateErr) throw updateErr;
 
-    supabaseAdmin.from('audit_logs').insert({
+    await writeAuditLog({
       user_id: req.user.sub, restaurant_id: req.restaurant_id,
       action: is_special_today ? "Marked today's special" : "Removed today's special",
       details: { item_id: req.params.id, item_name: item.name, is_special_today },
-    }).catch(() => {});
+    });
 
     res.json({ success: true, id: req.params.id, is_special_today, name: item.name });
   } catch (err) {

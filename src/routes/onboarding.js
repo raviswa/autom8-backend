@@ -12,6 +12,7 @@ const express = require('express');
 const router  = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
 const { ensureRestaurantSubscription, DEFAULT_SERVICES } = require('../helpers/subscriptionBilling');
+const { writeAuditLog } = require('../helpers/auditLog');
 
 const DEFAULT_FEATURES = DEFAULT_SERVICES;
 
@@ -185,12 +186,12 @@ async function registerStandalone(req, res, opts) {
     }
 
     // 6. Audit
-    await supabaseAdmin.from('audit_logs').insert({
+    await writeAuditLog({
       user_id:       authUserId,
       restaurant_id: restaurantId,
       action:        'Restaurant registered (standalone)',
       details:       { name, email, whatsapp_number, source: 'onboarding' },
-    }).catch(() => {});
+    });
 
     console.log(`[onboarding] ✅ Standalone: ${name} (${restaurantId}) — ${email}`);
 
@@ -357,12 +358,12 @@ async function registerChain(req, res, opts) {
     }
 
     // 5. Audit
-    await supabaseAdmin.from('audit_logs').insert({
+    await writeAuditLog({
       user_id:       authUserId,
       restaurant_id: restaurantId,
       action:        'Brand + first outlet registered',
       details:       { brand_id: brandId, chain_name, email, first_outlet: !!restaurantId },
-    }).catch(() => {});
+    });
 
     console.log(`[onboarding] ✅ Chain: ${chain_name} (${brandId}) — owner: ${email}${restaurantId ? ` — outlet: ${restaurantId}` : ''}`);
 

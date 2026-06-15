@@ -25,6 +25,7 @@ const RESTAURANT_SELECT_FULL = [
   'takeaway_fulfillment_mode', 'fulfillment_sections', 'parcel_charge_per_item',
   'takeaway_ready_range', 'delivery_ready_range', 'kitchen_busy', 'opening_hours',
   'restaurant_type', 'pickup_address', 'pickup_latitude', 'pickup_longitude',
+  'google_maps_url',
   'delivery_charge_default', 'delivery_charge_tiers',
   'min_delivery_order_amount', 'min_takeaway_order_amount',
   'scheduled_delivery_enabled', 'max_delivery_radius_km',

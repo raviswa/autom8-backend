@@ -23,6 +23,7 @@ const {
   validateAndNormalizeWhatsApp,
   roleRequiresWhatsApp,
 } = require('../helpers/phoneFormat');
+const { writeAuditLog } = require('../helpers/auditLog');
 const { requestPasswordReset } = require('../helpers/passwordReset');
 
 // Roles a manager is allowed to manage (cannot touch own level or above)
@@ -159,12 +160,12 @@ router.post('/', authenticateToken, getRestaurantId, async (req, res) => {
     }
 
     // ── Audit log ────────────────────────────────────────────────────────────
-    supabaseAdmin.from('audit_logs').insert({
+    await writeAuditLog({
       user_id:       req.user.sub,
       restaurant_id: req.restaurant_id,
       action:        'Employee onboarded',
       details:       { employee_id: employee.id, full_name, role, email },
-    }).catch(() => {});
+    });
 
     console.log(`[staff] ✅ Onboarded: ${full_name} (${role}) — ${email}`);
 
@@ -251,10 +252,10 @@ router.put('/:id', authenticateToken, getRestaurantId, async (req, res) => {
 
     if (error) throw error;
 
-    supabaseAdmin.from('audit_logs').insert({
+    await writeAuditLog({
       user_id: req.user.sub, restaurant_id: req.restaurant_id,
       action: 'Employee updated', details: { employee_id: req.params.id, changes: updates },
-    }).catch(() => {});
+    });
 
     res.json({ success: true, employee: data });
   } catch (err) {
@@ -298,7 +299,7 @@ router.post('/:id/send-password-reset', authenticateToken, getRestaurantId, asyn
       triggeredBy:  'manager',
     });
 
-    supabaseAdmin.from('audit_logs').insert({
+    await writeAuditLog({
       user_id: req.user.sub,
       restaurant_id: req.restaurant_id,
       action: 'Password reset sent',
@@ -308,7 +309,7 @@ router.post('/:id/send-password-reset', authenticateToken, getRestaurantId, asyn
         employee_notified: result.employeeNotified,
         manager_notified:  result.managersNotified?.sent ?? false,
       },
-    }).catch(() => {});
+    });
 
     const msg = result.employeeNotified
       ? `Password reset email sent to ${target.email}`
@@ -389,7 +390,7 @@ router.put('/:id/terminate', authenticateToken, getRestaurantId, async (req, res
     }
 
     // ── Audit log ────────────────────────────────────────────────────────────
-    supabaseAdmin.from('audit_logs').insert({
+    await writeAuditLog({
       user_id: req.user.sub, restaurant_id: req.restaurant_id,
       action: 'Employee terminated',
       details: {
@@ -398,7 +399,7 @@ router.put('/:id/terminate', authenticateToken, getRestaurantId, async (req, res
         role:           target.role,
         termination_note,
       },
-    }).catch(() => {});
+    });
 
     console.log(`[staff] 🔒 Terminated: ${target.full_name} (${target.role})`);
 

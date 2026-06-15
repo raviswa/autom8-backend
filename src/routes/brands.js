@@ -29,6 +29,7 @@ const { supabaseAdmin } = require('../config/supabase');
 const { authenticateToken } = require('../middleware/auth');
 const { invalidatePhoneCache } = require('../helpers/resolveRestaurant');
 const { ensureRestaurantSubscription } = require('../helpers/subscriptionBilling');
+const { writeAuditLog } = require('../helpers/auditLog');
 
 const BRAND_ROLES       = ['brand_owner', 'brand_manager'];
 const DEFAULT_FEATURES  = ['dine_in', 'takeaway', 'delivery', 'reserve_table'];
@@ -152,12 +153,12 @@ router.post('/', async (req, res) => {
     }
 
     // 5 ── Audit
-    supabaseAdmin.from('audit_logs').insert({
+    await writeAuditLog({
       user_id:       authUserId,
       restaurant_id: firstOutletId,
       action:        'Brand registered',
       details:       { brand_id: brandId, brand_name, contact_email, first_outlet: !!firstOutletId },
-    }).catch(() => {});
+    });
 
     console.log(`[brands] ✅ Created: ${brand_name} (${brandId}) — owner: ${contact_email}`);
 
@@ -297,12 +298,12 @@ router.post('/:id/outlets', authenticateToken, async (req, res) => {
 
     const result = await createOutlet(req.params.id, outletData);
 
-    supabaseAdmin.from('audit_logs').insert({
+    await writeAuditLog({
       user_id:       req.user.sub,
       restaurant_id: result.restaurant_id,
       action:        'Outlet added to brand',
       details:       { brand_id: req.params.id, outlet_name: outletData.name },
-    }).catch(() => {});
+    });
 
     res.status(201).json({ success: true, ...result });
   } catch (err) { handleErr(res, err); }
@@ -371,10 +372,10 @@ router.delete('/:id/outlets/:oid', authenticateToken, async (req, res) => {
       .update({ is_active: false, updated_at: new Date().toISOString() })
       .eq('id', req.params.oid);
 
-    supabaseAdmin.from('audit_logs').insert({
+    await writeAuditLog({
       user_id: req.user.sub, restaurant_id: req.params.oid,
       action: 'Outlet deactivated', details: { brand_id: req.params.id, outlet_name: outlet.name },
-    }).catch(() => {});
+    });
 
     res.json({ success: true, message: `Outlet "${outlet.name}" deactivated.` });
   } catch (err) { handleErr(res, err); }

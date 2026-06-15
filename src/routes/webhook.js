@@ -27,6 +27,7 @@ const { resolveRestaurantByPhone } = require('../helpers/resolveRestaurant');
 const { handleWhatsAppOrder, handleFeedbackReply, validateReferralCode }
   = require('../handlers/waHandlers');
 const { isWhatsAppAutoReply } = require('../helpers/whatsappAutoReply');
+const { writeAuditLog } = require('../helpers/auditLog');
 
 const CHAT_SERVICE_URL  = process.env.CHAT_SERVICE_URL || 'http://localhost:8001';
 const OUR_WHATSAPP_PHONE = process.env.WHATSAPP_PHONE_NUMBER || '';
@@ -135,7 +136,7 @@ router.post('/webhook', async (req, res) => {
           }
 
           // Audit log — best-effort
-          supabaseAdmin.from('audit_logs').insert({
+          void writeAuditLog({
             action:        'WhatsApp message received',
             restaurant_id: restaurantId,
             details: {
@@ -144,7 +145,7 @@ router.post('/webhook', async (req, res) => {
               phone_number_id: metadata?.phone_number_id,
               message_id:      message.id,
             },
-          }).catch(() => {});
+          });
         }
       }
     }

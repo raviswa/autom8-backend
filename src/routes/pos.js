@@ -6,6 +6,7 @@ const express = require('express');
 const router  = express.Router();
 const { supabaseAdmin }           = require('../config/supabase');
 const { invalidateRestaurantConfigCache } = require('../helpers/restaurantConfig');
+const { writeAuditLog } = require('../helpers/auditLog');
 const {
   authenticateToken,
   getRestaurantId,
@@ -24,7 +25,11 @@ const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../helpers/
 const { applySlotAvailability, getCurrentSlotIST } = require('./catalog');
 const { notifyOrderReady }        = require('../helpers/whatsapp');
 const { queueFeedbackForTable }   = require('../helpers/feedback');
-const { resolvePickupLocation, parseGoogleMapsCoords } = require('../helpers/googleMaps');
+const {
+  resolvePickupLocation,
+  parseGoogleMapsCoords,
+  resolveFailureMessage,
+} = require('../helpers/googleMaps');
 const {
   ORDER_SERVICES,
   resolvePaidFeatures,
@@ -441,7 +446,7 @@ router.post('/restaurants/resolve-pickup', authenticateToken, getRestaurantId, r
     });
     if (!resolved) {
       return res.status(422).json({
-        error: 'Could not resolve coordinates. Paste a Google Maps link with a pin, or check GOOGLE_MAPS_API_KEY is set for address lookup.',
+        error: resolveFailureMessage({ maps_url, pickup_address }),
       });
     }
     res.json({ success: true, ...resolved });
@@ -467,6 +472,7 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
       'parcel_charge_per_item',
       'takeaway_ready_range','delivery_ready_range',
   'restaurant_type','pickup_address','pickup_latitude','pickup_longitude',
+  'google_maps_url',
   'delivery_charge_default','delivery_charge_tiers',
   'min_delivery_order_amount','min_takeaway_order_amount',
   'scheduled_delivery_enabled','max_delivery_radius_km',
@@ -475,6 +481,9 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
     const updates = Object.fromEntries(
       Object.entries(req.body).filter(([k]) => ALLOWED.includes(k))
     );
+    if (req.body.maps_url !== undefined) {
+      updates.google_maps_url = req.body.maps_url || null;
+    }
     if (Object.keys(updates).length === 0)
       return res.status(400).json({ error: 'No valid fields provided' });
 
@@ -541,8 +550,21 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
       }
     }
 
-    if (updates.pickup_latitude !== undefined) updates.pickup_latitude = parseFloat(updates.pickup_latitude);
-    if (updates.pickup_longitude !== undefined) updates.pickup_longitude = parseFloat(updates.pickup_longitude);
+    if (updates.pickup_latitude !== undefined) {
+      const lat = parseFloat(updates.pickup_latitude);
+      updates.pickup_latitude = Number.isFinite(lat) ? lat : null;
+    }
+    if (updates.pickup_longitude !== undefined) {
+      const lng = parseFloat(updates.pickup_longitude);
+      updates.pickup_longitude = Number.isFinite(lng) ? lng : null;
+    }
+
+    const pickupWarning = (
+      (updates.restaurant_type === 'cloud_kitchen' || updates.pickup_address)
+      && !updates.pickup_latitude
+      && !updates.pickup_longitude
+    ) ? 'Saved, but pickup coordinates are not set — delivery distance may be inaccurate until you resolve the location.'
+      : undefined;
 
     updates.updated_at = new Date().toISOString();
     let { data, error } = await supabaseAdmin
@@ -570,7 +592,7 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
           restaurant: data,
           warning: skippedKitchen.length
             ? 'Kitchen settings not saved — run migrations/add_restaurant_kitchen_settings.sql in Supabase first.'
-            : undefined,
+            : pickupWarning,
         });
       }
     }
@@ -578,12 +600,16 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
 
     invalidateRestaurantConfigCache(req.restaurant_id);
 
-    await supabaseAdmin.from('audit_logs').insert({
+    await writeAuditLog({
       user_id: req.user.sub, restaurant_id: req.restaurant_id,
       action: 'Restaurant settings updated', details: { fields: Object.keys(updates) },
-    }).catch(() => {});
+    });
 
-    res.json({ success: true, restaurant: data });
+    res.json({
+      success: true,
+      restaurant: data,
+      warning: pickupWarning,
+    });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

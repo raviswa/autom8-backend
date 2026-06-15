@@ -25,6 +25,7 @@ const { queueFeedbackForTable }   = require('../helpers/feedback');
 const { getManagerPhone } = require('../helpers/restaurantConfig');
 const { assignAndNotifyCaptainTakeaway } = require('../helpers/captainAssignment');
 const { syncConversationForTokenApproval } = require('../helpers/conversationState');
+const { writeAuditLog } = require('../helpers/auditLog');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { requireKdsSecretOrJwt, requireKdsSecret } = require('../middleware/internalAuth');
 
@@ -400,10 +401,10 @@ router.put('/:id/assign', outletAuth, async (req, res) => {
 
     broadcastToRestaurant(restaurantId, { type: 'TOKEN_ASSIGNED', token: updatedToken, timestamp: new Date().toISOString() });
 
-    await supabaseAdmin.from('audit_logs').insert({
+    await writeAuditLog({
       user_id: req.user.sub, restaurant_id: restaurantId,
       action: 'Token assigned to table', details: { token_id: req.params.id, table_id, table_number },
-    }).catch(() => {});
+    });
 
     res.json({ success: true, token: updatedToken });
   } catch (err) {
