@@ -318,7 +318,9 @@ async def handle_booking_flow(
             if not sent:
                 await send_whatsapp_message(
                     customer_phone,
-                    "Great! You've selected Delivery 🛵\n\nPlease share your delivery address.",
+                    "Great! You've selected Delivery 🛵\n\n"
+                    "Please *share your location pin* on WhatsApp (tap 📎 → Location) so we can calculate delivery charge accurately.\n"
+                    "You can also type your full address if needed.",
                     restaurant_id,
                 )
             session_state["booking_step"] = "awaiting_address"

@@ -24,6 +24,7 @@ const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../helpers/
 const { applySlotAvailability, getCurrentSlotIST } = require('./catalog');
 const { notifyOrderReady }        = require('../helpers/whatsapp');
 const { queueFeedbackForTable }   = require('../helpers/feedback');
+const { resolvePickupLocation, parseGoogleMapsCoords } = require('../helpers/googleMaps');
 const {
   ORDER_SERVICES,
   resolvePaidFeatures,
@@ -427,6 +428,28 @@ router.delete('/tables/:id', authenticateToken, getRestaurantId, async (req, res
   }
 });
 
+// ── Resolve cloud-kitchen pickup coordinates from Maps link or address ─────────
+
+router.post('/restaurants/resolve-pickup', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
+  try {
+    const { maps_url, pickup_address, city, state } = req.body;
+    const resolved = await resolvePickupLocation({
+      mapsUrl: maps_url,
+      address: pickup_address,
+      city,
+      state,
+    });
+    if (!resolved) {
+      return res.status(422).json({
+        error: 'Could not resolve coordinates. Paste a Google Maps link with a pin, or check GOOGLE_MAPS_API_KEY is set for address lookup.',
+      });
+    }
+    res.json({ success: true, ...resolved });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // ── Owner self-service restaurant update ──────────────────────────────────────
 // Used by SettingsPanel tabs: Restaurant, Services, Kitchen, WhatsApp
 
@@ -443,7 +466,11 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
       'takeaway_fulfillment_mode','fulfillment_sections',
       'parcel_charge_per_item',
       'takeaway_ready_range','delivery_ready_range',
-      'subscribed_features', 'enabled_services',
+  'restaurant_type','pickup_address','pickup_latitude','pickup_longitude',
+  'delivery_charge_default','delivery_charge_tiers',
+  'min_delivery_order_amount','min_takeaway_order_amount',
+  'scheduled_delivery_enabled','max_delivery_radius_km',
+  'subscribed_features', 'enabled_services',
     ];
     const updates = Object.fromEntries(
       Object.entries(req.body).filter(([k]) => ALLOWED.includes(k))
@@ -481,6 +508,41 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
 
       updates.subscribed_features = nextEnabled;
     }
+
+    // Auto-resolve pickup coordinates for cloud kitchens when saving address/maps link
+    const needsPickupResolve = (
+      (updates.restaurant_type === 'cloud_kitchen' || updates.pickup_address !== undefined)
+      && (updates.pickup_address || req.body.maps_url)
+      && (updates.pickup_latitude === undefined && updates.pickup_longitude === undefined
+          || !updates.pickup_latitude || !updates.pickup_longitude)
+    );
+    if (needsPickupResolve) {
+      const { data: current } = await supabaseAdmin
+        .from('restaurants')
+        .select('city, state, pickup_address, restaurant_type')
+        .eq('id', req.restaurant_id)
+        .maybeSingle();
+
+      const fromUrl = req.body.maps_url ? parseGoogleMapsCoords(req.body.maps_url) : null;
+      if (fromUrl) {
+        updates.pickup_latitude = fromUrl.lat;
+        updates.pickup_longitude = fromUrl.lng;
+      } else {
+        const resolved = await resolvePickupLocation({
+          mapsUrl: req.body.maps_url,
+          address: updates.pickup_address || current?.pickup_address,
+          city: updates.city || current?.city,
+          state: updates.state || current?.state,
+        });
+        if (resolved) {
+          updates.pickup_latitude = resolved.lat;
+          updates.pickup_longitude = resolved.lng;
+        }
+      }
+    }
+
+    if (updates.pickup_latitude !== undefined) updates.pickup_latitude = parseFloat(updates.pickup_latitude);
+    if (updates.pickup_longitude !== undefined) updates.pickup_longitude = parseFloat(updates.pickup_longitude);
 
     updates.updated_at = new Date().toISOString();
     let { data, error } = await supabaseAdmin

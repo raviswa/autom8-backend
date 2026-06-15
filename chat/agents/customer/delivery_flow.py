@@ -20,8 +20,16 @@ from tools.db_tools import get_next_token_number, create_booking, update_booking
 from tools.payment_tools import create_payment_link
 from tools.whatsapp_tools import send_whatsapp_message, send_location_request
 from tools.cart_tools import cart_to_order_text, cart_total, clear_cart
-from tools.order_pricing import compute_order_totals, format_order_total_lines, DEFAULT_DELIVERY_CHARGE
+from tools.order_pricing import (
+    compute_order_totals,
+    format_order_total_lines,
+    resolve_delivery_charge,
+    check_min_order,
+    parse_scheduled_delivery_time,
+    format_scheduled_note,
+)
 from tools.order_timing import ready_time_note_from_session
+from tools.delivery_distance import finalize_delivery_address, format_distance_label
 from tools.booking_mechanisms import (
     RECEIPT_AVAILABLE,
     _generate_receipt,
@@ -47,7 +55,32 @@ from agents.customer.conversation_helpers import safe_build_order_suggestion
 
 logger = logging.getLogger(__name__)
 
-DELIVERY_CHARGE = 40.00
+
+async def _continue_after_address_validated(
+    customer_phone: str,
+    restaurant_id: str,
+    session_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Route to scheduled-time question or catalog once address + distance checks pass."""
+    if session_state.get("scheduled_delivery_enabled"):
+        await send_whatsapp_message(
+            customer_phone,
+            "When should we deliver?\n\n"
+            "Reply with a time (e.g. *1:00 PM* or *13:00*), or type *NOW* for as soon as possible.",
+            restaurant_id,
+        )
+        session_state["booking_step"] = "awaiting_scheduled_time"
+        return {"status": "awaiting_scheduled_time"}
+
+    await send_whatsapp_message(
+        customer_phone,
+        "Thank you! Browse today's menu below and add items to your basket 🛒",
+        restaurant_id,
+    )
+    clear_cart(session_state)
+    session_state["booking_step"] = "awaiting_order"
+    await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+    return {"status": session_state["booking_step"]}
 
 
 async def handle_delivery_flow(
@@ -65,6 +98,8 @@ async def handle_delivery_flow(
             try:
                 coords_part, label = raw[len("LOCATION:"):].split("|", 1)
                 lat, lng = coords_part.split(",", 1)
+                session_state["delivery_lat"] = float(lat.strip())
+                session_state["delivery_lng"] = float(lng.strip())
                 maps_link = f"https://maps.google.com/?q={lat.strip()},{lng.strip()}"
                 delivery_address = f"{label.strip()} ({maps_link})"
             except Exception:
@@ -81,15 +116,33 @@ async def handle_delivery_flow(
             ):
                 return {"status": "awaiting_service_selection"}
 
-        await send_whatsapp_message(
-            customer_phone,
-            "Thank you! Browse today's menu below and add items to your basket 🛒",
-            restaurant_id,
+        addr_result = await finalize_delivery_address(
+            session_state,
+            address_text=delivery_address if not raw.startswith("LOCATION:") else None,
         )
-        clear_cart(session_state)
-        session_state["booking_step"] = "awaiting_order"
-        await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
-        return {"status": session_state["booking_step"]}
+        if not addr_result.get("ok"):
+            await send_whatsapp_message(customer_phone, addr_result.get("message", ""), restaurant_id)
+            session_state["booking_step"] = "awaiting_address"
+            return {"status": "awaiting_address"}
+
+        if addr_result.get("message"):
+            await send_whatsapp_message(customer_phone, addr_result["message"], restaurant_id)
+
+        return await _continue_after_address_validated(customer_phone, restaurant_id, session_state)
+
+    # ── awaiting_scheduled_time ───────────────────────────────────────────────
+    elif booking_step == "awaiting_scheduled_time":
+        scheduled = parse_scheduled_delivery_time(message)
+        if scheduled is None and message.strip().upper() not in ("NOW", "ASAP", "IMMEDIATE"):
+            await send_whatsapp_message(
+                customer_phone,
+                "Please reply with a delivery time (e.g. *1:00 PM*) or type *NOW* for immediate delivery.",
+                restaurant_id,
+            )
+            return {"status": "awaiting_scheduled_time"}
+
+        session_state["scheduled_at"] = scheduled.isoformat() if scheduled else None
+        return await _continue_after_address_validated(customer_phone, restaurant_id, session_state)
 
     # ── awaiting_order ────────────────────────────────────────────────────────
     elif booking_step == "awaiting_order":
@@ -109,10 +162,23 @@ async def handle_delivery_flow(
             await cache_restaurant_pricing(session_state, restaurant_id)
             cart_snapshot = dict(cart)
             parcel_rate   = float(session_state.get("parcel_charge_per_item") or 0)
+
+            ok, subtotal, minimum = check_min_order(cart, "delivery", session_state)
+            if not ok:
+                await send_whatsapp_message(
+                    customer_phone,
+                    f"Minimum order for delivery is ₹{minimum:.0f}. "
+                    f"Your items total ₹{subtotal:.0f} — please add more to continue.",
+                    restaurant_id,
+                )
+                await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+                return {"status": "awaiting_order"}
+
+            delivery_fee  = resolve_delivery_charge(session_state)
             totals        = compute_order_totals(
                 cart, "delivery",
                 parcel_per_item=parcel_rate,
-                delivery_charge=DELIVERY_CHARGE,
+                delivery_charge=delivery_fee,
             )
             total         = totals["grand_total"]
             items_total   = totals["items_subtotal"]
@@ -130,6 +196,7 @@ async def handle_delivery_flow(
                 restaurant_id, customer_id, "delivery",
                 delivery_address=session_state.get("delivery_address"),
                 token_number=token,
+                booking_datetime=session_state.get("scheduled_at"),
             )
             booking_id = booking["id"]
             session_state["booking_id"] = booking_id
@@ -149,8 +216,11 @@ async def handle_delivery_flow(
                 f"Your order has been placed! 🎉\n────────────────────\n"
                 f"Token: {token}\nBooking Time: {booking_time}\nOrder: {order_text}\n"
                 f"────────────────────\n"
-                f"{format_order_total_lines(totals)}\n\n{payment_line}"
+                f"{format_order_total_lines(totals, session_state=session_state)}\n\n{payment_line}"
             )
+            sched_note = format_scheduled_note(session_state.get("scheduled_at"))
+            if sched_note:
+                confirmation += f"\n\n{sched_note}"
             timing_note = ready_time_note_from_session(session_state, "delivery")
             if timing_note:
                 confirmation += f"\n\n{timing_note}"
@@ -158,13 +228,22 @@ async def handle_delivery_flow(
                 confirmation += f"\n\n{suggestion}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
 
+            dist_note = ""
+            if session_state.get("delivery_distance_km") is not None:
+                dist_note = (
+                    f"Distance: {format_distance_label(float(session_state['delivery_distance_km']), session_state.get('delivery_distance_method'))}\n"
+                )
+
             try:
                 await send_whatsapp_message(
                     manager_phone,
                     f"🛵 New Delivery Order\n────────────────────\n"
                     f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
-                    f"Address: {session_state.get('delivery_address')}\nBooking Time: {booking_time}\n"
-                    f"Order: {order_text}\nTotal: ₹{total:.0f} (incl. ₹{DELIVERY_CHARGE:.0f} delivery)\n"
+                    f"Address: {session_state.get('delivery_address')}\n{dist_note}"
+                    f"Booking Time: {booking_time}\n"
+                    f"Order: {order_text}\n"
+                    f"Delivery: ₹{totals.get('delivery_charge', delivery_fee):.0f}\n"
+                    f"Total: ₹{total:.0f}\n"
                     f"────────────────────",
                     restaurant_id,
                 )
@@ -227,7 +306,7 @@ async def handle_delivery_flow(
                         items=_LineItem.from_cart(cart_snapshot),
                         gst_rate=5.0,
                         gst_inclusive=False,
-                        delivery_charge=totals.get("delivery_charge", DELIVERY_CHARGE),
+                        delivery_charge=totals.get("delivery_charge", delivery_fee),
                         parcel_charge=totals.get("parcel_charge", 0),
                         payment_mode=session_state.get("payment_mode", "Cash"),
                     )

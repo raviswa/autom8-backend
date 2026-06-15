@@ -191,13 +191,16 @@ def cart_summary_text(
     parcel_rate = float((session_state or {}).get("parcel_charge_per_item") or 0)
 
     if service_type in ("takeaway", "delivery") and (parcel_rate > 0 or service_type == "delivery"):
+        from tools.order_pricing import resolve_delivery_charge
+        deli = resolve_delivery_charge(session_state) if service_type == "delivery" else 0
         totals = compute_order_totals(
             cart,
             service_type,
             parcel_per_item=parcel_rate,
+            delivery_charge=deli,
         )
         lines.append("")
-        lines.append(format_order_total_lines(totals))
+        lines.append(format_order_total_lines(totals, session_state=session_state))
     else:
         lines.append(f"\n*Total: ₹{cart_total(cart):.0f}*")
 

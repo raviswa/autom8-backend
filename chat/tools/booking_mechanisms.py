@@ -165,7 +165,7 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict:
         resp = await get_http().get(
             f"{base}/rest/v1/restaurants",
             params={
-                "select": "name,whatsapp_number,address,phone,gstin,website,parcel_charge_per_item,takeaway_ready_range,delivery_ready_range,kitchen_busy",
+                "select": "name,whatsapp_number,address,phone,gstin,website,city,state,parcel_charge_per_item,takeaway_ready_range,delivery_ready_range,kitchen_busy,restaurant_type,pickup_address,pickup_latitude,pickup_longitude,delivery_charge_default,delivery_charge_tiers,min_delivery_order_amount,min_takeaway_order_amount,scheduled_delivery_enabled,max_delivery_radius_km",
                 "id":     f"eq.{restaurant_id}",
                 "limit":  "1",
             },
@@ -181,7 +181,7 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict:
 
 
 async def cache_restaurant_pricing(session_state: dict, restaurant_id: str) -> None:
-    """Store parcel rate and timing settings in session for cart summaries and checkout."""
+    """Store parcel rate, delivery tiers, pickup location, and timing in session."""
     info = await fetch_restaurant_info(restaurant_id)
     try:
         session_state["parcel_charge_per_item"] = float(info.get("parcel_charge_per_item") or 0)
@@ -190,6 +190,38 @@ async def cache_restaurant_pricing(session_state: dict, restaurant_id: str) -> N
     session_state["takeaway_ready_range"] = (info.get("takeaway_ready_range") or "").strip() or None
     session_state["delivery_ready_range"] = (info.get("delivery_ready_range") or "").strip() or None
     session_state["kitchen_busy"] = bool(info.get("kitchen_busy"))
+
+    session_state["restaurant_type"] = (info.get("restaurant_type") or "restaurant").strip().lower()
+    session_state["pickup_address"] = (info.get("pickup_address") or "").strip() or None
+    session_state["pickup_latitude"] = info.get("pickup_latitude")
+    session_state["pickup_longitude"] = info.get("pickup_longitude")
+
+    try:
+        session_state["delivery_charge_default"] = float(info.get("delivery_charge_default") or 30)
+    except (TypeError, ValueError):
+        session_state["delivery_charge_default"] = 30.0
+
+    tiers = info.get("delivery_charge_tiers")
+    session_state["delivery_charge_tiers"] = tiers if isinstance(tiers, list) and tiers else None
+
+    try:
+        session_state["min_delivery_order_amount"] = float(info.get("min_delivery_order_amount") or 0)
+    except (TypeError, ValueError):
+        session_state["min_delivery_order_amount"] = 0.0
+    try:
+        session_state["min_takeaway_order_amount"] = float(info.get("min_takeaway_order_amount") or 0)
+    except (TypeError, ValueError):
+        session_state["min_takeaway_order_amount"] = 0.0
+
+    session_state["scheduled_delivery_enabled"] = bool(info.get("scheduled_delivery_enabled"))
+
+    try:
+        session_state["max_delivery_radius_km"] = float(info.get("max_delivery_radius_km") or 0)
+    except (TypeError, ValueError):
+        session_state["max_delivery_radius_km"] = 0.0
+
+    session_state["restaurant_city"] = (info.get("city") or "").strip() or None
+    session_state["restaurant_state"] = (info.get("state") or "").strip() or None
 
 
 async def send_special_dishes_note(customer_phone: str, restaurant_id: str) -> None:

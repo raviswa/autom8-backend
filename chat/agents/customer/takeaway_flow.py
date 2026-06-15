@@ -22,7 +22,12 @@ from tools.db_tools import get_next_token_number, create_booking, update_booking
 from tools.payment_tools import create_payment_link
 from tools.whatsapp_tools import send_whatsapp_message
 from tools.cart_tools import cart_to_order_text, cart_total, clear_cart
-from tools.order_pricing import compute_order_totals, format_order_total_lines
+from tools.order_pricing import (
+    compute_order_totals,
+    format_order_total_lines,
+    check_min_order,
+    format_pickup_location_block,
+)
 from tools.order_timing import ready_time_note_from_session
 from tools.booking_mechanisms import (
     RECEIPT_AVAILABLE,
@@ -79,6 +84,18 @@ async def handle_takeaway_flow(
             await cache_restaurant_pricing(session_state, restaurant_id)
             cart_snapshot = dict(cart)
             parcel_rate   = float(session_state.get("parcel_charge_per_item") or 0)
+
+            ok, subtotal, minimum = check_min_order(cart, "takeaway", session_state)
+            if not ok:
+                await send_whatsapp_message(
+                    customer_phone,
+                    f"Minimum order for takeaway is ₹{minimum:.0f}. "
+                    f"Your items total ₹{subtotal:.0f} — please add more to continue.",
+                    restaurant_id,
+                )
+                await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+                return {"status": "awaiting_order"}
+
             totals        = compute_order_totals(cart, "takeaway", parcel_per_item=parcel_rate)
             total         = totals["grand_total"]
             session_state["order_total"] = total
@@ -132,11 +149,14 @@ async def handle_takeaway_flow(
                 )
 
             confirmation = (
-                f"Your order has been placed! 🎉\n────────────────────\n"
+                f"Order confirmed! ✅\n────────────────────\n"
                 f"Token: {display_token}\nBooking Time: {booking_time}\n"
                 f"Order: {order_text_display}\n────────────────────\n"
                 f"{format_order_total_lines(totals)}\n\n{payment_line}{captain_line}"
             )
+            pickup_block = format_pickup_location_block(session_state)
+            if pickup_block:
+                confirmation += f"\n\n{pickup_block}"
             timing_note = ready_time_note_from_session(session_state, "takeaway")
             if timing_note:
                 confirmation += f"\n\n{timing_note}"

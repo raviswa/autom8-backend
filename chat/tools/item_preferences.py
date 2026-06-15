@@ -1314,10 +1314,12 @@ async def handle_delivery_flow(
         cart         = session_state.get("cart", {})
         await cache_restaurant_pricing(session_state, restaurant_id)
         parcel_rate  = float(session_state.get("parcel_charge_per_item") or 0)
+        from tools.order_pricing import resolve_delivery_charge
+        deli_fee     = resolve_delivery_charge(session_state)
         totals       = compute_order_totals(
             cart, "delivery",
             parcel_per_item=parcel_rate,
-            delivery_charge=DELIVERY_CHARGE,
+            delivery_charge=deli_fee,
         )
         total        = totals["grand_total"]
         token        = await get_next_token_number(restaurant_id)

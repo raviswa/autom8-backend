@@ -32,6 +32,7 @@ class Settings(BaseSettings):
         )
 
     google_api_key: str = ""
+    google_maps_api_key: str = ""
 
     botbiz_api_endpoint: str         = "https://graph.facebook.com/v22.0"
     botbiz_phone_number_id: str      = ""
