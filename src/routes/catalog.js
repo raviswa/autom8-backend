@@ -462,16 +462,24 @@ router.get('/feed', async (req, res) => {
   }
 });
 
-// ── GET /api/catalog/feed/template — JSON preview for Excel upload ────────────
+function exportCategoryLabel(category) {
+  const c = String(category || '').trim();
+  return c && c !== 'General' ? c : '';
+}
 
-router.get('/feed/template', async (req, res) => {
+// ── GET /api/catalog/feed/template — JSON for Excel download (manager portal) ─
+
+router.get('/feed/template', authenticateToken, getRestaurantId, async (req, res) => {
   try {
-    const restaurantId = req.query.restaurant_id || process.env.DEFAULT_RESTAURANT_ID;
+    const restaurantId = req.restaurant_id || req.query.restaurant_id || process.env.DEFAULT_RESTAURANT_ID;
+    if (!restaurantId) return res.status(403).json({ error: 'No restaurant outlet linked to this account' });
+
     const { data: rawItems, error } = await supabaseAdmin
       .from('menu_items')
-      .select('retailer_id, name, description, price, image_url, time_slot, is_stocked, is_available, category')
+      .select('retailer_id, name, description, price, image_url, is_stocked, is_available, category')
       .eq('restaurant_id', restaurantId).not('retailer_id', 'is', null)
-      .order('time_slot', { ascending: true }).order('name', { ascending: true });
+      .eq('is_stocked', true)
+      .order('category', { ascending: true }).order('name', { ascending: true });
 
     if (error) throw error;
     if (!rawItems?.length) return res.status(404).json({ error: 'No menu items found' });
@@ -481,15 +489,13 @@ router.get('/feed/template', async (req, res) => {
       if (seen.has(item.retailer_id)) return false;
       seen.add(item.retailer_id); return true;
     });
-    const SLOT_LABEL = { morning_tiffin: 'Morning Tiffin', lunch: 'Lunch', snacks: 'Evening Snacks', dinner: 'Dinner', all: 'All Day' };
 
     const rows = items.map(item => ({
       id:            item.retailer_id,
       title:         item.name || '',
       description:   item.description || '',
       price:         Number(item.price) || 0,
-      category:      item.category || 'General',
-      custom_label_0: SLOT_LABEL[item.time_slot] || 'All Day',
+      category:      exportCategoryLabel(item.category),
       image_link:    item.image_url || '',
       is_available:  (item.is_stocked !== false && item.is_available !== false) ? 'TRUE' : 'FALSE',
     }));
@@ -584,8 +590,8 @@ async function handleMenuUpload(req, res) {
         description:   String(item.description || '').trim(),
         price,
         image_url:     item.image_url || item.image_link || null,
-        time_slot:     mapTimeSlot(item.time_slot || item.custom_label_0),
-        category:      item.category || 'General',
+        time_slot:     'all',
+        category:      String(item.category || '').trim() || 'General',
         is_stocked:    isStocked,
         is_available:  isStocked,
         created_at:    now,
@@ -629,17 +635,13 @@ async function handleMenuUpload(req, res) {
       }
     }
 
-    // Phase 4: re-apply current slot
-    const slot = getCurrentSlotIST();
-    if (slot) await applySlotAvailability(restaurantId, slot).catch(() => {});
-
-    // Phase 5: audit
+    // Phase 4: audit
     await writeAuditLog({
       user_id: req.user.sub, restaurant_id: restaurantId,
       action: 'Menu items uploaded via Excel', details: { upserted, skipped, purged },
     });
 
-    // Phase 6: trigger Meta feed refetch
+    // Phase 5: trigger Meta feed refetch
     triggerMetaFeedRefetch().catch(e => console.warn('[menu/upload] Meta trigger failed:', e.message));
 
     const response = { success: true, upserted, skipped, purged, total: items.length };
