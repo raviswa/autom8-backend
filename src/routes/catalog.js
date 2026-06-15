@@ -526,9 +526,9 @@ async function handleInternalMenuItems(req, res) {
 
 router.get('/internal-menu', handleInternalMenuItems);
 
-// ── POST /api/menu/upload — Bulk menu upload from Excel/CSV ──────────────────
+// ── POST /api/menu/upload (and /api/catalog/menu-upload) — Bulk menu upload ──
 
-router.post('/menu-upload', authenticateToken, getRestaurantId, async (req, res) => {
+async function handleMenuUpload(req, res) {
   try {
     if (!['owner', 'manager', 'brand_owner'].includes(req.user_role))
       return res.status(403).json({ error: 'Unauthorized' });
@@ -649,7 +649,10 @@ router.post('/menu-upload', authenticateToken, getRestaurantId, async (req, res)
     console.error('[menu/upload]', err.message);
     res.status(500).json({ error: err.message });
   }
-});
+}
+
+const menuUploadMiddleware = [authenticateToken, getRestaurantId, handleMenuUpload];
+router.post('/menu-upload', ...menuUploadMiddleware);
 
 // ── PUT /api/menu-items/:id/availability — Toggle stock + Meta Catalog push ──
 // AUTHORITATIVE version. Removes the need for pos.js's weaker version.
@@ -759,6 +762,8 @@ module.exports = router;
 module.exports.getCurrentSlotIST = getCurrentSlotIST;
 module.exports.applySlotAvailability = applySlotAvailability;
 module.exports.handleInternalMenuItems = handleInternalMenuItems;
+module.exports.handleMenuUpload = handleMenuUpload;
+module.exports.menuUploadMiddleware = menuUploadMiddleware;
 module.exports.resetDailySpecialDishes = resetDailySpecialDishes;
 module.exports.applySlotForAllRestaurants = async function() {
   const slot = getCurrentSlotIST();
