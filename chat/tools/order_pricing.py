@@ -10,11 +10,14 @@ import math
 import re
 from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from tools.cart_tools import cart_total
 
 DEFAULT_GST_RATE = 5.0
 DEFAULT_DELIVERY_CHARGE = 40.0
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 DEFAULT_DELIVERY_TIERS = [
     {"max_km": 3, "charge": 20},
@@ -146,19 +149,31 @@ def format_pickup_location_block(session_state: dict[str, Any] | None) -> str:
 
 def parse_scheduled_delivery_time(text: str, *, now: datetime | None = None) -> datetime | None:
     """
-    Parse simple customer time strings: 1pm, 1:00 PM, 13:00, 1:30 pm.
+    Parse simple customer time strings: 1pm, 1:00 PM, 1.00PM, 13:00, 1:30 pm.
     Returns datetime today; if time already passed, uses tomorrow.
     None means deliver now (NOW / ASAP).
     """
-    raw = (text or "").strip().lower()
-    if not raw or raw in ("now", "asap", "immediate", "immediately"):
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    if raw.lower() in ("now", "asap", "immediate", "immediately"):
         return None
 
-    compact = re.sub(r"\s+", "", raw.replace(".", ""))
+    normalized = re.sub(
+        r"(\d{1,2})\.(\d{2})\s*(am|pm)?",
+        lambda m: f"{int(m.group(1))}:{m.group(2)}"
+        + (f" {m.group(3).upper()}" if m.group(3) else ""),
+        raw,
+        flags=re.IGNORECASE,
+    )
+    raw = normalized.strip().lower()
+    raw = re.sub(r"(\d)(am|pm)\b", r"\1 \2", raw)
+    raw = re.sub(r"(\d)\.(\d)(?!\d)", r"\1:\2", raw)
+    compact = re.sub(r"\s+", "", raw)
     hour: int | None = None
     minute = 0
 
-    m = re.match(r"^(\d{1,2}):(\d{2})(am|pm)?$", compact)
+    m = re.match(r"^(\d{1,2}):(\d{1,2})(am|pm)?$", compact)
     if m:
         hour = int(m.group(1))
         minute = int(m.group(2))
@@ -186,7 +201,9 @@ def parse_scheduled_delivery_time(text: str, *, now: datetime | None = None) -> 
     elif meridiem == "am" and hour == 12:
         hour = 0
 
-    base = now or datetime.now()
+    base = now or datetime.now(_IST)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=_IST)
     candidate = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if candidate <= base:
         candidate += timedelta(days=1)

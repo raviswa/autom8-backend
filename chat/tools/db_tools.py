@@ -1506,17 +1506,17 @@ async def create_walk_in_token_direct(
         logger.error("[walk-in-token] DB session not initialized")
         return None
 
-    if token_type not in ("dinein", "takeaway", "large_party"):
+    if token_type not in ("dinein", "takeaway", "large_party", "scheduled_delivery"):
         logger.error(f"[walk-in-token] Invalid type: {token_type}")
         return None
 
     clean_phone = "".join(c for c in str(phone) if c.isdigit()) or None
     status = (
-        "pending_approval" if token_type == "large_party"
+        "pending_approval" if token_type in ("large_party", "scheduled_delivery")
         else "takeaway" if token_type == "takeaway"
         else "waiting"
     )
-    actual_pax = 1 if token_type == "takeaway" else max(1, int(pax or 1))
+    actual_pax = 1 if token_type in ("takeaway", "scheduled_delivery") else max(1, int(pax or 1))
 
     try:
         async with AsyncSessionLocal() as session:
@@ -1585,6 +1585,46 @@ async def get_active_walk_in_token(
         if not row:
             return None
         return dict(row)
+
+
+async def get_scheduled_delivery_token(
+    restaurant_id: str,
+    customer_phone: str,
+) -> dict | None:
+    """Return today's scheduled_delivery token for approval polling."""
+    if AsyncSessionLocal is None:
+        return None
+
+    phones = _phone_variants(customer_phone)
+    if not phones:
+        return None
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text("""
+                SELECT id, status, pax, meta, type, phone
+                FROM walk_in_tokens
+                WHERE restaurant_id = CAST(:rid AS uuid)
+                  AND phone = ANY(:phones)
+                  AND type = 'scheduled_delivery'
+                  AND arrived_at >= CURRENT_DATE
+                ORDER BY arrived_at DESC
+                LIMIT 1
+            """),
+            {"rid": restaurant_id, "phones": phones},
+        )
+        row = result.mappings().first()
+        if not row:
+            return None
+        data = dict(row)
+        meta = data.get("meta") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        data["meta"] = meta
+        return data
 
 
 def apply_walk_in_token_to_session(session_state: dict, token: dict) -> None:

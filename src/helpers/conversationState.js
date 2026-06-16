@@ -94,4 +94,59 @@ async function syncConversationForTokenApproval({
   }
 }
 
-module.exports = { syncConversationForTokenApproval, canonicalPhone, phoneVariants };
+/**
+ * After manager approves a scheduled delivery, sync session so the chat agent
+ * can send the payment link and push the order to KDS.
+ */
+async function syncConversationForScheduledDeliveryApproval({
+  restaurantId,
+  customerPhone,
+  tokenId,
+  meta = {},
+}) {
+  const phone = canonicalPhone(customerPhone);
+  if (!phone || !restaurantId) return;
+
+  try {
+    const existing = await findConversationRow(restaurantId, customerPhone);
+    const prev = existing?.context ?? {};
+    const storedPhone = existing?.customer_phone ?? phone;
+
+    const context = {
+      ...prev,
+      booking_step:                'awaiting_scheduled_delivery_payment',
+      service_type:                'delivery',
+      last_service_type:           'delivery',
+      display_token:               tokenId,
+      token_number:                tokenId,
+      scheduled_delivery_approved: true,
+      booking_id:                  meta.booking_id ?? prev.booking_id,
+      scheduled_at:                meta.scheduled_at ?? prev.scheduled_at,
+      delivery_address:            meta.delivery_address ?? prev.delivery_address,
+      order_total:                 meta.total ?? prev.order_total,
+      order_totals:                meta.totals ?? prev.order_totals,
+      pending_order_text:          meta.order_text ?? prev.pending_order_text,
+      pending_cart:                meta.cart ?? prev.pending_cart,
+    };
+
+    await supabaseAdmin.from('conversation_states').upsert({
+      restaurant_id:  restaurantId,
+      customer_phone: storedPhone,
+      adk_session_id: `${restaurantId}:${storedPhone}`,
+      current_state:  'booking',
+      context,
+      updated_at:     new Date().toISOString(),
+    }, { onConflict: 'restaurant_id,customer_phone' });
+
+    console.log(`[conversation-sync] ✅ ${phone} → awaiting_scheduled_delivery_payment (${tokenId})`);
+  } catch (err) {
+    console.warn('[conversation-sync] scheduled delivery sync failed (non-fatal):', err.message);
+  }
+}
+
+module.exports = {
+  syncConversationForTokenApproval,
+  syncConversationForScheduledDeliveryApproval,
+  canonicalPhone,
+  phoneVariants,
+};

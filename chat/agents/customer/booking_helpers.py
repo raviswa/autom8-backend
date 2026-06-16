@@ -265,6 +265,8 @@ _STEPS_ALLOWING_SHORT_REPLY: set[str] = {
     "awaiting_flow_datetime","awaiting_table_assignment",
     "awaiting_large_party_response","awaiting_manager_approval","visit_complete",
     "awaiting_order","awaiting_address","confirming_order","awaiting_cart_action",
+    "awaiting_scheduled_time", "awaiting_scheduled_flow",
+    "awaiting_scheduled_delivery_approval", "awaiting_scheduled_delivery_payment",
 }
 
 _FEEDBACK_RE = re.compile(r"^\s*[1-5]\b", re.IGNORECASE)
@@ -407,7 +409,8 @@ async def send_service_menu(
         )
     elif not is_kitchen_open():
         body_lines.append(
-            f"Takeaway and delivery open at *{next_open_label()}*. "
+            f"Takeaway opens at *{next_open_label()}*. "
+            f"Tap *Delivery* to schedule from the calendar — pick date and time like a table reservation. "
             f"Dine-in and reservations are still available."
         )
     body_lines.append("What would you like to do today?")
@@ -442,6 +445,13 @@ async def send_service_menu(
 
 def parse_booking_datetime(text: str) -> datetime | None:
     text = text.strip()
+    text = re.sub(
+        r"(\d{1,2})\.(\d{2})\s*(am|pm)?",
+        lambda m: f"{int(m.group(1))}:{m.group(2)}"
+        + (f" {m.group(3).upper()}" if m.group(3) else ""),
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(r"[./]", "-", text)
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"(\d)(AM|PM)", r"\1 \2", text, flags=re.IGNORECASE)
@@ -460,6 +470,26 @@ def parse_booking_datetime(text: str) -> datetime | None:
             return datetime.strptime(text, fmt)
         except ValueError:
             continue
+    return None
+
+
+def parse_flow_datetime(message: str) -> datetime | None:
+    """Parse WhatsApp Flow completion: FLOW:{token}|date=YYYY-MM-DD|time=HH:MM."""
+    if not message.startswith("FLOW:"):
+        return None
+    try:
+        parts = message.split("|")
+        data: dict[str, str] = {}
+        for part in parts[1:]:
+            if "=" in part:
+                k, v = part.split("=", 1)
+                data[k.strip()] = v.strip()
+        date_str = data.get("date", "")
+        time_str = data.get("time", "")
+        if date_str and time_str:
+            return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    except Exception:
+        return None
     return None
 
 
@@ -698,8 +728,14 @@ async def gate_ordering_service(
     """
     Block takeaway/delivery when the kitchen slot is closed.
     Returns True if the service was blocked (caller should return early).
+
+    Delivery is never hard-blocked here — customers can schedule for later
+    via awaiting_scheduled_flow / awaiting_scheduled_time instead.
     """
     from tools.kitchen_hours import ordering_blocked_for_service
+
+    if service_type == "delivery":
+        return False
 
     if not ordering_blocked_for_service(service_type):
         return False
