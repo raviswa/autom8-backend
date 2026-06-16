@@ -489,6 +489,12 @@ async def _send_manager_walk_in_alert(
             f"🪑 *New Walk-in* — Token *{token_id}*\n"
             f"👤 {customer_name}\n📦 Takeaway\n🕐 {arrival} IST\n\n{portal_url}"
         )
+    elif token_type == "scheduled_delivery":
+        body = (
+            f"🛵 *Scheduled Delivery* — Token *{token_id}*\n"
+            f"👤 {customer_name}\n🕐 {arrival} IST\n\n"
+            f"⚠️ *Approve in portal before customer pays:*\n{portal_url}"
+        )
     else:
         body = (
             f"🟣 *Large Party Request* — Token *{token_id}*\n"
@@ -741,6 +747,46 @@ async def sync_token_to_portal_large_party(
         await _send_manager_walk_in_alert(
             restaurant_id, token_id, customer_name, pax, "large_party",
         )
+    return token_id
+
+
+async def sync_scheduled_delivery_to_portal(
+    customer_name: str,
+    customer_phone: str,
+    restaurant_id: str,
+    meta: dict,
+    max_attempts: int = 3,
+) -> str | None:
+    """Queue a scheduled delivery in the manager portal for approval before payment."""
+    from tools.db_tools import create_walk_in_token_direct
+
+    payload = {
+        "restaurant_id": restaurant_id,
+        "name":          customer_name,
+        "phone":         customer_phone,
+        "type":          "scheduled_delivery",
+        "pax":           1,
+        "meta":          meta,
+    }
+
+    token_id = await _sync_token_via_api(payload, customer_phone, "portal-sync-scheduled", max_attempts)
+    if token_id:
+        return token_id
+
+    logger.warning(f"[portal-sync-scheduled] API failed — direct DB fallback for {customer_phone}")
+    token_id = await create_walk_in_token_direct(
+        restaurant_id=restaurant_id,
+        name=customer_name,
+        phone=customer_phone,
+        token_type="scheduled_delivery",
+        pax=1,
+        meta=meta,
+    )
+    if token_id:
+        await _send_manager_walk_in_alert(
+            restaurant_id, token_id, customer_name, 1, "scheduled_delivery",
+        )
+        await _rebroadcast_portal_token(restaurant_id, token_id)
     return token_id
 
 

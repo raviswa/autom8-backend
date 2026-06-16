@@ -61,6 +61,7 @@ from tools.cart_tools import (
 from tools.feature_gate import resolve_service_choice
 from tools.personalisation_tools import update_customer_profile
 from tools.db_tools import update_booking_status
+from tools.booking_mechanisms import cache_restaurant_pricing
 
 from agents.customer.booking_helpers import (
     MANAGER_PORTAL_URL,
@@ -168,14 +169,14 @@ async def handle_booking_flow(
             )
             session_state["booking_step"] = "awaiting_service_selection"
             return {"status": "remind_scheduled"}
-        await send_whatsapp_message(
-            customer_phone,
-            "We're open now — tap an option below to place your order.",
-            restaurant_id,
+        raw_greeting = await safe_build_greeting(customer_id, restaurant_id)
+        greeting = build_smart_greeting(customer_name, raw_greeting, session_state)
+        await send_service_menu(
+            customer_phone, restaurant_id, greeting, session_state, announce_closed=False,
         )
-        if current_step == "ask_service":
-            session_state["booking_step"] = "awaiting_service_selection"
-        return {"status": "kitchen_open"}
+        session_state["booking_step"] = "awaiting_service_selection"
+        session_state.pop("remind_when_open", None)
+        return {"status": "awaiting_service_selection"}
 
     # ── Closed kitchen: repeat greeting while stuck in ordering ───────────────
     from tools.kitchen_hours import is_kitchen_open, ordering_blocked_for_service
@@ -278,6 +279,16 @@ async def handle_booking_flow(
                 return await prompt_name_verification(
                     customer_phone, restaurant_id, customer_name, session_state,
                 )
+            if is_greeting(_raw_choice) or _raw_choice.lower() in (
+                "good morning", "good afternoon", "good evening", "morning", "gm",
+            ):
+                raw_greeting = await safe_build_greeting(customer_id, restaurant_id)
+                greeting = build_smart_greeting(customer_name, raw_greeting, session_state)
+                await send_service_menu(
+                    customer_phone, restaurant_id, greeting, session_state, announce_closed=False,
+                )
+                session_state["booking_step"] = "awaiting_service_selection"
+                return {"status": "awaiting_service_selection"}
             await send_whatsapp_message(
                 customer_phone, "Sorry, I did not catch that. Please tap one of the options above." + _HOME_HINT, restaurant_id
             )
@@ -309,10 +320,13 @@ async def handle_booking_flow(
             session_state["last_service_type"] = "takeaway"
             await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
         elif service_type == "delivery":
-            if await gate_ordering_service(
-                customer_phone, restaurant_id, session_state, "delivery",
-            ):
-                return {"status": "awaiting_service_selection"}
+            await cache_restaurant_pricing(session_state, restaurant_id)
+            from tools.kitchen_hours import is_kitchen_open
+            from agents.customer.delivery_flow import offer_delivery_schedule
+            if not is_kitchen_open():
+                return await offer_delivery_schedule(
+                    customer_phone, restaurant_id, customer_id, customer_name, session_state,
+                )
             from tools.whatsapp_tools import send_location_request
             sent = await send_location_request(customer_phone, restaurant_id)
             if not sent:

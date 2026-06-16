@@ -24,7 +24,7 @@ const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../helpers/
 const { queueFeedbackForTable }   = require('../helpers/feedback');
 const { getManagerPhone } = require('../helpers/restaurantConfig');
 const { assignAndNotifyCaptainTakeaway } = require('../helpers/captainAssignment');
-const { syncConversationForTokenApproval } = require('../helpers/conversationState');
+const { syncConversationForTokenApproval, syncConversationForScheduledDeliveryApproval } = require('../helpers/conversationState');
 const { writeAuditLog } = require('../helpers/auditLog');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { requireKdsSecretOrJwt, requireKdsSecret } = require('../middleware/internalAuth');
@@ -81,11 +81,11 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
     if (!name?.trim())    return res.status(400).json({ error: 'name is required' });
     if (!type)            return res.status(400).json({ error: 'type is required' });
     if (!restaurant_id)   return res.status(400).json({ error: 'restaurant_id is required' });
-    if (!['dinein', 'takeaway', 'large_party'].includes(type))
-      return res.status(400).json({ error: 'type must be dinein, takeaway, or large_party' });
+    if (!['dinein', 'takeaway', 'large_party', 'scheduled_delivery'].includes(type))
+      return res.status(400).json({ error: 'type must be dinein, takeaway, large_party, or scheduled_delivery' });
 
     const tokenId = await generateTokenId(restaurant_id);
-    const status  = type === 'large_party' ? 'pending_approval'
+    const status  = (type === 'large_party' || type === 'scheduled_delivery') ? 'pending_approval'
                   : type === 'takeaway'    ? 'takeaway'
                   : 'waiting';
 
@@ -95,7 +95,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
       name:        name.trim(),
       phone:       phone ? String(phone).replace(/\D/g, '') : null,
       type,
-      pax:         type === 'takeaway' ? 1 : (parseInt(pax) || 1),
+      pax:         (type === 'takeaway' || type === 'scheduled_delivery') ? 1 : (parseInt(pax) || 1),
       status,
       arrived_at:  new Date().toISOString(),
       meta:        meta || {},
@@ -126,6 +126,15 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
         sendWhatsAppMessage(
           managerPhone,
           `🟣 *Large Party Request* — Token *${token.id}*\n👥 ${token.name} · *${token.pax} people*\n🕐 ${arrivalTime} IST\n\nProposed: ${tableLines}\n\n⚠️ *Action required:*\n${portalUrl}`,
+          restaurant_id
+        );
+      } else if (type === 'scheduled_delivery') {
+        const schedAt = meta?.scheduled_at_label || meta?.scheduled_at || '—';
+        const addr    = (meta?.delivery_address || '—').slice(0, 80);
+        const total   = meta?.total != null ? `₹${Number(meta.total).toFixed(0)}` : '—';
+        sendWhatsAppMessage(
+          managerPhone,
+          `🛵 *Scheduled Delivery* — Token *${token.id}*\n👤 ${token.name}\n📱 ${token.phone || '—'}\n🕐 Deliver by: *${schedAt}*\n📍 ${addr}\n💰 ${total}\n\nOrder: ${(meta?.order_text || '—').slice(0, 120)}\n\n⚠️ *Approve in portal before customer pays:*\n${portalUrl}`,
           restaurant_id
         );
       } else if (type === 'dinein') {
@@ -425,6 +434,46 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
     if (!token) return res.status(404).json({ error: 'Token not found' });
     if (token.status !== 'pending_approval') return res.status(400).json({ error: `Token is ${token.status}` });
 
+    // ── Scheduled delivery: approve before customer payment ─────────────────
+    if (token.type === 'scheduled_delivery') {
+      const meta = token.meta || {};
+      const { data: updatedToken } = await supabaseAdmin
+        .from('walk_in_tokens')
+        .update({
+          status: 'takeaway',
+          meta: { ...meta, approved_at: new Date().toISOString() },
+        })
+        .eq('id', req.params.id).select().single();
+
+      if (meta.booking_id) {
+        await supabaseAdmin.from('bookings')
+          .update({ status: 'confirmed' })
+          .eq('id', meta.booking_id);
+      }
+
+      if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+        const schedLabel = meta.scheduled_at_label || meta.scheduled_at || 'your chosen time';
+        await sendWhatsAppMessage(
+          token.phone,
+          `✅ *Your scheduled delivery is approved!*\n\n`
+          + `Token: *${token.id}*\n`
+          + `Deliver by: *${schedLabel}*\n\n`
+          + `We'll send your payment link shortly. You can also reply *PAY* here when ready.`,
+          restaurantId
+        );
+      }
+
+      await syncConversationForScheduledDeliveryApproval({
+        restaurantId,
+        customerPhone: token.phone,
+        tokenId:       token.id,
+        meta,
+      });
+
+      broadcastToRestaurant(restaurantId, { type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString() });
+      return res.json({ success: true, token: updatedToken });
+    }
+
     const combo        = token.meta?.combo ?? [];
     const tableNumbers = combo.map(t => String(t[0]));
     let tableIds       = [];
@@ -483,7 +532,23 @@ router.put('/:id/reject', outletAuth, async (req, res) => {
       .update({ status: 'completed', completed_at: new Date().toISOString() })
       .eq('id', req.params.id).select().single();
 
-    if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+    if (token.type === 'scheduled_delivery') {
+      const meta = token.meta || {};
+      if (meta.booking_id) {
+        await supabaseAdmin.from('bookings')
+          .update({ status: 'rejected' })
+          .eq('id', meta.booking_id);
+      }
+      if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+        const reasonLine = req.body.reason ? `\n\nReason: ${req.body.reason}` : '';
+        await sendWhatsAppMessage(
+          token.phone,
+          `😔 *We're unable to confirm your scheduled delivery right now.*${reasonLine}\n\n`
+          + `Please try a different time or reply *Home* to see other options. 🙏`,
+          restaurantId
+        );
+      }
+    } else if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
       const reasonLine = req.body.reason ? `\n\nReason: ${req.body.reason}` : '';
       await sendWhatsAppMessage(
         token.phone,

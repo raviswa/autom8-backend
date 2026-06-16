@@ -76,7 +76,10 @@ def build_closed_notice(*, attempt: int = 1, service_type: str | None = None) ->
 
     svc_hint = ""
     if service_type == "delivery":
-        svc_hint = "\n\nDelivery will be available once the kitchen opens."
+        svc_hint = (
+            "\n\nTap *Delivery* to schedule from the calendar — "
+            "you'll pick date and time like a table reservation."
+        )
     elif service_type == "takeaway":
         svc_hint = "\n\nTakeaway ordering will be available once the kitchen opens."
 
