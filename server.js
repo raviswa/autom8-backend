@@ -31,6 +31,8 @@ const app = express();
 app.use(cors({
   origin: [
     'https://app.autom8.works',
+    'http://127.0.0.1:5500',   // ← Live Server
+    'http://localhost:5500',    // ← Live Server alternate
     'http://localhost:5173',
     process.env.FRONTEND_URL,
   ].filter(Boolean),
