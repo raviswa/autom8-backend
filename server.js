@@ -18,7 +18,12 @@ const cors    = require('cors');
 
 const { startAllSchedulers } = require('./src/schedulers/index');
 const { attachWebSocketServer } = require('./src/websocket');
-const { handleInternalMenuItems, menuUploadMiddleware } = require('./src/routes/catalog');
+const {
+  handleInternalMenuItems,
+  menuUploadMiddleware,
+  menuItemAvailabilityMiddleware,
+  menuItemSpecialTodayMiddleware,
+} = require('./src/routes/catalog');
 const { logKdsSecretStatus } = require('./src/config/internalSecret');
 
 if (process.env.NODE_ENV === 'production' && !process.env.AUTOM8_KDS_SECRET) {
@@ -60,6 +65,8 @@ app.use('/api/brands',      require('./src/routes/brands'));
 app.use('/api/kds',         require('./src/routes/kds'));          // FULL kds/notify
 app.use('/api/catalog',     require('./src/routes/catalog'));      // catalog sync + feed + menu upload
 app.post('/api/menu/upload', ...menuUploadMiddleware);             // Manager portal Excel upload alias
+app.put('/api/menu-items/:id/availability', ...menuItemAvailabilityMiddleware);
+app.put('/api/menu-items/:id/special-today', ...menuItemSpecialTodayMiddleware);
 app.get('/api/internal/menu-items', handleInternalMenuItems);      // Python chat menu cache
 app.use('/api/tokens',      require('./src/routes/tokens'));
 app.use('/api/feedback',    require('./src/routes/feedback'));
