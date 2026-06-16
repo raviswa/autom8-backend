@@ -36,6 +36,7 @@ const app = express();
 app.use(cors({
   origin: [
     'https://app.autom8.works',
+    'https://order.autom8.works',
     'http://localhost:5173',
     process.env.FRONTEND_URL,
   ].filter(Boolean),
@@ -72,6 +73,7 @@ app.use('/api/tokens',      require('./src/routes/tokens'));
 app.use('/api/feedback',    require('./src/routes/feedback'));
 app.use('/api/referrals',   require('./src/routes/referrals'));
 app.use('/api/delivery',    require('./src/routes/delivery'));
+app.use('/api/supply',      require('./src/routes/supply'));
 app.use('/api/enterprise',  require('./src/routes/enterprise'));
 app.use('/api/invoices',    require('./src/routes/invoices'));
 app.use('/api/subscription',require('./src/routes/subscription')); // replaces hardcoded stub

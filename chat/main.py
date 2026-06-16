@@ -35,6 +35,8 @@ from tools.booking_mechanisms import (
     bridge_catalog_order_to_cart,
 )
 from agents.root_agent import route_message
+from tools.supply_api import get_supplier_by_wa
+from agents.supply.supply_agent import handle_supply_flow
 
 import asyncio
 
@@ -247,6 +249,27 @@ async def _process_meta_payload(payload: dict):
         phone_number_id = metadata.get("phone_number_id")
         if phone_number_id:
             restaurant = await get_restaurant_by_phone_number_id(str(phone_number_id))
+
+        supplier_wa = None
+        if phone_number_id:
+            supplier_wa = await get_supplier_by_wa(str(phone_number_id))
+
+        # Munafe Supply B2B channel (dedicated WhatsApp phone_number_id)
+        if supplier_wa and not restaurant:
+            session_key = f"supply:{supplier_wa['supplier_id']}"
+            async with customer_lock(session_key, phone):
+                session_state = await get_session_state(session_key, phone)
+                if session_state is None:
+                    session_state = {}
+                await handle_supply_flow(
+                    customer_phone=phone,
+                    message=message_body or "",
+                    supplier_id=supplier_wa["supplier_id"],
+                    wa_credentials=supplier_wa,
+                    session_state=session_state,
+                )
+                await save_session_state(session_key, phone, session_state)
+            return
 
         if not restaurant:
             restaurant_whatsapp = (
