@@ -657,9 +657,8 @@ const menuUploadMiddleware = [authenticateToken, getRestaurantId, handleMenuUplo
 router.post('/menu-upload', ...menuUploadMiddleware);
 
 // ── PUT /api/menu-items/:id/availability — Toggle stock + Meta Catalog push ──
-// AUTHORITATIVE version. Removes the need for pos.js's weaker version.
 
-router.put('/menu-items/:id/availability', authenticateToken, getRestaurantId, async (req, res) => {
+async function handleMenuItemAvailability(req, res) {
   try {
     if (!['owner', 'manager', 'brand_owner'].includes(req.user_role))
       return res.status(403).json({ error: 'Unauthorized' });
@@ -688,10 +687,8 @@ router.put('/menu-items/:id/availability', authenticateToken, getRestaurantId, a
       details: { item_id: req.params.id, item_name: item.name, is_available },
     });
 
-    // Respond immediately — don't block on Meta API
     res.json({ success: true, id: req.params.id, is_available, name: item.name });
 
-    // Fire-and-forget Meta Catalog push
     if (item.retailer_id) {
       pushSingleItemToMetaCatalog({
         retailerId:   item.retailer_id,
@@ -703,11 +700,14 @@ router.put('/menu-items/:id/availability', authenticateToken, getRestaurantId, a
     console.error('[menu-item-availability]', err.message);
     if (!res.headersSent) res.status(500).json({ error: err.message });
   }
-});
+}
+
+const menuItemAvailabilityMiddleware = [authenticateToken, getRestaurantId, handleMenuItemAvailability];
+router.put('/menu-items/:id/availability', ...menuItemAvailabilityMiddleware);
 
 // ── PUT /api/menu-items/:id/special-today — Mark special dish (no Meta push) ─
 
-router.put('/menu-items/:id/special-today', authenticateToken, getRestaurantId, async (req, res) => {
+async function handleMenuItemSpecialToday(req, res) {
   try {
     if (!['owner', 'manager', 'brand_owner'].includes(req.user_role))
       return res.status(403).json({ error: 'Unauthorized' });
@@ -727,7 +727,14 @@ router.put('/menu-items/:id/special-today', authenticateToken, getRestaurantId, 
       updated_at: new Date().toISOString(),
     }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id);
 
-    if (updateErr) throw updateErr;
+    if (updateErr) {
+      if (/is_special_today/i.test(updateErr.message)) {
+        return res.status(500).json({
+          error: 'Special dish feature not enabled — run migrations/add_catalog_parcel_and_specials.sql in Supabase.',
+        });
+      }
+      throw updateErr;
+    }
 
     await writeAuditLog({
       user_id: req.user.sub, restaurant_id: req.restaurant_id,
@@ -738,9 +745,12 @@ router.put('/menu-items/:id/special-today', authenticateToken, getRestaurantId, 
     res.json({ success: true, id: req.params.id, is_special_today, name: item.name });
   } catch (err) {
     console.error('[menu-item-special-today]', err.message);
-    res.status(500).json({ error: err.message });
+    if (!res.headersSent) res.status(500).json({ error: err.message });
   }
-});
+}
+
+const menuItemSpecialTodayMiddleware = [authenticateToken, getRestaurantId, handleMenuItemSpecialToday];
+router.put('/menu-items/:id/special-today', ...menuItemSpecialTodayMiddleware);
 
 /** Clear all is_special_today flags (called daily at midnight IST). */
 async function resetDailySpecialDishes() {
@@ -766,6 +776,8 @@ module.exports.applySlotAvailability = applySlotAvailability;
 module.exports.handleInternalMenuItems = handleInternalMenuItems;
 module.exports.handleMenuUpload = handleMenuUpload;
 module.exports.menuUploadMiddleware = menuUploadMiddleware;
+module.exports.menuItemAvailabilityMiddleware = menuItemAvailabilityMiddleware;
+module.exports.menuItemSpecialTodayMiddleware = menuItemSpecialTodayMiddleware;
 module.exports.resetDailySpecialDishes = resetDailySpecialDishes;
 module.exports.applySlotForAllRestaurants = async function() {
   const slot = getCurrentSlotIST();
