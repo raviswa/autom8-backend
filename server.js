@@ -12,6 +12,9 @@
 
 'use strict';
 
+// Load .env before any module that reads process.env (supabase, schedulers, etc.)
+require('dotenv').config();
+
 const http    = require('http');
 const express = require('express');
 const cors    = require('cors');
@@ -36,8 +39,12 @@ const app = express();
 app.use(cors({
   origin: [
     'https://app.autom8.works',
+    'https://autom8.works',
+    'https://www.autom8.works',
     'https://order.autom8.works',
     'http://localhost:5173',
+    'http://localhost:3000',
+    'http://127.0.0.1:5500',
     process.env.FRONTEND_URL,
   ].filter(Boolean),
   methods:        ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -73,6 +80,7 @@ app.use('/api/tokens',      require('./src/routes/tokens'));
 app.use('/api/feedback',    require('./src/routes/feedback'));
 app.use('/api/referrals',   require('./src/routes/referrals'));
 app.use('/api/delivery',    require('./src/routes/delivery'));
+app.use('/api/discovery',   require('./src/routes/discovery'));
 app.use('/api/supply',      require('./src/routes/supply'));
 app.use('/api/enterprise',  require('./src/routes/enterprise'));
 app.use('/api/invoices',    require('./src/routes/invoices'));
