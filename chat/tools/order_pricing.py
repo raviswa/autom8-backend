@@ -124,8 +124,19 @@ def check_min_order(
     return subtotal >= minimum, subtotal, minimum
 
 
+_MAPS_URL_RE = re.compile(r"google\.com/maps|maps\.app\.goo\.gl|goo\.gl/maps", re.I)
+
+
+def _is_maps_url(text: str) -> bool:
+    return bool(text and _MAPS_URL_RE.search(text))
+
+
+def _short_maps_link(lat: float, lng: float) -> str:
+    return f"https://maps.google.com/?q={lat},{lng}"
+
+
 def format_pickup_location_block(session_state: dict[str, Any] | None) -> str:
-    """Pickup address + maps link for cloud kitchen takeaway confirmations."""
+    """Pickup maps link for cloud kitchen takeaway confirmations."""
     state = session_state or {}
     if (state.get("restaurant_type") or "").lower() != "cloud_kitchen":
         return ""
@@ -133,18 +144,17 @@ def format_pickup_location_block(session_state: dict[str, Any] | None) -> str:
     addr = (state.get("pickup_address") or "").strip()
     lat = state.get("pickup_latitude")
     lng = state.get("pickup_longitude")
-    if not addr and lat is None:
-        return ""
 
-    lines: list[str] = []
-    if addr:
-        lines.append(f"📍 Pickup: {addr}")
     try:
         if lat is not None and lng is not None:
-            lines.append(f"🔗 https://maps.google.com/?q={float(lat)},{float(lng)}")
+            return f"📍 Pickup: {_short_maps_link(float(lat), float(lng))}"
     except (TypeError, ValueError):
         pass
-    return "\n".join(lines)
+
+    if addr and not _is_maps_url(addr):
+        return f"📍 Pickup: {addr}"
+
+    return ""
 
 
 def parse_scheduled_delivery_time(text: str, *, now: datetime | None = None) -> datetime | None:
