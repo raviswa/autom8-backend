@@ -72,6 +72,7 @@ from agents.customer.booking_helpers import (
     now_display,
     is_greeting,
     is_feedback_reply,
+    is_feedback_aspect_reply,
     send_catalog_with_fallback,
     send_service_menu,
     build_smart_greeting,
@@ -129,7 +130,7 @@ async def handle_booking_flow(
 
     # ── visit_complete: treat any new message as fresh visit ─────────────────
     if current_step == "visit_complete":
-        if is_feedback_reply(message):
+        if is_feedback_reply(message) or is_feedback_aspect_reply(message):
             await send_whatsapp_message(
                 customer_phone,
                 "Thank you for your feedback! 🙏 We hope to see you again soon. 😊",
@@ -517,11 +518,11 @@ async def handle_booking_flow(
         return {"status": "awaiting_numbered_order"}
 
     # ── Feedback reply interception  (Fix 42) ─────────────────────────────────
-    # Handles 1-5 replies sent to Node.js feedback messages when the session
-    # is not yet in an explicit feedback step.
+    # Handles rating/aspect replies when Node feedback invite is active.
     if (
-        is_feedback_reply(message)
+        (is_feedback_reply(message) or is_feedback_aspect_reply(message))
         and current_step in {
+            "visit_complete",
             "awaiting_order", "awaiting_payment",
             "awaiting_table_assignment", "awaiting_special_notes",
         }

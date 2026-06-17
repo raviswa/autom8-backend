@@ -29,6 +29,7 @@ from tools.db_tools import (
 )
 from tools.whatsapp_tools import parse_incoming, send_whatsapp_message
 from agents.customer.booking_helpers import touch_session_activity
+from tools.feedback_bridge import try_handle_feedback_via_api
 from tools.payment_tools import verify_webhook_signature
 from tools.auto_reply_filter import is_whatsapp_auto_reply
 from tools.booking_mechanisms import (
@@ -307,6 +308,13 @@ async def _process_meta_payload(payload: dict):
                         "Please try again, or type *MENU* to order from our list. 🙏",
                         restaurant_id,
                     )
+                    return
+
+            # 5b. Feedback reply — delegate to Node before booking routing
+            if msg_type in ("text", "button", "interactive"):
+                if await try_handle_feedback_via_api(phone, message_obj, restaurant_id):
+                    touch_session_activity(session_state)
+                    await save_session_state(restaurant_id, phone, session_state)
                     return
 
             # 6. Route message
