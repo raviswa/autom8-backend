@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     meta_flow_reservation_id: str    = "999260283048797"
     # Reuses the reservation date/time Flow when unset (same Meta Flow screen).
     meta_flow_delivery_schedule_id: str = ""
+    meta_flow_takeaway_schedule_id: str = ""
 
     razorpay_key_id: str | None      = None
     razorpay_key_secret: str | None  = None

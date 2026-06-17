@@ -117,6 +117,7 @@ async def offer_delivery_schedule(
         if ok:
             session_state["booking_step"] = "awaiting_scheduled_flow"
             session_state["last_service_type"] = "delivery"
+            session_state["service_type"] = "delivery"
             session_state["schedule_flow_sent"] = True
             session_state.pop("schedule_text_fallback", None)
             return {"status": "awaiting_scheduled_flow"}
@@ -140,6 +141,7 @@ async def offer_delivery_schedule(
     await send_whatsapp_message(customer_phone, text, restaurant_id)
     session_state["booking_step"] = "awaiting_scheduled_time"
     session_state["last_service_type"] = "delivery"
+    session_state["service_type"] = "delivery"
     return {"status": "awaiting_scheduled_time"}
 
 

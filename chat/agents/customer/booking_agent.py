@@ -82,6 +82,10 @@ from agents.customer.booking_helpers import (
     strip_order_quantity,
     ask_continue_or_reset,
     do_reset,
+    expire_session_if_stale,
+    touch_session_activity,
+    _DIRECT_RESET_KEYWORDS,
+    _FULL_RESET_KEYWORDS,
 )
 from agents.customer.conversation_helpers import (
     safe_build_greeting,
@@ -114,6 +118,14 @@ async def handle_booking_flow(
 
     current_step = session_state.get("booking_step", "ask_service")
     session_state["restaurant_id"] = restaurant_id
+
+    # ── Idle session expiry (30 min) — drop stale mid-flow steps ───────────────
+    if expire_session_if_stale(
+        session_state, customer_id=customer_id, customer_name=customer_name,
+    ):
+        current_step = session_state.get("booking_step", "ask_service")
+
+    msg_lower = message.strip().lower()
 
     # ── visit_complete: treat any new message as fresh visit ─────────────────
     if current_step == "visit_complete":
@@ -202,10 +214,17 @@ async def handle_booking_flow(
         return {"status": "awaiting_service_selection"}
 
     # ── Global Home / reset keyword ───────────────────────────────────────────
-    if (current_step not in {"awaiting_reset_confirmation"}
-            and message.strip().lower() in _RESET_KEYWORDS):
-        session_state["step_before_reset"]     = current_step
-        session_state["booking_step"]          = "awaiting_reset_confirmation"
+    if current_step not in {"awaiting_reset_confirmation"} and msg_lower in _RESET_KEYWORDS:
+        if msg_lower in _DIRECT_RESET_KEYWORDS or msg_lower in _FULL_RESET_KEYWORDS:
+            full = msg_lower in _FULL_RESET_KEYWORDS
+            await do_reset(
+                customer_id, customer_name, customer_phone, restaurant_id,
+                session_state, full_restart=full,
+            )
+            touch_session_activity(session_state)
+            return {"status": "identity_restart" if full else "reset_complete"}
+        session_state["step_before_reset"] = current_step
+        session_state["booking_step"] = "awaiting_reset_confirmation"
         session_state["_full_restart_pending"] = True
         await ask_continue_or_reset(customer_phone, restaurant_id, full_restart=True)
         return {"status": "awaiting_reset_confirmation"}
@@ -311,9 +330,20 @@ async def handle_booking_flow(
             session_state["booking_step"] = "awaiting_party_size"
             session_state["table_number"] = table_number
         elif service_type == "takeaway":
+            await cache_restaurant_pricing(session_state, restaurant_id)
+            from tools.kitchen_hours import is_kitchen_open
+            from agents.customer.takeaway_flow import offer_takeaway_schedule
+            if not is_kitchen_open() or session_state.get("scheduled_takeaway_enabled"):
+                result = await offer_takeaway_schedule(
+                    customer_phone, restaurant_id, customer_id, customer_name, session_state,
+                    kitchen_closed=not is_kitchen_open(),
+                )
+                touch_session_activity(session_state)
+                return result
             if await gate_ordering_service(
                 customer_phone, restaurant_id, session_state, "takeaway",
             ):
+                touch_session_activity(session_state)
                 return {"status": "awaiting_service_selection"}
             clear_cart(session_state)
             session_state["booking_step"] = "awaiting_order"
@@ -323,10 +353,13 @@ async def handle_booking_flow(
             await cache_restaurant_pricing(session_state, restaurant_id)
             from tools.kitchen_hours import is_kitchen_open
             from agents.customer.delivery_flow import offer_delivery_schedule
-            if not is_kitchen_open():
-                return await offer_delivery_schedule(
+            if not is_kitchen_open() or session_state.get("scheduled_delivery_enabled"):
+                result = await offer_delivery_schedule(
                     customer_phone, restaurant_id, customer_id, customer_name, session_state,
+                    kitchen_closed=not is_kitchen_open(),
                 )
+                touch_session_activity(session_state)
+                return result
             from tools.whatsapp_tools import send_location_request
             sent = await send_location_request(customer_phone, restaurant_id)
             if not sent:

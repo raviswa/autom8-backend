@@ -14,19 +14,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from datetime import datetime
 from typing import Dict, Any
 
 import aiohttp
 
 from tools.db_tools import get_next_token_number, create_booking, update_booking_status
 from tools.payment_tools import create_payment_link
-from tools.whatsapp_tools import send_whatsapp_message
-from tools.cart_tools import cart_to_order_text, cart_total, clear_cart
+from tools.whatsapp_tools import send_whatsapp_message, send_whatsapp_flow
+from tools.cart_tools import cart_to_order_text, clear_cart
 from tools.order_pricing import (
     compute_order_totals,
     format_order_total_lines,
     check_min_order,
     format_pickup_location_block,
+    format_scheduled_note,
+    parse_scheduled_delivery_time,
 )
 from tools.order_timing import ready_time_note_from_session
 from tools.booking_mechanisms import (
@@ -41,22 +45,132 @@ from tools.booking_mechanisms import (
     fetch_restaurant_info,
     upload_and_send_receipt,
     receipt_qr_url,
-    AUTOM8_KDS_URL,
     notify_manager_order_alert,
     assign_and_notify_captain_takeaway,
     cache_restaurant_pricing,
 )
 from agents.customer.booking_helpers import (
-    MANAGER_PORTAL_URL,
     _HOME_HINT,
     now_display,
     is_placeholder_payment_link,
     send_catalog_with_fallback,
     strip_order_quantity,
+    parse_booking_datetime,
+    parse_flow_datetime,
 )
 from agents.customer.conversation_helpers import safe_build_order_suggestion
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+async def offer_takeaway_schedule(
+    customer_phone: str,
+    restaurant_id: str,
+    customer_id: str,
+    customer_name: str,
+    session_state: Dict[str, Any],
+    *,
+    kitchen_closed: bool = True,
+) -> Dict[str, Any]:
+    """Primary: WhatsApp Flow calendar. Text entry only if the Flow cannot be sent."""
+    from tools.kitchen_hours import is_kitchen_open, next_open_label
+
+    closed = kitchen_closed or not is_kitchen_open()
+    flow_id = (
+        settings.meta_flow_takeaway_schedule_id
+        or settings.meta_flow_delivery_schedule_id
+        or settings.meta_flow_reservation_id
+    )
+    if flow_id and flow_id != "your_flow_id_here":
+        flow_token = f"takeaway_{customer_id}_{int(time.time())}"
+        session_state["flow_token"] = flow_token
+        if closed:
+            flow_body = (
+                f"Hi {customer_name}! We're not taking immediate takeaway orders yet "
+                f"— we open at *{next_open_label()}*.\n\n"
+                "Tap below to pick when you'd like to collect your order."
+            )
+        else:
+            flow_body = (
+                f"Hi {customer_name}! Tap below to pick your pickup date and time."
+            )
+        ok = await send_whatsapp_flow(
+            phone=customer_phone,
+            flow_id=flow_id,
+            flow_token=flow_token,
+            flow_cta="Select Date & Time",
+            flow_header="🥡 Schedule Takeaway",
+            flow_body=flow_body,
+            flow_footer="Calendar picker — same as table reservations",
+            restaurant_id=restaurant_id,
+        )
+        if ok:
+            session_state["booking_step"] = "awaiting_takeaway_scheduled_flow"
+            session_state["last_service_type"] = "takeaway"
+            session_state["service_type"] = "takeaway"
+            session_state["schedule_flow_sent"] = True
+            session_state.pop("schedule_text_fallback", None)
+            return {"status": "awaiting_takeaway_scheduled_flow"}
+
+    logger.warning(f"[takeaway] schedule Flow unavailable for {customer_phone} — text fallback")
+    session_state["schedule_flow_sent"] = False
+    session_state["schedule_text_fallback"] = True
+    if closed:
+        text = (
+            f"We're not taking immediate orders yet — we open at *{next_open_label()}*.\n\n"
+            "We couldn't open the date picker — please reply with when you'd like pickup "
+            "(e.g. *11:30 AM* or *16-06-2026, 11:30 AM*)."
+        )
+    else:
+        text = (
+            "We couldn't open the date picker right now.\n\n"
+            "Please reply with when you'd like pickup (e.g. *1:00 PM* or *13:00*), "
+            "or type *NOW* for as soon as possible."
+        )
+    await send_whatsapp_message(customer_phone, text, restaurant_id)
+    session_state["booking_step"] = "awaiting_takeaway_scheduled_time"
+    session_state["last_service_type"] = "takeaway"
+    session_state["service_type"] = "takeaway"
+    return {"status": "awaiting_takeaway_scheduled_time"}
+
+
+async def _parse_takeaway_schedule(message: str) -> datetime | None:
+    scheduled = parse_flow_datetime(message)
+    if scheduled is not None:
+        return scheduled
+    scheduled = parse_booking_datetime(message.strip())
+    if scheduled is not None:
+        return scheduled
+    return parse_scheduled_delivery_time(message)
+
+
+async def _advance_after_takeaway_time_set(
+    customer_phone: str,
+    restaurant_id: str,
+    session_state: Dict[str, Any],
+    scheduled: datetime | None,
+) -> Dict[str, Any]:
+    session_state["scheduled_at"] = scheduled.isoformat() if scheduled else None
+
+    if scheduled is not None:
+        h = scheduled.hour % 12 or 12
+        ampm = "PM" if scheduled.hour >= 12 else "AM"
+        when = f"{scheduled.strftime('%d %b %Y')}, {h}:{scheduled.minute:02d} {ampm}"
+        await send_whatsapp_message(
+            customer_phone,
+            f"Got it — we'll have your order ready for pickup on *{when}*.",
+            restaurant_id,
+        )
+
+    intro = "Browse today's menu below and add items to your basket 🛒"
+    if scheduled is not None:
+        intro = "Add items for your scheduled pickup below 🛒"
+    await send_whatsapp_message(customer_phone, intro, restaurant_id)
+    clear_cart(session_state)
+    session_state["booking_step"] = "awaiting_order"
+    await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+    return {"status": "awaiting_order"}
 
 
 async def handle_takeaway_flow(
@@ -67,7 +181,84 @@ async def handle_takeaway_flow(
 
     booking_step = session_state.get("booking_step")
 
-    if booking_step == "awaiting_order":
+    # ── awaiting_takeaway_scheduled_flow (calendar picker) ────────────────────
+    if booking_step == "awaiting_takeaway_scheduled_flow":
+        from tools.kitchen_hours import is_kitchen_open
+
+        if message.strip().upper() in ("NOW", "ASAP", "IMMEDIATE"):
+            if not is_kitchen_open():
+                return await offer_takeaway_schedule(
+                    customer_phone, restaurant_id, customer_id, customer_name, session_state,
+                )
+            return await _advance_after_takeaway_time_set(
+                customer_phone, restaurant_id, session_state, None,
+            )
+
+        scheduled = await _parse_takeaway_schedule(message)
+        if scheduled is not None:
+            if scheduled <= datetime.now():
+                await send_whatsapp_message(
+                    customer_phone,
+                    "That time has already passed. Please tap *Select Date & Time* "
+                    "above to pick a future slot.",
+                    restaurant_id,
+                )
+                return {"status": "awaiting_takeaway_scheduled_flow"}
+            return await _advance_after_takeaway_time_set(
+                customer_phone, restaurant_id, session_state, scheduled,
+            )
+
+        await send_whatsapp_message(
+            customer_phone,
+            "Please tap *Select Date & Time* above to choose your pickup slot from the calendar.\n\n"
+            "If the picker didn't load, reply with a time (e.g. *1:00 PM*).",
+            restaurant_id,
+        )
+        return {"status": "awaiting_takeaway_scheduled_flow"}
+
+    # ── awaiting_takeaway_scheduled_time (text fallback) ──────────────────────
+    elif booking_step == "awaiting_takeaway_scheduled_time":
+        from tools.kitchen_hours import is_kitchen_open
+
+        if message.strip().upper() in ("NOW", "ASAP", "IMMEDIATE"):
+            if not is_kitchen_open():
+                return await offer_takeaway_schedule(
+                    customer_phone, restaurant_id, customer_id, customer_name, session_state,
+                )
+            return await _advance_after_takeaway_time_set(
+                customer_phone, restaurant_id, session_state, None,
+            )
+
+        scheduled = await _parse_takeaway_schedule(message)
+        if scheduled is None:
+            if not session_state.get("_schedule_flow_retry"):
+                session_state["_schedule_flow_retry"] = True
+                flow_result = await offer_takeaway_schedule(
+                    customer_phone, restaurant_id, customer_id, customer_name, session_state,
+                    kitchen_closed=not is_kitchen_open(),
+                )
+                if flow_result.get("status") == "awaiting_takeaway_scheduled_flow":
+                    return flow_result
+            await send_whatsapp_message(
+                customer_phone,
+                "Please reply with a pickup time (e.g. *1:00 PM*, *1.00 PM*, or *13:00*).",
+                restaurant_id,
+            )
+            return {"status": "awaiting_takeaway_scheduled_time"}
+
+        if scheduled <= datetime.now():
+            await send_whatsapp_message(
+                customer_phone,
+                "That time has already passed. Please choose a future time.",
+                restaurant_id,
+            )
+            return {"status": "awaiting_takeaway_scheduled_time"}
+
+        return await _advance_after_takeaway_time_set(
+            customer_phone, restaurant_id, session_state, scheduled,
+        )
+
+    elif booking_step == "awaiting_order":
         order_text = message.strip()
         if order_text.upper() == "MENU":
             await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
@@ -116,7 +307,10 @@ async def handle_takeaway_flow(
 
             # Manager alert is sent by POST /api/tokens when portal sync succeeds.
 
-            booking    = await create_booking(restaurant_id, customer_id, "takeaway", token_number=token)
+            booking    = await create_booking(
+                restaurant_id, customer_id, "takeaway", token_number=token,
+                booking_datetime=session_state.get("scheduled_at"),
+            )
             booking_id = booking["id"]
             session_state["booking_id"] = booking_id
 
@@ -157,6 +351,9 @@ async def handle_takeaway_flow(
             pickup_block = format_pickup_location_block(session_state)
             if pickup_block:
                 confirmation += f"\n\n{pickup_block}"
+            sched_note = format_scheduled_note(session_state.get("scheduled_at"))
+            if sched_note:
+                confirmation += f"\n\n{sched_note}"
             timing_note = ready_time_note_from_session(session_state, "takeaway")
             if timing_note:
                 confirmation += f"\n\n{timing_note}"
