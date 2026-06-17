@@ -46,7 +46,7 @@ async function fetchRestaurantRow(restaurantId) {
 
   if (!error) return { data, error: null };
 
-  if (/kitchen_workflow|kot_printer|meta_catalog_id|parcel_charge_per_item|takeaway_ready_range|delivery_ready_range|kitchen_busy|restaurant_type|delivery_charge/i.test(error.message)) {
+  if (/kitchen_workflow|kot_printer|meta_catalog_id|parcel_charge_per_item|takeaway_ready_range|delivery_ready_range|kitchen_busy|restaurant_type|delivery_charge|scheduled_delivery|scheduled_takeaway|max_delivery_radius/i.test(error.message)) {
     const fallback = await supabaseAdmin
       .from('restaurants')
       .select(RESTAURANT_SELECT_BASE)
@@ -60,6 +60,13 @@ async function fetchRestaurantRow(restaurantId) {
       fallback.data.takeaway_ready_range = null;
       fallback.data.delivery_ready_range = null;
       fallback.data.kitchen_busy = false;
+      fallback.data.scheduled_delivery_enabled = false;
+      fallback.data.scheduled_takeaway_enabled = false;
+      fallback.data.max_delivery_radius_km = 0;
+      fallback.data.delivery_charge_default = 30;
+      fallback.data.delivery_charge_tiers = [];
+      fallback.data.min_delivery_order_amount = 0;
+      fallback.data.min_takeaway_order_amount = 0;
     }
     return fallback;
   }
