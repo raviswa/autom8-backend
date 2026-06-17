@@ -1,16 +1,4 @@
-"""Feature gate — single place that enforces subscription access.
-
-Every agent, tool, and endpoint that is feature-specific must call
-`require_feature()` (async) or `has_feature()` (sync on cached data)
-before doing any work.
-
-Design goals
-------------
-* One function to check, one to raise.  No scattered `if` blocks.
-* Restaurant features are cached in-process for TTL seconds so the
-  gate adds <1 ms to hot paths.
-* The customer-facing denial message is friendly and non-technical.
-"""
+"""Feature gate — subscription access and customer service menu."""
 
 from __future__ import annotations
 
@@ -22,11 +10,11 @@ from db.models import Feature
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# In-process cache:  restaurant_id  →  (features: list[str], ts: float)
-# ---------------------------------------------------------------------------
+ORDER_MODE_IMMEDIATE = "immediate"
+ORDER_MODE_SCHEDULED = "scheduled"
+
 _CACHE: dict[str, tuple[list[str], float]] = {}
-_TTL = 300  # 5 minutes
+_TTL = 300
 
 
 def _cache_get(restaurant_id: str) -> list[str] | None:
@@ -41,66 +29,42 @@ def _cache_set(restaurant_id: str, features: list[str]) -> None:
 
 
 def invalidate(restaurant_id: str) -> None:
-    """Call after updating a restaurant's subscribed_features."""
     _CACHE.pop(restaurant_id, None)
 
 
-# ---------------------------------------------------------------------------
-# Core gate helpers
-# ---------------------------------------------------------------------------
-
 async def get_features(restaurant_id: str) -> list[str]:
-    """Return the subscribed feature list for a restaurant.
-
-    Hits the cache first; falls back to the DB via db_tools.
-    """
     cached = _cache_get(restaurant_id)
     if cached is not None:
         return cached
-
     try:
         from tools.db_tools import get_restaurant_features
         features = await get_restaurant_features(restaurant_id)
     except Exception as e:
         logger.warning(f"[feature_gate] DB lookup failed for {restaurant_id}: {e}")
         features = []
-
     _cache_set(restaurant_id, features)
     return features
 
 
 def has_feature(features: list[str], feature: str) -> bool:
-    """Sync check against an already-loaded feature list."""
     return feature in features
 
 
 async def restaurant_has_feature(restaurant_id: str, feature: str) -> bool:
-    """Async check that fetches features if not cached."""
     features = await get_features(restaurant_id)
     return feature in features
 
 
 class FeatureNotSubscribed(Exception):
-    """Raised when a restaurant tries to use an unsubscribed feature."""
     def __init__(self, feature: str):
         self.feature = feature
         super().__init__(f"Feature '{feature}' is not subscribed.")
 
 
 async def require_feature(restaurant_id: str, feature: str) -> None:
-    """Raise FeatureNotSubscribed if the restaurant hasn't subscribed.
-
-    Usage in any agent or tool::
-
-        await require_feature(restaurant_id, Feature.DELIVERY)
-    """
     if not await restaurant_has_feature(restaurant_id, feature):
         raise FeatureNotSubscribed(feature)
 
-
-# ---------------------------------------------------------------------------
-# WhatsApp-friendly denial messages
-# ---------------------------------------------------------------------------
 
 _DENIAL_MESSAGES: dict[str, str] = {
     Feature.TOKEN_MANAGEMENT: (
@@ -134,76 +98,135 @@ def denial_message(feature: str) -> str:
     return _DENIAL_MESSAGES.get(feature, _DEFAULT_DENIAL)
 
 
-# ---------------------------------------------------------------------------
-# Convenience: build the service menu rows for only subscribed features
-# ---------------------------------------------------------------------------
-
-_SERVICE_MENU_ROWS = {
-    Feature.DINE_IN: {
-        "id": "1", "title": "Dine-in Now 🍽️",
-        "description": "Order food at your table",
-    },
-    Feature.TAKEAWAY: {
-        "id": "2", "title": "Takeaway Now 🛍️",
-        "description": "Pick up your order at the counter",
-    },
-    Feature.DELIVERY: {
-        "id": "3", "title": "Delivery Now 🛵",
-        "description": "We deliver to your door",
-    },
-    Feature.RESERVE_TABLE: {
-        "id": "4", "title": "Reserve a Table 📅",
-        "description": "Book a table for a future visit",
-    },
-}
-
-# IDs are reassigned dynamically so the customer always sees 1, 2, 3 …
-# regardless of which features are enabled.
-_CHOICE_ID_TO_FEATURE = {
-    "1": Feature.DINE_IN,
-    "2": Feature.TAKEAWAY,
-    "3": Feature.DELIVERY,
-    "4": Feature.RESERVE_TABLE,
-    "5": None,  # "Nothing, thanks" — always present
-}
+def _feature_val(feature) -> str:
+    return feature.value if hasattr(feature, "value") else feature
 
 
-async def build_service_menu_rows(restaurant_id: str) -> list[dict]:
+def _parse_row_id(row_id: str) -> tuple[str | None, str | None]:
+    """Map menu row id → (service_type, order_mode)."""
+    mapping: dict[str, tuple[str | None, str | None]] = {
+        "dine_in": (Feature.DINE_IN, None),
+        "takeaway_now": (Feature.TAKEAWAY, ORDER_MODE_IMMEDIATE),
+        "takeaway_schedule": (Feature.TAKEAWAY, ORDER_MODE_SCHEDULED),
+        "delivery_now": (Feature.DELIVERY, ORDER_MODE_IMMEDIATE),
+        "delivery_schedule": (Feature.DELIVERY, ORDER_MODE_SCHEDULED),
+        "reserve_table": (Feature.RESERVE_TABLE, None),
+        "nothing": (None, None),
+    }
+    return mapping.get(row_id, (None, None))
+
+
+async def build_service_menu_rows(
+    restaurant_id: str,
+    session_state: dict[str, Any] | None = None,
+) -> list[dict]:
+    """Build WhatsApp list rows — immediate + scheduled options when enabled."""
     features = await get_features(restaurant_id)
-    rows = []
-    counter = 1
-    for feature, template in _SERVICE_MENU_ROWS.items():
-        # Compare .value if Feature is an Enum
-        feature_val = feature.value if hasattr(feature, 'value') else feature
-        if feature_val in features:
-            row = dict(template)
-            row["id"] = str(counter)
-            rows.append(row)
-            counter += 1
+    feature_set = set(features)
+
+    from tools.kitchen_hours import is_kitchen_open
+    kitchen_open = is_kitchen_open()
+
+    state = session_state or {}
+    sched_delivery = state.get("scheduled_delivery_enabled")
+    sched_takeaway = state.get("scheduled_takeaway_enabled")
+    if sched_delivery is None or sched_takeaway is None:
+        from tools.booking_mechanisms import fetch_restaurant_info
+        info = await fetch_restaurant_info(restaurant_id)
+        if sched_delivery is None:
+            sched_delivery = bool(info.get("scheduled_delivery_enabled"))
+        if sched_takeaway is None:
+            sched_takeaway = bool(info.get("scheduled_takeaway_enabled"))
+
+    rows: list[dict] = []
+
+    if _feature_val(Feature.DINE_IN) in feature_set:
+        rows.append({
+            "id": "dine_in",
+            "title": "Dine-in Now 🍽️",
+            "description": "Order food at your table",
+        })
+
+    if _feature_val(Feature.TAKEAWAY) in feature_set:
+        if kitchen_open:
+            rows.append({
+                "id": "takeaway_now",
+                "title": "Takeaway Now 🛍️",
+                "description": "Pick up as soon as it's ready",
+            })
+        if sched_takeaway:
+            rows.append({
+                "id": "takeaway_schedule",
+                "title": "Takeaway 📅",
+                "description": "Choose pickup date & time on the calendar",
+            })
+
+    if _feature_val(Feature.DELIVERY) in feature_set:
+        if kitchen_open:
+            rows.append({
+                "id": "delivery_now",
+                "title": "Deliver Now 🛵",
+                "description": "We deliver to your door ASAP",
+            })
+        if sched_delivery:
+            rows.append({
+                "id": "delivery_schedule",
+                "title": "Deliver 📅",
+                "description": "Choose delivery date & time on the calendar",
+            })
+
+    if _feature_val(Feature.RESERVE_TABLE) in feature_set:
+        rows.append({
+            "id": "reserve_table",
+            "title": "Reserve a Table 📅",
+            "description": "Book a table for a future visit",
+        })
+
     rows.append({
-        "id": str(counter),
+        "id": "nothing",
         "title": "Nothing, thanks ❌",
         "description": "Exit",
     })
     return rows
 
-async def resolve_service_choice(restaurant_id: str, choice_id: str) -> str | None:
-    """Map a customer's numeric choice back to a Feature constant.
 
-    Returns the Feature string (e.g. Feature.DINE_IN) or None if the
-    customer chose "Nothing, thanks".
+def _resolve_choice_from_rows(
+    choice_id: str,
+    rows: list[dict],
+) -> tuple[str | None, str | None]:
+    raw = (choice_id or "").strip()
 
-    Raises ValueError if choice_id is out of range.
-    """
-    features = await get_features(restaurant_id)
-    available = [f for f in _SERVICE_MENU_ROWS if (f.value if hasattr(f, 'value') else f) in features]
-    idx = int(choice_id) - 1
+    for row in rows:
+        if row["id"] == raw:
+            return _parse_row_id(row["id"])
 
-    # Last option is always "Nothing"
-    if idx == len(available):
-        return None
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(rows):
+            return _parse_row_id(rows[idx]["id"])
 
-    if idx < 0 or idx >= len(available):
-        raise ValueError(f"Invalid choice '{choice_id}' for {len(available)} available features.")
+    raise ValueError(f"Invalid choice '{choice_id}' for {len(rows)} menu options.")
 
-    return available[idx]
+
+async def resolve_service_selection(
+    restaurant_id: str,
+    choice_id: str,
+    session_state: dict[str, Any] | None = None,
+) -> tuple[str | None, str | None]:
+    """Returns (service_type, order_mode). order_mode is immediate|scheduled|None."""
+    rows = (session_state or {}).get("_service_menu_rows")
+    if not rows:
+        rows = await build_service_menu_rows(restaurant_id)
+    return _resolve_choice_from_rows(choice_id, rows)
+
+
+async def resolve_service_choice(
+    restaurant_id: str,
+    choice_id: str,
+    session_state: dict[str, Any] | None = None,
+) -> str | None:
+    """Backward-compatible wrapper — returns service_type only."""
+    service_type, _mode = await resolve_service_selection(
+        restaurant_id, choice_id, session_state,
+    )
+    return service_type

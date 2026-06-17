@@ -103,48 +103,47 @@ async def offer_delivery_schedule(
             )
         else:
             flow_body = (
-                f"Hi {customer_name}! Tap below to pick when you'd like delivery "
-                f"(or choose *now* for ASAP).{approval_note}"
+                f"Hi {customer_name}! Tap below to pick your delivery date and time "
+                f"on the calendar.{approval_note}"
             )
         ok = await send_whatsapp_flow(
             phone=customer_phone,
             flow_id=flow_id,
             flow_token=flow_token,
             flow_cta="Select Date & Time",
-            flow_header="🛵 Schedule Delivery",
+            flow_header="🛵 Deliver 📅",
             flow_body=flow_body,
-            flow_footer="Calendar picker — same as table reservations",
+            flow_footer="Calendar — pick date and time",
             restaurant_id=restaurant_id,
         )
         if ok:
             session_state["booking_step"] = "awaiting_scheduled_flow"
             session_state["last_service_type"] = "delivery"
             session_state["service_type"] = "delivery"
+            session_state["order_mode"] = "scheduled"
             session_state["schedule_flow_sent"] = True
             session_state.pop("schedule_text_fallback", None)
             return {"status": "awaiting_scheduled_flow"}
 
-    logger.warning(f"[delivery] schedule Flow unavailable for {customer_phone} — text fallback")
-    session_state["schedule_flow_sent"] = False
-    session_state["schedule_text_fallback"] = True
-    if closed:
-        text = (
-            f"We're not taking immediate orders yet — we open at *{next_open_label()}*.\n\n"
-            "We couldn't open the date picker — please reply with when you'd like delivery "
-            "(e.g. *11:30 AM* or *16-06-2026, 11:30 AM*)."
-            f"{_MANAGER_APPROVAL_NOTE}"
-        )
-    else:
-        text = (
-            "We couldn't open the date picker right now.\n\n"
-            "Please reply with when you'd like delivery (e.g. *1:00 PM* or *13:00*), "
-            "or type *NOW* for as soon as possible."
-        )
-    await send_whatsapp_message(customer_phone, text, restaurant_id)
-    session_state["booking_step"] = "awaiting_scheduled_time"
+        if not session_state.get("_schedule_flow_retry"):
+            session_state["_schedule_flow_retry"] = True
+            return await offer_delivery_schedule(
+                customer_phone, restaurant_id, customer_id, customer_name, session_state,
+                kitchen_closed=kitchen_closed,
+            )
+
+    logger.warning(f"[delivery] schedule Flow unavailable for {customer_phone}")
+    await send_whatsapp_message(
+        customer_phone,
+        "We couldn't open the date picker. Please reply *Home* and choose *Deliver 📅* again, "
+        "or contact the restaurant for help.",
+        restaurant_id,
+    )
+    session_state["booking_step"] = "awaiting_scheduled_flow"
     session_state["last_service_type"] = "delivery"
     session_state["service_type"] = "delivery"
-    return {"status": "awaiting_scheduled_time"}
+    session_state["order_mode"] = "scheduled"
+    return {"status": "awaiting_scheduled_flow"}
 
 
 async def _prompt_delivery_schedule(
@@ -432,8 +431,11 @@ async def _continue_after_address_validated(
     customer_id: str = "",
     customer_name: str = "Guest",
 ) -> Dict[str, Any]:
-    """Route to calendar or catalog once address + distance checks pass (legacy: address before time)."""
-    if not session_state.get("scheduled_at"):
+    """Route to calendar or catalog once address + distance checks pass."""
+    from tools.feature_gate import ORDER_MODE_SCHEDULED
+
+    mode = session_state.get("order_mode", "immediate")
+    if mode == ORDER_MODE_SCHEDULED and not session_state.get("scheduled_at"):
         return await _prompt_delivery_schedule(
             customer_phone, restaurant_id, customer_id, customer_name, session_state,
         )
@@ -506,26 +508,15 @@ async def handle_delivery_flow(
             customer_id=customer_id, customer_name=customer_name,
         )
 
-    # ── awaiting_scheduled_flow (primary — calendar picker) ───────────────────
+    # ── awaiting_scheduled_flow (calendar picker only — no text time) ─────────
     elif booking_step == "awaiting_scheduled_flow":
-        from tools.kitchen_hours import is_kitchen_open
-
-        if message.strip().upper() in ("NOW", "ASAP", "IMMEDIATE"):
-            if not is_kitchen_open():
-                return await offer_delivery_schedule(
-                    customer_phone, restaurant_id, customer_id, customer_name, session_state,
-                )
-            return await _advance_after_delivery_time_set(
-                customer_phone, restaurant_id, session_state, None,
-            )
-
-        scheduled = await _parse_delivery_schedule(message)
+        scheduled = parse_flow_datetime(message)
         if scheduled is not None:
             if scheduled <= datetime.now():
                 await send_whatsapp_message(
                     customer_phone,
                     "That time has already passed. Please tap *Select Date & Time* "
-                    "above to pick a future slot.",
+                    "to pick a future slot on the calendar.",
                     restaurant_id,
                 )
                 return {"status": "awaiting_scheduled_flow"}
@@ -533,54 +524,25 @@ async def handle_delivery_flow(
                 customer_phone, restaurant_id, session_state, scheduled,
             )
 
+        if not session_state.get("_schedule_flow_resend"):
+            session_state["_schedule_flow_resend"] = True
+            return await offer_delivery_schedule(
+                customer_phone, restaurant_id, customer_id, customer_name, session_state,
+            )
+
         await send_whatsapp_message(
             customer_phone,
             "Please tap *Select Date & Time* above to choose your delivery slot from the calendar.\n\n"
-            "If the picker didn't load, reply with a time (e.g. *1:00 PM*).",
+            "For immediate delivery, reply *Home* and choose *Deliver Now 🛵*.",
             restaurant_id,
         )
         return {"status": "awaiting_scheduled_flow"}
 
-    # ── awaiting_scheduled_time (fallback — text only, Flow unavailable) ──────
+    # ── awaiting_scheduled_time (legacy sessions — redirect to calendar) ──────
     elif booking_step == "awaiting_scheduled_time":
-        from tools.kitchen_hours import is_kitchen_open
-
-        if message.strip().upper() in ("NOW", "ASAP", "IMMEDIATE"):
-            if not is_kitchen_open():
-                return await offer_delivery_schedule(
-                    customer_phone, restaurant_id, customer_id, customer_name, session_state,
-                )
-            return await _advance_after_delivery_time_set(
-                customer_phone, restaurant_id, session_state, None,
-            )
-
-        scheduled = await _parse_delivery_schedule(message)
-        if scheduled is None:
-            if not session_state.get("_schedule_flow_retry"):
-                session_state["_schedule_flow_retry"] = True
-                flow_result = await offer_delivery_schedule(
-                    customer_phone, restaurant_id, customer_id, customer_name, session_state,
-                    kitchen_closed=not is_kitchen_open(),
-                )
-                if flow_result.get("status") == "awaiting_scheduled_flow":
-                    return flow_result
-            await send_whatsapp_message(
-                customer_phone,
-                "Please reply with a delivery time (e.g. *1:00 PM*, *1.00 PM*, or *13:00*).",
-                restaurant_id,
-            )
-            return {"status": "awaiting_scheduled_time"}
-
-        if scheduled <= datetime.now():
-            await send_whatsapp_message(
-                customer_phone,
-                "That time has already passed. Please choose a future time.",
-                restaurant_id,
-            )
-            return {"status": "awaiting_scheduled_time"}
-
-        return await _advance_after_delivery_time_set(
-            customer_phone, restaurant_id, session_state, scheduled,
+        session_state["order_mode"] = "scheduled"
+        return await offer_delivery_schedule(
+            customer_phone, restaurant_id, customer_id, customer_name, session_state,
         )
 
     # ── awaiting_scheduled_delivery_approval ──────────────────────────────────

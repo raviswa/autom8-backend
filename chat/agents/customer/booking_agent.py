@@ -58,7 +58,7 @@ from tools.cart_tools import (
     parse_numbered_order,
     _send_interactive,
 )
-from tools.feature_gate import resolve_service_choice
+from tools.feature_gate import resolve_service_choice, resolve_service_selection, ORDER_MODE_IMMEDIATE, ORDER_MODE_SCHEDULED
 from tools.personalisation_tools import update_customer_profile
 from tools.db_tools import update_booking_status
 from tools.booking_mechanisms import cache_restaurant_pricing
@@ -281,10 +281,16 @@ async def handle_booking_flow(
     # ── awaiting_service_selection ────────────────────────────────────────────
     if current_step == "awaiting_service_selection":
         _SERVICE_TEXT_MAP = {
-            "dine":"1","dine in":"1","dinein":"1","dine-in":"1","dine in now":"1","dining":"1","table":"1","eat in":"1",
-            "takeaway":"2","take away":"2","take-away":"2","pickup":"2","pick up":"2","carry out":"2","parcel":"2","take out":"2","takeaway now":"2",
-            "delivery":"3","deliver":"3","home delivery":"3","delivery now":"3",
-            "reserve":"4","reservation":"4","book":"4","booking":"4","book a table":"4","reserve a table":"4",
+            "dine":"dine_in","dine in":"dine_in","dinein":"dine_in","dine-in":"dine_in",
+            "dine in now":"dine_in","dining":"dine_in","table":"dine_in","eat in":"dine_in",
+            "takeaway now":"takeaway_now","takeaway":"takeaway_schedule","take away":"takeaway_schedule",
+            "take-away":"takeaway_schedule","pickup":"takeaway_now","pick up":"takeaway_now",
+            "carry out":"takeaway_now","parcel":"takeaway_now","take out":"takeaway_now",
+            "deliver now":"delivery_now","delivery now":"delivery_now",
+            "deliver":"delivery_schedule","delivery":"delivery_schedule",
+            "home delivery":"delivery_now",
+            "reserve":"reserve_table","reservation":"reserve_table","book":"reserve_table",
+            "booking":"reserve_table","book a table":"reserve_table","reserve a table":"reserve_table",
         }
         _raw_choice = message.strip()
         if is_name_correction_trigger(_raw_choice, customer_name):
@@ -293,7 +299,9 @@ async def handle_booking_flow(
             )
         choice = _SERVICE_TEXT_MAP.get(_raw_choice.lower(), _raw_choice)
         try:
-            service_type = await resolve_service_choice(restaurant_id, choice)
+            service_type, order_mode = await resolve_service_selection(
+                restaurant_id, choice, session_state,
+            )
         except ValueError:
             if is_name_correction_trigger(_raw_choice, customer_name):
                 return await prompt_name_verification(
@@ -324,6 +332,29 @@ async def handle_booking_flow(
         session_state["service_type"]  = service_type
         session_state["customer_name"] = customer_name
         session_state["manager_phone"] = manager_phone
+        if order_mode:
+            session_state["order_mode"] = order_mode
+        else:
+            session_state.pop("order_mode", None)
+
+        if order_mode == ORDER_MODE_SCHEDULED:
+            await cache_restaurant_pricing(session_state, restaurant_id)
+            if service_type == "delivery" and not session_state.get("scheduled_delivery_enabled"):
+                await send_whatsapp_message(
+                    customer_phone,
+                    "Scheduled delivery isn't enabled for this restaurant yet. "
+                    "Please choose *Deliver Now 🛵* or another option." + _HOME_HINT,
+                    restaurant_id,
+                )
+                return {"status": "awaiting_service_selection"}
+            if service_type == "takeaway" and not session_state.get("scheduled_takeaway_enabled"):
+                await send_whatsapp_message(
+                    customer_phone,
+                    "Scheduled takeaway isn't enabled for this restaurant yet. "
+                    "Please choose *Takeaway Now 🛍️* or another option." + _HOME_HINT,
+                    restaurant_id,
+                )
+                return {"status": "awaiting_service_selection"}
 
         if service_type == "dine_in":
             session_state["last_service_type"] = "dine_in"
@@ -332,9 +363,10 @@ async def handle_booking_flow(
             session_state["table_number"] = table_number
         elif service_type == "takeaway":
             await cache_restaurant_pricing(session_state, restaurant_id)
-            from tools.kitchen_hours import is_kitchen_open
-            from agents.customer.takeaway_flow import offer_takeaway_schedule
-            if not is_kitchen_open() or session_state.get("scheduled_takeaway_enabled"):
+            scheduled = session_state.get("order_mode") == ORDER_MODE_SCHEDULED
+            if scheduled:
+                from agents.customer.takeaway_flow import offer_takeaway_schedule
+                from tools.kitchen_hours import is_kitchen_open
                 result = await offer_takeaway_schedule(
                     customer_phone, restaurant_id, customer_id, customer_name, session_state,
                     kitchen_closed=not is_kitchen_open(),
@@ -352,15 +384,28 @@ async def handle_booking_flow(
             await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
         elif service_type == "delivery":
             await cache_restaurant_pricing(session_state, restaurant_id)
-            from tools.kitchen_hours import is_kitchen_open
-            from agents.customer.delivery_flow import offer_delivery_schedule
-            # Calendar first (time → address → menu). Text fallback only if Flow send fails.
-            result = await offer_delivery_schedule(
-                customer_phone, restaurant_id, customer_id, customer_name, session_state,
-                kitchen_closed=not is_kitchen_open(),
-            )
-            touch_session_activity(session_state)
-            return result
+            scheduled = session_state.get("order_mode") == ORDER_MODE_SCHEDULED
+            if scheduled:
+                from tools.kitchen_hours import is_kitchen_open
+                from agents.customer.delivery_flow import offer_delivery_schedule
+                result = await offer_delivery_schedule(
+                    customer_phone, restaurant_id, customer_id, customer_name, session_state,
+                    kitchen_closed=not is_kitchen_open(),
+                )
+                touch_session_activity(session_state)
+                return result
+            from tools.whatsapp_tools import send_location_request
+            sent = await send_location_request(customer_phone, restaurant_id)
+            if not sent:
+                await send_whatsapp_message(
+                    customer_phone,
+                    "Great! You've selected *Deliver Now* 🛵\n\n"
+                    "Please *share your location pin* on WhatsApp (tap 📎 → Location) so we can calculate delivery charge accurately.\n"
+                    "You can also type your full address if needed.",
+                    restaurant_id,
+                )
+            session_state["booking_step"] = "awaiting_address"
+            session_state["last_service_type"] = "delivery"
         elif service_type == "reserve_table":
             await send_whatsapp_message(
                 customer_phone,
