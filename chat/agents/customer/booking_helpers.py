@@ -55,6 +55,78 @@ _HOME_HINT                    = "\n\n💡 Type *Home* to start a fresh booking a
 _PAYMENT_PLACEHOLDER_SENTINEL = "placeholder"
 _GENERIC_GREETINGS: set[str]  = {"welcome!", "welcome", "hi!", "hi", "hello!", "hello", ""}
 
+# Session idle timeout — after this, mid-flow state is cleared (B2B spec: 30 min).
+SESSION_IDLE_SECONDS = 30 * 60
+
+# Home / menu always start fresh; no continue/start-over prompt.
+_DIRECT_RESET_KEYWORDS: set[str] = {"home", "menu", "main menu", "mainmenu"}
+
+# Full identity restart without continue/start-over prompt.
+_FULL_RESET_KEYWORDS: set[str] = {
+    "restart", "start over", "startover", "reboot", "new", "mulakarunga", "shuru",
+    "మొదలు", "modalu", "തുടങ്ങുക", "thudanguka",
+}
+
+
+def touch_session_activity(session_state: Dict[str, Any]) -> None:
+    session_state["_last_activity_at"] = datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
+
+
+def is_session_stale(session_state: Dict[str, Any]) -> bool:
+    raw = session_state.get("_last_activity_at")
+    if not raw:
+        # Legacy sessions without timestamp — any mid-flow step is treated as stale.
+        step = session_state.get("booking_step", "") or ""
+        if step in ("visit_complete", "ask_service", "awaiting_service_selection"):
+            return False
+        return bool(step)
+    try:
+        last = datetime.fromisoformat(str(raw))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        return (now - last).total_seconds() > SESSION_IDLE_SECONDS
+    except (ValueError, TypeError):
+        return True
+
+
+def expire_session_if_stale(
+    session_state: Dict[str, Any],
+    *,
+    customer_id: str | None = None,
+    customer_name: str | None = None,
+) -> bool:
+    """Clear mid-flow state when idle too long. Returns True if expired."""
+    if not is_session_stale(session_state):
+        return False
+    step = session_state.get("booking_step", "")
+    if step in ("visit_complete", "ask_service", "awaiting_service_selection", None, ""):
+        touch_session_activity(session_state)
+        return False
+
+    logger.info(f"[session] Expiring stale step={step!r} (idle>{SESSION_IDLE_SECONDS}s)")
+    _prev_cid = session_state.get("customer_id") or customer_id
+    _prev_cname = session_state.get("customer_name") or customer_name
+    _prev_ret = session_state.get("is_returning_customer", True)
+    _prev_visits = session_state.get("visit_count", 0)
+    _prev_last = session_state.get("last_order_summary", "")
+    _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
+    session_state.clear()
+    if _prev_cid:
+        session_state["customer_id"] = _prev_cid
+    if _prev_cname:
+        session_state["customer_name"] = _prev_cname
+    session_state["is_returning_customer"] = _prev_ret
+    if _prev_visits:
+        session_state["visit_count"] = _prev_visits
+    if _prev_last:
+        session_state["last_order_summary"] = strip_order_quantity(_prev_last)
+    if _prev_svc:
+        session_state["last_service_type"] = _prev_svc
+    session_state["booking_step"] = "ask_service"
+    touch_session_activity(session_state)
+    return True
+
 
 # ─────────────────────────────────────────────
 # B. TIME UTILITIES
@@ -253,11 +325,7 @@ _GREETING_WORDS: set[str] = {
     "yes","no","yep","nope","thanks","thank you","thankyou","bye","goodbye",
     "help","start","back","reset","restart","cancel",
 }
-_RESET_KEYWORDS: set[str] = {
-    "home","menu","restart","start over","startover","main menu","mainmenu",
-    "begin","reboot","new","mulakarunga","shuru",
-    "మొదలు","modalu","തുടങ്ങുക","thudanguka",
-}
+_RESET_KEYWORDS: set[str] = _DIRECT_RESET_KEYWORDS | _FULL_RESET_KEYWORDS | {"begin"}
 _STEPS_ALLOWING_SHORT_REPLY: set[str] = {
     "ask_service","awaiting_service_selection","awaiting_reset_confirmation",
     "awaiting__confirmation","awaiting_quantity","awaiting_item_qty",
@@ -267,6 +335,7 @@ _STEPS_ALLOWING_SHORT_REPLY: set[str] = {
     "awaiting_order","awaiting_address","confirming_order","awaiting_cart_action",
     "awaiting_scheduled_time", "awaiting_scheduled_flow",
     "awaiting_scheduled_delivery_approval", "awaiting_scheduled_delivery_payment",
+    "awaiting_takeaway_scheduled_flow", "awaiting_takeaway_scheduled_time",
 }
 
 _FEEDBACK_RE = re.compile(r"^\s*[1-5]\b", re.IGNORECASE)
@@ -729,12 +798,15 @@ async def gate_ordering_service(
     Block takeaway/delivery when the kitchen slot is closed.
     Returns True if the service was blocked (caller should return early).
 
-    Delivery is never hard-blocked here — customers can schedule for later
-    via awaiting_scheduled_flow / awaiting_scheduled_time instead.
+    Delivery is never hard-blocked here — customers can schedule for later.
+    Takeaway is allowed when scheduled_takeaway_enabled is on (calendar flow).
     """
     from tools.kitchen_hours import ordering_blocked_for_service
 
     if service_type == "delivery":
+        return False
+
+    if service_type == "takeaway" and session_state.get("scheduled_takeaway_enabled"):
         return False
 
     if not ordering_blocked_for_service(service_type):

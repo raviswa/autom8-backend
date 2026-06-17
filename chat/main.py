@@ -28,6 +28,7 @@ from tools.db_tools import (
     customer_lock,
 )
 from tools.whatsapp_tools import parse_incoming, send_whatsapp_message
+from agents.customer.booking_helpers import touch_session_activity
 from tools.payment_tools import verify_webhook_signature
 from tools.auto_reply_filter import is_whatsapp_auto_reply
 from tools.booking_mechanisms import (
@@ -352,6 +353,7 @@ async def _process_meta_payload(payload: dict):
                 f"[DIAG] POST-ROUTE result={result} "
                 f"booking_step={session_state.get('booking_step')!r}"
             )
+            touch_session_activity(session_state)
             await save_session_state(restaurant_id, phone, session_state)
 
         # 8. Manager fallback (outside lock)
