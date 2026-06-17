@@ -87,12 +87,14 @@ async def offer_delivery_schedule(
         settings.meta_flow_delivery_schedule_id
         or settings.meta_flow_reservation_id
     )
+    needs_approval = bool(session_state.get("scheduled_delivery_enabled"))
+    approval_note = (
+        "\n\nScheduled deliveries need manager approval before payment."
+        if needs_approval else ""
+    )
     if flow_id and flow_id != "your_flow_id_here":
         flow_token = f"delivery_{customer_id}_{int(time.time())}"
         session_state["flow_token"] = flow_token
-        approval_note = (
-            "\n\nScheduled deliveries need manager approval before payment."
-        )
         if closed:
             flow_body = (
                 f"Hi {customer_name}! We're not taking immediate delivery orders yet "
@@ -101,8 +103,8 @@ async def offer_delivery_schedule(
             )
         else:
             flow_body = (
-                f"Hi {customer_name}! Tap below to pick your delivery date and time."
-                f"{approval_note}"
+                f"Hi {customer_name}! Tap below to pick when you'd like delivery "
+                f"(or choose *now* for ASAP).{approval_note}"
             )
         ok = await send_whatsapp_flow(
             phone=customer_phone,
@@ -185,9 +187,12 @@ async def _advance_after_delivery_time_set(
         h = scheduled.hour % 12 or 12
         ampm = "PM" if scheduled.hour >= 12 else "AM"
         when = f"{scheduled.strftime('%d %b %Y')}, {h}:{scheduled.minute:02d} {ampm}"
+        note = ""
+        if session_state.get("scheduled_delivery_enabled"):
+            note = _MANAGER_APPROVAL_NOTE
         await send_whatsapp_message(
             customer_phone,
-            f"Got it — we'll deliver on *{when}*.{_MANAGER_APPROVAL_NOTE}",
+            f"Got it — we'll deliver on *{when}*.{note}",
             restaurant_id,
         )
 
@@ -427,14 +432,8 @@ async def _continue_after_address_validated(
     customer_id: str = "",
     customer_name: str = "Guest",
 ) -> Dict[str, Any]:
-    """Route to scheduled-time question or catalog once address + distance checks pass."""
-    from tools.kitchen_hours import is_kitchen_open
-
-    need_schedule = not session_state.get("scheduled_at") and (
-        not is_kitchen_open()
-        or session_state.get("scheduled_delivery_enabled")
-    )
-    if need_schedule:
+    """Route to calendar or catalog once address + distance checks pass (legacy: address before time)."""
+    if not session_state.get("scheduled_at"):
         return await _prompt_delivery_schedule(
             customer_phone, restaurant_id, customer_id, customer_name, session_state,
         )
@@ -449,11 +448,13 @@ async def _proceed_to_delivery_menu(
 ) -> Dict[str, Any]:
     """Send catalog after scheduled time (and address) are collected."""
     intro = "Thank you! Browse today's menu below and add items to your basket 🛒"
-    if session_state.get("scheduled_at"):
+    if session_state.get("scheduled_at") and session_state.get("scheduled_delivery_enabled"):
         intro = (
             "Thank you! Add items for your scheduled delivery below 🛒"
             + _MANAGER_APPROVAL_NOTE
         )
+    elif session_state.get("scheduled_at"):
+        intro = "Thank you! Add items for your scheduled delivery below 🛒"
     await send_whatsapp_message(customer_phone, intro, restaurant_id)
     clear_cart(session_state)
     session_state["booking_step"] = "awaiting_order"
@@ -697,7 +698,7 @@ async def handle_delivery_flow(
             booking_id = booking["id"]
             session_state["booking_id"] = booking_id
 
-            if session_state.get("scheduled_at"):
+            if session_state.get("scheduled_at") and session_state.get("scheduled_delivery_enabled"):
                 return await _submit_scheduled_delivery_for_approval(
                     restaurant_id, customer_id, customer_name, customer_phone, manager_phone,
                     session_state,
