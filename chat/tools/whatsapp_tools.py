@@ -244,7 +244,7 @@ async def send_location_request(phone: str, restaurant_id: str) -> bool:
                 "type": "location_request_message",
                 "body": {
                     "text": (
-                        "Great! You've selected Delivery 🛵\n\n"
+                        "Great! You've selected *Deliver Now* 🛵\n\n"
                         "Tap the button below to *share your location pin* 📍 — "
                         "we use it to calculate your delivery charge.\n"
                         "Or reply with your full address."

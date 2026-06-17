@@ -478,8 +478,12 @@ async def send_service_menu(
 ) -> None:
     from tools.kitchen_hours import is_kitchen_open, next_open_label
 
-    rows = await build_service_menu_rows(restaurant_id)
     state = session_state or {}
+    if "scheduled_delivery_enabled" not in state or "scheduled_takeaway_enabled" not in state:
+        from tools.booking_mechanisms import cache_restaurant_pricing
+        await cache_restaurant_pricing(state, restaurant_id)
+    rows = await build_service_menu_rows(restaurant_id, state)
+    state["_service_menu_rows"] = rows
     normalize_last_order_summary(state)
     tod = _time_of_day_label()
     header = _MENU_HEADERS.get(tod, "Welcome")
@@ -505,9 +509,9 @@ async def send_service_menu(
         )
     elif not is_kitchen_open():
         body_lines.append(
-            f"Takeaway opens at *{next_open_label()}*. "
-            f"Tap *Delivery* to schedule from the calendar — pick date and time like a table reservation. "
-            f"Dine-in and reservations are still available."
+            f"Kitchen is closed until *{next_open_label()}*. "
+            f"Tap *Deliver 📅* or *Takeaway 📅* to pick a date and time on the calendar. "
+            f"Dine-in reservations are still available."
         )
     body_lines.append("What would you like to do today?")
     body_text = "\n\n".join(body_lines)
