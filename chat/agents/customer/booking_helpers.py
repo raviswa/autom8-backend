@@ -339,14 +339,41 @@ _STEPS_ALLOWING_SHORT_REPLY: set[str] = {
 }
 
 _FEEDBACK_RE = re.compile(r"^\s*[1-5]\b", re.IGNORECASE)
+_FEEDBACK_WORDS: frozenset[str] = frozenset({
+    "excellent", "good", "average", "below_average", "below average", "poor",
+    "skip", "skip_aspects", "skip_comment",
+})
+_FEEDBACK_SKIP = frozenset({"skip", "s", "none", "no", "done", "ok", "okay"})
+
+
+def is_feedback_reply(text: str) -> bool:
+    """Rating tap, star digit, or feedback-flow keyword — not a new order."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    t = raw.lower()
+    if _FEEDBACK_RE.match(t):
+        return True
+    if t in _FEEDBACK_WORDS or t in _FEEDBACK_SKIP:
+        return True
+    stars = raw.count("⭐") + raw.count("★")
+    if 1 <= stars <= 5 and len(raw) <= 8:
+        return True
+    return False
+
+
+def is_feedback_aspect_reply(text: str) -> bool:
+    """Numbered aspect selection during step 2 (e.g. 1 3 or 1,3,5 or all)."""
+    t = (text or "").strip().lower()
+    if t in _FEEDBACK_SKIP or t in {"all", "everything"}:
+        return True
+    if re.fullmatch(r"[\d\s,;]+", t) and re.search(r"\d", t):
+        return True
+    return False
 
 
 def is_greeting(text: str) -> bool:
     return text.strip().lower() in _GREETING_WORDS
-
-
-def is_feedback_reply(text: str) -> bool:
-    return bool(_FEEDBACK_RE.match(text.strip()))
 
 
 def is_placeholder_payment_link(link: str) -> bool:

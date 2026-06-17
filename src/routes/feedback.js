@@ -74,6 +74,27 @@ router.post('/queue', async (req, res) => {
   res.json({ success: true });
 });
 
+// ── POST /api/feedback/handle-reply ─────────────────────────────────────────
+// Internal: Python chat (or other services) delegate feedback replies here.
+
+router.post('/handle-reply', async (req, res) => {
+  const authHeader = req.headers['authorization'];
+  const bearer     = authHeader?.split(' ')[1];
+
+  if (!isValidKdsSecret(bearer)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const { customer_phone, restaurant_id, message } = req.body || {};
+  if (!customer_phone || !restaurant_id || !message) {
+    return res.status(400).json({ error: 'customer_phone, restaurant_id, and message required' });
+  }
+
+  const { handleFeedbackReply } = require('../helpers/feedbackFlow');
+  const consumed = await handleFeedbackReply(customer_phone, message, restaurant_id);
+  return res.json({ consumed: !!consumed });
+});
+
 // ── Scheduler helpers ─────────────────────────────────────────────────────────
 
 async function releaseSendLease(id) {
