@@ -134,7 +134,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
         const total   = meta?.total != null ? `₹${Number(meta.total).toFixed(0)}` : '—';
         sendWhatsAppMessage(
           managerPhone,
-          `🛵 *Scheduled Delivery* — Token *${token.id}*\n👤 ${token.name}\n📱 ${token.phone || '—'}\n🕐 Deliver by: *${schedAt}*\n📍 ${addr}\n💰 ${total}\n\nOrder: ${(meta?.order_text || '—').slice(0, 120)}\n\n⚠️ *Approve in portal before customer pays:*\n${portalUrl}`,
+          `🛵 *Scheduled Door Delivery* — Token *${token.id}*\n👤 ${token.name}\n📱 ${token.phone || '—'}\n🕐 Delivery at: *${schedAt}*\n📍 ${addr}\n💰 ${total}\n\nOrder: ${(meta?.order_text || '—').slice(0, 120)}\n\n⚠️ *Approve in portal before customer pays:*\n${portalUrl}`,
           restaurant_id
         );
       } else if (type === 'dinein') {

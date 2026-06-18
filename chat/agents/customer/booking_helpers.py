@@ -515,7 +515,7 @@ async def send_service_menu(
     elif not is_kitchen_open():
         body_lines.append(
             f"Kitchen is closed until *{next_open_label()}*. "
-            f"Tap *Deliver 📅* or *Takeaway 📅* to pick a date and time on the calendar. "
+            f"Tap *Scheduled Door Delivery 📅* or *Takeaway 📅* to pick a date and time on the calendar. "
             f"Dine-in reservations are still available."
         )
     body_lines.append("What would you like to do today?")

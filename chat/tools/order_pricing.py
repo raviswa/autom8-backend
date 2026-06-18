@@ -230,9 +230,9 @@ def format_scheduled_note(scheduled_at: str | None) -> str:
         if "%" in label:
             h = dt.hour % 12 or 12
             label = f"{h}:{dt.minute:02d} {'PM' if dt.hour >= 12 else 'AM'}"
-        return f"🕐 Scheduled delivery: {label}"
+        return f"🕐 Scheduled door delivery: {label}"
     except (ValueError, TypeError):
-        return f"🕐 Scheduled delivery: {scheduled_at}"
+        return f"🕐 Scheduled door delivery: {scheduled_at}"
 
 
 def compute_order_totals(

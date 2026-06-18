@@ -458,6 +458,51 @@ def format_combo_message(combo: list, party_size: int) -> str:
 # PORTAL SYNC
 # ─────────────────────────────────────────────
 
+async def _notify_manager_scheduled_delivery(
+    restaurant_id: str,
+    token_id: str,
+    customer_name: str,
+    customer_phone: str,
+    meta: dict | None = None,
+) -> None:
+    """Manager WhatsApp when a scheduled delivery order awaits approval (chat service path)."""
+    from tools.restaurant_config import get_manager_phone
+
+    manager_phone = await get_manager_phone(restaurant_id)
+    if not manager_phone:
+        logger.warning(
+            f"[scheduled-delivery-alert] No manager phone for restaurant {restaurant_id}"
+        )
+        return
+
+    meta = meta or {}
+    sched_at = meta.get("scheduled_at_label") or meta.get("scheduled_at") or "—"
+    addr = str(meta.get("delivery_address") or "—")[:80]
+    total = meta.get("total")
+    total_label = f"₹{float(total):.0f}" if total is not None else "—"
+    order_text = str(meta.get("order_text") or "—")[:120]
+    portal_url = (
+        f"{_os.getenv('FRONTEND_URL', 'https://app.autom8.works').rstrip('/')}"
+        "/dashboard/manager"
+    )
+
+    body = (
+        f"🛵 *Scheduled Door Delivery* — Token *{token_id}*\n"
+        f"👤 {customer_name}\n"
+        f"📱 {customer_phone or '—'}\n"
+        f"🕐 Delivery at: *{sched_at}*\n"
+        f"📍 {addr}\n"
+        f"💰 {total_label}\n\n"
+        f"Order: {order_text}\n\n"
+        f"⚠️ *Approve in portal before customer pays:*\n{portal_url}"
+    )
+    try:
+        await send_whatsapp_message(manager_phone, body, restaurant_id)
+        logger.info(f"[scheduled-delivery-alert] ✅ {token_id} → manager")
+    except Exception as e:
+        logger.warning(f"[scheduled-delivery-alert] failed for {token_id}: {e}")
+
+
 async def _send_manager_walk_in_alert(
     restaurant_id: str,
     token_id: str,
@@ -493,7 +538,7 @@ async def _send_manager_walk_in_alert(
         )
     elif token_type == "scheduled_delivery":
         body = (
-            f"🛵 *Scheduled Delivery* — Token *{token_id}*\n"
+            f"🛵 *Scheduled Door Delivery* — Token *{token_id}*\n"
             f"👤 {customer_name}\n🕐 {arrival} IST\n\n"
             f"⚠️ *Approve in portal before customer pays:*\n{portal_url}"
         )
@@ -515,6 +560,8 @@ async def _sync_token_via_api(
     customer_phone: str,
     log_label: str,
     max_attempts: int = 3,
+    *,
+    skip_api_notify: bool = False,
 ) -> str | None:
     secret = _get_kds_secret()
     if not secret:
@@ -523,11 +570,14 @@ async def _sync_token_via_api(
 
     payload = {**payload, "secret": secret}
     headers = _portal_auth_headers()
+    url = PORTAL_API_URL
+    if skip_api_notify:
+        url = f"{PORTAL_API_URL}?notify=false"
 
     for attempt in range(max_attempts):
         try:
             resp = await get_http().post(
-                PORTAL_API_URL,
+                url,
                 headers=headers,
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=8),
@@ -771,8 +821,15 @@ async def sync_scheduled_delivery_to_portal(
         "meta":          meta,
     }
 
-    token_id = await _sync_token_via_api(payload, customer_phone, "portal-sync-scheduled", max_attempts)
+    token_id = await _sync_token_via_api(
+        payload, customer_phone, "portal-sync-scheduled", max_attempts,
+        skip_api_notify=True,
+    )
     if token_id:
+        await _notify_manager_scheduled_delivery(
+            restaurant_id, token_id, customer_name, customer_phone, meta,
+        )
+        await _rebroadcast_portal_token(restaurant_id, token_id)
         return token_id
 
     logger.warning(f"[portal-sync-scheduled] API failed — direct DB fallback for {customer_phone}")
@@ -785,8 +842,8 @@ async def sync_scheduled_delivery_to_portal(
         meta=meta,
     )
     if token_id:
-        await _send_manager_walk_in_alert(
-            restaurant_id, token_id, customer_name, 1, "scheduled_delivery",
+        await _notify_manager_scheduled_delivery(
+            restaurant_id, token_id, customer_name, customer_phone, meta,
         )
         await _rebroadcast_portal_token(restaurant_id, token_id)
     return token_id

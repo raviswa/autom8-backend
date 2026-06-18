@@ -70,7 +70,7 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 _MANAGER_APPROVAL_NOTE = (
-    "\n\n📋 *Scheduled deliveries need manager approval before payment.* "
+    "\n\n📋 *Scheduled door deliveries need manager approval before payment.* "
     "We'll message you once confirmed."
 )
 
@@ -116,7 +116,7 @@ async def offer_delivery_schedule(
             flow_id=flow_id,
             flow_token=flow_token,
             flow_cta="Select Date & Time",
-            flow_header="🛵 Deliver 📅",
+            flow_header="🛵 Scheduled Door Delivery",
             flow_body=flow_body,
             flow_footer="Calendar — pick date and time",
             restaurant_id=restaurant_id,
@@ -140,7 +140,7 @@ async def offer_delivery_schedule(
     logger.warning(f"[delivery] schedule Flow unavailable for {customer_phone}")
     await send_whatsapp_message(
         customer_phone,
-        "We couldn't open the date picker. Please reply *Home* and choose *Deliver 📅* again, "
+        "We couldn't open the date picker. Please reply *Home* and choose *Scheduled Door Delivery 📅* again, "
         "or contact the restaurant for help.",
         restaurant_id,
     )
@@ -450,7 +450,7 @@ async def _submit_scheduled_delivery_for_approval(
         f"{format_order_total_lines(totals, session_state=session_state)}"
     )
     if sched_label:
-        confirmation += f"\n\n🕐 Deliver by: *{sched_label}*"
+        confirmation += f"\n\n🕐 Door delivery at: *{sched_label}*"
     confirmation += (
         "\n\n⏳ *Manager approval required* before payment.\n"
         "We'll message you as soon as your slot is confirmed — usually within a few minutes."

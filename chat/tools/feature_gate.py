@@ -171,8 +171,8 @@ async def build_service_menu_rows(
         if sched_delivery:
             rows.append({
                 "id": "delivery_schedule",
-                "title": "Deliver 📅",
-                "description": "Choose delivery date & time on the calendar",
+                "title": "Scheduled Door Delivery 📅",
+                "description": "Pick a date & time — we deliver to your door",
             })
 
     if _feature_val(Feature.RESERVE_TABLE) in feature_set:
