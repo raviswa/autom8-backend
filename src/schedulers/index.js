@@ -137,6 +137,30 @@ function startSpecialNotesTimeoutMonitor() {
           const customerName  = ctx.customer_name || ctx.name || 'Guest';
           const tokenNumber   = ctx.token_number  || ctx.display_token || null;
           const kitchenAlreadySent = !!(ctx._kitchen_sent || ctx._customer_finalize_sent);
+          const prepayPending = !!(
+            ctx.payment_link
+            || ctx._prepay_blocks_kitchen
+            || ctx._notes_finalized_pending_payment
+            || ctx.pending_prepay_fulfillment
+          ) && !ctx._payment_received;
+
+          if (prepayPending) {
+            await supabaseAdmin.from('conversation_states').update({
+              current_state: 'visit_complete',
+              context: {
+                ...ctx,
+                booking_step: 'visit_complete',
+                special_notes: null,
+                special_notes_asked_at: null,
+                auto_confirmed_at: new Date().toISOString(),
+              },
+              updated_at: new Date().toISOString(),
+            }).eq('id', session.id);
+            console.log(
+              `[notes-timeout] Session ${session.id} closed (prepay — KDS waits for payment)`
+            );
+            continue;
+          }
 
           if (kitchenAlreadySent) {
             // KDS + manager order alert already fired at confirm — just close the session.

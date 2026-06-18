@@ -7,9 +7,12 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
-DEFAULT_KDS_LEAD_MINUTES = 150
-MIN_KDS_LEAD_MINUTES = 30
-MAX_KDS_LEAD_MINUTES = 480
+DEFAULT_KDS_LEAD_MINUTES = 150  # 2.5 h — within the 120–180 min kitchen prep window
+MIN_KDS_LEAD_MINUTES = 120
+MAX_KDS_LEAD_MINUTES = 180
+
+ORDER_MODE_IMMEDIATE = "immediate"
+ORDER_MODE_SCHEDULED = "scheduled"
 
 
 def clamp_kds_lead_minutes(value: Any) -> int:
@@ -65,20 +68,59 @@ def kds_should_dispatch_now(
     return now >= compute_kds_release_at(scheduled_at, lead_minutes)
 
 
+def is_scheduled_order_mode(
+    session_state: dict[str, Any] | None = None,
+    *,
+    order_mode: str | None = None,
+    service_type: str | None = None,
+) -> bool:
+    """
+    True only for future-slot takeaway/delivery — never for dine-in or immediate orders.
+    """
+    if (service_type or (session_state or {}).get("service_type")) == "dine_in":
+        return False
+
+    mode = (
+        order_mode
+        or (session_state or {}).get("order_mode")
+        or ""
+    ).strip().lower()
+
+    if mode == ORDER_MODE_IMMEDIATE:
+        return False
+    if mode == ORDER_MODE_SCHEDULED:
+        return True
+
+    # Unknown / missing mode → immediate (never defer on stale scheduled_at alone).
+    return False
+
+
 def is_deferred_scheduled_order(
     scheduled_at_raw: Any,
     *,
     session_state: dict[str, Any] | None = None,
     restaurant_info: dict[str, Any] | None = None,
+    service_type: str | None = None,
     now: datetime | None = None,
 ) -> tuple[bool, datetime | None, datetime | None]:
     """
     Returns (should_defer, scheduled_at, kds_release_at).
-    Immediate dispatch when within the lead window or unparseable schedule.
+
+    Immediate / dine-in orders always dispatch now.
+    Scheduled future slots defer until within the lead window (default 150 min).
     """
-    scheduled_at = parse_scheduled_at(scheduled_at_raw)
+    if not is_scheduled_order_mode(
+        session_state,
+        service_type=service_type,
+    ):
+        return False, None, None
+
+    scheduled_at = parse_scheduled_at(
+        scheduled_at_raw if scheduled_at_raw is not None else (session_state or {}).get("scheduled_at")
+    )
     if scheduled_at is None:
         return False, None, None
+
     lead = resolve_kds_lead_minutes(
         session_state=session_state,
         restaurant_info=restaurant_info,

@@ -77,7 +77,7 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
         `[catalog-msg] meta_catalog_id not set for restaurant ${restaurantId} — ` +
         'skipping (refusing env fallback; wrong catalog is a showstopper)',
       );
-      return;
+      return false;
     }
 
     const { data: restaurant } = await supabaseAdmin
@@ -98,7 +98,7 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
 
     if (!availableItems?.length) {
       console.warn(`[catalog-msg] No stocked items for restaurant ${restaurantId}`);
-      return;
+      return false;
     }
 
     const creds = await getWhatsAppIntegration(restaurantId);
@@ -108,7 +108,7 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
 
     if (!accessToken || !phoneNumberId || !apiUrl) {
       console.warn(`[catalog-msg] Missing WhatsApp credentials for restaurant ${restaurantId}`);
-      return;
+      return false;
     }
 
     const productItems = availableItems.map((i) => ({
@@ -146,14 +146,66 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
 
     if (response.ok) {
       console.log(`[catalog-msg] ✅ product_list sent to ${toNumber} (${productItems.length} items)`);
-      return;
+      return true;
     }
 
     const errBody = await response.json().catch(() => ({}));
     console.error('[catalog-msg] API error:', JSON.stringify(errBody).slice(0, 300));
+    return false;
   } catch (err) {
     console.error('[catalog-msg] Failed:', err.message);
+    return false;
   }
+}
+
+// ── sendSpecialDishesNote ─────────────────────────────────────────────────────
+// WhatsApp note for manager-marked daily specials (not in Meta catalog).
+
+async function sendSpecialDishesNote(toNumber, restaurantId) {
+  try {
+    const { data: specials, error } = await supabaseAdmin
+      .from('menu_items')
+      .select('name')
+      .eq('restaurant_id', restaurantId)
+      .eq('is_special_today', true)
+      .eq('is_available', true)
+      .order('name');
+
+    if (error) {
+      console.warn(`[specials] Query failed for ${restaurantId}:`, error.message);
+      return false;
+    }
+    if (!specials?.length) {
+      console.log(`[specials] No is_special_today items for restaurant ${restaurantId}`);
+      return false;
+    }
+
+    const names = specials.slice(0, 8).map((i) => i.name).join(', ');
+    const extra = specials.length > 8 ? ` (+${specials.length - 8} more)` : '';
+
+    await sendWhatsAppMessage(
+      toNumber,
+      `🌟 *Today's specials:* ${names}${extra}\n`
+        + "Ask us to add any of these while you order — we'd love to serve you! 😊",
+      restaurantId,
+    );
+    console.log(`[specials] Sent ${specials.length} special(s) to ${toNumber}`);
+    return true;
+  } catch (err) {
+    console.warn(`[specials] Failed for ${toNumber}:`, err.message);
+    return false;
+  }
+}
+
+/**
+ * Send catalog then today's specials note (catalog first, brief pause, then specials).
+ */
+async function sendWhatsAppCatalogWithSpecials(toNumber, restaurantId) {
+  const catalogOk = await sendWhatsAppCatalogMessage(toNumber, restaurantId);
+  if (!catalogOk) return { catalogOk: false, specialsSent: false };
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const specialsSent = await sendSpecialDishesNote(toNumber, restaurantId);
+  return { catalogOk: true, specialsSent };
 }
 
 // ── notifyOrderReady ──────────────────────────────────────────────────────────
@@ -270,5 +322,7 @@ module.exports = {
   sendWhatsAppMessage,
   sendWhatsAppInteractive,
   sendWhatsAppCatalogMessage,
+  sendSpecialDishesNote,
+  sendWhatsAppCatalogWithSpecials,
   notifyOrderReady,
 };

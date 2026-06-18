@@ -55,7 +55,16 @@ async function notifyKdsFromSessionContext(session) {
       body: JSON.stringify(payload),
     });
     if (resp.ok) {
-      console.log(`[kds-notify-client] ✅ token ${payload.token_number} → KDS`);
+      const data = await resp.json().catch(() => ({}));
+      const created = Number(data.kds_items_created || 0);
+      const expected = payload.items.length;
+      if (created < expected) {
+        console.error(
+          `[kds-notify-client] partial — expected ${expected} lines, got ${created} for token ${payload.token_number}`
+        );
+        return false;
+      }
+      console.log(`[kds-notify-client] ✅ token ${payload.token_number} → KDS (${created} items)`);
       return true;
     }
     const body = await resp.text();

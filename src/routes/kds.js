@@ -84,7 +84,6 @@ router.post('/notify', async (req, res) => {
       ? String(customer_phone).replace(/\D/g, '')
       : null;
 
-    // ── Dedup: one KDS ticket per token/order_number (Meta webhooks can retry) ─
     const { data: existingOrder } = await supabaseAdmin
       .from('orders')
       .select('id, order_number')
@@ -92,12 +91,17 @@ router.post('/notify', async (req, res) => {
       .eq('order_number', orderNumber)
       .maybeSingle();
 
+    // ── Dedup / repair: one ticket per token; fill missing lines on partial sends ─
+    let orderRow = existingOrder;
+    let existingOrderLines = [];
+
     if (existingOrder?.id) {
       const { data: existingOrderItems } = await supabaseAdmin
         .from('order_items')
-        .select('id')
+        .select('id, menu_item:menu_item_id(retailer_id, name)')
         .eq('order_id', existingOrder.id);
-      const oiIds = (existingOrderItems ?? []).map((r) => r.id);
+      existingOrderLines = existingOrderItems ?? [];
+      const oiIds = existingOrderLines.map((r) => r.id);
       let existingKdsCount = 0;
       if (oiIds.length) {
         const { count } = await supabaseAdmin
@@ -106,10 +110,28 @@ router.post('/notify', async (req, res) => {
           .in('order_item_id', oiIds);
         existingKdsCount = count ?? 0;
       }
-      if (existingKdsCount > 0) {
+
+      const requestedLines = items.length;
+      if (existingKdsCount >= requestedLines && existingKdsCount > 0) {
         console.log(
           `[kds-notify] ♻️ deduped ${orderNumber} — ${existingKdsCount} item(s) already on KDS`
         );
+        broadcastToRestaurant(restaurant_id, {
+          type:             'ORDER_NEW',
+          order_id:         existingOrder.id,
+          order_number:     existingOrder.order_number,
+          token_number:     token_number   ?? null,
+          table_number:     table_number   ?? null,
+          customer_name:    customer_name  ?? null,
+          customer_phone:   cleanPhone,
+          service_type:     service_type   ?? null,
+          special_notes:    special_notes  ?? null,
+          advance_credit:   advance_credit || 0,
+          item_count:       existingKdsCount,
+          source:           'whatsapp_booking',
+          deduplicated:     true,
+          timestamp:        new Date().toISOString(),
+        });
         return res.json({
           success:           true,
           order_id:          existingOrder.id,
@@ -118,9 +140,24 @@ router.post('/notify', async (req, res) => {
           deduplicated:      true,
         });
       }
+      if (existingKdsCount > 0 && existingKdsCount < requestedLines) {
+        console.warn(
+          `[kds-notify] ⚠️ partial ${orderNumber} — ${existingKdsCount}/${requestedLines} on KDS, adding missing lines`
+        );
+      }
     }
 
-    let orderRow = existingOrder;
+    const lineAlreadyOnOrder = (item) => {
+      const rid = item.retailer_id;
+      if (rid && rid !== 'manual') {
+        return existingOrderLines.some((l) => l.menu_item?.retailer_id === rid);
+      }
+      const name = (item.name || '').trim().toLowerCase();
+      if (!name) return false;
+      return existingOrderLines.some(
+        (l) => (l.menu_item?.name || '').trim().toLowerCase() === name,
+      );
+    };
     if (!orderRow) {
       const { data: inserted, error: orderErr } = await supabaseAdmin
         .from('orders')
@@ -153,6 +190,9 @@ router.post('/notify', async (req, res) => {
     let   kdsItemsCreated = 0;
 
     for (const item of items) {
+      if (lineAlreadyOnOrder(item)) {
+        continue;
+      }
       // 3a: Resolve by retailer_id
       let menuItemId = null;
 
@@ -246,6 +286,19 @@ router.post('/notify', async (req, res) => {
         return res.status(500).json({ error: kdsErr.message });
       }
       kdsItemsCreated = kdsInserts.length;
+    }
+
+    if (orderRow?.id) {
+      const { data: oiRows } = await supabaseAdmin
+        .from('order_items').select('id').eq('order_id', orderRow.id);
+      const ids = (oiRows ?? []).map((r) => r.id);
+      if (ids.length) {
+        const { count } = await supabaseAdmin
+          .from('kds_items')
+          .select('id', { count: 'exact', head: true })
+          .in('order_item_id', ids);
+        if (count != null) kdsItemsCreated = count;
+      }
     }
 
     // ── Step 5: Broadcast ORDER_NEW → KDSScreen.jsx ───────────────────────────

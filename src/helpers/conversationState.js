@@ -48,6 +48,7 @@ async function syncConversationForTokenApproval({
   tokenId,
   tableNumbers = [],
   partySize,
+  specialsNoteSent = false,
 }) {
   const phone = canonicalPhone(customerPhone);
   if (!phone || !restaurantId) return;
@@ -77,6 +78,7 @@ async function syncConversationForTokenApproval({
       booking_mechanism_order_source: null,
       // Portal sends catalog on assign — avoid duplicate from chat poll path
       _catalog_sent_after_party: true,
+      ...(specialsNoteSent ? { _specials_note_sent: true } : {}),
     };
 
     await supabaseAdmin.from('conversation_states').upsert({

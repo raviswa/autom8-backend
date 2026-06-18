@@ -218,6 +218,8 @@ async def _finalize_special_notes_and_kitchen(
     if kitchen_blocked_pending_payment(session_state):
         session_state["_deferred_special_notes"] = special_notes
         session_state["_notes_finalized_pending_payment"] = True
+        session_state.pop("special_notes_asked_at", None)
+        await save_session_state(restaurant_id, customer_phone, session_state)
         if notify_customer:
             if special_notes:
                 await send_whatsapp_message(
@@ -952,12 +954,6 @@ async def handle_dine_in_flow(
 
     # ── awaiting_order ────────────────────────────────────────────────────────
     elif booking_step == "awaiting_order":
-        from tools.booking_mechanisms import maybe_send_special_dishes_note
-        if not session_state.get("_specials_note_sent"):
-            await maybe_send_special_dishes_note(
-                customer_phone, restaurant_id, session_state,
-            )
-
         order_text = message.strip()
         if order_text.upper() == "MENU":
             await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)

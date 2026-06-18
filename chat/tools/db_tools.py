@@ -1053,6 +1053,7 @@ async def get_bookings_due_for_kds() -> list[dict]:
                 WHERE b.status = 'confirmed'
                   AND b.kds_sent_at IS NULL
                   AND b.booking_datetime IS NOT NULL
+                  AND b.booking_datetime > NOW()
                   AND b.service_type IN ('delivery', 'takeaway')
                   AND b.booking_datetime - (
                         COALESCE(r.scheduled_kds_lead_minutes, 150) * INTERVAL '1 minute'

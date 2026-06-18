@@ -64,6 +64,7 @@ _SESSION_HINT_KEYS = (
     "kitchen_busy",
     "scheduled_at",
     "order_mode",
+    "service_type",
     "scheduled_kds_lead_minutes",
     "payment_mode",
     "delivery_address",
@@ -228,6 +229,7 @@ async def _should_defer_kds_for_scheduled(
         session_hints.get("scheduled_at"),
         session_state=session_hints,
         restaurant_info=restaurant_info,
+        service_type=session_hints.get("service_type"),
     )
     if not defer or scheduled_at is None or release_at is None:
         return False, None

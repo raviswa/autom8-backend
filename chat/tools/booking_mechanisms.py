@@ -1042,15 +1042,16 @@ async def notify_kds(
                 if resp.status in (200, 201):
                     data = await resp.json()
                     kds_count = int(data.get("kds_items_created") or 0)
-                    tag = "deduped" if data.get("deduplicated") else "created"
-                    if kds_count <= 0:
+                    expected = len(items)
+                    if kds_count <= 0 or kds_count < expected:
                         logger.error(
-                            f"[kds-notify] attempt {attempt + 1}/3 — API ok but 0 KDS items "
-                            f"for token {token_number} | restaurant {restaurant_id} | {data}"
+                            f"[kds-notify] attempt {attempt + 1}/3 — expected {expected} KDS line(s) "
+                            f"but got {kds_count} for token {token_number} | restaurant {restaurant_id} | {data}"
                         )
                         if attempt < 2:
                             await asyncio.sleep(0.75 * (attempt + 1))
                         continue
+                    tag = "deduped" if data.get("deduplicated") else "created"
                     logger.info(
                         f"[kds-notify] ✅ {kds_count} item(s) "
                         f"({tag}) for token {token_number} | table {table_number} | "
@@ -1226,6 +1227,7 @@ async def send_unified_booking_menu(
     if await send_catalog_booking(customer_phone, restaurant_id, session_state):
         if session_state.get("service_type") in ("dine_in", "takeaway", "delivery"):
             session_state["booking_step"] = "awaiting_order"
+        await asyncio.sleep(1.5)
         await maybe_send_special_dishes_note(
             customer_phone, restaurant_id, session_state, menu_items=items,
         )
@@ -1237,6 +1239,7 @@ async def send_unified_booking_menu(
     if await send_catalog_booking(customer_phone, restaurant_id, session_state):
         if session_state.get("service_type") in ("dine_in", "takeaway", "delivery"):
             session_state["booking_step"] = "awaiting_order"
+        await asyncio.sleep(1.5)
         await maybe_send_special_dishes_note(
             customer_phone, restaurant_id, session_state, menu_items=items,
         )
@@ -1244,6 +1247,7 @@ async def send_unified_booking_menu(
 
     # ── Attempt 3: Interactive cart ───────────────────────────────────────────
     if await send_cart_booking(customer_phone, restaurant_id, session_state):
+        await asyncio.sleep(1.0)
         await maybe_send_special_dishes_note(
             customer_phone, restaurant_id, session_state, menu_items=items,
         )

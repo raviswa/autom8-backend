@@ -358,6 +358,9 @@ async def handle_booking_flow(
         else:
             session_state.pop("order_mode", None)
 
+        if order_mode != ORDER_MODE_SCHEDULED:
+            session_state.pop("scheduled_at", None)
+
         if order_mode == ORDER_MODE_SCHEDULED:
             await cache_restaurant_pricing(session_state, restaurant_id)
             if service_type == "delivery" and not session_state.get("scheduled_delivery_enabled"):
