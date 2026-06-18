@@ -34,6 +34,7 @@ from tools.payment_tools import (
     verify_webhook_signature,
     handle_payment_webhook,
     razorpay_status_message,
+    handle_payment_link_callback,
 )
 from tools.auto_reply_filter import is_whatsapp_auto_reply
 from tools.booking_mechanisms import (
@@ -377,14 +378,28 @@ async def health_razorpay():
 
 
 @app.get("/payment/complete")
-async def payment_complete():
+async def payment_complete(request: Request):
     """Customer redirect after Razorpay payment link checkout."""
+    params = dict(request.query_params)
+    if params.get("razorpay_payment_link_status") == "paid":
+        result = await handle_payment_link_callback(params)
+        if not result.get("ok"):
+            logger.warning(f"[razorpay] Callback not fulfilled: {result}")
     return HTMLResponse(
         "<h1>Thank you! 🙏</h1>"
         "<p>Your payment was received. You can return to WhatsApp — "
         "we'll confirm your order there shortly.</p>",
         status_code=200,
     )
+
+
+@app.get("/webhook/razorpay")
+async def razorpay_webhook_probe():
+    """Browser/Razorpay URL check — real events must use POST."""
+    return JSONResponse({
+        "status": "ok",
+        "message": "Razorpay webhook endpoint is live. Configure POST payment_link.paid events here.",
+    })
 
 
 @app.post("/webhook/razorpay")

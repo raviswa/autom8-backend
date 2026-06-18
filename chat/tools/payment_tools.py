@@ -249,6 +249,72 @@ async def verify_webhook_signature(body: str, signature: str) -> bool:
         return False
 
 
+async def verify_payment_link_callback(params: dict[str, str]) -> bool:
+    """Verify Razorpay GET callback query params after payment link checkout."""
+    client = _get_client()
+    if not client:
+        return False
+    try:
+        return client.utility.verify_payment_link_signature({
+            "payment_link_id": params.get("razorpay_payment_link_id", ""),
+            "payment_link_reference_id": params.get("razorpay_payment_link_reference_id", ""),
+            "payment_link_status": params.get("razorpay_payment_link_status", ""),
+            "razorpay_payment_id": params.get("razorpay_payment_id", ""),
+            "razorpay_signature": params.get("razorpay_signature", ""),
+        })
+    except Exception as e:
+        logger.error(f"[razorpay] Payment link callback verify failed: {e}")
+        return False
+
+
+async def _mark_paid_and_fulfill(booking_id: str, *, source: str) -> dict[str, Any]:
+    from tools.db_tools import update_booking_payment_status
+    from tools.prepay_fulfillment import fulfill_from_webhook
+
+    await update_booking_payment_status(booking_id, "paid")
+    fulfilled = await fulfill_from_webhook(booking_id)
+    logger.info(
+        f"[razorpay] Booking {booking_id} payment_status=paid "
+        f"fulfilled={fulfilled} source={source}"
+    )
+    return {"ok": True, "booking_id": booking_id, "fulfilled": fulfilled, "source": source}
+
+
+async def handle_payment_link_callback(query_params: dict[str, str]) -> dict[str, Any]:
+    """Process customer redirect to /payment/complete after Razorpay checkout."""
+    status = query_params.get("razorpay_payment_link_status", "")
+    link_id = query_params.get("razorpay_payment_link_id", "")
+
+    if status != "paid":
+        return {"ok": False, "reason": "not_paid", "status": status}
+
+    if not await verify_payment_link_callback(query_params):
+        return {"ok": False, "reason": "invalid_signature"}
+
+    client = _get_client()
+    if not client:
+        return {"ok": False, "reason": "not_configured"}
+
+    booking_id = None
+    try:
+        plink = client.payment_link.fetch(link_id)
+        notes = plink.get("notes") or {}
+        booking_id = notes.get("booking_id")
+    except Exception as e:
+        logger.error(f"[razorpay] Failed to fetch payment link {link_id}: {e}")
+        return {"ok": False, "reason": "fetch_failed"}
+
+    if not booking_id:
+        logger.error(f"[razorpay] No booking_id in payment link {link_id} notes")
+        return {"ok": False, "reason": "booking_id_missing"}
+
+    try:
+        return await _mark_paid_and_fulfill(str(booking_id), source="callback")
+    except Exception as e:
+        logger.error(f"[razorpay] Callback fulfillment failed for {booking_id}: {e}")
+        return {"ok": False, "error": str(e)}
+
+
 async def handle_payment_webhook(payload: dict[str, Any]) -> dict[str, Any]:
     """Process Razorpay payment_link.paid events."""
     event = payload.get("event", "")
@@ -264,21 +330,7 @@ async def handle_payment_webhook(payload: dict[str, Any]) -> dict[str, Any]:
 
     if event == "payment_link.paid" and booking_id:
         try:
-            from tools.db_tools import update_booking_payment_status
-            from tools.prepay_fulfillment import fulfill_from_webhook
-
-            await update_booking_payment_status(str(booking_id), "paid")
-            fulfilled = await fulfill_from_webhook(str(booking_id))
-            logger.info(
-                f"[razorpay] Booking {booking_id} payment_status=paid "
-                f"fulfilled={fulfilled}"
-            )
-            return {
-                "ok": True,
-                "booking_id": booking_id,
-                "event": event,
-                "fulfilled": fulfilled,
-            }
+            return await _mark_paid_and_fulfill(str(booking_id), source="webhook")
         except Exception as e:
             logger.error(f"[razorpay] Failed to update booking {booking_id}: {e}")
             return {"ok": False, "error": str(e)}
