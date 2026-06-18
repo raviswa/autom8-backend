@@ -212,6 +212,20 @@ async def recover_prepay_if_already_paid(
         return {"state": "pending"}
 
     if booking.get("status") == "confirmed":
+        if booking.get("service_type") in ("takeaway", "delivery", "dine_in"):
+            from tools.prepay_fulfillment import retry_kds_for_confirmed_booking
+            had_kds_flag = bool(booking.get("kds_sent_at"))
+            logger.info(
+                f"[razorpay] Booking {booking_id} confirmed — verify KDS "
+                f"(kds_sent_at={'set' if had_kds_flag else 'null'})"
+            )
+            ok = await retry_kds_for_confirmed_booking(booking_id, booking)
+            if ok and not had_kds_flag:
+                return {"state": "kds_retried", "booking": booking}
+            if ok:
+                return {"state": "already_confirmed", "booking": booking}
+            if not had_kds_flag:
+                return {"state": "kds_retry_failed", "booking": booking}
         return {"state": "already_confirmed", "booking": booking}
 
     link_status = await resolve_payment_link_status(booking_id, session_state)

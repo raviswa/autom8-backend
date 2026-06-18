@@ -754,6 +754,26 @@ async def handle_awaiting_prepay(
             session_state["booking_step"] = "visit_complete"
             session_state.pop("payment_link", None)
             return {"status": "visit_complete"}
+        if recovery["state"] == "kds_retried":
+            await send_whatsapp_message(
+                customer_phone,
+                f"✅ Your order is confirmed — we've just sent it to the kitchen.\n_{summary}_\n\n"
+                f"Reply *Home* to place a new order.",
+                restaurant_id,
+            )
+            session_state["booking_step"] = "visit_complete"
+            session_state.pop("payment_link", None)
+            return {"status": "visit_complete"}
+        if recovery["state"] == "kds_retry_failed":
+            await send_whatsapp_message(
+                customer_phone,
+                "Your order is confirmed ✅ but the kitchen display didn't update.\n\n"
+                "Please show staff your token at the counter — we're retrying in the background."
+                + _HOME_HINT,
+                restaurant_id,
+            )
+            touch_session_activity(session_state)
+            return {"status": "visit_complete"}
         if recovery["state"] == "fulfilled":
             session_state["booking_step"] = "visit_complete"
             session_state.pop("payment_link", None)

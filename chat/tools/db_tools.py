@@ -1206,7 +1206,24 @@ async def get_booking_with_customer(booking_id: str) -> Dict[str, Any] | None:
             "status": booking.status,
             "payment_status": booking.payment_status,
             "token_number": booking.token_number,
+            "kds_sent_at": await _fetch_booking_kds_sent_at(str(booking.id)),
         }
+
+
+async def _fetch_booking_kds_sent_at(booking_id: str):
+    """Read kds_sent_at (column added via migration; may be absent on ORM model)."""
+    if AsyncSessionLocal is None:
+        return None
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("SELECT kds_sent_at FROM bookings WHERE id = CAST(:bid AS uuid)"),
+                {"bid": booking_id},
+            )
+            row = result.fetchone()
+            return row[0] if row else None
+    except Exception:
+        return None
 
 
 async def confirm_table_for_booking(booking_id: str, table_number: int) -> Dict[str, Any]:

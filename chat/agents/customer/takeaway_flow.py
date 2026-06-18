@@ -20,6 +20,7 @@ from typing import Dict, Any
 
 import aiohttp
 
+from tools.cart_tools import enrich_cart_titles
 from tools.db_tools import get_next_token_number, create_booking, update_booking_status
 from tools.payment_tools import build_payment_line
 from tools.prepay_fulfillment import (
@@ -408,12 +409,20 @@ async def handle_takeaway_flow(
             session_state["booking_step"] = "visit_complete"
             clear_cart(session_state)
 
-            await notify_kds(
+            if cart_snapshot:
+                await enrich_cart_titles(cart_snapshot, restaurant_id)
+
+            kds_order_id = await notify_kds(
                 customer_name=customer_name, customer_phone=customer_phone,
                 order_text=order_text_display, cart=cart_snapshot, table_number=None,
                 token_number=display_token, service_type="takeaway",
                 restaurant_id=restaurant_id,
             )
+            if not kds_order_id:
+                logger.error(
+                    f"[takeaway] KDS dispatch failed for token {display_token} "
+                    f"(cart_lines={len(cart_snapshot or {})})"
+                )
 
             # Fix 38: feedback queue — mirrors dine-in behaviour
             try:

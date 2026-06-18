@@ -234,6 +234,105 @@ async def _should_defer_kds_for_scheduled(
     return True, format_kds_defer_customer_note(scheduled_at, release_at)
 
 
+async def _dispatch_to_kds(
+    *,
+    restaurant_id: str,
+    customer_name: str,
+    customer_phone: str,
+    order_text: str,
+    cart: dict,
+    token: str,
+    service_type: str,
+    booking_id: str | None = None,
+    special_notes: str | None = None,
+) -> str | None:
+    """Push order to KDS; return order_id only when items were created."""
+    cart_copy = dict(cart or {})
+    if cart_copy:
+        from tools.cart_tools import enrich_cart_titles
+        await enrich_cart_titles(cart_copy, restaurant_id)
+
+    order_id = None
+    for attempt in range(3):
+        order_id = await notify_kds(
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            order_text=order_text,
+            cart=cart_copy,
+            table_number=None,
+            token_number=token,
+            service_type=service_type,
+            restaurant_id=restaurant_id,
+            special_notes=special_notes,
+        )
+        if order_id:
+            if booking_id:
+                await mark_booking_kds_sent(booking_id)
+            logger.info(
+                f"[prepay-kds] Dispatched {service_type} token {token} "
+                f"booking={booking_id} order_id={order_id}"
+            )
+            return order_id
+        if attempt < 2:
+            await asyncio.sleep(0.75 * (attempt + 1))
+
+    logger.error(
+        f"[prepay-kds] KDS dispatch FAILED for {service_type} token {token} "
+        f"booking={booking_id} restaurant={restaurant_id} "
+        f"(cart_lines={len(cart_copy)}, order_text={order_text[:80]!r})"
+    )
+    return None
+
+
+async def _retry_kds_for_confirmed_booking(
+    booking_id: str,
+    booking: dict[str, Any],
+) -> bool:
+    """Re-dispatch KDS when payment confirmed but kitchen board never received items."""
+    payload = await load_prepay_payload(
+        booking["restaurant_id"],
+        booking["customer_phone"],
+        booking_id,
+    )
+    if not payload:
+        payload = await load_prepay_fulfillment_payload(booking_id)
+    if not payload:
+        logger.error(f"[prepay-kds] No payload to retry KDS for confirmed booking {booking_id}")
+        return False
+
+    hints = payload.get("session_hints") or {}
+    defer, _ = await _should_defer_kds_for_scheduled(
+        hints, restaurant_id=payload["restaurant_id"],
+    )
+    if defer:
+        logger.info(f"[prepay-kds] Booking {booking_id} KDS deferred (scheduled) — OK")
+        return True
+
+    token = str(payload.get("token") or booking.get("token_number") or "—")
+    order_id = await _dispatch_to_kds(
+        restaurant_id=payload["restaurant_id"],
+        customer_name=payload.get("customer_name") or booking.get("customer_name") or "Guest",
+        customer_phone=payload["customer_phone"],
+        order_text=payload.get("order_text_display") or "",
+        cart=payload.get("cart_snapshot") or {},
+        token=token,
+        service_type=payload.get("service_type") or booking.get("service_type") or "takeaway",
+        booking_id=booking_id,
+    )
+    return bool(order_id)
+
+
+async def retry_kds_for_confirmed_booking(
+    booking_id: str,
+    booking: dict[str, Any] | None = None,
+) -> bool:
+    if booking is None:
+        booking = await get_booking_with_customer(booking_id)
+    if not booking:
+        return False
+    return await _retry_kds_for_confirmed_booking(booking_id, booking)
+
+
 async def _finalize_kds_for_scheduled_order(
     *,
     booking_id: str,
@@ -288,18 +387,17 @@ async def _finalize_kds_for_scheduled_order(
                 logger.warning(f"[scheduled-kds] manager defer notify failed: {exc}")
         return False
 
-    await notify_kds(
+    order_id = await _dispatch_to_kds(
+        restaurant_id=restaurant_id,
         customer_name=customer_name,
         customer_phone=customer_phone,
         order_text=order_text,
         cart=cart,
-        table_number=None,
-        token_number=token,
+        token=token,
         service_type=service_type,
-        restaurant_id=restaurant_id,
+        booking_id=booking_id,
     )
-    await mark_booking_kds_sent(booking_id)
-    return True
+    return bool(order_id)
 
 
 async def _queue_feedback(
@@ -427,11 +525,31 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
     defer, defer_note = await _should_defer_kds_for_scheduled(
         hints, restaurant_id=restaurant_id,
     )
-    kitchen_line = (
-        "Your takeaway order is confirmed."
-        if defer
-        else "Your takeaway order is confirmed and sent to the kitchen."
+
+    dispatched_now = await _finalize_kds_for_scheduled_order(
+        booking_id=booking_id,
+        restaurant_id=restaurant_id,
+        customer_phone=customer_phone,
+        customer_name=customer_name,
+        token=str(display_token),
+        order_text=order_text_display,
+        cart=cart_snapshot,
+        service_type="takeaway",
+        session_hints=hints,
+        booking_time=booking_time,
+        total=total,
     )
+
+    if defer:
+        kitchen_line = "Your takeaway order is confirmed."
+    elif dispatched_now:
+        kitchen_line = "Your takeaway order is confirmed and sent to the kitchen."
+    else:
+        kitchen_line = (
+            "Your takeaway order is confirmed. "
+            "We're pushing it to the kitchen display — please alert staff if it doesn't appear shortly."
+        )
+
     confirm_body = (
         f"Payment received! ✅\n────────────────────\n"
         f"Token: {display_token}\n"
@@ -457,19 +575,12 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
     except Exception as exc:
         logger.warning(f"[prepay-fulfill] manager alert failed (non-fatal): {exc}")
 
-    dispatched_now = await _finalize_kds_for_scheduled_order(
-        booking_id=booking_id,
-        restaurant_id=restaurant_id,
-        customer_phone=customer_phone,
-        customer_name=customer_name,
-        token=str(display_token),
-        order_text=order_text_display,
-        cart=cart_snapshot,
-        service_type="takeaway",
-        session_hints=hints,
-        booking_time=booking_time,
-        total=total,
-    )
+    if not defer and not dispatched_now:
+        logger.error(
+            f"[prepay-fulfill] Takeaway KDS failed for booking {booking_id} token {display_token}"
+        )
+        return False
+
     if dispatched_now:
         await _queue_feedback(restaurant_id, customer_phone, customer_name, display_token)
     await _send_receipt(
@@ -507,11 +618,33 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
     defer, defer_note = await _should_defer_kds_for_scheduled(
         hints, restaurant_id=restaurant_id,
     )
-    kitchen_line = (
-        "Your delivery order is confirmed."
-        if defer
-        else "Your delivery order is confirmed and sent to the kitchen."
+
+    dispatched_now = await _finalize_kds_for_scheduled_order(
+        booking_id=booking_id,
+        restaurant_id=restaurant_id,
+        customer_phone=customer_phone,
+        customer_name=customer_name,
+        token=token,
+        order_text=order_text_display,
+        cart=cart_snapshot,
+        service_type="delivery",
+        session_hints=hints,
+        manager_phone=manager_phone,
+        delivery_address=delivery_address,
+        booking_time=booking_time,
+        total=total,
     )
+
+    if defer:
+        kitchen_line = "Your delivery order is confirmed."
+    elif dispatched_now:
+        kitchen_line = "Your delivery order is confirmed and sent to the kitchen."
+    else:
+        kitchen_line = (
+            "Your delivery order is confirmed. "
+            "We're pushing it to the kitchen display — please alert staff if it doesn't appear shortly."
+        )
+
     confirm_body = (
         f"Payment received! ✅\n────────────────────\n"
         f"Token: {token}\n"
@@ -547,21 +680,12 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
         except Exception as exc:
             logger.warning(f"[prepay-fulfill] delivery manager notify failed: {exc}")
 
-    dispatched_now = await _finalize_kds_for_scheduled_order(
-        booking_id=booking_id,
-        restaurant_id=restaurant_id,
-        customer_phone=customer_phone,
-        customer_name=customer_name,
-        token=token,
-        order_text=order_text_display,
-        cart=cart_snapshot,
-        service_type="delivery",
-        session_hints=hints,
-        manager_phone=manager_phone,
-        delivery_address=delivery_address,
-        booking_time=booking_time,
-        total=total,
-    )
+    if not defer and not dispatched_now:
+        logger.error(
+            f"[prepay-fulfill] Delivery KDS failed for booking {booking_id} token {token}"
+        )
+        return False
+
     if dispatched_now:
         await _queue_feedback(restaurant_id, customer_phone, customer_name, token)
     await _send_receipt(
@@ -708,6 +832,11 @@ async def fulfill_from_webhook(booking_id: str) -> bool:
         logger.warning(f"[prepay-fulfill] Booking {booking_id} not found")
         return False
     if booking.get("status") == "confirmed":
+        if booking.get("service_type") in ("takeaway", "delivery", "dine_in"):
+            logger.warning(
+                f"[prepay-fulfill] Booking {booking_id} confirmed — verify/repair KDS dispatch"
+            )
+            return await _retry_kds_for_confirmed_booking(booking_id, booking)
         logger.info(f"[prepay-fulfill] Booking {booking_id} already confirmed — skip")
         return True
 
