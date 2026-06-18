@@ -21,7 +21,12 @@ from typing import Dict, Any
 import aiohttp
 
 from tools.db_tools import get_next_token_number, create_booking, update_booking_status
-from tools.payment_tools import build_payment_line
+from tools.payment_tools import build_payment_line, wants_online_payment
+from tools.prepay_fulfillment import (
+    prepay_fulfillment_required,
+    build_prepay_payload,
+    stash_prepay_payload,
+)
 from tools.whatsapp_tools import send_whatsapp_message, send_whatsapp_flow
 from tools.cart_tools import cart_to_order_text, clear_cart
 from tools.order_pricing import (
@@ -251,20 +256,12 @@ async def handle_takeaway_flow(
             session_state["order_total"] = total
             session_state["order_totals"] = totals
 
-            token, portal_token_id, suggestion = await asyncio.gather(
+            token, suggestion = await asyncio.gather(
                 get_next_token_number(restaurant_id),
-                sync_token_to_portal(
-                    customer_name=customer_name, customer_phone=customer_phone,
-                    token_type="takeaway", pax=1, restaurant_id=restaurant_id,
-                ),
                 safe_build_order_suggestion(customer_id, restaurant_id),
             )
             booking_time  = now_display()
             session_state["token_number"] = token
-            display_token = portal_token_id or token
-            session_state["display_token"] = display_token
-
-            # Manager alert is sent by POST /api/tokens when portal sync succeeds.
 
             booking    = await create_booking(
                 restaurant_id, customer_id, "takeaway", token_number=token,
@@ -279,6 +276,65 @@ async def handle_takeaway_flow(
             )
 
             order_text_display = cart_to_order_text(cart) if cart else order_text
+            prepay_pending = prepay_fulfillment_required(session_state)
+
+            portal_token_id = None
+            if not prepay_pending:
+                portal_token_id = await sync_token_to_portal(
+                    customer_name=customer_name, customer_phone=customer_phone,
+                    token_type="takeaway", pax=1, restaurant_id=restaurant_id,
+                )
+            display_token = portal_token_id or token
+            session_state["display_token"] = display_token
+
+            if prepay_pending:
+                stash_prepay_payload(
+                    session_state,
+                    booking_id,
+                    build_prepay_payload(
+                        session_state=session_state,
+                        restaurant_id=restaurant_id,
+                        customer_id=customer_id,
+                        customer_name=customer_name,
+                        customer_phone=customer_phone,
+                        booking_id=booking_id,
+                        token=token,
+                        cart_snapshot=cart_snapshot,
+                        order_text_display=order_text_display,
+                        total=total,
+                        totals=totals,
+                        booking_time=booking_time,
+                    ),
+                )
+                confirmation = (
+                    f"Order received! 🛍️\n────────────────────\n"
+                    f"Token: {display_token}\nBooking Time: {booking_time}\n"
+                    f"Order: {order_text_display}\n────────────────────\n"
+                    f"{format_order_total_lines(totals)}\n\n{payment_line}\n\n"
+                    f"_Your order will be sent to the kitchen after payment is received._"
+                )
+                pickup_block = format_pickup_location_block(session_state)
+                if pickup_block:
+                    confirmation += f"\n\n{pickup_block}"
+                sched_note = format_scheduled_note(session_state.get("scheduled_at"))
+                if sched_note:
+                    confirmation += f"\n\n{sched_note}"
+                timing_note = ready_time_note_from_session(session_state, "takeaway")
+                if timing_note:
+                    confirmation += f"\n\n{timing_note}"
+                if suggestion:
+                    confirmation += f"\n\n{suggestion}"
+                await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
+
+                session_state["last_service_type"] = "takeaway"
+                session_state["order_confirmed_summary"] = (
+                    f"Takeaway Token *{display_token}* — {order_text_display} (₹{total:.0f}) — awaiting payment"
+                )
+                _first_item = strip_order_quantity(order_text.split(",")[0].strip())[:40]
+                session_state["last_order_summary"]    = _first_item
+                session_state["booking_step"] = "awaiting_prepay"
+                clear_cart(session_state)
+                return {"status": "awaiting_prepay", "booking_id": booking_id, "total": total}
 
             captain_result = await assign_and_notify_captain_takeaway(
                 restaurant_id,

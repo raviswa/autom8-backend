@@ -129,8 +129,8 @@ async def handle_booking_flow(
 
     msg_lower = message.strip().lower()
 
-    # ── visit_complete: treat any new message as fresh visit ─────────────────
-    if current_step == "visit_complete":
+    # ── visit_complete / awaiting_prepay: treat new message as fresh visit ───
+    if current_step in ("visit_complete", "awaiting_prepay"):
         if is_feedback_reply(message) or is_feedback_aspect_reply(message):
             await send_whatsapp_message(
                 customer_phone,
@@ -145,6 +145,7 @@ async def handle_booking_flow(
         _prev_visits = session_state.get("visit_count", 0)
         _prev_last   = session_state.get("last_order_summary", "")
         _prev_svc    = session_state.get("service_type") or session_state.get("last_service_type")
+        _pending_pay = session_state.get("pending_prepay_fulfillment")
         session_state.clear()
         if _prev_cid:    session_state["customer_id"]          = _prev_cid
         if _prev_cname:  session_state["customer_name"]        = _prev_cname
@@ -152,6 +153,7 @@ async def handle_booking_flow(
         if _prev_visits: session_state["visit_count"]          = _prev_visits
         if _prev_last:   session_state["last_order_summary"]   = strip_order_quantity(_prev_last)
         if _prev_svc:    session_state["last_service_type"]    = _prev_svc
+        if _pending_pay: session_state["pending_prepay_fulfillment"] = _pending_pay
         session_state["booking_step"] = "ask_service"
         current_step = "ask_service"
 

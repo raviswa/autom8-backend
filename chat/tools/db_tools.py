@@ -932,6 +932,31 @@ async def get_booking_by_id(restaurant_id: str, booking_id: str) -> Dict[str, An
         return None
 
 
+async def get_booking_with_customer(booking_id: str) -> Dict[str, Any] | None:
+    """Load booking with customer phone/name — used by Razorpay webhook fulfillment."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Booking)
+            .options(selectinload(Booking.customer))
+            .where(Booking.id == UUID(booking_id))
+        )
+        booking = result.scalar_one_or_none()
+        if not booking:
+            return None
+        customer = booking.customer
+        return {
+            "id": str(booking.id),
+            "restaurant_id": str(booking.restaurant_id),
+            "customer_id": str(booking.customer_id),
+            "customer_phone": customer.phone if customer else None,
+            "customer_name": customer.name if customer else None,
+            "service_type": booking.service_type,
+            "status": booking.status,
+            "payment_status": booking.payment_status,
+            "token_number": booking.token_number,
+        }
+
+
 async def confirm_table_for_booking(booking_id: str, table_number: int) -> Dict[str, Any]:
     """Assign table to booking and record confirmation time for Dine-in flow."""
     async with AsyncSessionLocal() as session:

@@ -265,9 +265,20 @@ async def handle_payment_webhook(payload: dict[str, Any]) -> dict[str, Any]:
     if event == "payment_link.paid" and booking_id:
         try:
             from tools.db_tools import update_booking_payment_status
+            from tools.prepay_fulfillment import fulfill_takeaway_from_webhook
+
             await update_booking_payment_status(str(booking_id), "paid")
-            logger.info(f"[razorpay] Booking {booking_id} payment_status=paid")
-            return {"ok": True, "booking_id": booking_id, "event": event}
+            fulfilled = await fulfill_takeaway_from_webhook(str(booking_id))
+            logger.info(
+                f"[razorpay] Booking {booking_id} payment_status=paid "
+                f"takeaway_fulfilled={fulfilled}"
+            )
+            return {
+                "ok": True,
+                "booking_id": booking_id,
+                "event": event,
+                "takeaway_fulfilled": fulfilled,
+            }
         except Exception as e:
             logger.error(f"[razorpay] Failed to update booking {booking_id}: {e}")
             return {"ok": False, "error": str(e)}
