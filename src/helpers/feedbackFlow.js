@@ -12,7 +12,31 @@
 
 'use strict';
 
-const { supabaseAdmin } = require('../config/supabase');
+const { closeOpenFeedbackRows } = require('./feedbackDedup');
+
+const RESET_KEYWORDS = new Set([
+  'home', 'menu', 'main menu', 'mainmenu', 'restart', 'start over', 'startover',
+  'reboot', 'new', 'begin',
+]);
+
+function isResetKeyword(text) {
+  return RESET_KEYWORDS.has(String(text || '').trim().toLowerCase());
+}
+
+async function dismissActiveFeedback(restaurantId, phone) {
+  const { error } = await supabaseAdmin
+    .from('feedback_pending')
+    .update({
+      manager_notified: true,
+      feedback_received_at: new Date().toISOString(),
+      feedback_text: 'dismissed:user_reset',
+    })
+    .eq('restaurant_id', restaurantId)
+    .eq('customer_phone', phone)
+    .eq('feedback_sent', true)
+    .eq('manager_notified', false);
+  if (error) throw error;
+}
 const { sendWhatsAppMessage, sendWhatsAppInteractive } = require('./whatsapp');
 const { isWhatsAppAutoReply } = require('./whatsappAutoReply');
 
@@ -350,6 +374,12 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
     if (!phone) return false;
 
     const text = extractMessageText(message);
+
+    if (isResetKeyword(text)) {
+      await dismissActiveFeedback(restaurantId, phone).catch(() => {});
+      await closeOpenFeedbackRows(restaurantId, phone).catch(() => {});
+      return false;
+    }
 
     if (isWhatsAppAutoReply(message, text, process.env.WHATSAPP_PHONE_NUMBER || null)) {
       return false;

@@ -73,6 +73,7 @@ from agents.customer.booking_helpers import (
     is_greeting,
     is_feedback_reply,
     is_feedback_aspect_reply,
+    is_reset_keyword,
     send_catalog_with_fallback,
     send_service_menu,
     build_smart_greeting,
@@ -154,6 +155,22 @@ async def handle_booking_flow(
         session_state["booking_step"] = "ask_service"
         current_step = "ask_service"
 
+    # ── Global Home / reset keyword (before feedback — active order wins) ─────
+    if current_step not in {"awaiting_reset_confirmation"} and is_reset_keyword(message):
+        if msg_lower in _DIRECT_RESET_KEYWORDS or msg_lower in _FULL_RESET_KEYWORDS:
+            full = msg_lower in _FULL_RESET_KEYWORDS
+            await do_reset(
+                customer_id, customer_name, customer_phone, restaurant_id,
+                session_state, full_restart=full,
+            )
+            touch_session_activity(session_state)
+            return {"status": "identity_restart" if full else "reset_complete"}
+        session_state["step_before_reset"] = current_step
+        session_state["booking_step"] = "awaiting_reset_confirmation"
+        session_state["_full_restart_pending"] = True
+        await ask_continue_or_reset(customer_phone, restaurant_id, full_restart=True)
+        return {"status": "awaiting_reset_confirmation"}
+
     # ── Feedback steps — routed entirely to feedback_flow ────────────────────
     _FEEDBACK_STEPS = {
         "awaiting_feedback_rating",
@@ -213,22 +230,6 @@ async def handle_booking_flow(
         session_state.pop("delivery_address", None)
         clear_cart(session_state)
         return {"status": "awaiting_service_selection"}
-
-    # ── Global Home / reset keyword ───────────────────────────────────────────
-    if current_step not in {"awaiting_reset_confirmation"} and msg_lower in _RESET_KEYWORDS:
-        if msg_lower in _DIRECT_RESET_KEYWORDS or msg_lower in _FULL_RESET_KEYWORDS:
-            full = msg_lower in _FULL_RESET_KEYWORDS
-            await do_reset(
-                customer_id, customer_name, customer_phone, restaurant_id,
-                session_state, full_restart=full,
-            )
-            touch_session_activity(session_state)
-            return {"status": "identity_restart" if full else "reset_complete"}
-        session_state["step_before_reset"] = current_step
-        session_state["booking_step"] = "awaiting_reset_confirmation"
-        session_state["_full_restart_pending"] = True
-        await ask_continue_or_reset(customer_phone, restaurant_id, full_restart=True)
-        return {"status": "awaiting_reset_confirmation"}
 
     # ── Greeting guard ────────────────────────────────────────────────────────
     if (current_step not in _STEPS_ALLOWING_SHORT_REPLY and is_greeting(message)):

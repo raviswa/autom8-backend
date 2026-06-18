@@ -28,7 +28,7 @@ from tools.db_tools import (
     customer_lock,
 )
 from tools.whatsapp_tools import parse_incoming, send_whatsapp_message
-from agents.customer.booking_helpers import touch_session_activity
+from agents.customer.booking_helpers import touch_session_activity, is_reset_keyword
 from tools.feedback_bridge import try_handle_feedback_via_api
 from tools.payment_tools import verify_webhook_signature, handle_payment_webhook, razorpay_status_message
 from tools.auto_reply_filter import is_whatsapp_auto_reply
@@ -312,7 +312,8 @@ async def _process_meta_payload(payload: dict):
                     return
 
             # 5b. Feedback reply — delegate to Node before booking routing
-            if msg_type in ("text", "button", "interactive"):
+            # Home/Menu always go to booking reset, never feedback for a past order.
+            if msg_type in ("text", "button", "interactive") and not is_reset_keyword(message_body):
                 if await try_handle_feedback_via_api(phone, message_obj, restaurant_id):
                     touch_session_activity(session_state)
                     await save_session_state(restaurant_id, phone, session_state)

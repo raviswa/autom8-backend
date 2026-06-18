@@ -326,6 +326,11 @@ _GREETING_WORDS: set[str] = {
     "help","start","back","reset","restart","cancel",
 }
 _RESET_KEYWORDS: set[str] = _DIRECT_RESET_KEYWORDS | _FULL_RESET_KEYWORDS | {"begin"}
+
+
+def is_reset_keyword(text: str) -> bool:
+    """True for Home/Menu/restart — must bypass feedback and start fresh booking."""
+    return (text or "").strip().lower() in _RESET_KEYWORDS
 _STEPS_ALLOWING_SHORT_REPLY: set[str] = {
     "ask_service","awaiting_service_selection","awaiting_reset_confirmation",
     "awaiting__confirmation","awaiting_quantity","awaiting_item_qty",
@@ -591,6 +596,64 @@ def parse_flow_datetime(message: str) -> datetime | None:
     except Exception:
         return None
     return None
+
+
+async def offer_whatsapp_schedule_calendar(
+    customer_phone: str,
+    restaurant_id: str,
+    customer_id: str,
+    session_state: Dict[str, Any],
+    *,
+    flow_id: str,
+    flow_token_prefix: str,
+    flow_header: str,
+    flow_body: str,
+    booking_step: str,
+    failure_message: str,
+    flow_footer: str = "Calendar — pick date and time",
+    flow_cta: str = "Select Date & Time",
+    retry_key: str = "_schedule_flow_retry",
+    resend_fn=None,
+) -> Dict[str, Any]:
+    """
+    Platform rule (restaurant + supply): future date/time via WhatsApp Flow calendar only.
+    Never fall back to typed date/time input — text parsing is unreliable.
+    """
+    import time as _time
+    from tools.whatsapp_tools import send_whatsapp_flow, send_whatsapp_message
+
+    if not flow_id or flow_id == "your_flow_id_here":
+        logger.warning(f"[calendar] Flow ID not configured for {customer_phone}")
+        await send_whatsapp_message(customer_phone, failure_message, restaurant_id)
+        session_state["booking_step"] = booking_step
+        return {"status": booking_step}
+
+    flow_token = f"{flow_token_prefix}_{customer_id}_{int(_time.time())}"
+    session_state["flow_token"] = flow_token
+    ok = await send_whatsapp_flow(
+        phone=customer_phone,
+        flow_id=flow_id,
+        flow_token=flow_token,
+        flow_cta=flow_cta,
+        flow_header=flow_header,
+        flow_body=flow_body,
+        flow_footer=flow_footer,
+        restaurant_id=restaurant_id,
+    )
+    if ok:
+        session_state["booking_step"] = booking_step
+        session_state.pop("schedule_text_fallback", None)
+        session_state.pop(retry_key, None)
+        return {"status": booking_step}
+
+    if not session_state.get(retry_key) and resend_fn is not None:
+        session_state[retry_key] = True
+        return await resend_fn()
+
+    logger.warning(f"[calendar] Flow send failed for {customer_phone}")
+    await send_whatsapp_message(customer_phone, failure_message, restaurant_id)
+    session_state["booking_step"] = booking_step
+    return {"status": booking_step}
 
 
 # ─────────────────────────────────────────────
