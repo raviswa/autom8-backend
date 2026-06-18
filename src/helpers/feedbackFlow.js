@@ -12,6 +12,7 @@
 
 'use strict';
 
+const { supabaseAdmin } = require('../config/supabase');
 const { closeOpenFeedbackRows } = require('./feedbackDedup');
 
 const RESET_KEYWORDS = new Set([
