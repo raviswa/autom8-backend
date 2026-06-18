@@ -30,7 +30,7 @@ from tools.db_tools import (
 from tools.whatsapp_tools import parse_incoming, send_whatsapp_message
 from agents.customer.booking_helpers import touch_session_activity
 from tools.feedback_bridge import try_handle_feedback_via_api
-from tools.payment_tools import verify_webhook_signature
+from tools.payment_tools import verify_webhook_signature, handle_payment_webhook, razorpay_status_message
 from tools.auto_reply_filter import is_whatsapp_auto_reply
 from tools.booking_mechanisms import (
     is_catalog_order,
@@ -49,6 +49,7 @@ import httpx, os
 async def lifespan(app: FastAPI):
     sha = os.getenv("RAILWAY_GIT_COMMIT_SHA", "unknown")
     logger.info(f"Starting Munafe bot... commit={sha} integration_model=no_phone_number")
+    logger.info(f"[razorpay] status={razorpay_status_message()}")
     await init_db()
     from tools.scheduler_tools import start_scheduler
     await start_scheduler()
@@ -357,6 +358,36 @@ async def _process_meta_payload(payload: dict):
 
     except Exception as e:
         logger.error(f"Webhook processing failed: {e}", exc_info=True)
+
+
+@app.get("/payment/complete")
+async def payment_complete():
+    """Customer redirect after Razorpay payment link checkout."""
+    return HTMLResponse(
+        "<h1>Thank you! 🙏</h1>"
+        "<p>Your payment was received. You can return to WhatsApp — "
+        "we'll confirm your order there shortly.</p>",
+        status_code=200,
+    )
+
+
+@app.post("/webhook/razorpay")
+async def razorpay_webhook(request: Request):
+    """Razorpay payment events (configure in Razorpay Dashboard → Webhooks)."""
+    body_bytes = await request.body()
+    body_text = body_bytes.decode("utf-8")
+    signature = request.headers.get("X-Razorpay-Signature", "")
+
+    if not await verify_webhook_signature(body_text, signature):
+        raise HTTPException(status_code=400, detail="Invalid Razorpay signature")
+
+    try:
+        payload = json.loads(body_text)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    result = await handle_payment_webhook(payload)
+    return JSONResponse(status_code=200, content=result)
 
 
 @app.post("/webhook/meta")

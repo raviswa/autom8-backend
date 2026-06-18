@@ -48,6 +48,9 @@ class Settings(BaseSettings):
 
     razorpay_key_id: str | None      = None
     razorpay_key_secret: str | None  = None
+    razorpay_webhook_secret: str | None = None
+    razorpay_callback_url: str | None = None
+    chat_public_url: str              = "https://chat.autom8.works"
     log_level: str                   = "INFO"
     environment: str                 = "production"
 

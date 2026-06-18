@@ -854,6 +854,22 @@ async def update_booking_status(booking_id: str, status: str) -> Dict[str, Any]:
         return {"id": str(booking.id), "status": booking.status}
 
 
+async def update_booking_payment_status(booking_id: str, payment_status: str) -> Dict[str, Any]:
+    """Update booking payment_status (pending|paid|refunded|na)."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Booking).where(Booking.id == UUID(booking_id)))
+        booking = result.scalar_one_or_none()
+
+        if not booking:
+            raise ValueError(f"Booking {booking_id} not found")
+
+        booking.payment_status = payment_status
+        session.add(booking)
+        await session.commit()
+
+        return {"id": str(booking.id), "payment_status": booking.payment_status}
+
+
 async def get_todays_bookings(restaurant_id: str) -> List[Dict[str, Any]]:
     async with AsyncSessionLocal() as session:
         today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
