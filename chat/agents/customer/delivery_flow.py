@@ -27,7 +27,7 @@ from tools.payment_tools import build_payment_line
 from tools.prepay_fulfillment import (
     prepay_fulfillment_required,
     build_prepay_payload,
-    stash_prepay_payload,
+    stash_and_persist_prepay_payload,
     PREPAY_PENDING_FOOTER,
     _finalize_kds_for_scheduled_order,
 )
@@ -64,6 +64,7 @@ from agents.customer.booking_helpers import (
     strip_order_quantity,
     parse_booking_datetime,
     parse_flow_datetime,
+    handle_unknown_booking_step,
 )
 from agents.customer.conversation_helpers import safe_build_order_suggestion
 from config.settings import settings
@@ -144,10 +145,12 @@ async def offer_delivery_schedule(
             )
 
     logger.warning(f"[delivery] schedule Flow unavailable for {customer_phone}")
+    session_state["schedule_text_fallback"] = True
     await send_whatsapp_message(
         customer_phone,
-        "We couldn't open the date picker. Please reply *Home* and choose *Schedule Delivery 📅* again, "
-        "or contact the restaurant for help.",
+        "We couldn't open the date picker. You can type your preferred date and time "
+        "(e.g. *tomorrow 7:30 PM* or *18 Jun 7pm*).\n\n"
+        "Or reply *Home* and choose *Schedule Delivery 📅* again.",
         restaurant_id,
     )
     session_state["booking_step"] = "awaiting_scheduled_flow"
@@ -290,7 +293,7 @@ async def _complete_scheduled_delivery_after_approval(
     session_state["_scheduled_payment_sent"] = True
 
     if prepay_pending and booking_id:
-        stash_prepay_payload(
+        await stash_and_persist_prepay_payload(
             session_state,
             booking_id,
             build_prepay_payload(
@@ -473,6 +476,16 @@ async def _submit_scheduled_delivery_for_approval(
             )
         except Exception as alert_err:
             logger.warning(f"[delivery] manager portal-failure alert failed: {alert_err}")
+        await send_whatsapp_message(
+            customer_phone,
+            "We couldn't submit your scheduled delivery for manager approval right now. "
+            "Please contact the restaurant directly, or reply *Home* to try again later."
+            + _HOME_HINT,
+            restaurant_id,
+        )
+        session_state["booking_step"] = "visit_complete"
+        clear_cart(session_state)
+        return {"status": "error", "reason": "portal_token_missing"}
 
     session_state["pending_order_text"] = order_text
     session_state["pending_cart"] = cart_snapshot
@@ -584,6 +597,9 @@ async def handle_delivery_flow(
     # ── awaiting_scheduled_flow (calendar picker only — no text time) ─────────
     elif booking_step == "awaiting_scheduled_flow":
         scheduled = parse_flow_datetime(message)
+        if scheduled is None and session_state.get("schedule_text_fallback"):
+            scheduled = await _parse_delivery_schedule(message)
+
         if scheduled is not None:
             if scheduled <= datetime.now():
                 await send_whatsapp_message(
@@ -653,7 +669,8 @@ async def handle_delivery_flow(
         await send_whatsapp_message(
             customer_phone,
             "⏳ Your scheduled delivery is with our manager for approval.\n\n"
-            "We'll message you as soon as it's confirmed — no payment is needed until then.",
+            "We'll message you as soon as it's confirmed — no payment is needed until then."
+            + _HOME_HINT,
             restaurant_id,
         )
         return {"status": "awaiting_scheduled_delivery_approval"}
@@ -672,6 +689,13 @@ async def handle_delivery_flow(
                 restaurant_id, customer_id, customer_name, customer_phone,
                 manager_phone, session_state,
             )
+        await send_whatsapp_message(
+            customer_phone,
+            "⏳ Your scheduled delivery is still awaiting manager approval.\n\n"
+            "We'll message you as soon as it's confirmed — no payment needed until then."
+            + _HOME_HINT,
+            restaurant_id,
+        )
         return {"status": "awaiting_scheduled_delivery_payment"}
 
     # ── awaiting_order ────────────────────────────────────────────────────────
@@ -771,7 +795,7 @@ async def handle_delivery_flow(
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
 
             if prepay_pending:
-                stash_prepay_payload(
+                await stash_and_persist_prepay_payload(
                     session_state,
                     booking_id,
                     build_prepay_payload(
@@ -907,4 +931,6 @@ async def handle_delivery_flow(
             )
             return {"status": "error"}
 
-    return {"status": "error"}
+    return await handle_unknown_booking_step(
+        customer_phone, restaurant_id, session_state, flow_name="delivery", booking_step=booking_step,
+    )

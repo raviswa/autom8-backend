@@ -111,6 +111,11 @@ def expire_session_if_stale(
     _prev_visits = session_state.get("visit_count", 0)
     _prev_last = session_state.get("last_order_summary", "")
     _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
+    _pending_pay = session_state.get("pending_prepay_fulfillment")
+    _booking_id = session_state.get("booking_id")
+    _payment_link = session_state.get("payment_link")
+    _order_summary = session_state.get("order_confirmed_summary")
+    _order_total = session_state.get("order_total")
     session_state.clear()
     if _prev_cid:
         session_state["customer_id"] = _prev_cid
@@ -123,7 +128,20 @@ def expire_session_if_stale(
         session_state["last_order_summary"] = strip_order_quantity(_prev_last)
     if _prev_svc:
         session_state["last_service_type"] = _prev_svc
-    session_state["booking_step"] = "ask_service"
+    if _pending_pay:
+        session_state["pending_prepay_fulfillment"] = _pending_pay
+    if _booking_id:
+        session_state["booking_id"] = _booking_id
+    if _payment_link:
+        session_state["payment_link"] = _payment_link
+    if _order_summary:
+        session_state["order_confirmed_summary"] = _order_summary
+    if _order_total is not None:
+        session_state["order_total"] = _order_total
+    if step == "awaiting_prepay":
+        session_state["booking_step"] = "awaiting_prepay"
+    else:
+        session_state["booking_step"] = "ask_service"
     touch_session_activity(session_state)
     return True
 
@@ -334,7 +352,7 @@ def is_reset_keyword(text: str) -> bool:
 _STEPS_ALLOWING_SHORT_REPLY: set[str] = {
     "ask_service","awaiting_service_selection","awaiting_reset_confirmation",
     "awaiting__confirmation","awaiting_quantity","awaiting_item_qty",
-    "awaiting_numbered_order","awaiting_payment","awaiting_special_notes",
+    "awaiting_numbered_order","awaiting_payment","awaiting_prepay","awaiting_special_notes",
     "awaiting_flow_datetime","awaiting_table_assignment",
     "awaiting_large_party_response","awaiting_manager_approval","visit_complete",
     "awaiting_order","awaiting_address","confirming_order","awaiting_cart_action",
@@ -652,9 +670,109 @@ async def offer_whatsapp_schedule_calendar(
         return await resend_fn()
 
     logger.warning(f"[calendar] Flow send failed for {customer_phone}")
-    await send_whatsapp_message(customer_phone, failure_message, restaurant_id)
+    session_state["schedule_text_fallback"] = True
+    await send_whatsapp_message(
+        customer_phone,
+        failure_message
+        + "\n\nYou can also type your preferred date and time "
+        "(e.g. *tomorrow 7:30 PM* or *18 Jun 7pm*).",
+        restaurant_id,
+    )
     session_state["booking_step"] = booking_step
     return {"status": booking_step}
+
+
+async def handle_unknown_booking_step(
+    customer_phone: str,
+    restaurant_id: str,
+    session_state: Dict[str, Any],
+    *,
+    flow_name: str,
+    booking_step: str | None = None,
+) -> Dict[str, Any]:
+    """User-visible recovery when a flow receives an unexpected booking_step."""
+    step = booking_step or session_state.get("booking_step", "")
+    logger.error(f"[{flow_name}] unhandled booking_step={step!r}")
+    await send_whatsapp_message(
+        customer_phone,
+        "Sorry, something went wrong with your booking. "
+        "Please reply *Home* to start again, or contact the restaurant for help."
+        + _HOME_HINT,
+        restaurant_id,
+    )
+    return {"status": "error", "message_sent": True}
+
+
+async def handle_awaiting_prepay(
+    customer_phone: str,
+    restaurant_id: str,
+    customer_name: str,
+    message: str,
+    session_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Keep prepay session alive — resend payment link instead of resetting."""
+    from tools.payment_tools import create_payment_link, is_placeholder_payment_link, build_payment_line
+
+    msg_lower = message.strip().lower()
+    if msg_lower in ("new order", "new", "order again"):
+        from agents.customer.conversation_helpers import safe_build_greeting
+        session_state["booking_step"] = "ask_service"
+        raw_greeting = await safe_build_greeting(
+            session_state.get("customer_id", ""), restaurant_id,
+        )
+        ret_greeting = build_smart_greeting(customer_name, raw_greeting, session_state)
+        await send_service_menu(customer_phone, restaurant_id, ret_greeting, session_state)
+        session_state["booking_step"] = "awaiting_service_selection"
+        return {"status": "awaiting_service_selection"}
+
+    booking_id = session_state.get("booking_id")
+    summary = session_state.get(
+        "order_confirmed_summary",
+        f"Order *#{session_state.get('token_number', '')}*",
+    )
+    total = float(session_state.get("order_total") or 0)
+    service_type = session_state.get("service_type") or session_state.get("last_service_type") or "takeaway"
+
+    payment_link = session_state.get("payment_link")
+    if (not payment_link or is_placeholder_payment_link(str(payment_link))) and booking_id and total >= 1:
+        try:
+            description = f"{str(service_type).replace('_', ' ').title()} order"
+            payment_link = await create_payment_link(
+                str(booking_id), total, customer_name, description,
+                customer_phone=customer_phone,
+            )
+            if not is_placeholder_payment_link(payment_link):
+                session_state["payment_link"] = payment_link
+        except Exception as e:
+            logger.warning(f"[awaiting_prepay] link regen failed for {booking_id}: {e}")
+
+    if payment_link and not is_placeholder_payment_link(str(payment_link)):
+        pay_line = f"💳 Pay here to confirm:\n{payment_link}"
+    else:
+        pay_line = await build_payment_line(
+            str(booking_id or ""), total, customer_name, customer_phone,
+            f"{service_type} order", session_state, service_type=service_type,
+        )
+
+    await _send_interactive(customer_phone, {
+        "interactive": {
+            "type": "button",
+            "body": {
+                "text": (
+                    f"⏳ *Awaiting payment*\n_{summary}_\n\n"
+                    f"{pay_line}\n\n"
+                    "_Your order will be sent to the kitchen after payment._"
+                ),
+            },
+            "footer": {"text": "Reply pay to resend link · Home for new order"},
+            "action": {"buttons": [
+                {"type": "reply", "reply": {"id": "PAY", "title": "💳 Resend link"}},
+                {"type": "reply", "reply": {"id": "NEW ORDER", "title": "🆕 New order"}},
+            ]},
+        }
+    }, restaurant_id)
+    touch_session_activity(session_state)
+    return {"status": "awaiting_prepay"}
 
 
 # ─────────────────────────────────────────────

@@ -268,16 +268,111 @@ async def verify_payment_link_callback(params: dict[str, str]) -> bool:
 
 
 async def _mark_paid_and_fulfill(booking_id: str, *, source: str) -> dict[str, Any]:
-    from tools.db_tools import update_booking_payment_status
+    from tools.db_tools import update_booking_payment_status, get_booking_with_customer
     from tools.prepay_fulfillment import fulfill_from_webhook
 
-    await update_booking_payment_status(booking_id, "paid")
+    booking = await get_booking_with_customer(booking_id)
+    if booking and booking.get("payment_status") == "paid" and booking.get("status") == "confirmed":
+        return {"ok": True, "booking_id": booking_id, "fulfilled": True, "source": source, "already_done": True}
+
     fulfilled = await fulfill_from_webhook(booking_id)
+    if not fulfilled:
+        logger.error(
+            f"[razorpay] Fulfillment failed for booking {booking_id} source={source} — "
+            "payment_status NOT updated"
+        )
+        return {
+            "ok": False,
+            "booking_id": booking_id,
+            "fulfilled": False,
+            "source": source,
+            "reason": "fulfillment_failed",
+        }
+
+    await update_booking_payment_status(booking_id, "paid")
     logger.info(
         f"[razorpay] Booking {booking_id} payment_status=paid "
         f"fulfilled={fulfilled} source={source}"
     )
     return {"ok": True, "booking_id": booking_id, "fulfilled": fulfilled, "source": source}
+
+
+async def _resolve_booking_from_payment_entity(entity: dict[str, Any]) -> str | None:
+    notes = entity.get("notes") or {}
+    booking_id = notes.get("booking_id")
+    if booking_id:
+        return str(booking_id)
+    link_id = entity.get("payment_link_id") or entity.get("id")
+    if not link_id:
+        return None
+    client = _get_client()
+    if not client:
+        return None
+    try:
+        plink = client.payment_link.fetch(link_id)
+        plink_notes = plink.get("notes") or {}
+        return plink_notes.get("booking_id")
+    except Exception as e:
+        logger.error(f"[razorpay] Failed to fetch payment link {link_id}: {e}")
+        return None
+
+
+async def notify_customer_payment_failure(
+    booking_id: str,
+    *,
+    reason: str = "failed",
+    regenerate_link: bool = True,
+) -> bool:
+    """Send WhatsApp notice when Razorpay prepay fails, expires, or is cancelled."""
+    from tools.db_tools import get_booking_with_customer
+    from tools.prepay_fulfillment import load_prepay_payload
+
+    booking = await get_booking_with_customer(booking_id)
+    if not booking:
+        logger.warning(f"[razorpay] notify_payment_failure — booking {booking_id} not found")
+        return False
+    if booking.get("payment_status") == "paid" or booking.get("status") == "confirmed":
+        return False
+
+    phone = booking.get("customer_phone")
+    restaurant_id = booking.get("restaurant_id")
+    customer_name = booking.get("customer_name") or "Guest"
+    if not phone or not restaurant_id:
+        return False
+
+    payload = await load_prepay_payload(restaurant_id, phone, booking_id)
+    total = float((payload or {}).get("total") or 0)
+    service_type = booking.get("service_type") or (payload or {}).get("service_type") or "order"
+
+    reason_text = {
+        "cancelled": "Your payment was cancelled.",
+        "expired": "Your payment link has expired.",
+        "failed": "Your payment could not be processed.",
+    }.get(reason, "Your payment was not completed.")
+
+    payment_line = ""
+    if regenerate_link and total >= 1:
+        try:
+            description = f"{service_type.replace('_', ' ').title()} — retry payment"
+            link = await create_payment_link(
+                booking_id, total, customer_name, description, customer_phone=phone,
+            )
+            if not is_placeholder_payment_link(link):
+                payment_line = f"\n\n💳 Tap to pay and confirm your order:\n{link}"
+        except Exception as e:
+            logger.warning(f"[razorpay] Could not regenerate link for {booking_id}: {e}")
+
+    from tools.whatsapp_tools import send_whatsapp_message
+
+    await send_whatsapp_message(
+        phone,
+        f"Hi {customer_name}! {reason_text}\n\n"
+        f"Your order is still on hold — complete payment to send it to the kitchen."
+        f"{payment_line}\n\n"
+        f"Reply *pay* anytime to get your payment link again.",
+        restaurant_id,
+    )
+    return True
 
 
 async def handle_payment_link_callback(query_params: dict[str, str]) -> dict[str, Any]:
@@ -286,6 +381,19 @@ async def handle_payment_link_callback(query_params: dict[str, str]) -> dict[str
     link_id = query_params.get("razorpay_payment_link_id", "")
 
     if status != "paid":
+        if status in ("cancelled", "failed", "expired"):
+            booking_id = None
+            client = _get_client()
+            if client and link_id:
+                try:
+                    plink = client.payment_link.fetch(link_id)
+                    booking_id = (plink.get("notes") or {}).get("booking_id")
+                except Exception:
+                    pass
+            if booking_id:
+                await notify_customer_payment_failure(
+                    str(booking_id), reason=status or "failed",
+                )
         return {"ok": False, "reason": "not_paid", "status": status}
 
     if not await verify_payment_link_callback(query_params):
@@ -316,7 +424,7 @@ async def handle_payment_link_callback(query_params: dict[str, str]) -> dict[str
 
 
 async def handle_payment_webhook(payload: dict[str, Any]) -> dict[str, Any]:
-    """Process Razorpay payment_link.paid events."""
+    """Process Razorpay payment_link and payment events."""
     event = payload.get("event", "")
     entity = payload.get("payload", {}).get("payment_link", {}).get("entity", {})
     if not entity and payload.get("payload", {}).get("payment", {}):
@@ -330,10 +438,27 @@ async def handle_payment_webhook(payload: dict[str, Any]) -> dict[str, Any]:
 
     if event == "payment_link.paid" and booking_id:
         try:
-            return await _mark_paid_and_fulfill(str(booking_id), source="webhook")
+            result = await _mark_paid_and_fulfill(str(booking_id), source="webhook")
+            if not result.get("fulfilled"):
+                return {"ok": False, **result}
+            return result
         except Exception as e:
             logger.error(f"[razorpay] Failed to update booking {booking_id}: {e}")
             return {"ok": False, "error": str(e)}
+
+    failure_events = {
+        "payment_link.cancelled": "cancelled",
+        "payment_link.expired": "expired",
+        "payment.failed": "failed",
+    }
+    if event in failure_events:
+        resolved_id = booking_id or await _resolve_booking_from_payment_entity(entity)
+        if resolved_id:
+            await notify_customer_payment_failure(
+                str(resolved_id), reason=failure_events[event],
+            )
+            return {"ok": True, "event": event, "handled": True, "booking_id": resolved_id}
+        return {"ok": True, "event": event, "handled": False, "reason": "booking_id_missing"}
 
     return {"ok": True, "event": event, "handled": False}
 

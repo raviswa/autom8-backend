@@ -1,5 +1,6 @@
 """Scheduler tools - APScheduler background jobs."""
 
+import asyncio
 from datetime import datetime, timedelta
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -125,6 +126,13 @@ async def start_scheduler():
         id="dispatch_deferred_scheduled_kds",
         name="Release scheduled orders to KDS before delivery slot",
     )
+
+    scheduler.add_job(
+        send_prepay_payment_reminders,
+        trigger=CronTrigger(minute="*/15"),  # Every 15 minutes
+        id="send_prepay_payment_reminders",
+        name="Remind customers with pending Razorpay prepay",
+    )
     
     scheduler.start()
     logger.info("APScheduler started with jobs")
@@ -229,6 +237,59 @@ async def dispatch_deferred_scheduled_kds():
         logger.info(f"[scheduled-kds] Dispatched {dispatched}/{len(due_rows)} deferred orders")
     except Exception as e:
         logger.error(f"Error in dispatch_deferred_scheduled_kds: {e}")
+
+
+async def send_prepay_payment_reminders():
+    """Nudge customers who have not completed Razorpay prepay."""
+    from tools.db_tools import (
+        get_pending_prepay_reminder_candidates,
+        increment_prepay_reminder_count,
+    )
+    from tools.payment_tools import create_payment_link, is_placeholder_payment_link
+
+    logger.info("Running send_prepay_payment_reminders job")
+    try:
+        candidates = await get_pending_prepay_reminder_candidates()
+        sent = 0
+        for row in candidates:
+            booking_id = row["booking_id"]
+            payload = row.get("payload") or {}
+            if isinstance(payload, str):
+                import json
+                payload = json.loads(payload)
+            total = float(payload.get("total") or 0)
+            service_type = row.get("service_type") or payload.get("service_type") or "order"
+            phone = row["customer_phone"]
+            name = row.get("customer_name") or "Guest"
+            restaurant_id = row["restaurant_id"]
+
+            pay_line = ""
+            if total >= 1:
+                try:
+                    link = await create_payment_link(
+                        booking_id, total, name,
+                        f"{service_type.replace('_', ' ').title()} — payment reminder",
+                        customer_phone=phone,
+                    )
+                    if not is_placeholder_payment_link(link):
+                        pay_line = f"\n\n💳 Pay here:\n{link}"
+                except Exception as link_err:
+                    logger.warning(f"[prepay-reminder] link failed for {booking_id}: {link_err}")
+
+            await send_whatsapp_message(
+                phone,
+                f"Hi {name}! 👋\n\n"
+                f"Your {service_type.replace('_', ' ')} order is still awaiting payment."
+                f"{pay_line}\n\n"
+                f"Reply *pay* on WhatsApp to get your link again.",
+                restaurant_id,
+            )
+            await increment_prepay_reminder_count(booking_id)
+            sent += 1
+
+        logger.info(f"[prepay-reminder] Sent {sent} payment reminders")
+    except Exception as e:
+        logger.error(f"Error in send_prepay_payment_reminders: {e}")
 
 
 async def detect_no_shows():

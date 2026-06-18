@@ -17,7 +17,7 @@ from tools.db_tools import get_next_token_number, create_booking, update_booking
 from tools.payment_tools import create_payment_link
 from tools.prepay_fulfillment import (
     build_prepay_payload,
-    stash_prepay_payload,
+    stash_and_persist_prepay_payload,
     PREPAY_PENDING_FOOTER,
     RESERVE_PREPAY_FOOTER,
 )
@@ -35,7 +35,9 @@ from agents.customer.booking_helpers import (
     now_display,
     is_placeholder_payment_link,
     parse_flow_datetime,
+    parse_booking_datetime,
     offer_whatsapp_schedule_calendar,
+    handle_unknown_booking_step,
 )
 from agents.customer.conversation_intelligence import is_affirmative as _is_affirmative
 from config.settings import settings
@@ -107,6 +109,8 @@ async def handle_reserve_table_flow(
     # ── awaiting_flow_datetime (calendar picker only — no text input) ─────────
     elif booking_step == "awaiting_flow_datetime":
         parsed_dt = parse_flow_datetime(message)
+        if parsed_dt is None and session_state.get("schedule_text_fallback"):
+            parsed_dt = parse_booking_datetime(message.strip())
 
         if parsed_dt is None:
             if not session_state.get("_schedule_flow_resend"):
@@ -270,7 +274,7 @@ async def handle_reserve_table_flow(
                 return {"status": "awaiting_payment", "booking_id": booking_id, "total": advance_amount}
 
             session_state["payment_link"] = payment_link
-            stash_prepay_payload(
+            await stash_and_persist_prepay_payload(
                 session_state,
                 booking_id,
                 build_prepay_payload(
@@ -316,4 +320,6 @@ async def handle_reserve_table_flow(
             )
             return {"status": "error"}
 
-    return {"status": "error"}
+    return await handle_unknown_booking_step(
+        customer_phone, restaurant_id, session_state, flow_name="reserve_table", booking_step=booking_step,
+    )

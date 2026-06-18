@@ -25,7 +25,7 @@ from tools.payment_tools import build_payment_line
 from tools.prepay_fulfillment import (
     prepay_fulfillment_required,
     build_prepay_payload,
-    stash_prepay_payload,
+    stash_and_persist_prepay_payload,
     PREPAY_PENDING_FOOTER,
 )
 from tools.whatsapp_tools import send_whatsapp_message, send_whatsapp_flow
@@ -63,6 +63,7 @@ from agents.customer.booking_helpers import (
     parse_booking_datetime,
     parse_flow_datetime,
     format_captain_pickup_line,
+    handle_unknown_booking_step,
 )
 from agents.customer.conversation_helpers import safe_build_order_suggestion
 from config.settings import settings
@@ -128,10 +129,12 @@ async def offer_takeaway_schedule(
             )
 
     logger.warning(f"[takeaway] schedule Flow unavailable for {customer_phone}")
+    session_state["schedule_text_fallback"] = True
     await send_whatsapp_message(
         customer_phone,
-        "We couldn't open the date picker. Please reply *Home* and choose *Takeaway 📅* again, "
-        "or contact the restaurant for help.",
+        "We couldn't open the date picker. You can type your preferred date and time "
+        "(e.g. *tomorrow 7:30 PM* or *18 Jun 7pm*).\n\n"
+        "Or reply *Home* and choose *Takeaway 📅* again.",
         restaurant_id,
     )
     session_state["booking_step"] = "awaiting_takeaway_scheduled_flow"
@@ -190,6 +193,9 @@ async def handle_takeaway_flow(
     # ── awaiting_takeaway_scheduled_flow (calendar picker only) ───────────────
     if booking_step == "awaiting_takeaway_scheduled_flow":
         scheduled = parse_flow_datetime(message)
+        if scheduled is None and session_state.get("schedule_text_fallback"):
+            scheduled = await _parse_takeaway_schedule(message)
+
         if scheduled is not None:
             if scheduled <= datetime.now():
                 await send_whatsapp_message(
@@ -290,7 +296,7 @@ async def handle_takeaway_flow(
             session_state["display_token"] = display_token
 
             if prepay_pending:
-                stash_prepay_payload(
+                await stash_and_persist_prepay_payload(
                     session_state,
                     booking_id,
                     build_prepay_payload(
@@ -469,4 +475,6 @@ async def handle_takeaway_flow(
             )
             return {"status": "error"}
 
-    return {"status": "error"}
+    return await handle_unknown_booking_step(
+        customer_phone, restaurant_id, session_state, flow_name="takeaway", booking_step=booking_step,
+    )

@@ -160,17 +160,32 @@ def _extract_message_body(message_obj: dict) -> str:
             raw = nfm.get("response_json", "{}")
             try:
                 data       = json.loads(raw)
-                date_str   = data.get("reservation_date", "")
-                time_str   = data.get("reservation_time", "")
+                date_str   = (
+                    data.get("reservation_date")
+                    or data.get("date")
+                    or data.get("delivery_date")
+                    or data.get("pickup_date")
+                    or ""
+                )
+                time_str   = (
+                    data.get("reservation_time")
+                    or data.get("time")
+                    or data.get("delivery_time")
+                    or data.get("pickup_time")
+                    or ""
+                )
                 # flow_token is inside response_json (set when the Flow was sent)
                 flow_token = data.get(
                     "flow_token",
                     message_obj.get("context", {}).get("id", "unknown"),
                 )
-                return f"FLOW:{flow_token}|date={date_str}|time={time_str}"
+                if date_str and time_str:
+                    return f"FLOW:{flow_token}|date={date_str}|time={time_str}"
+                logger.warning(f"nfm_reply missing date/time fields: {data}")
+                return "FLOW_PARSE_FAILED"
             except Exception as e:
                 logger.error(f"Failed to parse nfm_reply response_json: {e} | raw={raw}")
-                return ""
+                return "FLOW_PARSE_FAILED"
 
         # Any other interactive type we don't handle yet
         logger.info(f"Unhandled interactive type: {interactive_type!r}")
@@ -381,16 +396,42 @@ async def health_razorpay():
 async def payment_complete(request: Request):
     """Customer redirect after Razorpay payment link checkout."""
     params = dict(request.query_params)
-    if params.get("razorpay_payment_link_status") == "paid":
+    status = params.get("razorpay_payment_link_status", "")
+    result: dict = {}
+
+    if status == "paid":
         result = await handle_payment_link_callback(params)
         if not result.get("ok"):
             logger.warning(f"[razorpay] Callback not fulfilled: {result}")
-    return HTMLResponse(
-        "<h1>Thank you! 🙏</h1>"
-        "<p>Your payment was received. You can return to WhatsApp — "
-        "we'll confirm your order there shortly.</p>",
-        status_code=200,
-    )
+    elif status in ("cancelled", "failed", "expired"):
+        result = await handle_payment_link_callback(params)
+
+    if status == "paid" and result.get("fulfilled") is not False and result.get("ok") is not False:
+        html = (
+            "<h1>Thank you! 🙏</h1>"
+            "<p>Your payment was received. You can return to WhatsApp — "
+            "we'll confirm your order there shortly.</p>"
+        )
+    elif status == "paid":
+        html = (
+            "<h1>Payment received ✅</h1>"
+            "<p>We received your payment. If you don't get a WhatsApp confirmation "
+            "within a few minutes, please message us <em>pay</em> to retry confirmation.</p>"
+        )
+    elif status in ("cancelled", "failed", "expired"):
+        html = (
+            "<h1>Payment not completed</h1>"
+            "<p>Your payment was not completed. Return to WhatsApp — "
+            "we've sent you a link to try again.</p>"
+        )
+    else:
+        html = (
+            "<h1>Payment status unknown</h1>"
+            "<p>Return to WhatsApp and reply <em>pay</em> to get your payment link, "
+            "or type <em>Home</em> to start over.</p>"
+        )
+
+    return HTMLResponse(html, status_code=200)
 
 
 @app.get("/webhook/razorpay")
@@ -418,7 +459,8 @@ async def razorpay_webhook(request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
     result = await handle_payment_webhook(payload)
-    return JSONResponse(status_code=200, content=result)
+    status_code = 200 if result.get("ok", True) else 500
+    return JSONResponse(status_code=status_code, content=result)
 
 
 @app.post("/webhook/meta")

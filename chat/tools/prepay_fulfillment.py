@@ -16,6 +16,9 @@ from tools.db_tools import (
     mark_booking_kds_sent,
     patch_walk_in_token_meta_for_booking,
     patch_walk_in_token_meta,
+    save_prepay_fulfillment_payload,
+    load_prepay_fulfillment_payload,
+    clear_prepay_fulfillment_payload,
 )
 from tools.scheduled_kds import (
     is_deferred_scheduled_order,
@@ -116,22 +119,63 @@ def stash_prepay_payload(
     session_state["_prepay_blocks_kitchen"] = True
 
 
+async def persist_prepay_payload(booking_id: str, payload: dict[str, Any]) -> None:
+    """Write payload to session stash and booking row."""
+    await save_prepay_fulfillment_payload(booking_id, payload)
+
+
+async def stash_and_persist_prepay_payload(
+    session_state: dict[str, Any],
+    booking_id: str,
+    payload: dict[str, Any],
+) -> None:
+    stash_prepay_payload(session_state, booking_id, payload)
+    await persist_prepay_payload(booking_id, payload)
+
+
+async def load_prepay_payload(
+    restaurant_id: str,
+    customer_phone: str,
+    booking_id: str,
+) -> dict[str, Any] | None:
+    """Load prepay payload from session or booking row (does not clear)."""
+    state = await get_session_state(restaurant_id, customer_phone)
+    pending = state.get("pending_prepay_fulfillment") or {}
+    payload = pending.get(str(booking_id))
+    if payload:
+        return payload
+    return await load_prepay_fulfillment_payload(booking_id)
+
+
+async def clear_prepay_payload(
+    restaurant_id: str,
+    customer_phone: str,
+    booking_id: str,
+) -> None:
+    """Remove prepay payload from session and booking row after successful fulfillment."""
+    state = await get_session_state(restaurant_id, customer_phone)
+    pending = dict(state.get("pending_prepay_fulfillment") or {})
+    pending.pop(str(booking_id), None)
+    state["pending_prepay_fulfillment"] = pending
+    state["_payment_received"] = True
+    state.pop("_prepay_blocks_kitchen", None)
+    await save_session_state(restaurant_id, customer_phone, state)
+    await clear_prepay_fulfillment_payload(booking_id)
+
+
 async def load_and_clear_prepay_payload(
     restaurant_id: str,
     customer_phone: str,
     booking_id: str,
 ) -> dict[str, Any] | None:
-    state = await get_session_state(restaurant_id, customer_phone)
-    pending = dict(state.get("pending_prepay_fulfillment") or {})
-    payload = pending.pop(str(booking_id), None)
+    """Legacy alias — prefer load_prepay_payload + clear_prepay_payload after success."""
+    payload = await load_prepay_payload(restaurant_id, customer_phone, booking_id)
     if payload is None:
         return None
-    state["pending_prepay_fulfillment"] = pending
-    state["_payment_received"] = True
-    state.pop("_prepay_blocks_kitchen", None)
     if payload.get("service_type") == "dine_in":
+        state = await get_session_state(restaurant_id, customer_phone)
         restore_dine_in_kitchen_from_prepay(state, payload)
-    await save_session_state(restaurant_id, customer_phone, state)
+        await save_session_state(restaurant_id, customer_phone, state)
     return payload
 
 
@@ -665,7 +709,7 @@ async def fulfill_from_webhook(booking_id: str) -> bool:
         logger.info(f"[prepay-fulfill] Booking {booking_id} already confirmed — skip")
         return True
 
-    payload = await load_and_clear_prepay_payload(
+    payload = await load_prepay_payload(
         booking["restaurant_id"],
         booking["customer_phone"],
         booking_id,
@@ -677,4 +721,16 @@ async def fulfill_from_webhook(booking_id: str) -> bool:
         )
         return False
 
-    return await fulfill_after_payment(payload)
+    if payload.get("service_type") == "dine_in":
+        state = await get_session_state(booking["restaurant_id"], booking["customer_phone"])
+        restore_dine_in_kitchen_from_prepay(state, payload)
+        await save_session_state(booking["restaurant_id"], booking["customer_phone"], state)
+
+    success = await fulfill_after_payment(payload)
+    if success:
+        await clear_prepay_payload(
+            booking["restaurant_id"],
+            booking["customer_phone"],
+            booking_id,
+        )
+    return success

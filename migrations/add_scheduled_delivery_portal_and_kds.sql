@@ -1,6 +1,6 @@
 -- Scheduled delivery portal token type + deferred KDS lead time.
 -- Run once in Supabase SQL editor.
-
+-- Also run: add_prepay_fulfillment_payload.sql (Razorpay prepay fulfillment persistence).
 -- Allow walk_in_tokens.type = 'scheduled_delivery' (enum or text check).
 DO $$
 DECLARE

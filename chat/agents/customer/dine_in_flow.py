@@ -28,7 +28,7 @@ from tools.payment_tools import build_payment_line
 from tools.prepay_fulfillment import (
     prepay_fulfillment_required,
     build_prepay_payload,
-    stash_prepay_payload,
+    stash_and_persist_prepay_payload,
     kitchen_blocked_pending_payment,
     PREPAY_PENDING_FOOTER,
 )
@@ -73,6 +73,7 @@ from agents.customer.booking_helpers import (
     status_after_booking_menu,
     start_special_notes_timer,
     stop_special_notes_timer,
+    handle_unknown_booking_step,
 )
 from agents.customer.conversation_helpers import safe_build_order_suggestion
 
@@ -520,7 +521,7 @@ async def _confirm_dine_in_order(
     await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
 
     if prepay_pending:
-        stash_prepay_payload(
+        await stash_and_persist_prepay_payload(
             session_state,
             booking_id,
             build_prepay_payload(
@@ -639,6 +640,7 @@ async def handle_dine_in_flow(
 ) -> Dict[str, Any]:
 
     booking_step = session_state.get("booking_step")
+    msg_lower = message.strip().lower()
 
     # ── awaiting_party_size ───────────────────────────────────────────────────
     if booking_step == "awaiting_party_size":
@@ -843,6 +845,16 @@ async def handle_dine_in_flow(
 
     # ── awaiting_manager_approval ─────────────────────────────────────────────
     elif booking_step == "awaiting_manager_approval":
+        if msg_lower in ("cancel", "cancel request", "cancel order"):
+            session_state["booking_step"] = "visit_complete"
+            await send_whatsapp_message(
+                customer_phone,
+                "Your table request has been cancelled. Reply *Home* anytime to start a new booking."
+                + _HOME_HINT,
+                restaurant_id,
+            )
+            return {"status": "visit_complete"}
+
         if await recover_session_from_walk_in_token(restaurant_id, customer_phone, session_state):
             tables = session_state.get("assigned_tables") or [session_state.get("table_number")]
             tables_txt = ", ".join(str(t) for t in tables if t)
@@ -868,13 +880,24 @@ async def handle_dine_in_flow(
             customer_phone,
             "⏳ We're still waiting for manager confirmation on your table arrangement. "
             "Please hold on — we'll notify you shortly! 😊\n\n"
-            "If it's urgent, please speak to our staff directly.",
+            "If it's urgent, please speak to our staff directly."
+            + _HOME_HINT,
             restaurant_id,
         )
         return {"status": "awaiting_manager_approval"}
 
     # ── awaiting_table_assignment ─────────────────────────────────────────────
     elif booking_step == "awaiting_table_assignment":
+        if msg_lower in ("cancel", "cancel request", "cancel order"):
+            session_state["booking_step"] = "visit_complete"
+            await send_whatsapp_message(
+                customer_phone,
+                "Your table request has been cancelled. Reply *Home* anytime to start a new booking."
+                + _HOME_HINT,
+                restaurant_id,
+            )
+            return {"status": "visit_complete"}
+
         token_ref = session_state.get("token_number") or session_state.get("display_token")
         if not token_ref or str(token_ref).startswith("#"):
             party_size = session_state.get("party_size") or 1
@@ -914,7 +937,8 @@ async def handle_dine_in_flow(
                 customer_phone,
                 "⏳ We're still assigning your table. You'll receive a WhatsApp message "
                 "with your table number shortly. If you've been waiting more than 5 minutes, "
-                "please speak to our staff directly. 😊",
+                "please speak to our staff directly. 😊"
+                + _HOME_HINT,
                 restaurant_id,
             )
             return {"status": "awaiting_table_assignment"}
@@ -1049,4 +1073,6 @@ async def handle_dine_in_flow(
         )
         return {"status": "visit_complete"}
 
-    return {"status": "error"}
+    return await handle_unknown_booking_step(
+        customer_phone, restaurant_id, session_state, flow_name="dine_in", booking_step=booking_step,
+    )

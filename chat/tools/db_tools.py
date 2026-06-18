@@ -870,6 +870,142 @@ async def update_booking_payment_status(booking_id: str, payment_status: str) ->
         return {"id": str(booking.id), "payment_status": booking.payment_status}
 
 
+async def save_prepay_fulfillment_payload(booking_id: str, payload: dict[str, Any]) -> None:
+    """Persist prepay fulfillment payload on the booking row (survives session loss)."""
+    if AsyncSessionLocal is None:
+        return
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text("""
+                    UPDATE bookings
+                    SET prepay_fulfillment_payload = CAST(:payload AS jsonb)
+                    WHERE id = CAST(:bid AS uuid)
+                """),
+                {"bid": booking_id, "payload": json.dumps(payload)},
+            )
+            await session.commit()
+    except Exception as e:
+        logger.warning(f"[prepay] save_prepay_fulfillment_payload failed for {booking_id}: {e}")
+
+
+async def load_prepay_fulfillment_payload(booking_id: str) -> dict[str, Any] | None:
+    """Load persisted prepay payload from booking row."""
+    if AsyncSessionLocal is None:
+        return None
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    SELECT prepay_fulfillment_payload
+                    FROM bookings
+                    WHERE id = CAST(:bid AS uuid)
+                """),
+                {"bid": booking_id},
+            )
+            row = result.fetchone()
+            if not row or not row[0]:
+                return None
+            data = row[0]
+            return dict(data) if isinstance(data, dict) else json.loads(data)
+    except Exception as e:
+        logger.warning(f"[prepay] load_prepay_fulfillment_payload failed for {booking_id}: {e}")
+        return None
+
+
+async def clear_prepay_fulfillment_payload(booking_id: str) -> None:
+    """Remove persisted prepay payload after successful fulfillment."""
+    if AsyncSessionLocal is None:
+        return
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text("""
+                    UPDATE bookings
+                    SET prepay_fulfillment_payload = NULL
+                    WHERE id = CAST(:bid AS uuid)
+                """),
+                {"bid": booking_id},
+            )
+            await session.commit()
+    except Exception as e:
+        logger.warning(f"[prepay] clear_prepay_fulfillment_payload failed for {booking_id}: {e}")
+
+
+async def get_pending_prepay_reminder_candidates(
+    min_age_minutes: int = 15,
+    max_age_hours: int = 24,
+    max_reminders: int = 3,
+) -> list[dict[str, Any]]:
+    """Bookings awaiting Razorpay prepay that may need a WhatsApp payment reminder."""
+    if AsyncSessionLocal is None:
+        return []
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    SELECT
+                      b.id::text AS booking_id,
+                      b.restaurant_id::text AS restaurant_id,
+                      b.service_type,
+                      b.token_number,
+                      b.prepay_fulfillment_payload AS payload,
+                      c.phone AS customer_phone,
+                      c.name AS customer_name
+                    FROM bookings b
+                    JOIN customers c ON c.id = b.customer_id
+                    JOIN restaurants r ON r.id = b.restaurant_id
+                    WHERE b.payment_status = 'pending'
+                      AND b.status = 'pending'
+                      AND COALESCE(r.payment_mode, 'prepay') = 'prepay'
+                      AND b.prepay_fulfillment_payload IS NOT NULL
+                      AND b.created_at < NOW() - (:min_age || ' minutes')::interval
+                      AND b.created_at > NOW() - (:max_age || ' hours')::interval
+                      AND COALESCE(
+                            (b.prepay_fulfillment_payload->>'reminder_count')::int, 0
+                          ) < :max_reminders
+                    ORDER BY b.created_at ASC
+                    LIMIT 30
+                """),
+                {
+                    "min_age": str(min_age_minutes),
+                    "max_age": str(max_age_hours),
+                    "max_reminders": max_reminders,
+                },
+            )
+            rows = result.mappings().all()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        logger.warning(f"[prepay] get_pending_prepay_reminder_candidates failed: {e}")
+        return []
+
+
+async def increment_prepay_reminder_count(booking_id: str) -> None:
+    """Bump reminder_count inside prepay_fulfillment_payload."""
+    if AsyncSessionLocal is None:
+        return
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text("""
+                    UPDATE bookings
+                    SET prepay_fulfillment_payload = jsonb_set(
+                      COALESCE(prepay_fulfillment_payload, '{}'::jsonb),
+                      '{reminder_count}',
+                      to_jsonb(
+                        COALESCE((prepay_fulfillment_payload->>'reminder_count')::int, 0) + 1
+                      ),
+                      true
+                    )
+                    WHERE id = CAST(:bid AS uuid)
+                """),
+                {"bid": booking_id},
+            )
+            await session.commit()
+    except Exception as e:
+        logger.warning(f"[prepay] increment_prepay_reminder_count failed for {booking_id}: {e}")
+
+
 async def mark_booking_kds_sent(booking_id: str) -> None:
     """Record that this booking was pushed to KDS."""
     if AsyncSessionLocal is None:

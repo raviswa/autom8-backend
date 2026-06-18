@@ -86,6 +86,7 @@ from agents.customer.booking_helpers import (
     do_reset,
     expire_session_if_stale,
     touch_session_activity,
+    handle_awaiting_prepay,
     _DIRECT_RESET_KEYWORDS,
     _FULL_RESET_KEYWORDS,
 )
@@ -129,8 +130,25 @@ async def handle_booking_flow(
 
     msg_lower = message.strip().lower()
 
-    # ── visit_complete / awaiting_prepay: treat new message as fresh visit ───
-    if current_step in ("visit_complete", "awaiting_prepay", "awaiting_payment"):
+    if message.strip() == "FLOW_PARSE_FAILED":
+        await send_whatsapp_message(
+            customer_phone,
+            "We couldn't read your calendar selection. Please tap *Select Date & Time* again, "
+            "or type your preferred date and time (e.g. *tomorrow 7pm*)."
+            + _HOME_HINT,
+            restaurant_id,
+        )
+        session_state["schedule_text_fallback"] = True
+        touch_session_activity(session_state)
+        return {"status": session_state.get("booking_step", "awaiting_service_selection")}
+    if current_step == "awaiting_prepay":
+        touch_session_activity(session_state)
+        return await handle_awaiting_prepay(
+            customer_phone, restaurant_id, customer_name, message, session_state,
+        )
+
+    # ── visit_complete / awaiting_payment: treat new message as fresh visit ───
+    if current_step in ("visit_complete", "awaiting_payment"):
         if is_feedback_reply(message) or is_feedback_aspect_reply(message):
             await send_whatsapp_message(
                 customer_phone,
