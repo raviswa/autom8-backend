@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import logging
+import re
 from typing import Any
 
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+_PLACEHOLDER_URL = "https://payment-placeholder.com"
 
 try:
     import razorpay
@@ -38,18 +40,32 @@ def razorpay_status_message() -> str:
     return f"enabled_{mode}"
 
 
-# Razorpay client — created when keys are present
-razorpay_client = None
-if razorpay_configured():
-    razorpay_client = razorpay.Client(
+def is_placeholder_payment_link(link: str) -> bool:
+    if not link:
+        return True
+    return "placeholder" in link.lower() or link == _PLACEHOLDER_URL
+
+
+def _get_client():
+    """Fresh client per call — picks up Railway env vars after redeploy."""
+    if not razorpay_configured():
+        return None
+    return razorpay.Client(
         auth=(settings.razorpay_key_id, settings.razorpay_key_secret)
     )
-    logger.info(f"[razorpay] Client ready ({razorpay_status_message()})")
-elif RAZORPAY_AVAILABLE:
-    logger.warning(
-        "[razorpay] RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET not set — "
-        "payment links will use placeholder URLs"
-    )
+
+
+def _format_contact(phone: str | None) -> str | None:
+    if not phone:
+        return None
+    digits = re.sub(r"\D", "", str(phone))
+    if len(digits) == 10:
+        return f"+91{digits}"
+    if len(digits) == 12 and digits.startswith("91"):
+        return f"+{digits}"
+    if len(digits) >= 10:
+        return f"+{digits}"
+    return None
 
 
 def _callback_url() -> str:
@@ -58,27 +74,45 @@ def _callback_url() -> str:
     return f"{settings.chat_public_url.rstrip('/')}/payment/complete"
 
 
+def wants_online_payment(session_state: dict[str, Any] | None) -> bool:
+    """Restaurant prepay mode — online payment link expected."""
+    mode = (session_state or {}).get("payment_mode", "prepay")
+    return str(mode).strip().lower() != "postpay"
+
+
 async def create_payment_link(
-    booking_id: str, amount: float, customer_name: str, description: str
+    booking_id: str,
+    amount: float,
+    customer_name: str,
+    description: str,
+    *,
+    customer_phone: str | None = None,
 ) -> str:
     """Create Razorpay payment link and return the short URL."""
-    if not razorpay_configured() or not razorpay_client:
+    client = _get_client()
+    if not client:
+        reason = razorpay_status_message()
+        logger.error(f"[razorpay] Cannot create link — status={reason}")
         if settings.environment == "production":
-            raise RuntimeError("Razorpay is not configured in production")
-        logger.warning("[razorpay] Not configured — returning placeholder URL")
-        return "https://payment-placeholder.com"
+            raise RuntimeError(f"Razorpay not configured ({reason})")
+        return _PLACEHOLDER_URL
 
     try:
         amount_paise = int(round(amount * 100))
         if amount_paise < 100:
             raise ValueError(f"Amount too small for Razorpay: ₹{amount}")
 
+        contact = _format_contact(customer_phone)
+        customer: dict[str, str] = {"name": (customer_name or "Guest")[:120]}
+        if contact:
+            customer["contact"] = contact
+
         payload: dict[str, Any] = {
             "amount": amount_paise,
             "currency": "INR",
             "accept_partial": False,
             "description": description[:255],
-            "customer": {"name": customer_name[:120]},
+            "customer": customer,
             "notify": {"sms": False, "email": False},
             "reminder_enable": True,
             "notes": {
@@ -89,9 +123,11 @@ async def create_payment_link(
             "callback_method": "get",
         }
 
-        response = razorpay_client.payment_link.create(data=payload)
+        response = client.payment_link.create(data=payload)
         link_id = response.get("id", "")
         short_url = response.get("short_url") or response.get("url", "")
+        if not short_url:
+            raise RuntimeError(f"Razorpay returned no URL: {response}")
         logger.info(f"[razorpay] Payment link created: {link_id} for booking {booking_id}")
         return short_url
 
@@ -100,14 +136,49 @@ async def create_payment_link(
         raise
 
 
+async def build_payment_line(
+    booking_id: str,
+    amount: float,
+    customer_name: str,
+    customer_phone: str,
+    description: str,
+    session_state: dict[str, Any],
+    *,
+    counter_fallback: str = "💳 Payment can be made at the counter.",
+    delivery_fallback: str = "💳 Payment can be made on delivery.",
+    service_type: str = "takeaway",
+) -> str:
+    """Return WhatsApp payment line — Razorpay link when prepay + configured."""
+    if not wants_online_payment(session_state):
+        return counter_fallback if service_type != "delivery" else delivery_fallback
+
+    try:
+        link = await create_payment_link(
+            booking_id, amount, customer_name, description,
+            customer_phone=customer_phone,
+        )
+        if is_placeholder_payment_link(link):
+            logger.warning(
+                f"[razorpay] Placeholder link for booking {booking_id} "
+                f"(status={razorpay_status_message()})"
+            )
+            return counter_fallback if service_type != "delivery" else delivery_fallback
+        session_state["payment_link"] = link
+        return f"💳 Pay here to confirm your order:\n{link}"
+    except Exception as e:
+        logger.warning(f"[payment] build_payment_line failed for {booking_id}: {e}")
+        return counter_fallback if service_type != "delivery" else delivery_fallback
+
+
 async def verify_payment(razorpay_order_id: str) -> bool:
     """Check if a Razorpay order is paid."""
-    if not razorpay_configured() or not razorpay_client:
+    client = _get_client()
+    if not client:
         logger.warning("[razorpay] Not configured — skipping payment verification")
         return False
 
     try:
-        order = razorpay_client.order.fetch(razorpay_order_id)
+        order = client.order.fetch(razorpay_order_id)
         if order.get("status") == "paid":
             logger.info(f"[razorpay] Payment verified for order {razorpay_order_id}")
             return True
@@ -120,19 +191,20 @@ async def verify_payment(razorpay_order_id: str) -> bool:
 
 async def initiate_refund(razorpay_order_id: str, amount: float) -> bool:
     """Initiate refund for a cancelled reservation advance."""
-    if not razorpay_configured() or not razorpay_client:
+    client = _get_client()
+    if not client:
         logger.warning("[razorpay] Not configured — refund not processed")
         return False
 
     try:
         amount_paise = int(round(amount * 100))
-        payments = razorpay_client.order.payments(razorpay_order_id)
+        payments = client.order.payments(razorpay_order_id)
         if not payments.get("items"):
             logger.warning(f"[razorpay] No payments found for order {razorpay_order_id}")
             return False
 
         payment_id = payments["items"][0]["id"]
-        refund_response = razorpay_client.payment.refund(
+        refund_response = client.payment.refund(
             payment_id,
             data={
                 "amount": amount_paise,
@@ -153,8 +225,9 @@ def _webhook_signing_secret() -> str | None:
 
 async def verify_webhook_signature(body: str, signature: str) -> bool:
     """Verify Razorpay webhook X-Razorpay-Signature header."""
+    client = _get_client()
     secret = _webhook_signing_secret()
-    if not razorpay_configured() or not razorpay_client or not secret:
+    if not client or not secret:
         if settings.environment == "production":
             logger.error("[razorpay] Webhook received but signing secret is not configured")
             return False
@@ -162,7 +235,7 @@ async def verify_webhook_signature(body: str, signature: str) -> bool:
         return True
 
     try:
-        return razorpay_client.utility.verify_webhook_signature(
+        return client.utility.verify_webhook_signature(
             body=body,
             signature=signature,
             secret=secret,
@@ -173,10 +246,7 @@ async def verify_webhook_signature(body: str, signature: str) -> bool:
 
 
 async def handle_payment_webhook(payload: dict[str, Any]) -> dict[str, Any]:
-    """
-    Process Razorpay payment_link.paid (and related) events.
-    Updates booking status when notes.booking_id is present.
-    """
+    """Process Razorpay payment_link.paid events."""
     event = payload.get("event", "")
     entity = payload.get("payload", {}).get("payment_link", {}).get("entity", {})
     if not entity and payload.get("payload", {}).get("payment", {}):
@@ -190,12 +260,22 @@ async def handle_payment_webhook(payload: dict[str, Any]) -> dict[str, Any]:
 
     if event == "payment_link.paid" and booking_id:
         try:
-            from tools.db_tools import update_booking_status
-            await update_booking_status(str(booking_id), "paid")
-            logger.info(f"[razorpay] Booking {booking_id} marked paid")
+            from tools.db_tools import update_booking_payment_status
+            await update_booking_payment_status(str(booking_id), "paid")
+            logger.info(f"[razorpay] Booking {booking_id} payment_status=paid")
             return {"ok": True, "booking_id": booking_id, "event": event}
         except Exception as e:
             logger.error(f"[razorpay] Failed to update booking {booking_id}: {e}")
             return {"ok": False, "error": str(e)}
 
     return {"ok": True, "event": event, "handled": False}
+
+
+# Startup log
+if razorpay_configured():
+    logger.info(f"[razorpay] Ready ({razorpay_status_message()})")
+elif RAZORPAY_AVAILABLE:
+    logger.warning(
+        "[razorpay] RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET not set — "
+        "orders will show counter payment"
+    )

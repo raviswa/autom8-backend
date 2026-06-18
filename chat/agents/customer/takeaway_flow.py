@@ -21,7 +21,7 @@ from typing import Dict, Any
 import aiohttp
 
 from tools.db_tools import get_next_token_number, create_booking, update_booking_status
-from tools.payment_tools import create_payment_link
+from tools.payment_tools import build_payment_line
 from tools.whatsapp_tools import send_whatsapp_message, send_whatsapp_flow
 from tools.cart_tools import cart_to_order_text, clear_cart
 from tools.order_pricing import (
@@ -52,7 +52,6 @@ from tools.booking_mechanisms import (
 from agents.customer.booking_helpers import (
     _HOME_HINT,
     now_display,
-    is_placeholder_payment_link,
     send_catalog_with_fallback,
     strip_order_quantity,
     parse_booking_datetime,
@@ -73,7 +72,7 @@ async def offer_takeaway_schedule(
     *,
     kitchen_closed: bool = True,
 ) -> Dict[str, Any]:
-    """Primary: WhatsApp Flow calendar. Text entry only if the Flow cannot be sent."""
+    """WhatsApp Flow calendar only — platform rule: no typed date/time input."""
     from tools.kitchen_hours import is_kitchen_open, next_open_label
 
     closed = kitchen_closed or not is_kitchen_open()
@@ -274,14 +273,10 @@ async def handle_takeaway_flow(
             booking_id = booking["id"]
             session_state["booking_id"] = booking_id
 
-            try:
-                payment_link = await create_payment_link(booking_id, total, customer_name, f"Takeaway {token}")
-            except Exception as _pl:
-                logger.warning(f"[payment] create_payment_link failed (non-fatal): {_pl}")
-                payment_link = "placeholder"
-            payment_line = ("💳 Payment can be made at the counter."
-                            if is_placeholder_payment_link(payment_link)
-                            else f"Pay here: {payment_link}")
+            payment_line = await build_payment_line(
+                booking_id, total, customer_name, customer_phone,
+                f"Takeaway {token}", session_state, service_type="takeaway",
+            )
 
             order_text_display = cart_to_order_text(cart) if cart else order_text
 

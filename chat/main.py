@@ -30,7 +30,11 @@ from tools.db_tools import (
 from tools.whatsapp_tools import parse_incoming, send_whatsapp_message
 from agents.customer.booking_helpers import touch_session_activity, is_reset_keyword
 from tools.feedback_bridge import try_handle_feedback_via_api
-from tools.payment_tools import verify_webhook_signature, handle_payment_webhook, razorpay_status_message
+from tools.payment_tools import (
+    verify_webhook_signature,
+    handle_payment_webhook,
+    razorpay_status_message,
+)
 from tools.auto_reply_filter import is_whatsapp_auto_reply
 from tools.booking_mechanisms import (
     is_catalog_order,
@@ -361,7 +365,10 @@ async def _process_meta_payload(payload: dict):
         logger.error(f"Webhook processing failed: {e}", exc_info=True)
 
 
-@app.get("/payment/complete")
+@app.get("/health/razorpay")
+async def health_razorpay():
+    """Diagnostic — confirms keys loaded (no secrets exposed)."""
+    return JSONResponse({"status": razorpay_status_message()})
 async def payment_complete():
     """Customer redirect after Razorpay payment link checkout."""
     return HTMLResponse(

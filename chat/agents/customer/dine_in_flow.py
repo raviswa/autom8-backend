@@ -24,7 +24,7 @@ from tools.db_tools import (
     save_session_state,
     customer_lock,
 )
-from tools.payment_tools import create_payment_link
+from tools.payment_tools import build_payment_line
 from tools.restaurant_config import get_manager_phone
 from tools.whatsapp_tools import send_whatsapp_message
 from tools.cart_tools import (
@@ -444,18 +444,10 @@ async def _confirm_dine_in_order(
     booking_id = booking["id"]
     session_state["booking_id"] = booking_id
 
-    try:
-        payment_link = await create_payment_link(
-            booking_id, total, customer_name,
-            f"Dine-in {token} at table {session_state.get('table_number')}",
-        )
-    except Exception as _pl:
-        logger.warning(f"[payment] create_payment_link failed (non-fatal): {_pl}")
-        payment_link = "placeholder"
-    payment_line = (
-        "💳 Payment can be made at the counter."
-        if is_placeholder_payment_link(payment_link)
-        else f"Pay here: {payment_link}"
+    payment_line = await build_payment_line(
+        booking_id, total, customer_name, customer_phone,
+        f"Dine-in {token} at table {session_state.get('table_number')}",
+        session_state, service_type="dine_in",
     )
 
     confirmation = (

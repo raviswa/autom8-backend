@@ -3,8 +3,8 @@ agents/customer/delivery_flow.py
 ──────────────────────────────────
 Delivery booking flow — immediate and scheduled delivery.
 
-Scheduled delivery: calendar Flow (primary), text fallback, manager approval
-before payment/KDS when scheduled_at is set.
+Scheduled delivery: WhatsApp Flow calendar only (no typed date/time).
+Manager approval before payment/KDS when scheduled_at is set.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from tools.db_tools import (
     update_booking_status,
     get_scheduled_delivery_token,
 )
-from tools.payment_tools import create_payment_link
+from tools.payment_tools import build_payment_line
 from tools.whatsapp_tools import send_whatsapp_message, send_location_request, send_whatsapp_flow
 from tools.cart_tools import cart_to_order_text, clear_cart
 from tools.order_pricing import (
@@ -53,7 +53,6 @@ from tools.booking_mechanisms import (
 from agents.customer.booking_helpers import (
     _HOME_HINT,
     now_display,
-    is_placeholder_payment_link,
     send_catalog_with_fallback,
     strip_order_quantity,
     parse_booking_datetime,
@@ -79,7 +78,7 @@ async def offer_delivery_schedule(
     *,
     kitchen_closed: bool = True,
 ) -> Dict[str, Any]:
-    """Primary: WhatsApp Flow calendar. Text entry only if the Flow cannot be sent."""
+    """WhatsApp Flow calendar only — platform rule: no typed date/time input."""
     from tools.kitchen_hours import is_kitchen_open, next_open_label
 
     closed = kitchen_closed or not is_kitchen_open()
@@ -253,16 +252,10 @@ async def _complete_scheduled_delivery_after_approval(
     booking_id = session_state.get("booking_id")
     cart_snapshot = dict(cart)
 
-    payment_line = "💳 Payment can be made on delivery."
-    if booking_id:
-        try:
-            payment_link = await create_payment_link(
-                booking_id, total, customer_name, f"Scheduled delivery {token}",
-            )
-            if not is_placeholder_payment_link(payment_link):
-                payment_line = f"Please complete payment to confirm your order:\n{payment_link}"
-        except Exception as _pl:
-            logger.warning(f"[payment] scheduled delivery link failed (non-fatal): {_pl}")
+    payment_line = await build_payment_line(
+        booking_id or "", total, customer_name, customer_phone,
+        f"Scheduled delivery {token}", session_state, service_type="delivery",
+    ) if booking_id else "💳 Payment can be made on delivery."
 
     confirmation = (
         f"Your scheduled delivery is confirmed! 🎉\n────────────────────\n"
@@ -673,16 +666,10 @@ async def handle_delivery_flow(
                     booking_id=booking_id,
                 )
 
-            try:
-                payment_link = await create_payment_link(
-                    booking_id, total, customer_name, f"Delivery {token}"
-                )
-            except Exception as _pl:
-                logger.warning(f"[payment] create_payment_link failed (non-fatal): {_pl}")
-                payment_link = "placeholder"
-            payment_line = ("💳 Payment can be made on delivery."
-                            if is_placeholder_payment_link(payment_link)
-                            else f"Pay here: {payment_link}")
+            payment_line = await build_payment_line(
+                booking_id, total, customer_name, customer_phone,
+                f"Delivery {token}", session_state, service_type="delivery",
+            )
 
             confirmation = (
                 f"Your order has been placed! 🎉\n────────────────────\n"
