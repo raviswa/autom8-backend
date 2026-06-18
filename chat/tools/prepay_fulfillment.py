@@ -23,6 +23,7 @@ from tools.scheduled_kds import (
 )
 from tools.payment_tools import wants_online_payment, is_placeholder_payment_link
 from tools.whatsapp_tools import send_whatsapp_message
+from agents.customer.booking_helpers import format_captain_pickup_line
 from tools.booking_mechanisms import (
     RECEIPT_AVAILABLE,
     KDS_SECRET,
@@ -77,6 +78,27 @@ def prepay_fulfillment_required(session_state: dict[str, Any]) -> bool:
     )
 
 
+def restore_dine_in_kitchen_from_prepay(
+    session_state: dict[str, Any],
+    payload: dict[str, Any],
+) -> None:
+    """Keep order payload available for KDS even if session fields were lost."""
+    cart = dict(payload.get("cart_snapshot") or {})
+    order_text = payload.get("order_text_display") or ""
+    if not cart and not order_text:
+        return
+    snapshot = {"order_text": order_text, "cart": cart}
+    session_state.setdefault("_pending_kitchen", snapshot)
+    session_state["_prepay_kitchen_snapshot"] = snapshot
+    if payload.get("token"):
+        session_state.setdefault("display_token", payload["token"])
+        session_state.setdefault("token_number", payload["token"])
+    if payload.get("table_number") is not None:
+        session_state.setdefault("table_number", payload["table_number"])
+    if payload.get("manager_phone"):
+        session_state.setdefault("manager_phone", payload["manager_phone"])
+
+
 def kitchen_blocked_pending_payment(session_state: dict[str, Any]) -> bool:
     return bool(
         session_state.get("_prepay_blocks_kitchen")
@@ -107,6 +129,8 @@ async def load_and_clear_prepay_payload(
     state["pending_prepay_fulfillment"] = pending
     state["_payment_received"] = True
     state.pop("_prepay_blocks_kitchen", None)
+    if payload.get("service_type") == "dine_in":
+        restore_dine_in_kitchen_from_prepay(state, payload)
     await save_session_state(restaurant_id, customer_phone, state)
     return payload
 
@@ -353,13 +377,7 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
         booking_time=booking_time,
     )
 
-    captain_line = ""
-    if captain_result and captain_result.get("captain_name"):
-        display = captain_result.get("display_name") or captain_result["captain_name"]
-        captain_line = (
-            f"\n\n👤 *{display}* is your captain and will coordinate "
-            f"your pickup at the counter."
-        )
+    captain_line = format_captain_pickup_line(captain_result)
 
     hints = payload.get("session_hints") or {}
     defer, defer_note = await _should_defer_kds_for_scheduled(
@@ -520,37 +538,63 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
 
 
 async def _fulfill_dine_in(payload: dict[str, Any]) -> bool:
+    from agents.customer.booking_helpers import stop_special_notes_timer
+    from agents.customer.dine_in_flow import _finalize_special_notes_and_kitchen
+
     restaurant_id = payload["restaurant_id"]
     customer_phone = payload["customer_phone"]
     customer_name = payload["customer_name"]
-
-    await send_whatsapp_message(
-        customer_phone,
-        "Payment received! ✅\n\n"
-        "Your dine-in order will be sent to the kitchen once you finish "
-        "the optional kitchen notes step (or after the 2-minute wait).",
-        restaurant_id,
-    )
+    booking_id = payload["booking_id"]
 
     state = await get_session_state(restaurant_id, customer_phone)
     state["_payment_received"] = True
     state.pop("_prepay_blocks_kitchen", None)
-    await save_session_state(restaurant_id, customer_phone, state)
+    restore_dine_in_kitchen_from_prepay(state, payload)
 
-    if state.get("_notes_finalized_pending_payment"):
-        from agents.customer.dine_in_flow import _finalize_special_notes_and_kitchen
+    stop_special_notes_timer(customer_phone)
 
+    state.pop("_customer_finalize_sent", None)
+    state.pop("_kitchen_send_claimed", None)
+
+    dispatched = False
+    if not state.get("_kitchen_sent"):
+        notes = (
+            state.get("_deferred_special_notes")
+            if state.get("_notes_finalized_pending_payment")
+            else None
+        )
         await _finalize_special_notes_and_kitchen(
             restaurant_id=restaurant_id,
             customer_phone=customer_phone,
             customer_name=customer_name,
             session_state=state,
-            special_notes=state.get("_deferred_special_notes"),
-            notify_customer=True,
+            special_notes=notes,
+            notify_customer=False,
         )
-        await save_session_state(restaurant_id, customer_phone, state)
+        dispatched = bool(state.get("_kitchen_sent"))
 
-    logger.info(f"[prepay-fulfill] Dine-in booking {payload['booking_id']} payment received")
+    if dispatched:
+        await send_whatsapp_message(
+            customer_phone,
+            "Payment received! ✅\n\n"
+            "Your order is confirmed and sent to the kitchen. Enjoy your meal! 🍽️",
+            restaurant_id,
+        )
+    else:
+        await send_whatsapp_message(
+            customer_phone,
+            "Payment received! ✅\n\n"
+            "Your dine-in order is confirmed. "
+            "Reply with any kitchen notes, or tap *No notes* when prompted.",
+            restaurant_id,
+        )
+
+    await save_session_state(restaurant_id, customer_phone, state)
+    await update_booking_status(booking_id, "confirmed")
+    logger.info(
+        f"[prepay-fulfill] Dine-in booking {booking_id} payment received "
+        f"(kds={'sent' if dispatched else 'pending'})"
+    )
     return True
 
 

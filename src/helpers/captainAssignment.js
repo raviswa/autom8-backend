@@ -9,11 +9,12 @@ const { validateAndNormalizeWhatsApp } = require('./phoneFormat');
 
 function captainDisplayName(fullName) {
   const name = String(fullName || '').trim();
-  if (!name) return 'your captain';
+  if (!name) return null;
   const parts = name.split(/\s+/);
-  // "Field Captain" → use full name; "Ravi Sharma" → first name only
+  // Role placeholders like "Field Captain" — not a person's name
+  if (/^field\s+captain$/i.test(name)) return null;
   if (parts.length >= 2 && parts[parts.length - 1].toLowerCase() === 'captain') {
-    return name;
+    return parts[0];
   }
   if (parts.length === 1) return name;
   return parts[0];

@@ -809,6 +809,36 @@ def _first_name(full_name: str) -> str:
     return full_name.strip().split()[0].capitalize() if full_name.strip() else full_name
 
 
+def captain_customer_display(captain_result: dict | None) -> str | None:
+    """First name for customer-facing captain line; skips role placeholders."""
+    if not captain_result:
+        return None
+    full = str(captain_result.get("captain_name") or "").strip()
+    if not full:
+        return None
+    display = str(captain_result.get("display_name") or "").strip()
+    if display and display.lower() not in ("field captain", "captain"):
+        return display
+    parts = full.split()
+    if len(parts) >= 2 and parts[-1].lower() == "captain":
+        if parts[0].lower() == "field":
+            return None
+        return parts[0]
+    return _first_name(full) if full.lower() != "field captain" else None
+
+
+def format_captain_pickup_line(captain_result: dict | None) -> str:
+    display = captain_customer_display(captain_result)
+    if display:
+        return (
+            f"\n\n👤 *{display}* is your captain and will coordinate "
+            f"your pickup at the counter."
+        )
+    if captain_result and captain_result.get("captain_name"):
+        return "\n\n👤 Our captain will coordinate your pickup at the counter."
+    return ""
+
+
 def strip_order_quantity(order_fragment: str) -> str:
     """'1x Vada Pav' → 'Vada Pav' for greeting / last-order memory."""
     import re

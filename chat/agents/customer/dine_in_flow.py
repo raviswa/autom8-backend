@@ -187,6 +187,22 @@ async def _notify_manager_order_received(
         logger.warning(f"[dine-in] Manager order alert failed for {token} → {phone}")
 
 
+async def _ensure_pending_kitchen(session_state: Dict[str, Any]) -> bool:
+    """Ensure _pending_kitchen has order payload; return True if ready for KDS."""
+    pending = session_state.get("_pending_kitchen") or {}
+    if pending.get("order_text") and pending.get("cart"):
+        return True
+
+    backup = session_state.get("_prepay_kitchen_snapshot") or {}
+    if backup.get("order_text") and backup.get("cart"):
+        session_state["_pending_kitchen"] = {
+            "order_text": backup["order_text"],
+            "cart": dict(backup["cart"]),
+        }
+        return True
+    return False
+
+
 async def _finalize_special_notes_and_kitchen(
     *,
     restaurant_id: str,
@@ -197,9 +213,6 @@ async def _finalize_special_notes_and_kitchen(
     notify_customer: bool = True,
 ) -> None:
     """Send order to KDS/KOT + receipt once notes are collected or timed out."""
-    if session_state.get("_customer_finalize_sent"):
-        return
-
     if kitchen_blocked_pending_payment(session_state):
         session_state["_deferred_special_notes"] = special_notes
         session_state["_notes_finalized_pending_payment"] = True
@@ -248,32 +261,32 @@ async def _finalize_special_notes_and_kitchen(
         session_state.pop("_pending_kitchen", None)
         return
 
-    if session_state.get("_kitchen_send_claimed"):
+    # Previous attempt may have marked finalize without reaching KDS — allow retry.
+    if session_state.get("_customer_finalize_sent") or session_state.get("_kitchen_send_claimed"):
+        session_state.pop("_customer_finalize_sent", None)
+        session_state.pop("_kitchen_send_claimed", None)
+
+    if not await _ensure_pending_kitchen(session_state):
+        logger.warning(
+            f"[dine-in] Missing pending kitchen payload for {customer_phone} — skipping KDS"
+        )
         if notify_customer:
             await send_whatsapp_message(
                 customer_phone,
-                "No problem! Your order is being prepared. Enjoy your meal! 🍽️",
+                "We couldn't find your order details to send to the kitchen. "
+                "Please contact the staff or reply *Home* to start again.",
                 restaurant_id,
             )
-        session_state["booking_step"] = "visit_complete"
-        session_state["_customer_finalize_sent"] = True
-        session_state.pop("_pending_kitchen", None)
         return
 
     pending = session_state.get("_pending_kitchen") or {}
     order_text = pending.get("order_text") or ""
     cart_snapshot = pending.get("cart") or {}
-    if not order_text or not cart_snapshot:
-        logger.warning(
-            f"[dine-in] Missing pending kitchen payload for {customer_phone} — skipping KDS"
-        )
-        return
 
     token = session_state.get("display_token", session_state.get("token_number", ""))
     table_number = session_state.get("table_number")
 
     session_state["_kitchen_send_claimed"] = True
-    session_state["_kitchen_sent"] = True
     session_state["special_notes"] = special_notes
     await save_session_state(restaurant_id, customer_phone, session_state)
 
@@ -288,10 +301,25 @@ async def _finalize_special_notes_and_kitchen(
         table_number=table_number,
         special_notes=special_notes,
     )
-    if order_id:
-        session_state["_kds_order_id"] = order_id
-    else:
+    if not order_id:
         session_state["_kitchen_sent"] = False
+        session_state["_kitchen_send_claimed"] = False
+        session_state.pop("_customer_finalize_sent", None)
+        logger.error(
+            f"[dine-in] KDS notify failed for token {token} ({customer_phone}) — will retry on next message"
+        )
+        if notify_customer:
+            await send_whatsapp_message(
+                customer_phone,
+                "Your notes are saved, but we couldn't reach the kitchen display yet. "
+                "Our team has been notified — please alert staff if nothing appears shortly.",
+                restaurant_id,
+            )
+        await save_session_state(restaurant_id, customer_phone, session_state)
+        return
+
+    session_state["_kitchen_sent"] = True
+    session_state["_kds_order_id"] = order_id
 
     await _notify_manager_order_received(
         manager_phone=session_state.get("manager_phone", ""),
@@ -340,6 +368,7 @@ async def _finalize_special_notes_and_kitchen(
     session_state["booking_step"] = "visit_complete"
     session_state["_customer_finalize_sent"] = True
     session_state.pop("_pending_kitchen", None)
+    await save_session_state(restaurant_id, customer_phone, session_state)
 
 
 async def _on_special_notes_timeout(
@@ -544,6 +573,10 @@ async def _confirm_dine_in_order(
     }, restaurant_id)
     session_state["special_notes_asked_at"] = time.time()
     session_state["_pending_kitchen"] = {
+        "order_text": order_text,
+        "cart": dict(cart_snapshot),
+    }
+    session_state["_prepay_kitchen_snapshot"] = {
         "order_text": order_text,
         "cart": dict(cart_snapshot),
     }

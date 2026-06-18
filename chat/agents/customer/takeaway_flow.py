@@ -62,6 +62,7 @@ from agents.customer.booking_helpers import (
     strip_order_quantity,
     parse_booking_datetime,
     parse_flow_datetime,
+    format_captain_pickup_line,
 )
 from agents.customer.conversation_helpers import safe_build_order_suggestion
 from config.settings import settings
@@ -347,13 +348,7 @@ async def handle_takeaway_flow(
                 total=total,
                 booking_time=booking_time,
             )
-            captain_line = ""
-            if captain_result and captain_result.get("captain_name"):
-                display = captain_result.get("display_name") or captain_result["captain_name"]
-                captain_line = (
-                    f"\n\n👤 *{display}* is your captain and will coordinate "
-                    f"your pickup at the counter."
-                )
+            captain_line = format_captain_pickup_line(captain_result)
 
             confirmation = (
                 f"Order confirmed! ✅\n────────────────────\n"
