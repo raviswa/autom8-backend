@@ -248,58 +248,6 @@ async def cmd_scheduled_delivery_reject(
     return {"status": "error", "message": result.get("error", "reject failed")}
 
 
-async def cmd_scheduled_delivery_approve(
-    restaurant_id: str, manager_phone: str, token_id: str,
-) -> Dict[str, Any]:
-    """Approve a scheduled door delivery from manager WhatsApp button."""
-    from tools.booking_mechanisms import approve_scheduled_delivery_token
-
-    try:
-        result = await approve_scheduled_delivery_token(restaurant_id, token_id)
-        if result.get("ok"):
-            await send_whatsapp_message(
-                manager_phone,
-                f"✅ Scheduled delivery *{token_id}* approved. Customer will receive payment link.",
-                restaurant_id,
-            )
-            return {"status": "success"}
-        await send_whatsapp_message(
-            manager_phone,
-            f"Could not approve *{token_id}*. Check the manager portal or try again.",
-            restaurant_id,
-        )
-        return {"status": "error", "message": result.get("error", "approve failed")}
-    except Exception as e:
-        logger.error(f"cmd_scheduled_delivery_approve: {e}")
-        return {"status": "error", "message": str(e)}
-
-
-async def cmd_scheduled_delivery_reject(
-    restaurant_id: str, manager_phone: str, token_id: str,
-) -> Dict[str, Any]:
-    """Reject a scheduled door delivery from manager WhatsApp button."""
-    from tools.booking_mechanisms import reject_scheduled_delivery_token
-
-    try:
-        result = await reject_scheduled_delivery_token(restaurant_id, token_id)
-        if result.get("ok"):
-            await send_whatsapp_message(
-                manager_phone,
-                f"❌ Scheduled delivery *{token_id}* rejected. Customer notified.",
-                restaurant_id,
-            )
-            return {"status": "success"}
-        await send_whatsapp_message(
-            manager_phone,
-            f"Could not reject *{token_id}*. Check the manager portal or try again.",
-            restaurant_id,
-        )
-        return {"status": "error", "message": result.get("error", "reject failed")}
-    except Exception as e:
-        logger.error(f"cmd_scheduled_delivery_reject: {e}")
-        return {"status": "error", "message": str(e)}
-
-
 async def cmd_reject(restaurant_id: str, manager_phone: str, booking_num: str, reason: str) -> Dict[str, Any]:
     """Reject a booking."""
     try:

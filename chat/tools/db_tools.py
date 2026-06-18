@@ -870,6 +870,122 @@ async def update_booking_payment_status(booking_id: str, payment_status: str) ->
         return {"id": str(booking.id), "payment_status": booking.payment_status}
 
 
+async def mark_booking_kds_sent(booking_id: str) -> None:
+    """Record that this booking was pushed to KDS."""
+    if AsyncSessionLocal is None:
+        return
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            text("""
+                UPDATE bookings
+                SET kds_sent_at = NOW()
+                WHERE id = CAST(:bid AS uuid)
+                  AND kds_sent_at IS NULL
+            """),
+            {"bid": booking_id},
+        )
+        await session.commit()
+
+
+async def get_bookings_due_for_kds() -> list[dict]:
+    """
+    Confirmed scheduled delivery/takeaway bookings whose KDS release window has opened.
+    Respects prepay: only dispatches when payment_status = paid if restaurant uses prepay.
+    """
+    if AsyncSessionLocal is None:
+        return []
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text("""
+                SELECT
+                  b.id AS booking_id,
+                  b.restaurant_id::text AS restaurant_id,
+                  b.service_type,
+                  b.token_number,
+                  b.delivery_address,
+                  b.booking_datetime,
+                  c.name AS customer_name,
+                  c.phone AS customer_phone,
+                  wt.id AS portal_token_id,
+                  wt.meta AS token_meta
+                FROM bookings b
+                JOIN customers c ON c.id = b.customer_id
+                JOIN restaurants r ON r.id = b.restaurant_id
+                LEFT JOIN walk_in_tokens wt
+                  ON wt.meta->>'booking_id' = b.id::text
+                WHERE b.status = 'confirmed'
+                  AND b.kds_sent_at IS NULL
+                  AND b.booking_datetime IS NOT NULL
+                  AND b.service_type IN ('delivery', 'takeaway')
+                  AND b.booking_datetime - (
+                        COALESCE(r.scheduled_kds_lead_minutes, 150) * INTERVAL '1 minute'
+                      ) <= NOW()
+                  AND (
+                    COALESCE(r.payment_mode, 'prepay') <> 'prepay'
+                    OR b.payment_status = 'paid'
+                  )
+                ORDER BY b.booking_datetime ASC
+                LIMIT 50
+            """),
+        )
+        rows = []
+        for row in result.mappings().all():
+            data = dict(row)
+            meta = data.get("token_meta") or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            data["token_meta"] = meta
+            rows.append(data)
+        return rows
+
+
+async def patch_walk_in_token_meta_for_booking(booking_id: str, patch: dict) -> bool:
+    """Merge JSON into walk_in_tokens.meta for scheduler KDS dispatch."""
+    if AsyncSessionLocal is None or not booking_id:
+        return False
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text("""
+                UPDATE walk_in_tokens
+                SET meta = COALESCE(meta, '{}'::jsonb) || CAST(:patch AS jsonb)
+                WHERE meta->>'booking_id' = :bid
+            """),
+            {"bid": str(booking_id), "patch": json.dumps(patch or {})},
+        )
+        await session.commit()
+        return (result.rowcount or 0) > 0
+
+
+async def patch_walk_in_token_meta(
+    token_id: str,
+    restaurant_id: str,
+    patch: dict,
+) -> bool:
+    """Merge JSON into a specific walk_in_tokens row."""
+    if AsyncSessionLocal is None or not token_id:
+        return False
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text("""
+                UPDATE walk_in_tokens
+                SET meta = COALESCE(meta, '{}'::jsonb) || CAST(:patch AS jsonb)
+                WHERE id = :tid
+                  AND restaurant_id = CAST(:rid AS uuid)
+            """),
+            {
+                "tid": token_id,
+                "rid": restaurant_id,
+                "patch": json.dumps(patch or {}),
+            },
+        )
+        await session.commit()
+        return (result.rowcount or 0) > 0
+
+
 async def get_todays_bookings(restaurant_id: str) -> List[Dict[str, Any]]:
     async with AsyncSessionLocal() as session:
         today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1648,7 +1764,7 @@ async def get_scheduled_delivery_token(
                 WHERE restaurant_id = CAST(:rid AS uuid)
                   AND phone = ANY(:phones)
                   AND type = 'scheduled_delivery'
-                  AND arrived_at >= CURRENT_DATE
+                  AND status IN ('pending_approval', 'takeaway')
                 ORDER BY arrived_at DESC
                 LIMIT 1
             """),

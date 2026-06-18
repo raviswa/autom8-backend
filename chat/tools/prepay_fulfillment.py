@@ -13,6 +13,13 @@ from tools.db_tools import (
     save_session_state,
     update_booking_status,
     get_booking_with_customer,
+    mark_booking_kds_sent,
+    patch_walk_in_token_meta_for_booking,
+    patch_walk_in_token_meta,
+)
+from tools.scheduled_kds import (
+    is_deferred_scheduled_order,
+    format_kds_defer_customer_note,
 )
 from tools.payment_tools import wants_online_payment, is_placeholder_payment_link
 from tools.whatsapp_tools import send_whatsapp_message
@@ -53,6 +60,7 @@ _SESSION_HINT_KEYS = (
     "kitchen_busy",
     "scheduled_at",
     "order_mode",
+    "scheduled_kds_lead_minutes",
     "payment_mode",
     "delivery_address",
     "delivery_distance_km",
@@ -137,6 +145,93 @@ def build_prepay_payload(
     }
     payload.update(extra)
     return payload
+
+
+async def _should_defer_kds_for_scheduled(
+    session_hints: dict[str, Any],
+    *,
+    restaurant_id: str | None = None,
+) -> tuple[bool, str | None]:
+    """Return (defer, customer_note) when KDS should wait until the lead window."""
+    restaurant_info = None
+    if restaurant_id:
+        restaurant_info = await fetch_restaurant_info(restaurant_id)
+    defer, scheduled_at, release_at = is_deferred_scheduled_order(
+        session_hints.get("scheduled_at"),
+        session_state=session_hints,
+        restaurant_info=restaurant_info,
+    )
+    if not defer or scheduled_at is None or release_at is None:
+        return False, None
+    return True, format_kds_defer_customer_note(scheduled_at, release_at)
+
+
+async def _finalize_kds_for_scheduled_order(
+    *,
+    booking_id: str,
+    restaurant_id: str,
+    customer_phone: str,
+    customer_name: str,
+    token: str,
+    order_text: str,
+    cart: dict,
+    service_type: str,
+    session_hints: dict[str, Any],
+    manager_phone: str = "",
+    delivery_address: str = "",
+    booking_time: str = "",
+    total: float = 0,
+) -> bool:
+    """
+    Push to KDS now or defer until scheduled_kds_lead_minutes before the slot.
+    Returns True when dispatch happened immediately.
+    """
+    defer, defer_note = await _should_defer_kds_for_scheduled(
+        session_hints, restaurant_id=restaurant_id,
+    )
+    if defer:
+        logger.info(
+            f"[scheduled-kds] Deferred KDS for booking {booking_id} "
+            f"(service={service_type}, token={token})"
+        )
+        await patch_walk_in_token_meta_for_booking(
+            booking_id,
+            {
+                "booking_id": booking_id,
+                "order_text": order_text,
+                "cart": cart,
+                "service_type": service_type,
+                "token": token,
+                "customer_name": customer_name,
+                "customer_phone": customer_phone,
+            },
+        )
+        if manager_phone:
+            try:
+                await send_whatsapp_message(
+                    manager_phone,
+                    f"📅 *Scheduled {service_type} — paid* ✅\n"
+                    f"Token: {token}\nCustomer: {customer_name}\n"
+                    f"Kitchen dispatch is queued for closer to the delivery slot.\n"
+                    f"{defer_note}",
+                    restaurant_id,
+                )
+            except Exception as exc:
+                logger.warning(f"[scheduled-kds] manager defer notify failed: {exc}")
+        return False
+
+    await notify_kds(
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        order_text=order_text,
+        cart=cart,
+        table_number=None,
+        token_number=token,
+        service_type=service_type,
+        restaurant_id=restaurant_id,
+    )
+    await mark_booking_kds_sent(booking_id)
+    return True
 
 
 async def _queue_feedback(
@@ -235,6 +330,18 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
         restaurant_id=restaurant_id,
     )
     display_token = portal_token_id or token
+    hints = payload.get("session_hints") or {}
+    if portal_token_id and hints.get("scheduled_at"):
+        await patch_walk_in_token_meta(
+            portal_token_id,
+            restaurant_id,
+            {
+                "booking_id": booking_id,
+                "order_text": order_text_display,
+                "cart": cart_snapshot,
+                "scheduled_at": hints.get("scheduled_at"),
+            },
+        )
 
     captain_result = await assign_and_notify_captain_takeaway(
         restaurant_id,
@@ -254,13 +361,23 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
             f"your pickup at the counter."
         )
 
-    await send_whatsapp_message(
-        customer_phone,
+    hints = payload.get("session_hints") or {}
+    defer, defer_note = await _should_defer_kds_for_scheduled(
+        hints, restaurant_id=restaurant_id,
+    )
+    kitchen_line = (
+        "Your takeaway order is confirmed."
+        if defer
+        else "Your takeaway order is confirmed and sent to the kitchen."
+    )
+    confirm_body = (
         f"Payment received! ✅\n────────────────────\n"
         f"Token: {display_token}\n"
-        f"Your takeaway order is confirmed and sent to the kitchen.{captain_line}",
-        restaurant_id,
+        f"{kitchen_line}{captain_line}"
     )
+    if defer and defer_note:
+        confirm_body += f"\n\n{defer_note}"
+    await send_whatsapp_message(customer_phone, confirm_body, restaurant_id)
 
     try:
         await notify_manager_order_alert(
@@ -278,17 +395,21 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
     except Exception as exc:
         logger.warning(f"[prepay-fulfill] manager alert failed (non-fatal): {exc}")
 
-    await notify_kds(
-        customer_name=customer_name,
+    dispatched_now = await _finalize_kds_for_scheduled_order(
+        booking_id=booking_id,
+        restaurant_id=restaurant_id,
         customer_phone=customer_phone,
+        customer_name=customer_name,
+        token=str(display_token),
         order_text=order_text_display,
         cart=cart_snapshot,
-        table_number=None,
-        token_number=display_token,
         service_type="takeaway",
-        restaurant_id=restaurant_id,
+        session_hints=hints,
+        booking_time=booking_time,
+        total=total,
     )
-    await _queue_feedback(restaurant_id, customer_phone, customer_name, display_token)
+    if dispatched_now:
+        await _queue_feedback(restaurant_id, customer_phone, customer_name, display_token)
     await _send_receipt(
         restaurant_id=restaurant_id,
         customer_phone=customer_phone,
@@ -321,16 +442,24 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
     delivery_address = payload.get("delivery_address") or ""
     hints = payload.get("session_hints") or {}
     delivery_address = delivery_address or hints.get("delivery_address") or ""
-
-    await send_whatsapp_message(
-        customer_phone,
+    defer, defer_note = await _should_defer_kds_for_scheduled(
+        hints, restaurant_id=restaurant_id,
+    )
+    kitchen_line = (
+        "Your delivery order is confirmed."
+        if defer
+        else "Your delivery order is confirmed and sent to the kitchen."
+    )
+    confirm_body = (
         f"Payment received! ✅\n────────────────────\n"
         f"Token: {token}\n"
-        f"Your delivery order is confirmed and sent to the kitchen.\n"
+        f"{kitchen_line}\n"
         f"────────────────────\n"
-        f"{format_order_total_lines(totals)}",
-        restaurant_id,
+        f"{format_order_total_lines(totals)}"
     )
+    if defer and defer_note:
+        confirm_body += f"\n\n{defer_note}"
+    await send_whatsapp_message(customer_phone, confirm_body, restaurant_id)
 
     dist_note = ""
     if hints.get("delivery_distance_km") is not None:
@@ -340,30 +469,39 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
         )
     if manager_phone:
         try:
+            header = "📅 *Scheduled delivery — paid* ✅" if defer else "🛵 *Deliver Now — paid* ✅"
             await send_whatsapp_message(
                 manager_phone,
-                f"🛵 *Deliver Now — paid* ✅\n────────────────────\n"
+                f"{header}\n────────────────────\n"
                 f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
                 f"Address: {delivery_address}\n{dist_note}"
                 f"Booking Time: {booking_time}\n"
                 f"Order: {order_text_display}\n"
-                f"Total: ₹{total:.0f}\n────────────────────",
+                f"Total: ₹{total:.0f}\n"
+                + (f"{defer_note}\n" if defer and defer_note else "")
+                + "────────────────────",
                 restaurant_id,
             )
         except Exception as exc:
             logger.warning(f"[prepay-fulfill] delivery manager notify failed: {exc}")
 
-    await notify_kds(
-        customer_name=customer_name,
+    dispatched_now = await _finalize_kds_for_scheduled_order(
+        booking_id=booking_id,
+        restaurant_id=restaurant_id,
         customer_phone=customer_phone,
+        customer_name=customer_name,
+        token=token,
         order_text=order_text_display,
         cart=cart_snapshot,
-        table_number=None,
-        token_number=token,
         service_type="delivery",
-        restaurant_id=restaurant_id,
+        session_hints=hints,
+        manager_phone=manager_phone,
+        delivery_address=delivery_address,
+        booking_time=booking_time,
+        total=total,
     )
-    await _queue_feedback(restaurant_id, customer_phone, customer_name, token)
+    if dispatched_now:
+        await _queue_feedback(restaurant_id, customer_phone, customer_name, token)
     await _send_receipt(
         restaurant_id=restaurant_id,
         customer_phone=customer_phone,

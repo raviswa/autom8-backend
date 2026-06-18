@@ -29,6 +29,7 @@ from tools.prepay_fulfillment import (
     build_prepay_payload,
     stash_prepay_payload,
     PREPAY_PENDING_FOOTER,
+    _finalize_kds_for_scheduled_order,
 )
 from tools.whatsapp_tools import send_whatsapp_message, send_location_request, send_whatsapp_flow
 from tools.cart_tools import cart_to_order_text, clear_cart
@@ -73,6 +74,11 @@ _MANAGER_APPROVAL_NOTE = (
     "\n\n📋 *Scheduled door deliveries need manager approval before payment.* "
     "We'll message you once confirmed."
 )
+
+
+def _requires_scheduled_delivery_approval(session_state: Dict[str, Any]) -> bool:
+    """Calendar-scheduled deliveries always need manager approval before payment."""
+    return bool(session_state.get("scheduled_at"))
 
 
 async def offer_delivery_schedule(
@@ -344,28 +350,42 @@ async def _complete_scheduled_delivery_after_approval(
     session_state["booking_step"] = "visit_complete"
     clear_cart(session_state)
 
-    await notify_kds(
-        customer_name=customer_name, customer_phone=customer_phone,
-        order_text=order_text, cart=cart_snapshot, table_number=None,
-        token_number=str(token), service_type="delivery",
+    hints = {k: session_state.get(k) for k in (
+        "scheduled_at", "order_mode", "scheduled_kds_lead_minutes",
+        "delivery_address", "delivery_distance_km", "delivery_distance_method",
+    )}
+    dispatched_now = await _finalize_kds_for_scheduled_order(
+        booking_id=booking_id,
         restaurant_id=restaurant_id,
+        customer_phone=customer_phone,
+        customer_name=customer_name,
+        token=str(token),
+        order_text=order_text,
+        cart=cart_snapshot,
+        service_type="delivery",
+        session_hints=hints,
+        manager_phone=manager_phone,
+        delivery_address=session_state.get("delivery_address", ""),
+        booking_time=session_state.get("booking_time", now_display()),
+        total=total,
     )
 
-    try:
-        await get_http().post(
-            "https://api.autom8.works/api/feedback/queue",
-            json={
-                "restaurant_id": restaurant_id,
-                "customer_phone": customer_phone,
-                "customer_name": customer_name,
-                "token_number": str(token),
-                "table_number": None,
-            },
-            headers={"Authorization": f"Bearer {KDS_SECRET}"},
-            timeout=aiohttp.ClientTimeout(total=5),
-        )
-    except Exception as fb_err:
-        logger.warning(f"[feedback-queue] Non-fatal: {fb_err}")
+    if dispatched_now:
+        try:
+            await get_http().post(
+                "https://api.autom8.works/api/feedback/queue",
+                json={
+                    "restaurant_id": restaurant_id,
+                    "customer_phone": customer_phone,
+                    "customer_name": customer_name,
+                    "token_number": str(token),
+                    "table_number": None,
+                },
+                headers={"Authorization": f"Bearer {KDS_SECRET}"},
+                timeout=aiohttp.ClientTimeout(total=5),
+            )
+        except Exception as fb_err:
+            logger.warning(f"[feedback-queue] Non-fatal: {fb_err}")
 
     if RECEIPT_AVAILABLE and booking_id:
         try:
@@ -437,6 +457,22 @@ async def _submit_scheduled_delivery_for_approval(
     if portal_token:
         session_state["display_token"] = portal_token
         session_state["token_number"] = portal_token
+    else:
+        logger.error(
+            f"[delivery] scheduled delivery portal token missing for {customer_phone} "
+            f"(booking={booking_id}) — manager portal approval unavailable"
+        )
+        try:
+            await send_whatsapp_message(
+                manager_phone,
+                f"⚠️ *Scheduled delivery needs portal setup*\n"
+                f"Customer: {customer_name} ({customer_phone})\n"
+                f"Order: {order_text[:120]}\n"
+                f"Run migration add_scheduled_delivery_portal_and_kds.sql if approvals are missing.",
+                restaurant_id,
+            )
+        except Exception as alert_err:
+            logger.warning(f"[delivery] manager portal-failure alert failed: {alert_err}")
 
     session_state["pending_order_text"] = order_text
     session_state["pending_cart"] = cart_snapshot
@@ -697,7 +733,7 @@ async def handle_delivery_flow(
             booking_id = booking["id"]
             session_state["booking_id"] = booking_id
 
-            if session_state.get("scheduled_at") and session_state.get("scheduled_delivery_enabled"):
+            if _requires_scheduled_delivery_approval(session_state):
                 return await _submit_scheduled_delivery_for_approval(
                     restaurant_id, customer_id, customer_name, customer_phone, manager_phone,
                     session_state,

@@ -165,7 +165,7 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict:
         resp = await get_http().get(
             f"{base}/rest/v1/restaurants",
             params={
-                "select": "name,whatsapp_number,address,phone,gstin,website,city,state,parcel_charge_per_item,takeaway_ready_range,delivery_ready_range,kitchen_busy,restaurant_type,pickup_address,pickup_latitude,pickup_longitude,delivery_charge_default,delivery_charge_tiers,min_delivery_order_amount,min_takeaway_order_amount,scheduled_delivery_enabled,scheduled_takeaway_enabled,max_delivery_radius_km,payment_mode",
+                "select": "name,whatsapp_number,address,phone,gstin,website,city,state,parcel_charge_per_item,takeaway_ready_range,delivery_ready_range,kitchen_busy,restaurant_type,pickup_address,pickup_latitude,pickup_longitude,delivery_charge_default,delivery_charge_tiers,min_delivery_order_amount,min_takeaway_order_amount,scheduled_delivery_enabled,scheduled_takeaway_enabled,scheduled_kds_lead_minutes,max_delivery_radius_km,payment_mode",
                 "id":     f"eq.{restaurant_id}",
                 "limit":  "1",
             },
@@ -215,6 +215,7 @@ async def cache_restaurant_pricing(session_state: dict, restaurant_id: str) -> N
 
     session_state["scheduled_delivery_enabled"] = bool(info.get("scheduled_delivery_enabled"))
     session_state["scheduled_takeaway_enabled"] = bool(info.get("scheduled_takeaway_enabled"))
+    session_state["scheduled_kds_lead_minutes"] = info.get("scheduled_kds_lead_minutes")
 
     try:
         session_state["max_delivery_radius_km"] = float(info.get("max_delivery_radius_km") or 0)

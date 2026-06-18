@@ -475,7 +475,7 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
   'google_maps_url',
   'delivery_charge_default','delivery_charge_tiers',
   'min_delivery_order_amount','min_takeaway_order_amount',
-  'scheduled_delivery_enabled','scheduled_takeaway_enabled','max_delivery_radius_km',
+  'scheduled_delivery_enabled','scheduled_takeaway_enabled','scheduled_kds_lead_minutes','max_delivery_radius_km',
   'subscribed_features', 'enabled_services',
     ];
     const updates = Object.fromEntries(

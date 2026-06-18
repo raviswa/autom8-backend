@@ -310,6 +310,7 @@ router.get('/', outletAuth, async (req, res) => {
       todayStart.setHours(0, 0, 0, 0);
       query = query.eq('status', status).gte('arrived_at', todayStart.toISOString());
     } else {
+      // Include all pending approvals (future scheduled deliveries may sit for days).
       query = query.in('status', ['waiting', 'seated', 'takeaway', 'pending_approval']);
     }
 

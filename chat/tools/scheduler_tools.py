@@ -15,6 +15,8 @@ from tools.db_tools import (
     mark_menu_prompt_sent,
     get_reservation_reminder_candidates,
     mark_reservation_reminder_sent,
+    get_bookings_due_for_kds,
+    mark_booking_kds_sent,
 )
 from tools.personalisation_tools import update_customer_profile
 from tools.campaign_tools import (
@@ -116,6 +118,13 @@ async def start_scheduler():
         id="track_campaign_conversions",
         name="Track campaign conversions",
     )
+
+    scheduler.add_job(
+        dispatch_deferred_scheduled_kds,
+        trigger=CronTrigger(minute="*/5"),  # Every 5 minutes
+        id="dispatch_deferred_scheduled_kds",
+        name="Release scheduled orders to KDS before delivery slot",
+    )
     
     scheduler.start()
     logger.info("APScheduler started with jobs")
@@ -169,6 +178,57 @@ async def send_reservation_reminders():
 
     except Exception as e:
         logger.error(f"Error in send_reservation_reminders: {e}")
+
+
+async def dispatch_deferred_scheduled_kds():
+    """Push scheduled delivery/takeaway orders to KDS when within the lead window."""
+    from tools.booking_mechanisms import notify_kds
+
+    logger.info("Running dispatch_deferred_scheduled_kds job")
+    try:
+        due_rows = await get_bookings_due_for_kds()
+        if not due_rows:
+            return
+
+        dispatched = 0
+        for row in due_rows:
+            meta = row.get("token_meta") or {}
+            cart = meta.get("cart") or {}
+            order_text = meta.get("order_text") or ""
+            token = row.get("portal_token_id") or row.get("token_number") or "—"
+            service_type = row.get("service_type") or "delivery"
+
+            if not order_text and not cart:
+                logger.warning(
+                    f"[scheduled-kds] Skipping booking {row.get('booking_id')} — no order payload"
+                )
+                continue
+
+            try:
+                await notify_kds(
+                    customer_name=row.get("customer_name") or "Guest",
+                    customer_phone=row.get("customer_phone") or "",
+                    order_text=order_text,
+                    cart=cart,
+                    table_number=None,
+                    token_number=str(token),
+                    service_type=service_type,
+                    restaurant_id=row["restaurant_id"],
+                )
+                await mark_booking_kds_sent(row["booking_id"])
+                dispatched += 1
+                logger.info(
+                    f"[scheduled-kds] Dispatched booking {row['booking_id']} "
+                    f"to KDS (token={token})"
+                )
+            except Exception as row_err:
+                logger.error(
+                    f"[scheduled-kds] Failed booking {row.get('booking_id')}: {row_err}"
+                )
+
+        logger.info(f"[scheduled-kds] Dispatched {dispatched}/{len(due_rows)} deferred orders")
+    except Exception as e:
+        logger.error(f"Error in dispatch_deferred_scheduled_kds: {e}")
 
 
 async def detect_no_shows():
