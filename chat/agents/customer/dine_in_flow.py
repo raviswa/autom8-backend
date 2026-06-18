@@ -952,6 +952,12 @@ async def handle_dine_in_flow(
 
     # ── awaiting_order ────────────────────────────────────────────────────────
     elif booking_step == "awaiting_order":
+        from tools.booking_mechanisms import maybe_send_special_dishes_note
+        if not session_state.get("_specials_note_sent"):
+            await maybe_send_special_dishes_note(
+                customer_phone, restaurant_id, session_state,
+            )
+
         order_text = message.strip()
         if order_text.upper() == "MENU":
             await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)

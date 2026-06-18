@@ -227,21 +227,29 @@ async def cache_restaurant_pricing(session_state: dict, restaurant_id: str) -> N
     session_state["payment_mode"] = (info.get("payment_mode") or "prepay").strip().lower()
 
 
-async def send_special_dishes_note(customer_phone: str, restaurant_id: str) -> None:
+async def send_special_dishes_note(
+    customer_phone: str,
+    restaurant_id: str,
+    *,
+    menu_items: list[dict] | None = None,
+) -> bool:
     """
     Friendly WhatsApp note for today's specials — not pushed to Meta catalog.
+    Returns True if a message was sent.
     """
-    from tools.catalog_tools import fetch_menu_items
+    from tools.catalog_tools import invalidate_menu_cache, fetch_menu_items
 
-    await fetch_menu_items(restaurant_id)
-    from tools.catalog_tools import MENU_ITEMS
+    if menu_items is None:
+        invalidate_menu_cache(restaurant_id)
+        menu_items = await fetch_menu_items(restaurant_id)
 
     specials = [
-        i for i in MENU_ITEMS
+        i for i in (menu_items or [])
         if i.get("is_special_today") and i.get("is_available", True)
     ]
     if not specials:
-        return
+        logger.info(f"[specials] No is_special_today items for restaurant {restaurant_id}")
+        return False
 
     names = ", ".join(i.get("title", "Special") for i in specials[:8])
     extra = f" (+{len(specials) - 8} more)" if len(specials) > 8 else ""
@@ -251,6 +259,31 @@ async def send_special_dishes_note(customer_phone: str, restaurant_id: str) -> N
         "Ask us to add any of these while you order — we'd love to serve you! 😊",
         restaurant_id,
     )
+    logger.info(f"[specials] Sent {len(specials)} special(s) to {customer_phone}")
+    return True
+
+
+async def maybe_send_special_dishes_note(
+    customer_phone: str,
+    restaurant_id: str,
+    session_state: dict[str, Any] | None = None,
+    *,
+    menu_items: list[dict] | None = None,
+    force: bool = False,
+) -> bool:
+    """Send today's specials once per session (unless force=True)."""
+    if session_state is not None and session_state.get("_specials_note_sent") and not force:
+        return False
+    try:
+        sent = await send_special_dishes_note(
+            customer_phone, restaurant_id, menu_items=menu_items,
+        )
+        if sent and session_state is not None:
+            session_state["_specials_note_sent"] = True
+        return sent
+    except Exception as exc:
+        logger.warning(f"[specials] Failed for {customer_phone}: {exc}")
+        return False
 
 
 async def upload_and_send_receipt(
@@ -1193,7 +1226,9 @@ async def send_unified_booking_menu(
     if await send_catalog_booking(customer_phone, restaurant_id, session_state):
         if session_state.get("service_type") in ("dine_in", "takeaway", "delivery"):
             session_state["booking_step"] = "awaiting_order"
-        await send_special_dishes_note(customer_phone, restaurant_id)
+        await maybe_send_special_dishes_note(
+            customer_phone, restaurant_id, session_state, menu_items=items,
+        )
         return "catalog"
 
     # ── Attempt 2: Retry catalog after 2 s ───────────────────────────────────
@@ -1202,12 +1237,16 @@ async def send_unified_booking_menu(
     if await send_catalog_booking(customer_phone, restaurant_id, session_state):
         if session_state.get("service_type") in ("dine_in", "takeaway", "delivery"):
             session_state["booking_step"] = "awaiting_order"
-        await send_special_dishes_note(customer_phone, restaurant_id)
+        await maybe_send_special_dishes_note(
+            customer_phone, restaurant_id, session_state, menu_items=items,
+        )
         return "catalog"
 
     # ── Attempt 3: Interactive cart ───────────────────────────────────────────
     if await send_cart_booking(customer_phone, restaurant_id, session_state):
-        await send_special_dishes_note(customer_phone, restaurant_id)
+        await maybe_send_special_dishes_note(
+            customer_phone, restaurant_id, session_state, menu_items=items,
+        )
         return "cart"
 
     # ── Attempt 3b: Menu empty (e.g. kitchen closed / slot gap) ───────────────
@@ -1229,7 +1268,9 @@ async def send_unified_booking_menu(
 
     # ── Attempt 4: Plain-text menu ────────────────────────────────────────────
     if await send_cart_fallback_text(customer_phone, restaurant_id, session_state):
-        await send_special_dishes_note(customer_phone, restaurant_id)
+        await maybe_send_special_dishes_note(
+            customer_phone, restaurant_id, session_state, menu_items=items,
+        )
         return "cart_text"
 
     # ── Last resort: Fix 40 — direct to Shop icon, never leave silence ────────
@@ -1247,6 +1288,9 @@ async def send_unified_booking_menu(
         )
         session_state["booking_mechanism"] = "none"
         session_state["booking_step"] = "awaiting_order"
+        await maybe_send_special_dishes_note(
+            customer_phone, restaurant_id, session_state, menu_items=items,
+        )
     except Exception as e:
         logger.critical(f"[BOOKING] {customer_phone} → even last-resort message failed: {e}")
 
