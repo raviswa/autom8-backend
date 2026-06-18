@@ -26,7 +26,7 @@ from tools.scheduled_kds import (
 )
 from tools.payment_tools import wants_online_payment, is_placeholder_payment_link
 from tools.whatsapp_tools import send_whatsapp_message
-from agents.customer.booking_helpers import format_captain_pickup_line
+from agents.customer.booking_helpers import format_captain_pickup_line, _HOME_HINT
 from tools.booking_mechanisms import (
     RECEIPT_AVAILABLE,
     KDS_SECRET,
@@ -599,23 +599,24 @@ async def _fulfill_dine_in(payload: dict[str, Any]) -> bool:
 
     state.pop("_customer_finalize_sent", None)
     state.pop("_kitchen_send_claimed", None)
+    state.pop("_kitchen_sent", None)
+    state.pop("_kds_order_id", None)
 
-    dispatched = False
-    if not state.get("_kitchen_sent"):
-        notes = (
-            state.get("_deferred_special_notes")
-            if state.get("_notes_finalized_pending_payment")
-            else None
-        )
-        await _finalize_special_notes_and_kitchen(
-            restaurant_id=restaurant_id,
-            customer_phone=customer_phone,
-            customer_name=customer_name,
-            session_state=state,
-            special_notes=notes,
-            notify_customer=False,
-        )
-        dispatched = bool(state.get("_kitchen_sent"))
+    notes = (
+        state.get("_deferred_special_notes")
+        if state.get("_notes_finalized_pending_payment")
+        else None
+    )
+    await _finalize_special_notes_and_kitchen(
+        restaurant_id=restaurant_id,
+        customer_phone=customer_phone,
+        customer_name=customer_name,
+        session_state=state,
+        special_notes=notes,
+        notify_customer=False,
+        force_kitchen_send=True,
+    )
+    dispatched = bool(state.get("_kitchen_sent"))
 
     if dispatched:
         await send_whatsapp_message(
@@ -628,8 +629,9 @@ async def _fulfill_dine_in(payload: dict[str, Any]) -> bool:
         await send_whatsapp_message(
             customer_phone,
             "Payment received! ✅\n\n"
-            "Your dine-in order is confirmed. "
-            "Reply with any kitchen notes, or tap *No notes* when prompted.",
+            "We're sending your order to the kitchen now — "
+            "please alert staff if it doesn't appear on the display within a minute."
+            + _HOME_HINT,
             restaurant_id,
         )
 

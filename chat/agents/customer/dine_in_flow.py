@@ -212,6 +212,7 @@ async def _finalize_special_notes_and_kitchen(
     session_state: Dict[str, Any],
     special_notes: str | None,
     notify_customer: bool = True,
+    force_kitchen_send: bool = False,
 ) -> None:
     """Send order to KDS/KOT + receipt once notes are collected or timed out."""
     if kitchen_blocked_pending_payment(session_state):
@@ -233,7 +234,7 @@ async def _finalize_special_notes_and_kitchen(
                 )
         return
 
-    if session_state.get("_kitchen_sent"):
+    if session_state.get("_kitchen_sent") and not force_kitchen_send:
         token = session_state.get("display_token", session_state.get("token_number", ""))
         if special_notes:
             await update_kds_order_notes(
@@ -283,6 +284,12 @@ async def _finalize_special_notes_and_kitchen(
     pending = session_state.get("_pending_kitchen") or {}
     order_text = pending.get("order_text") or ""
     cart_snapshot = pending.get("cart") or {}
+
+    if cart_snapshot:
+        from tools.cart_tools import enrich_cart_titles
+        await enrich_cart_titles(cart_snapshot, restaurant_id)
+        if cart_snapshot:
+            order_text = order_text or cart_to_order_text(cart_snapshot)
 
     token = session_state.get("display_token", session_state.get("token_number", ""))
     table_number = session_state.get("table_number")

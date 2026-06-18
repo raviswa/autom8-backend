@@ -352,8 +352,21 @@ router.post('/notify', async (req, res) => {
       `[kds-notify] ✅ ${kdsItemsCreated} KDS item(s)` +
       ` | order ${orderRow.order_number}` +
       ` | token ${token_number ?? 'N/A'}` +
-      ` | table ${table_number ?? 'N/A'}`
+      ` | table ${table_number ?? 'N/A'}` +
+      ` | restaurant ${restaurant_id}`
     );
+
+    if (kdsItemsCreated === 0) {
+      console.error(
+        `[kds-notify] ❌ order ${orderRow.order_number} created but 0 KDS items — check menu_items schema`
+      );
+      return res.status(500).json({
+        error:           'No KDS items could be created for this order',
+        order_id:        orderRow.id,
+        order_number:    orderRow.order_number,
+        kds_items_created: 0,
+      });
+    }
 
     return res.status(201).json({
       success:           true,

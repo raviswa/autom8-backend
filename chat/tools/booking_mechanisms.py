@@ -960,13 +960,28 @@ async def notify_kds(
     """POST order to Node KDS API. Returns order_id on success, else None."""
     try:
         items = []
-        for item_id, line in cart.items():
+        for item_id, line in (cart or {}).items():
+            if not isinstance(line, dict):
+                continue
+            title = (line.get("title") or line.get("name") or str(item_id)).strip()
+            if not title:
+                continue
             items.append({
-                "retailer_id": item_id, "name": line["title"],
-                "qty": line["qty"], "unit_price": line["unit_price"],
+                "retailer_id": str(item_id),
+                "name": title,
+                "qty": int(line.get("qty") or 1),
+                "unit_price": float(line.get("unit_price") or 0),
             })
-        if not items:
+        order_text = (order_text or "").strip()
+        if not items and order_text:
             items = [{"retailer_id": "manual", "name": order_text, "qty": 1, "unit_price": 0}]
+
+        if not items:
+            logger.error(
+                f"[kds-notify] No items to send for token {token_number} "
+                f"(cart={len(cart or {})} lines, order_text={order_text!r})"
+            )
+            return None
 
         secret = _get_kds_secret()
         if not secret:
@@ -993,11 +1008,20 @@ async def notify_kds(
                 )
                 if resp.status in (200, 201):
                     data = await resp.json()
+                    kds_count = int(data.get("kds_items_created") or 0)
                     tag = "deduped" if data.get("deduplicated") else "created"
+                    if kds_count <= 0:
+                        logger.error(
+                            f"[kds-notify] attempt {attempt + 1}/3 — API ok but 0 KDS items "
+                            f"for token {token_number} | restaurant {restaurant_id} | {data}"
+                        )
+                        if attempt < 2:
+                            await asyncio.sleep(0.75 * (attempt + 1))
+                        continue
                     logger.info(
-                        f"[kds-notify] ✅ {data.get('kds_items_created', '?')} item(s) "
+                        f"[kds-notify] ✅ {kds_count} item(s) "
                         f"({tag}) for token {token_number} | table {table_number} | "
-                        f"order {data.get('order_id', '?')}"
+                        f"order {data.get('order_id', '?')} | restaurant {restaurant_id}"
                     )
                     return data.get("order_id")
                 body = await resp.text()
