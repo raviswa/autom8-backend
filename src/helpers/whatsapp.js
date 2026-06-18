@@ -13,10 +13,6 @@
 const { supabaseAdmin } = require('../config/supabase');
 const { broadcastToRestaurant } = require('../websocket');
 const { getMetaCatalogId, getWhatsAppIntegration } = require('./restaurantConfig');
-const {
-  notifyCaptainTakeawayReady,
-  orderNumberToToken,
-} = require('./captainAssignment');
 
 // ── sendWhatsAppMessage ───────────────────────────────────────────────────────
 // Sends a plain-text WhatsApp message.
@@ -183,6 +179,7 @@ async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
 
     if (updateErr || !updated) return;
 
+    const { notifyCaptainTakeawayReady, orderNumberToToken } = require('./captainAssignment');
     const isTakeaway = isTakeawayOrder(kdsItem?.service_type, updated.source);
     const tokenNumber = kdsItem?.token_number || orderNumberToToken(updated.order_number);
     const phone = updated.customer_phone ?? kdsItem?.customer_phone ?? null;
