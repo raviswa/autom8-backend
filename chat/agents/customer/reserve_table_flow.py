@@ -15,27 +15,58 @@ from typing import Dict, Any
 
 from tools.db_tools import get_next_token_number, create_booking, update_booking_status
 from tools.payment_tools import create_payment_link
-from tools.whatsapp_tools import send_whatsapp_message, send_whatsapp_flow
+from tools.whatsapp_tools import send_whatsapp_message
 from tools.cart_tools import _send_interactive
 from tools.booking_mechanisms import (
     RECEIPT_AVAILABLE,
     _generate_receipt,
     _ReceiptData,
-    _LineItem,
     sync_token_to_portal,
     fetch_restaurant_info,
-    receipt_qr_url,
 )
 from agents.customer.booking_helpers import (
     _HOME_HINT,
     now_display,
     is_placeholder_payment_link,
-    parse_booking_datetime,
+    parse_flow_datetime,
+    offer_whatsapp_schedule_calendar,
 )
 from agents.customer.conversation_intelligence import is_affirmative as _is_affirmative
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+async def _offer_reserve_calendar(
+    customer_phone: str,
+    restaurant_id: str,
+    customer_id: str,
+    customer_name: str,
+    session_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    party_size = session_state.get("party_size", "")
+    flow_id = settings.meta_flow_reservation_id
+    return await offer_whatsapp_schedule_calendar(
+        customer_phone,
+        restaurant_id,
+        customer_id,
+        session_state,
+        flow_id=flow_id or "",
+        flow_token_prefix="reserve",
+        flow_header="📅 Reserve a Table",
+        flow_body=(
+            f"Hi {customer_name}! Tap below to pick your reservation date and time "
+            f"for your party of {party_size} guests."
+        ),
+        booking_step="awaiting_flow_datetime",
+        failure_message=(
+            "We couldn't open the date picker. Please reply *Home* and choose "
+            "*Reserve a Table 📅* again, or contact the restaurant for help."
+        ),
+        resend_fn=lambda: _offer_reserve_calendar(
+            customer_phone, restaurant_id, customer_id, customer_name, session_state,
+        ),
+    )
 
 
 async def handle_reserve_table_flow(
@@ -52,83 +83,54 @@ async def handle_reserve_table_flow(
         try:
             party_size = parse_party_size(message)
             session_state["party_size"] = party_size
-
-            flow_id = settings.meta_flow_reservation_id
-            if flow_id and flow_id != "your_flow_id_here":
-                flow_token = f"reserve_{customer_id}_{int(time.time())}"
-                session_state["flow_token"] = flow_token
-                ok = await send_whatsapp_flow(
-                    phone=customer_phone, flow_id=flow_id, flow_token=flow_token,
-                    flow_cta="Select Date & Time", flow_header="📅 Table Reservation",
-                    flow_body=(
-                        f"Hi {customer_name}! Please select your preferred date and time "
-                        f"for your party of {party_size} guests."
-                    ),
-                    flow_footer="Restaurant hours: 10:00 AM - 11:00 PM",
-                    restaurant_id=restaurant_id,
-                )
-                if ok:
-                    session_state["booking_step"] = "awaiting_flow_datetime"
-                    return {"status": "awaiting_flow_datetime"}
-
-            await send_whatsapp_message(
-                customer_phone,
-                "Please share your preferred date and time.\nExample: 25-05-2026, 8:00 PM",
-                restaurant_id,
+            return await _offer_reserve_calendar(
+                customer_phone, restaurant_id, customer_id, customer_name, session_state,
             )
-            session_state["booking_step"] = "awaiting_datetime"
-            return {"status": "awaiting_datetime"}
-
         except ValueError:
             await send_whatsapp_message(
                 customer_phone, "Please enter a valid number of people (e.g. 4)." + _HOME_HINT, restaurant_id
             )
             return {"status": "error"}
 
-    # ── awaiting_datetime / awaiting_flow_datetime ────────────────────────────
-    elif booking_step in ("awaiting_datetime", "awaiting_flow_datetime"):
-        parsed_dt = None
+    # ── awaiting_datetime (legacy — redirect to calendar) ─────────────────────
+    elif booking_step == "awaiting_datetime":
+        return await _offer_reserve_calendar(
+            customer_phone, restaurant_id, customer_id, customer_name, session_state,
+        )
 
-        if booking_step == "awaiting_flow_datetime" and message.startswith("FLOW:"):
-            try:
-                parts = message.split("|")
-                data  = {}
-                for part in parts[1:]:
-                    if "=" in part:
-                        k, v = part.split("=", 1)
-                        data[k.strip()] = v.strip()
-                date_str = data.get("date", "")
-                time_str = data.get("time", "")
-                if date_str and time_str:
-                    parsed_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-            except Exception as e:
-                logger.error(f"Failed to parse Flow response: {e}")
-        else:
-            parsed_dt = parse_booking_datetime(message.strip())
+    # ── awaiting_flow_datetime (calendar picker only — no text input) ─────────
+    elif booking_step == "awaiting_flow_datetime":
+        parsed_dt = parse_flow_datetime(message)
 
         if parsed_dt is None:
+            if not session_state.get("_schedule_flow_resend"):
+                session_state["_schedule_flow_resend"] = True
+                return await _offer_reserve_calendar(
+                    customer_phone, restaurant_id, customer_id, customer_name, session_state,
+                )
             await send_whatsapp_message(
                 customer_phone,
-                "Sorry, I couldn't understand that date and time. 🙏\n\n"
-                "Please use this format:\nExample: 25-05-2026, 8:00 PM" + _HOME_HINT,
+                "Please tap *Select Date & Time* above to choose your reservation slot "
+                "from the calendar." + _HOME_HINT,
                 restaurant_id,
             )
-            return {"status": "error"}
+            return {"status": "awaiting_flow_datetime"}
 
         if parsed_dt <= datetime.now():
             await send_whatsapp_message(
                 customer_phone,
-                f"Oops! *{parsed_dt.strftime('%d %b %Y, %I:%M %p')}* has already passed. 😊\n\n"
-                "Please send a future date and time.\nExample: 25-05-2026, 8:00 PM" + _HOME_HINT,
+                "That time has already passed. Please tap *Select Date & Time* "
+                "to pick a future slot on the calendar.",
                 restaurant_id,
             )
-            return {"status": "error"}
+            return {"status": "awaiting_flow_datetime"}
 
         advance_amount = 150.0
         formatted_dt   = parsed_dt.strftime("%d %b %Y, %I:%M %p")
         session_state["booking_datetime"] = parsed_dt.isoformat()
         session_state["advance_amount"]   = advance_amount
         session_state["booking_step"]     = "awaiting_advance_confirmation"
+        session_state.pop("_schedule_flow_resend", None)
 
         ok = await _send_interactive(customer_phone, {
             "interactive": {
