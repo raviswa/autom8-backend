@@ -24,6 +24,12 @@ from tools.db_tools import (
     get_scheduled_delivery_token,
 )
 from tools.payment_tools import build_payment_line
+from tools.prepay_fulfillment import (
+    prepay_fulfillment_required,
+    build_prepay_payload,
+    stash_prepay_payload,
+    PREPAY_PENDING_FOOTER,
+)
 from tools.whatsapp_tools import send_whatsapp_message, send_location_request, send_whatsapp_flow
 from tools.cart_tools import cart_to_order_text, clear_cart
 from tools.order_pricing import (
@@ -270,8 +276,46 @@ async def _complete_scheduled_delivery_after_approval(
     if timing_note:
         confirmation += f"\n\n{timing_note}"
 
+    prepay_pending = prepay_fulfillment_required(session_state)
+    if prepay_pending and booking_id:
+        confirmation += f"\n\n{PREPAY_PENDING_FOOTER}"
+
     await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
     session_state["_scheduled_payment_sent"] = True
+
+    if prepay_pending and booking_id:
+        stash_prepay_payload(
+            session_state,
+            booking_id,
+            build_prepay_payload(
+                service_type="delivery",
+                session_state=session_state,
+                restaurant_id=restaurant_id,
+                customer_id=customer_id,
+                customer_name=customer_name,
+                customer_phone=customer_phone,
+                booking_id=booking_id,
+                token=str(token),
+                cart_snapshot=cart_snapshot,
+                order_text_display=order_text,
+                total=total,
+                totals=totals,
+                booking_time=session_state.get("booking_time", now_display()),
+                manager_phone=manager_phone,
+                delivery_address=session_state.get("delivery_address"),
+                delivery_fee=delivery_fee,
+            ),
+        )
+        session_state["order_confirmed_summary"] = (
+            f"Scheduled delivery *{token}* — {order_text[:40]} (₹{total:.0f}) — awaiting payment"
+        )
+        _first_item = strip_order_quantity(order_text.split(",")[0].strip())[:40]
+        session_state["last_order_summary"] = _first_item
+        session_state["is_returning_customer"] = True
+        session_state["visit_count"] = session_state.get("visit_count", 0) + 1
+        session_state["booking_step"] = "awaiting_prepay"
+        clear_cart(session_state)
+        return {"status": "awaiting_prepay", "booking_id": booking_id, "total": total}
 
     dist_note = ""
     if session_state.get("delivery_distance_km") is not None:
@@ -685,7 +729,45 @@ async def handle_delivery_flow(
                 confirmation += f"\n\n{timing_note}"
             if suggestion:
                 confirmation += f"\n\n{suggestion}"
+            prepay_pending = prepay_fulfillment_required(session_state)
+            if prepay_pending:
+                confirmation += f"\n\n{PREPAY_PENDING_FOOTER}"
             await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
+
+            if prepay_pending:
+                stash_prepay_payload(
+                    session_state,
+                    booking_id,
+                    build_prepay_payload(
+                        service_type="delivery",
+                        session_state=session_state,
+                        restaurant_id=restaurant_id,
+                        customer_id=customer_id,
+                        customer_name=customer_name,
+                        customer_phone=customer_phone,
+                        booking_id=booking_id,
+                        token=token,
+                        cart_snapshot=cart_snapshot,
+                        order_text_display=order_text,
+                        total=total,
+                        totals=totals,
+                        booking_time=booking_time,
+                        manager_phone=manager_phone,
+                        delivery_address=session_state.get("delivery_address"),
+                        delivery_fee=delivery_fee,
+                    ),
+                )
+                session_state["order_confirmed_summary"] = (
+                    f"Delivery Token *{token}* — {order_text} "
+                    f"to {session_state.get('delivery_address', '')[:40]} (₹{total:.0f}) — awaiting payment"
+                )
+                _first_item = strip_order_quantity(order_text.split(",")[0].strip())[:40]
+                session_state["last_order_summary"]    = _first_item
+                session_state["is_returning_customer"] = True
+                session_state["visit_count"]           = session_state.get("visit_count", 0) + 1
+                session_state["booking_step"] = "awaiting_prepay"
+                clear_cart(session_state)
+                return {"status": "awaiting_prepay", "booking_id": booking_id, "total": total}
 
             dist_note = ""
             if session_state.get("delivery_distance_km") is not None:

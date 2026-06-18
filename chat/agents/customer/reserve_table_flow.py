@@ -15,6 +15,12 @@ from typing import Dict, Any
 
 from tools.db_tools import get_next_token_number, create_booking, update_booking_status
 from tools.payment_tools import create_payment_link
+from tools.prepay_fulfillment import (
+    build_prepay_payload,
+    stash_prepay_payload,
+    PREPAY_PENDING_FOOTER,
+    RESERVE_PREPAY_FOOTER,
+)
 from tools.whatsapp_tools import send_whatsapp_message
 from tools.cart_tools import _send_interactive
 from tools.booking_mechanisms import (
@@ -190,11 +196,6 @@ async def handle_reserve_table_flow(
         booking_datetime_iso = session_state.get("booking_datetime", "")
         session_state["token_number"] = token
 
-        await sync_token_to_portal(
-            customer_name=customer_name, customer_phone=customer_phone,
-            token_type="dinein", pax=party_size or 1, restaurant_id=restaurant_id,
-        )
-
         try:
             booking = await create_booking(
                 restaurant_id, customer_id, "reserve_table",
@@ -208,6 +209,7 @@ async def handle_reserve_table_flow(
                 payment_link = await create_payment_link(
                     booking_id, advance_amount, customer_name,
                     f"Reservation {token} for {party_size} people",
+                    customer_phone=customer_phone,
                 )
             except Exception as _pl:
                 logger.warning(f"[payment] create_payment_link failed (non-fatal): {_pl}")
@@ -219,52 +221,91 @@ async def handle_reserve_table_flow(
                 display_dt = booking_datetime_iso
 
             if is_placeholder_payment_link(payment_link):
+                await sync_token_to_portal(
+                    customer_name=customer_name, customer_phone=customer_phone,
+                    token_type="dinein", pax=party_size or 1, restaurant_id=restaurant_id,
+                )
                 payment_line = (
                     f"💳 Please pay the advance of ₹{advance_amount:.0f} at the counter when you arrive.\n"
                     f"Your table is provisionally held."
                 )
-            else:
-                payment_line = f"Please complete payment to secure your table:\n{payment_link}"
+                summary = (
+                    f"Reservation confirmed! 🎉\n────────────────────\n"
+                    f"Token: {token}\nBooking Time: {booking_time}\n"
+                    f"Date & Time: {display_dt}\nGuests: {party_size}\n"
+                    f"Advance: ₹{advance_amount:.0f}\n────────────────────\n\n"
+                    f"{payment_line}\n\nJust tell our staff your token *{token}* when you arrive!"
+                )
+                await send_whatsapp_message(customer_phone, summary, restaurant_id)
 
+                if RECEIPT_AVAILABLE:
+                    try:
+                        r_info = await fetch_restaurant_info(restaurant_id)
+                        receipt_data = _ReceiptData(
+                            restaurant_name=r_info.get("name", ""),
+                            restaurant_wa_number=r_info.get("whatsapp_number", ""),
+                            token_number=token,
+                            table_number="",
+                            service_type="reserve_table",
+                            customer_name=customer_name,
+                            customer_phone=customer_phone,
+                            items=[],
+                            gst_rate=0.0,
+                            payment_mode=session_state.get("payment_mode", "Cash"),
+                            footer_message=f"Reservation for {display_dt} — {party_size} guests 😊",
+                        )
+                        receipt_path = _generate_receipt(receipt_data)
+                        logger.info(f"[receipt] Reservation receipt saved: {receipt_path}")
+                        await update_booking_status(booking_id, "confirmed")
+                        logger.info(f"[receipt] Booking {booking_id} marked confirmed")
+                    except Exception as _re:
+                        import traceback as _tb
+                        logger.warning(f"[receipt] Generation failed (non-fatal): {_re}\n{_tb.format_exc()}")
+
+                session_state["order_confirmed_summary"] = (
+                    f"Table Reservation Token *{token}* — {display_dt} "
+                    f"for {party_size} guests (advance ₹{advance_amount:.0f})"
+                )
+                session_state["booking_step"] = "awaiting_payment"
+                return {"status": "awaiting_payment", "booking_id": booking_id, "total": advance_amount}
+
+            session_state["payment_link"] = payment_link
+            stash_prepay_payload(
+                session_state,
+                booking_id,
+                build_prepay_payload(
+                    service_type="reserve_table",
+                    session_state=session_state,
+                    restaurant_id=restaurant_id,
+                    customer_id=customer_id,
+                    customer_name=customer_name,
+                    customer_phone=customer_phone,
+                    booking_id=booking_id,
+                    token=token,
+                    total=advance_amount,
+                    booking_time=booking_time,
+                    party_size=party_size,
+                    advance_amount=advance_amount,
+                    booking_datetime_iso=booking_datetime_iso,
+                    display_dt=display_dt,
+                ),
+            )
+            payment_line = f"Please complete payment to secure your table:\n{payment_link}"
             summary = (
-                f"Reservation confirmed! 🎉\n────────────────────\n"
+                f"Reservation received! 📅\n────────────────────\n"
                 f"Token: {token}\nBooking Time: {booking_time}\n"
                 f"Date & Time: {display_dt}\nGuests: {party_size}\n"
                 f"Advance: ₹{advance_amount:.0f}\n────────────────────\n\n"
-                f"{payment_line}\n\nJust tell our staff your token *{token}* when you arrive!"
+                f"{payment_line}\n\n{RESERVE_PREPAY_FOOTER}"
             )
             await send_whatsapp_message(customer_phone, summary, restaurant_id)
 
-            if RECEIPT_AVAILABLE:
-                try:
-                    r_info = await fetch_restaurant_info(restaurant_id)
-                    receipt_data = _ReceiptData(
-                        restaurant_name=r_info.get("name", ""),
-                        restaurant_wa_number=r_info.get("whatsapp_number", ""),
-                        token_number=token,
-                        table_number="",
-                        service_type="reserve_table",
-                        customer_name=customer_name,
-                        customer_phone=customer_phone,
-                        items=[],
-                        gst_rate=0.0,
-                        payment_mode=session_state.get("payment_mode", "Cash"),
-                        footer_message=f"Reservation for {display_dt} — {party_size} guests 😊",
-                    )
-                    receipt_path = _generate_receipt(receipt_data)
-                    logger.info(f"[receipt] Reservation receipt saved: {receipt_path}")
-                    await update_booking_status(booking_id, "confirmed")
-                    logger.info(f"[receipt] Booking {booking_id} marked confirmed")
-                except Exception as _re:
-                    import traceback as _tb
-                    logger.warning(f"[receipt] Generation failed (non-fatal): {_re}\n{_tb.format_exc()}")
-
             session_state["order_confirmed_summary"] = (
                 f"Table Reservation Token *{token}* — {display_dt} "
-                f"for {party_size} guests (advance ₹{advance_amount:.0f})"
+                f"for {party_size} guests (advance ₹{advance_amount:.0f}) — awaiting payment"
             )
-            session_state["booking_step"] = "awaiting_payment"
-            return {"status": "awaiting_payment", "booking_id": booking_id, "total": advance_amount}
+            session_state["booking_step"] = "awaiting_prepay"
+            return {"status": "awaiting_prepay", "booking_id": booking_id, "total": advance_amount}
 
         except Exception as e:
             logger.error(f"Failed to create reservation: {e}")

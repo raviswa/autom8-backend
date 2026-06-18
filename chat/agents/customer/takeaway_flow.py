@@ -21,11 +21,12 @@ from typing import Dict, Any
 import aiohttp
 
 from tools.db_tools import get_next_token_number, create_booking, update_booking_status
-from tools.payment_tools import build_payment_line, wants_online_payment
+from tools.payment_tools import build_payment_line
 from tools.prepay_fulfillment import (
     prepay_fulfillment_required,
     build_prepay_payload,
     stash_prepay_payload,
+    PREPAY_PENDING_FOOTER,
 )
 from tools.whatsapp_tools import send_whatsapp_message, send_whatsapp_flow
 from tools.cart_tools import cart_to_order_text, clear_cart
@@ -292,6 +293,7 @@ async def handle_takeaway_flow(
                     session_state,
                     booking_id,
                     build_prepay_payload(
+                        service_type="takeaway",
                         session_state=session_state,
                         restaurant_id=restaurant_id,
                         customer_id=customer_id,
@@ -311,7 +313,7 @@ async def handle_takeaway_flow(
                     f"Token: {display_token}\nBooking Time: {booking_time}\n"
                     f"Order: {order_text_display}\n────────────────────\n"
                     f"{format_order_total_lines(totals)}\n\n{payment_line}\n\n"
-                    f"_Your order will be sent to the kitchen after payment is received._"
+                    f"{PREPAY_PENDING_FOOTER}"
                 )
                 pickup_block = format_pickup_location_block(session_state)
                 if pickup_block:

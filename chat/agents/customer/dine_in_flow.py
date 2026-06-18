@@ -25,6 +25,13 @@ from tools.db_tools import (
     customer_lock,
 )
 from tools.payment_tools import build_payment_line
+from tools.prepay_fulfillment import (
+    prepay_fulfillment_required,
+    build_prepay_payload,
+    stash_prepay_payload,
+    kitchen_blocked_pending_payment,
+    PREPAY_PENDING_FOOTER,
+)
 from tools.restaurant_config import get_manager_phone
 from tools.whatsapp_tools import send_whatsapp_message
 from tools.cart_tools import (
@@ -191,6 +198,25 @@ async def _finalize_special_notes_and_kitchen(
 ) -> None:
     """Send order to KDS/KOT + receipt once notes are collected or timed out."""
     if session_state.get("_customer_finalize_sent"):
+        return
+
+    if kitchen_blocked_pending_payment(session_state):
+        session_state["_deferred_special_notes"] = special_notes
+        session_state["_notes_finalized_pending_payment"] = True
+        if notify_customer:
+            if special_notes:
+                await send_whatsapp_message(
+                    customer_phone,
+                    "✅ Got it! Your notes are saved.\n\n"
+                    "Complete payment to send your order to the kitchen.",
+                    restaurant_id,
+                )
+            else:
+                await send_whatsapp_message(
+                    customer_phone,
+                    "No problem! Complete payment to send your order to the kitchen.",
+                    restaurant_id,
+                )
         return
 
     if session_state.get("_kitchen_sent"):
@@ -392,7 +418,7 @@ async def _fire_kitchen_and_receipt(
             items=_LineItem.from_cart(cart_snapshot),
             gst_rate=5.0,
             gst_inclusive=False,
-            payment_mode=session_state.get("payment_mode", "Cash"),
+            payment_mode="Online" if session_state.get("_payment_received") else session_state.get("payment_mode", "Cash"),
             special_notes=special_notes or "",
         )
         receipt_path = _generate_receipt(receipt_data)
@@ -450,6 +476,7 @@ async def _confirm_dine_in_order(
         session_state, service_type="dine_in",
     )
 
+    prepay_pending = prepay_fulfillment_required(session_state)
     confirmation = (
         f"Your order has been placed! 🎉\n"
         f"────────────────────\n"
@@ -457,22 +484,47 @@ async def _confirm_dine_in_order(
         f"────────────────────\n"
         f"Total: ₹{total:.0f}\n\n{payment_line}"
     )
+    if prepay_pending:
+        confirmation += f"\n\n{PREPAY_PENDING_FOOTER}"
     if suggestion:
         confirmation += f"\n\n{suggestion}"
     await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
 
-    await _notify_manager_order_received(
-        manager_phone=manager_phone,
-        restaurant_id=restaurant_id,
-        session_state=session_state,
-        customer_name=customer_name,
-        customer_phone=customer_phone,
-        order_text=order_text,
-        total=total,
-        token=token,
-        booking_time=booking_time,
-        table_num=table_num,
-    )
+    if prepay_pending:
+        stash_prepay_payload(
+            session_state,
+            booking_id,
+            build_prepay_payload(
+                service_type="dine_in",
+                session_state=session_state,
+                restaurant_id=restaurant_id,
+                customer_id=customer_id,
+                customer_name=customer_name,
+                customer_phone=customer_phone,
+                booking_id=booking_id,
+                token=token,
+                cart_snapshot=cart_snapshot,
+                order_text_display=order_text,
+                total=total,
+                totals={},
+                booking_time=booking_time,
+                manager_phone=manager_phone,
+                table_number=table_num,
+            ),
+        )
+    else:
+        await _notify_manager_order_received(
+            manager_phone=manager_phone,
+            restaurant_id=restaurant_id,
+            session_state=session_state,
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            order_text=order_text,
+            total=total,
+            token=token,
+            booking_time=booking_time,
+            table_num=table_num,
+        )
 
     notes_hint = await build_notes_hint(order_text, cart_snapshot, restaurant_id)
     await _send_interactive(customer_phone, {
@@ -496,31 +548,33 @@ async def _confirm_dine_in_order(
         "cart": dict(cart_snapshot),
     }
 
-    session_state["_kitchen_send_claimed"] = True
-    await save_session_state(restaurant_id, customer_phone, session_state)
-
-    # Send to KDS immediately — kitchen should see the order without waiting for notes.
-    kds_order_id = await _fire_kitchen_and_receipt(
-        restaurant_id=restaurant_id,
-        customer_name=customer_name,
-        customer_phone=customer_phone,
-        order_text=order_text,
-        cart_snapshot=cart_snapshot,
-        session_state=session_state,
-        token=token,
-        table_number=table_num,
-        special_notes=None,
-    )
-    if kds_order_id:
-        session_state["_kitchen_sent"] = True
-        session_state["_kds_order_id"] = kds_order_id
+    if not prepay_pending:
+        session_state["_kitchen_send_claimed"] = True
         await save_session_state(restaurant_id, customer_phone, session_state)
-    else:
-        session_state["_kitchen_send_claimed"] = False
-        logger.error(
-            f"[dine-in] KDS notify failed for token {token} — "
-            "kitchen board will stay empty until retry"
+
+        kds_order_id = await _fire_kitchen_and_receipt(
+            restaurant_id=restaurant_id,
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            order_text=order_text,
+            cart_snapshot=cart_snapshot,
+            session_state=session_state,
+            token=token,
+            table_number=table_num,
+            special_notes=None,
         )
+        if kds_order_id:
+            session_state["_kitchen_sent"] = True
+            session_state["_kds_order_id"] = kds_order_id
+            await save_session_state(restaurant_id, customer_phone, session_state)
+        else:
+            session_state["_kitchen_send_claimed"] = False
+            logger.error(
+                f"[dine-in] KDS notify failed for token {token} — "
+                "kitchen board will stay empty until retry"
+            )
+            await save_session_state(restaurant_id, customer_phone, session_state)
+    else:
         await save_session_state(restaurant_id, customer_phone, session_state)
 
     start_special_notes_timer(
