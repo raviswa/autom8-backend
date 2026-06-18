@@ -91,6 +91,7 @@ async def create_payment_link(
     description: str,
     *,
     customer_phone: str | None = None,
+    session_state: dict[str, Any] | None = None,
 ) -> str:
     """Create Razorpay payment link and return the short URL."""
     client = _get_client()
@@ -116,6 +117,7 @@ async def create_payment_link(
             "currency": "INR",
             "accept_partial": False,
             "description": description[:255],
+            "reference_id": str(booking_id)[:40],
             "customer": customer,
             "notify": {"sms": False, "email": False},
             "reminder_enable": True,
@@ -132,12 +134,101 @@ async def create_payment_link(
         short_url = response.get("short_url") or response.get("url", "")
         if not short_url:
             raise RuntimeError(f"Razorpay returned no URL: {response}")
+        if session_state is not None:
+            session_state["payment_link"] = short_url
+            session_state["razorpay_payment_link_id"] = link_id
         logger.info(f"[razorpay] Payment link created: {link_id} for booking {booking_id}")
         return short_url
 
     except Exception as e:
         logger.error(f"[razorpay] Failed to create payment link: {e}")
         raise
+
+
+def _cache_payment_link_in_session(session_state: dict[str, Any] | None, plink: dict[str, Any]) -> None:
+    if session_state is None:
+        return
+    link_id = plink.get("id")
+    short_url = plink.get("short_url") or plink.get("url")
+    if link_id:
+        session_state["razorpay_payment_link_id"] = link_id
+    if short_url:
+        session_state["payment_link"] = short_url
+
+
+async def resolve_payment_link_status(
+    booking_id: str,
+    session_state: dict[str, Any] | None = None,
+) -> str | None:
+    """Return Razorpay payment-link status: paid, created, expired, cancelled, or None."""
+    client = _get_client()
+    if not client:
+        return None
+
+    link_id = (session_state or {}).get("razorpay_payment_link_id")
+    if link_id:
+        try:
+            plink = client.payment_link.fetch(link_id)
+            _cache_payment_link_in_session(session_state, plink)
+            return plink.get("status")
+        except Exception as exc:
+            logger.warning(f"[razorpay] fetch link {link_id} failed: {exc}")
+
+    try:
+        by_ref = client.payment_link.all({"reference_id": str(booking_id), "count": 10})
+        for plink in by_ref.get("items") or []:
+            notes = plink.get("notes") or {}
+            if str(notes.get("booking_id")) == str(booking_id):
+                _cache_payment_link_in_session(session_state, plink)
+                return plink.get("status")
+    except Exception as exc:
+        logger.warning(f"[razorpay] reference_id lookup failed for {booking_id}: {exc}")
+
+    try:
+        recent = client.payment_link.all({"count": 100})
+        for plink in recent.get("items") or []:
+            notes = plink.get("notes") or {}
+            if str(notes.get("booking_id")) == str(booking_id):
+                _cache_payment_link_in_session(session_state, plink)
+                return plink.get("status")
+    except Exception as exc:
+        logger.warning(f"[razorpay] recent-link scan failed for {booking_id}: {exc}")
+
+    return None
+
+
+async def recover_prepay_if_already_paid(
+    booking_id: str,
+    session_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    If Razorpay shows paid (or DB already confirmed), fulfill and return state.
+    States: already_confirmed | fulfilled | fulfill_failed | pending
+    """
+    from tools.db_tools import get_booking_with_customer
+
+    booking = await get_booking_with_customer(booking_id)
+    if not booking:
+        return {"state": "pending"}
+
+    if booking.get("status") == "confirmed":
+        return {"state": "already_confirmed", "booking": booking}
+
+    link_status = await resolve_payment_link_status(booking_id, session_state)
+    paid_on_razorpay = link_status == "paid"
+    paid_in_db = booking.get("payment_status") == "paid"
+
+    if not paid_on_razorpay and not paid_in_db:
+        return {"state": "pending", "link_status": link_status}
+
+    logger.info(
+        f"[razorpay] Recovering prepay for booking {booking_id} "
+        f"(link_status={link_status}, db_paid={paid_in_db})"
+    )
+    result = await _mark_paid_and_fulfill(booking_id, source="prepay_recovery")
+    if result.get("fulfilled"):
+        return {"state": "fulfilled", "booking": booking, "result": result}
+    return {"state": "fulfill_failed", "booking": booking, "result": result}
 
 
 async def build_payment_line(
@@ -160,6 +251,7 @@ async def build_payment_line(
         link = await create_payment_link(
             booking_id, amount, customer_name, description,
             customer_phone=customer_phone,
+            session_state=session_state,
         )
         if is_placeholder_payment_link(link):
             logger.warning(
@@ -167,7 +259,6 @@ async def build_payment_line(
                 f"(status={razorpay_status_message()})"
             )
             return counter_fallback if service_type != "delivery" else delivery_fallback
-        session_state["payment_link"] = link
         return f"💳 Pay here to confirm your order:\n{link}"
     except Exception as e:
         logger.warning(f"[payment] build_payment_line failed for {booking_id}: {e}")

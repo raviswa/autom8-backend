@@ -114,6 +114,7 @@ def expire_session_if_stale(
     _pending_pay = session_state.get("pending_prepay_fulfillment")
     _booking_id = session_state.get("booking_id")
     _payment_link = session_state.get("payment_link")
+    _razorpay_link_id = session_state.get("razorpay_payment_link_id")
     _order_summary = session_state.get("order_confirmed_summary")
     _order_total = session_state.get("order_total")
     session_state.clear()
@@ -134,6 +135,8 @@ def expire_session_if_stale(
         session_state["booking_id"] = _booking_id
     if _payment_link:
         session_state["payment_link"] = _payment_link
+    if _razorpay_link_id:
+        session_state["razorpay_payment_link_id"] = _razorpay_link_id
     if _order_summary:
         session_state["order_confirmed_summary"] = _order_summary
     if _order_total is not None:
@@ -711,7 +714,13 @@ async def handle_awaiting_prepay(
     session_state: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Keep prepay session alive — resend payment link instead of resetting."""
-    from tools.payment_tools import create_payment_link, is_placeholder_payment_link, build_payment_line
+    from tools.payment_tools import (
+        create_payment_link,
+        is_placeholder_payment_link,
+        build_payment_line,
+        recover_prepay_if_already_paid,
+        resolve_payment_link_status,
+    )
 
     msg_lower = message.strip().lower()
     if msg_lower in ("new order", "new", "order again"):
@@ -733,16 +742,55 @@ async def handle_awaiting_prepay(
     total = float(session_state.get("order_total") or 0)
     service_type = session_state.get("service_type") or session_state.get("last_service_type") or "takeaway"
 
+    if booking_id:
+        recovery = await recover_prepay_if_already_paid(str(booking_id), session_state)
+        if recovery["state"] == "already_confirmed":
+            await send_whatsapp_message(
+                customer_phone,
+                f"✅ Your order is already confirmed!\n_{summary}_\n\n"
+                f"Reply *Home* to place a new order.",
+                restaurant_id,
+            )
+            session_state["booking_step"] = "visit_complete"
+            session_state.pop("payment_link", None)
+            return {"status": "visit_complete"}
+        if recovery["state"] == "fulfilled":
+            session_state["booking_step"] = "visit_complete"
+            session_state.pop("payment_link", None)
+            session_state.pop("razorpay_payment_link_id", None)
+            return {"status": "visit_complete"}
+        if recovery["state"] == "fulfill_failed":
+            await send_whatsapp_message(
+                customer_phone,
+                "We received your payment ✅ but confirmation is still processing.\n\n"
+                "Please wait a minute — we'll message you shortly. "
+                "If nothing arrives, contact the restaurant."
+                + _HOME_HINT,
+                restaurant_id,
+            )
+            touch_session_activity(session_state)
+            return {"status": "awaiting_prepay"}
+
     payment_link = session_state.get("payment_link")
+    link_status = await resolve_payment_link_status(str(booking_id), session_state) if booking_id else None
+    if link_status == "paid":
+        await send_whatsapp_message(
+            customer_phone,
+            "Your payment is already complete ✅ We're confirming your order now — "
+            "you'll get a confirmation message shortly.",
+            restaurant_id,
+        )
+        touch_session_activity(session_state)
+        return {"status": "awaiting_prepay"}
+
     if (not payment_link or is_placeholder_payment_link(str(payment_link))) and booking_id and total >= 1:
         try:
             description = f"{str(service_type).replace('_', ' ').title()} order"
             payment_link = await create_payment_link(
                 str(booking_id), total, customer_name, description,
                 customer_phone=customer_phone,
+                session_state=session_state,
             )
-            if not is_placeholder_payment_link(payment_link):
-                session_state["payment_link"] = payment_link
         except Exception as e:
             logger.warning(f"[awaiting_prepay] link regen failed for {booking_id}: {e}")
 
