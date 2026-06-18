@@ -140,7 +140,7 @@ async def offer_delivery_schedule(
     logger.warning(f"[delivery] schedule Flow unavailable for {customer_phone}")
     await send_whatsapp_message(
         customer_phone,
-        "We couldn't open the date picker. Please reply *Home* and choose *Scheduled Door Delivery 📅* again, "
+        "We couldn't open the date picker. Please reply *Home* and choose *Schedule Delivery 📅* again, "
         "or contact the restaurant for help.",
         restaurant_id,
     )
@@ -778,7 +778,7 @@ async def handle_delivery_flow(
             try:
                 await send_whatsapp_message(
                     manager_phone,
-                    f"🛵 New Delivery Order\n────────────────────\n"
+                    f"🛵 *Deliver Now* (immediate)\n────────────────────\n"
                     f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
                     f"Address: {session_state.get('delivery_address')}\n{dist_note}"
                     f"Booking Time: {booking_time}\n"

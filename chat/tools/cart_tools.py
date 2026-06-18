@@ -138,6 +138,22 @@ _BASE_URL = f"https://graph.facebook.com/{_API_VER}"
 
 # WhatsApp API hard limit for list-row description field
 _MAX_ROW_DESC = 72
+_MAX_ROW_TITLE = 24
+
+
+def sanitize_list_rows(rows: list[dict]) -> list[dict]:
+    """Ensure list row title/description fit WhatsApp interactive list limits."""
+    sanitized: list[dict] = []
+    for row in rows:
+        title = str(row.get("title") or "")
+        if len(title) > _MAX_ROW_TITLE:
+            title = title[: _MAX_ROW_TITLE - 1] + "…"
+        sanitized.append({
+            **row,
+            "title": title,
+            "description": _truncate_desc(str(row.get("description") or "")),
+        })
+    return sanitized
 
 # ── Quantity validation bounds ────────────────────────────────────────────────
 MIN_QTY = 1

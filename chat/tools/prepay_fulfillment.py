@@ -342,7 +342,7 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
         try:
             await send_whatsapp_message(
                 manager_phone,
-                f"🛵 Delivery Order — *paid*\n────────────────────\n"
+                f"🛵 *Deliver Now — paid* ✅\n────────────────────\n"
                 f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
                 f"Address: {delivery_address}\n{dist_note}"
                 f"Booking Time: {booking_time}\n"

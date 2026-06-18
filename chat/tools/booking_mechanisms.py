@@ -494,13 +494,80 @@ async def _notify_manager_scheduled_delivery(
         f"📍 {addr}\n"
         f"💰 {total_label}\n\n"
         f"Order: {order_text}\n\n"
-        f"⚠️ *Approve in portal before customer pays:*\n{portal_url}"
+        f"Approve before the customer pays."
     )
     try:
-        await send_whatsapp_message(manager_phone, body, restaurant_id)
+        from tools.whatsapp_buttons_helper import send_whatsapp_buttons
+
+        ok = await send_whatsapp_buttons(
+            to=manager_phone,
+            body=body,
+            buttons=[
+                {"id": f"SCHED_APPROVE_{token_id}", "title": "✅ Approve"},
+                {"id": f"SCHED_REJECT_{token_id}", "title": "❌ Reject"},
+            ],
+            restaurant_id=restaurant_id,
+            footer=f"Portal: {portal_url.split('/')[-1]}",
+        )
+        if not ok:
+            await send_whatsapp_message(
+                manager_phone,
+                f"{body}\n\n⚠️ *Approve in portal:*\n{portal_url}",
+                restaurant_id,
+            )
         logger.info(f"[scheduled-delivery-alert] ✅ {token_id} → manager")
     except Exception as e:
         logger.warning(f"[scheduled-delivery-alert] failed for {token_id}: {e}")
+
+
+async def approve_scheduled_delivery_token(restaurant_id: str, token_id: str) -> dict[str, Any]:
+    """Manager approved a scheduled delivery via WhatsApp button."""
+    secret = _get_kds_secret()
+    if not secret:
+        return {"ok": False, "error": "not_configured"}
+    url = f"{PORTAL_API_URL}/{token_id}/approve-internal"
+    try:
+        resp = await get_http().post(
+            url,
+            json={"restaurant_id": restaurant_id, "secret": secret},
+            headers=_portal_auth_headers(),
+            timeout=aiohttp.ClientTimeout(total=8),
+        )
+        if resp.status in (200, 201):
+            data = await resp.json()
+            logger.info(f"[scheduled-delivery] approved {token_id}")
+            return {"ok": True, "token": data.get("token")}
+        body = (await resp.text())[:300]
+        logger.error(f"[scheduled-delivery] approve failed {resp.status}: {body}")
+        return {"ok": False, "error": body}
+    except Exception as e:
+        logger.error(f"[scheduled-delivery] approve error: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+async def reject_scheduled_delivery_token(restaurant_id: str, token_id: str) -> dict[str, Any]:
+    """Manager rejected a scheduled delivery via WhatsApp button."""
+    secret = _get_kds_secret()
+    if not secret:
+        return {"ok": False, "error": "not_configured"}
+    url = f"{PORTAL_API_URL}/{token_id}/reject-internal"
+    try:
+        resp = await get_http().post(
+            url,
+            json={"restaurant_id": restaurant_id, "secret": secret},
+            headers=_portal_auth_headers(),
+            timeout=aiohttp.ClientTimeout(total=8),
+        )
+        if resp.status in (200, 201):
+            data = await resp.json()
+            logger.info(f"[scheduled-delivery] rejected {token_id}")
+            return {"ok": True, "token": data.get("token")}
+        body = (await resp.text())[:300]
+        logger.error(f"[scheduled-delivery] reject failed {resp.status}: {body}")
+        return {"ok": False, "error": body}
+    except Exception as e:
+        logger.error(f"[scheduled-delivery] reject error: {e}")
+        return {"ok": False, "error": str(e)}
 
 
 async def _send_manager_walk_in_alert(

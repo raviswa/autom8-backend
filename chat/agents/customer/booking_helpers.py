@@ -33,7 +33,7 @@ from typing import Dict, Any
 from zoneinfo import ZoneInfo
 
 from tools.whatsapp_tools import send_whatsapp_message
-from tools.cart_tools import clear_cart, _send_interactive
+from tools.cart_tools import clear_cart, _send_interactive, sanitize_list_rows
 from tools.feature_gate import build_service_menu_rows
 from tools.db_tools import update_booking_status
 
@@ -488,6 +488,7 @@ async def send_service_menu(
         from tools.booking_mechanisms import cache_restaurant_pricing
         await cache_restaurant_pricing(state, restaurant_id)
     rows = await build_service_menu_rows(restaurant_id, state)
+    rows = sanitize_list_rows(rows)
     state["_service_menu_rows"] = rows
     normalize_last_order_summary(state)
     tod = _time_of_day_label()
@@ -515,7 +516,7 @@ async def send_service_menu(
     elif not is_kitchen_open():
         body_lines.append(
             f"Kitchen is closed until *{next_open_label()}*. "
-            f"Tap *Scheduled Door Delivery 📅* or *Takeaway 📅* to pick a date and time on the calendar. "
+            f"Tap *Schedule Delivery 📅* or *Takeaway 📅* to pick a date and time on the calendar. "
             f"Dine-in reservations are still available."
         )
     body_lines.append("What would you like to do today?")
@@ -534,7 +535,7 @@ async def send_service_menu(
                 "sections": [{"title": "Our services", "rows": rows}],
             },
         }
-    })
+    }, restaurant_id)
     if not ok:
         lines = "\n".join(f"{r['id']}. {r['title']}" for r in rows)
         await send_whatsapp_message(

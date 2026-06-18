@@ -606,6 +606,106 @@ router.put('/:id/complete', outletAuth, async (req, res) => {
   }
 });
 
+// ── POST /api/tokens/:id/approve-internal — chat agent: manager WhatsApp approve ─
+
+router.post('/:id/approve-internal', requireKdsSecret, async (req, res) => {
+  try {
+    const restaurantId = req.body.restaurant_id;
+    if (!restaurantId) return res.status(400).json({ error: 'restaurant_id is required' });
+
+    const { data: token } = await supabaseAdmin
+      .from('walk_in_tokens').select('*').eq('id', req.params.id).eq('restaurant_id', restaurantId).single();
+    if (!token) return res.status(404).json({ error: 'Token not found' });
+    if (token.status !== 'pending_approval') {
+      return res.status(400).json({ error: `Token is ${token.status}` });
+    }
+    if (token.type !== 'scheduled_delivery') {
+      return res.status(400).json({ error: 'Internal approve supports scheduled_delivery only' });
+    }
+
+    const meta = token.meta || {};
+    const { data: updatedToken } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .update({
+        status: 'takeaway',
+        meta: { ...meta, approved_at: new Date().toISOString() },
+      })
+      .eq('id', req.params.id).select().single();
+
+    if (meta.booking_id) {
+      await supabaseAdmin.from('bookings')
+        .update({ status: 'confirmed' })
+        .eq('id', meta.booking_id);
+    }
+
+    if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+      const schedLabel = meta.scheduled_at_label || meta.scheduled_at || 'your chosen time';
+      await sendWhatsAppMessage(
+        token.phone,
+        `✅ *Your scheduled delivery is approved!*\n\n`
+        + `Token: *${token.id}*\n`
+        + `Delivery at: *${schedLabel}*\n\n`
+        + `We'll send your payment link shortly. You can also reply *PAY* here when ready.`,
+        restaurantId
+      );
+    }
+
+    await syncConversationForScheduledDeliveryApproval({
+      restaurantId,
+      customerPhone: token.phone,
+      tokenId:       token.id,
+      meta,
+    });
+
+    broadcastToRestaurant(restaurantId, { type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString() });
+    res.json({ success: true, token: updatedToken });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/tokens/:id/reject-internal — chat agent: manager WhatsApp reject ─
+
+router.post('/:id/reject-internal', requireKdsSecret, async (req, res) => {
+  try {
+    const restaurantId = req.body.restaurant_id;
+    if (!restaurantId) return res.status(400).json({ error: 'restaurant_id is required' });
+
+    const { data: token } = await supabaseAdmin
+      .from('walk_in_tokens').select('*').eq('id', req.params.id).eq('restaurant_id', restaurantId).single();
+    if (!token) return res.status(404).json({ error: 'Token not found' });
+    if (token.type !== 'scheduled_delivery') {
+      return res.status(400).json({ error: 'Internal reject supports scheduled_delivery only' });
+    }
+
+    const meta = token.meta || {};
+    const { data: updatedToken } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .update({ status: 'completed', completed_at: new Date().toISOString() })
+      .eq('id', req.params.id).select().single();
+
+    if (meta.booking_id) {
+      await supabaseAdmin.from('bookings')
+        .update({ status: 'rejected' })
+        .eq('id', meta.booking_id);
+    }
+
+    if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+      await sendWhatsAppMessage(
+        token.phone,
+        `😔 *We're unable to confirm your scheduled delivery right now.*\n\n`
+        + `Please try a different time or reply *Home* to see other options. 🙏`,
+        restaurantId
+      );
+    }
+
+    broadcastToRestaurant(restaurantId, { type: 'TOKEN_REJECTED', token: updatedToken, timestamp: new Date().toISOString() });
+    res.json({ success: true, token: updatedToken });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── DELETE /api/tokens/:id ────────────────────────────────────────────────────
 
 router.delete('/:id', outletAuth, async (req, res) => {

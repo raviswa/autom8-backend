@@ -35,9 +35,20 @@ async def parse_manager_command(
     message: str,
 ) -> Dict[str, Any]:
     """Parse and execute manager commands."""
-    
-    command_text = message.strip().upper()
-    
+
+    raw = message.strip()
+    upper = raw.upper()
+
+    # Scheduled delivery WhatsApp approve/reject buttons
+    if upper.startswith("SCHED_APPROVE_"):
+        token_id = raw[len("SCHED_APPROVE_"):]
+        return await cmd_scheduled_delivery_approve(restaurant_id, manager_phone, token_id)
+    if upper.startswith("SCHED_REJECT_"):
+        token_id = raw[len("SCHED_REJECT_"):]
+        return await cmd_scheduled_delivery_reject(restaurant_id, manager_phone, token_id)
+
+    command_text = upper
+
     # BOOKING COMMANDS
     if command_text == "TODAY":
         return await cmd_today(restaurant_id, manager_phone)
@@ -190,6 +201,102 @@ async def cmd_confirm(restaurant_id: str, manager_phone: str, booking_num: str) 
     
     except Exception as e:
         logger.error(f"Error in cmd_confirm: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+async def cmd_scheduled_delivery_approve(
+    restaurant_id: str, manager_phone: str, token_id: str,
+) -> Dict[str, Any]:
+    """Approve a scheduled door delivery from manager WhatsApp button."""
+    from tools.booking_mechanisms import approve_scheduled_delivery_token
+
+    result = await approve_scheduled_delivery_token(restaurant_id, token_id)
+    if result.get("ok"):
+        await send_whatsapp_message(
+            manager_phone,
+            f"✅ Scheduled delivery *{token_id}* approved. Customer will receive payment link.",
+            restaurant_id,
+        )
+        return {"status": "success", "token_id": token_id}
+    await send_whatsapp_message(
+        manager_phone,
+        f"Could not approve *{token_id}*. It may already be handled — check the portal.",
+        restaurant_id,
+    )
+    return {"status": "error", "message": result.get("error", "approve failed")}
+
+
+async def cmd_scheduled_delivery_reject(
+    restaurant_id: str, manager_phone: str, token_id: str,
+) -> Dict[str, Any]:
+    """Reject a scheduled door delivery from manager WhatsApp button."""
+    from tools.booking_mechanisms import reject_scheduled_delivery_token
+
+    result = await reject_scheduled_delivery_token(restaurant_id, token_id)
+    if result.get("ok"):
+        await send_whatsapp_message(
+            manager_phone,
+            f"❌ Scheduled delivery *{token_id}* rejected. Customer notified.",
+            restaurant_id,
+        )
+        return {"status": "success", "token_id": token_id}
+    await send_whatsapp_message(
+        manager_phone,
+        f"Could not reject *{token_id}*. Check the portal.",
+        restaurant_id,
+    )
+    return {"status": "error", "message": result.get("error", "reject failed")}
+
+
+async def cmd_scheduled_delivery_approve(
+    restaurant_id: str, manager_phone: str, token_id: str,
+) -> Dict[str, Any]:
+    """Approve a scheduled door delivery from manager WhatsApp button."""
+    from tools.booking_mechanisms import approve_scheduled_delivery_token
+
+    try:
+        result = await approve_scheduled_delivery_token(restaurant_id, token_id)
+        if result.get("ok"):
+            await send_whatsapp_message(
+                manager_phone,
+                f"✅ Scheduled delivery *{token_id}* approved. Customer will receive payment link.",
+                restaurant_id,
+            )
+            return {"status": "success"}
+        await send_whatsapp_message(
+            manager_phone,
+            f"Could not approve *{token_id}*. Check the manager portal or try again.",
+            restaurant_id,
+        )
+        return {"status": "error", "message": result.get("error", "approve failed")}
+    except Exception as e:
+        logger.error(f"cmd_scheduled_delivery_approve: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+async def cmd_scheduled_delivery_reject(
+    restaurant_id: str, manager_phone: str, token_id: str,
+) -> Dict[str, Any]:
+    """Reject a scheduled door delivery from manager WhatsApp button."""
+    from tools.booking_mechanisms import reject_scheduled_delivery_token
+
+    try:
+        result = await reject_scheduled_delivery_token(restaurant_id, token_id)
+        if result.get("ok"):
+            await send_whatsapp_message(
+                manager_phone,
+                f"❌ Scheduled delivery *{token_id}* rejected. Customer notified.",
+                restaurant_id,
+            )
+            return {"status": "success"}
+        await send_whatsapp_message(
+            manager_phone,
+            f"Could not reject *{token_id}*. Check the manager portal or try again.",
+            restaurant_id,
+        )
+        return {"status": "error", "message": result.get("error", "reject failed")}
+    except Exception as e:
+        logger.error(f"cmd_scheduled_delivery_reject: {e}")
         return {"status": "error", "message": str(e)}
 
 
