@@ -1,6 +1,0 @@
-# Ensure Python deps (including razorpay) install when Railway root = chat/
-[phases.install]
-cmds = ["pip install -r requirements.txt"]
-
-[start]
-cmd = "uvicorn main:app --host 0.0.0.0 --port $PORT"
