@@ -12,14 +12,18 @@ logger = logging.getLogger(__name__)
 
 _PLACEHOLDER_URL = "https://payment-placeholder.com"
 
+_RAZORPAY_IMPORT_ERROR: str | None = None
+
 try:
     import razorpay
     RAZORPAY_AVAILABLE = True
-except ImportError:
+except ImportError as exc:
     razorpay = None  # type: ignore
     RAZORPAY_AVAILABLE = False
+    _RAZORPAY_IMPORT_ERROR = str(exc)
     logger.warning(
-        "[razorpay] Python package not installed — run: pip install razorpay"
+        "[razorpay] Python package not installed — run: pip install razorpay (%s)",
+        exc,
     )
 
 

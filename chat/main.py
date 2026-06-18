@@ -368,7 +368,15 @@ async def _process_meta_payload(payload: dict):
 @app.get("/health/razorpay")
 async def health_razorpay():
     """Diagnostic — confirms keys loaded (no secrets exposed)."""
-    return JSONResponse({"status": razorpay_status_message()})
+    from tools.payment_tools import _RAZORPAY_IMPORT_ERROR
+
+    payload: dict[str, str] = {"status": razorpay_status_message()}
+    if _RAZORPAY_IMPORT_ERROR:
+        payload["import_error"] = _RAZORPAY_IMPORT_ERROR
+    return JSONResponse(payload)
+
+
+@app.get("/payment/complete")
 async def payment_complete():
     """Customer redirect after Razorpay payment link checkout."""
     return HTMLResponse(
