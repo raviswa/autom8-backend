@@ -66,21 +66,31 @@ function resolvePasswordResetRedirectUrl(redirectTo) {
 
 const FRONTEND_URL = resolveFrontendOrigin();
 
-async function sendPasswordResetEmail(email, redirectTo) {
-  const normalized = String(email || '').trim().toLowerCase();
-  if (!normalized) throw new Error('Email is required');
-
-  const resetRedirect = resolvePasswordResetRedirectUrl(redirectTo);
-  console.log(`[password-reset] redirectTo=${resetRedirect}`);
-
-  const { error } = await supabase.auth.resetPasswordForEmail(normalized, {
-    redirectTo: resetRedirect,
-  });
-  if (error) throw error;
-  return true;
+/**
+ * App URL with token_hash — bypasses Supabase Site URL (often stuck on localhost in dev).
+ * User opens app.autom8.works/reset-password?token_hash=…&type=recovery directly.
+ */
+function buildDirectResetUrl(hashedToken, redirectTo) {
+  if (!hashedToken) return null;
+  const base = resolvePasswordResetRedirectUrl(redirectTo);
+  const url = new URL(base);
+  url.searchParams.set('token_hash', hashedToken);
+  url.searchParams.set('type', 'recovery');
+  return url.toString();
 }
 
-async function generateRecoveryLink(email, redirectTo) {
+function patchRecoveryActionLink(actionLink, redirectTo) {
+  if (!actionLink) return null;
+  try {
+    const url = new URL(actionLink);
+    url.searchParams.set('redirect_to', resolvePasswordResetRedirectUrl(redirectTo));
+    return url.toString();
+  } catch {
+    return actionLink;
+  }
+}
+
+async function createRecoveryCredentials(email, redirectTo) {
   const normalized = String(email || '').trim().toLowerCase();
   const resetRedirect = resolvePasswordResetRedirectUrl(redirectTo);
   const { data, error } = await supabaseAdmin.auth.admin.generateLink({
@@ -89,7 +99,62 @@ async function generateRecoveryLink(email, redirectTo) {
     options: { redirectTo: resetRedirect },
   });
   if (error) throw error;
-  return data?.properties?.action_link || null;
+
+  const props = data?.properties || {};
+  const hashedToken = props.hashed_token || null;
+  const actionLink = props.action_link || null;
+
+  return {
+    hashedToken,
+    actionLink,
+    directLink: buildDirectResetUrl(hashedToken, redirectTo),
+    fallbackLink: patchRecoveryActionLink(actionLink, redirectTo),
+    resetRedirect,
+  };
+}
+
+async function sendPasswordResetEmail(email, redirectTo) {
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!normalized) throw new Error('Email is required');
+
+  const creds = await createRecoveryCredentials(normalized, redirectTo);
+  const resetLink = creds.directLink || creds.fallbackLink;
+  if (!resetLink) throw new Error('Could not generate reset link');
+
+  console.log(`[password-reset] redirectTo=${creds.resetRedirect} direct=${Boolean(creds.directLink)}`);
+
+  const subject = 'Reset your Autom8 password';
+  const text = (
+    `Hi,\n\n` +
+    `Use this link to set a new password for your Autom8 staff account:\n\n` +
+    `${resetLink}\n\n` +
+    `This link expires in about an hour. If you did not request this, you can ignore this email.\n\n` +
+    `— Autom8 / Munafe`
+  );
+  const html = (
+    `<p>Hi,</p>` +
+    `<p>Use this link to set a new password for your Autom8 staff account:</p>` +
+    `<p><a href="${resetLink}">Reset password</a></p>` +
+    `<p style="color:#666;font-size:13px">This link expires in about an hour. ` +
+    `If you did not request this, you can ignore this email.</p>`
+  );
+
+  if (process.env.RESEND_API_KEY) {
+    await sendTransactionalEmail({ to: normalized, subject, text, html });
+    return true;
+  }
+
+  console.warn('[password-reset] RESEND_API_KEY unset — falling back to Supabase auth email (check Site URL in dashboard)');
+  const { error } = await supabase.auth.resetPasswordForEmail(normalized, {
+    redirectTo: creds.resetRedirect,
+  });
+  if (error) throw error;
+  return true;
+}
+
+async function generateRecoveryLink(email, redirectTo) {
+  const creds = await createRecoveryCredentials(email, redirectTo);
+  return creds.directLink || creds.fallbackLink;
 }
 
 async function getManagerOwnerEmails(restaurantId) {
@@ -232,6 +297,8 @@ module.exports = {
   FRONTEND_URL,
   resolveFrontendOrigin,
   resolvePasswordResetRedirectUrl,
+  buildDirectResetUrl,
+  createRecoveryCredentials,
   sendPasswordResetEmail,
   generateRecoveryLink,
   getManagerOwnerEmails,
