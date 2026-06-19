@@ -34,6 +34,14 @@ EXCEPTION
     RAISE NOTICE 'scheduled_delivery enum add skipped: %', SQLERRM;
 END $$;
 
+-- CHECK constraint (text/varchar type column) — enum migration above does not cover this.
+ALTER TABLE walk_in_tokens
+  DROP CONSTRAINT IF EXISTS walk_in_tokens_type_check;
+
+ALTER TABLE walk_in_tokens
+  ADD CONSTRAINT walk_in_tokens_type_check
+  CHECK (type IN ('dinein', 'takeaway', 'large_party', 'scheduled_delivery'));
+
 ALTER TABLE restaurants
   ADD COLUMN IF NOT EXISTS scheduled_kds_lead_minutes integer NOT NULL DEFAULT 150;
 
