@@ -23,6 +23,7 @@ const {
   releaseOrphanedOccupiedTables,
   ACTIVE_ORDER_STATUSES,
 } = require('../helpers/tableRelease');
+const { sendKitchenOpenReminders } = require('../helpers/kitchenReminders');
 
 // Slot helpers live in catalog.js (single source of truth — shared with POST /catalog/slot-sync)
 const {
@@ -109,6 +110,10 @@ function startSlotScheduler() {
       const currentSlot = getCurrentSlotIST();
       if (currentSlot !== lastAppliedSlot) {
         console.log(`🔄 Slot changed: ${String(lastAppliedSlot)} → ${currentSlot}`);
+        if (lastAppliedSlot !== Symbol('init') && currentSlot && !lastAppliedSlot) {
+          const n = await sendKitchenOpenReminders();
+          if (n) console.log(`[kitchen-remind] Sent ${n} open notification(s)`);
+        }
         lastAppliedSlot = currentSlot;
         await applySlotForAllRestaurants();
       }

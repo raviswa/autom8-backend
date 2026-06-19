@@ -209,12 +209,12 @@ async def handle_booking_flow(
 
     # ── Closed kitchen: REMIND opt-in ─────────────────────────────────────────
     if message.strip().upper() == "REMIND":
-        from tools.kitchen_hours import is_kitchen_open, next_open_label
+        from tools.kitchen_hours import is_kitchen_open, next_open_slot_description
         if not is_kitchen_open():
             session_state["remind_when_open"] = True
             await send_whatsapp_message(
                 customer_phone,
-                f"Got it — we'll message you when we open at *{next_open_label()}*. 🙏",
+                f"Got it — we'll message you when we open for *{next_open_slot_description()}*. 🙏",
                 restaurant_id,
             )
             session_state["booking_step"] = "awaiting_service_selection"
@@ -357,6 +357,29 @@ async def handle_booking_flow(
             session_state["order_mode"] = order_mode
         else:
             session_state.pop("order_mode", None)
+
+        from tools.kitchen_hours import is_kitchen_open, next_open_slot_description
+        if not is_kitchen_open():
+            allowed = (
+                (service_type == "delivery" and order_mode == ORDER_MODE_SCHEDULED)
+                or service_type == "reserve_table"
+            )
+            if not allowed:
+                await send_whatsapp_message(
+                    customer_phone,
+                    f"The kitchen is still closed — we reopen for *{next_open_slot_description()}*.\n\n"
+                    f"Please choose *Schedule Delivery 📅* or *Reserve a Table 📅*, "
+                    f"or reply *REMIND* for a ping when we open."
+                    + _HOME_HINT,
+                    restaurant_id,
+                )
+                raw_greeting = await safe_build_greeting(customer_id, restaurant_id)
+                greeting = build_smart_greeting(customer_name, raw_greeting, session_state)
+                await send_service_menu(
+                    customer_phone, restaurant_id, greeting, session_state, announce_closed=False,
+                )
+                session_state["booking_step"] = "awaiting_service_selection"
+                return {"status": "awaiting_service_selection"}
 
         if order_mode != ORDER_MODE_SCHEDULED:
             session_state.pop("scheduled_at", None)

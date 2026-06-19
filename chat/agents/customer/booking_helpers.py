@@ -567,7 +567,7 @@ async def send_service_menu(
     *,
     announce_closed: bool = True,
 ) -> None:
-    from tools.kitchen_hours import is_kitchen_open, next_open_label
+    from tools.kitchen_hours import is_kitchen_open, next_open_slot_description
 
     state = session_state or {}
     if "scheduled_delivery_enabled" not in state or "scheduled_takeaway_enabled" not in state:
@@ -578,7 +578,7 @@ async def send_service_menu(
     state["_service_menu_rows"] = rows
     normalize_last_order_summary(state)
     tod = _time_of_day_label()
-    header = _MENU_HEADERS.get(tod, "Welcome")
+    header = "Welcome back" if (greeting and greeting.strip()) else _MENU_HEADERS.get(tod, "Welcome")
 
     recall = build_recall_message(state)
     if recall:
@@ -600,11 +600,24 @@ async def send_service_menu(
             f"Your takeaway order *{token}* is ready — pick up at the counter."
         )
     elif not is_kitchen_open():
-        body_lines.append(
-            f"Kitchen is closed until *{next_open_label()}*. "
-            f"Tap *Schedule Delivery 📅* or *Takeaway 📅* to pick a date and time on the calendar. "
-            f"Dine-in reservations are still available."
-        )
+        reopen = next_open_slot_description()
+        option_bits = []
+        row_ids = {r["id"] for r in rows}
+        if "delivery_schedule" in row_ids:
+            option_bits.append("*Schedule Delivery 📅*")
+        if "reserve_table" in row_ids:
+            option_bits.append("*Reserve a Table 📅*")
+        if option_bits:
+            options_line = " or ".join(option_bits)
+            body_lines.append(
+                f"Kitchen is closed — we reopen for *{reopen}*.\n"
+                f"Tap {options_line} below."
+            )
+        else:
+            body_lines.append(
+                f"Kitchen is closed until *{reopen}*. "
+                f"Reply *REMIND* and we'll ping you when we're open."
+            )
     body_lines.append("What would you like to do today?")
     body_text = "\n\n".join(body_lines)
 

@@ -49,6 +49,25 @@ def next_open_label() -> str:
     return _SLOTS[0]["open_label"]
 
 
+def next_open_slot_description() -> str:
+    """Slot label + time, e.g. 'Morning Tiffin at 6:00 AM'."""
+    hour = _now_ist().hour
+    for slot in _SLOTS:
+        if hour < slot["start_hour"]:
+            return f"{slot['label']} at {slot['open_label']}"
+    first = _SLOTS[0]
+    return f"{first['label']} at {first['open_label']}"
+
+
+def current_slot_label() -> str | None:
+    """Human label for the active slot, or None when closed."""
+    hour = _now_ist().hour
+    for slot in _SLOTS:
+        if slot["start_hour"] <= hour < slot["end_hour"]:
+            return slot["label"]
+    return None
+
+
 def ordering_blocked_for_service(service_type: str | None) -> bool:
     return service_type in _ORDERING_SERVICES and not is_kitchen_open()
 
@@ -89,11 +108,7 @@ def build_closed_notice(*, attempt: int = 1, service_type: str | None = None) ->
         else ""
     )
 
-    dine_in = (
-        "\n\nDine-in check-in is still available if you're at the restaurant."
-        if attempt <= 2
-        else ""
-    )
+    dine_in = ""  # Dine-in Now is hidden from the closed-hours menu
 
     return f"{lead}{svc_hint}{dine_in}{reminder}"
 

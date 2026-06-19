@@ -64,6 +64,26 @@ function nextOpenLabelIST() {
   return `${h12}:00 AM`;
 }
 
+function nextOpenSlotDescriptionIST() {
+  const hour = new Date(Date.now() + 5.5 * 60 * 60 * 1000).getUTCHours();
+  for (const s of SLOTS) {
+    if (hour < s.startHour) {
+      const label = SLOT_DISPLAY_LABELS[s.dbValue];
+      const h12 = s.startHour % 12 || 12;
+      const ampm = s.startHour < 12 ? 'AM' : 'PM';
+      return `${label} at ${h12}:00 ${ampm}`;
+    }
+  }
+  const first = SLOTS[0];
+  const h12 = first.startHour % 12 || 12;
+  return `${SLOT_DISPLAY_LABELS[first.dbValue]} at ${h12}:00 AM`;
+}
+
+function currentSlotLabelIST() {
+  const slot = getCurrentSlotIST();
+  return slot ? SLOT_DISPLAY_LABELS[slot] : null;
+}
+
 function mapTimeSlot(raw) {
   if (!raw) return 'all';
   const MAP = {
@@ -779,6 +799,8 @@ module.exports.menuUploadMiddleware = menuUploadMiddleware;
 module.exports.menuItemAvailabilityMiddleware = menuItemAvailabilityMiddleware;
 module.exports.menuItemSpecialTodayMiddleware = menuItemSpecialTodayMiddleware;
 module.exports.resetDailySpecialDishes = resetDailySpecialDishes;
+module.exports.nextOpenSlotDescriptionIST = nextOpenSlotDescriptionIST;
+module.exports.currentSlotLabelIST = currentSlotLabelIST;
 module.exports.applySlotForAllRestaurants = async function() {
   const slot = getCurrentSlotIST();
   const { data: restaurants } = await supabaseAdmin.from('restaurants').select('id').eq('is_active', true);
