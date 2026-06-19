@@ -59,6 +59,20 @@ async def init_db():
         # Test connection properly with async context manager
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
+            row = await conn.execute(text("""
+                SELECT pg_get_constraintdef(oid) AS def
+                FROM pg_constraint
+                WHERE conrelid = 'public.walk_in_tokens'::regclass
+                  AND conname = 'walk_in_tokens_type_check'
+            """))
+            defn = row.scalar() or ""
+            if "scheduled_delivery" in defn:
+                logger.info("[boot] ✅ walk_in_tokens_type_check allows scheduled_delivery")
+            else:
+                logger.error(
+                    "[boot] ❌ walk_in_tokens_type_check on THIS DB connection "
+                    f"does NOT allow scheduled_delivery: {defn or '(missing)'}"
+                )
         print("Database connection successful")
     except Exception as e:
         print(f"Database connection failed: {e}. Running without database.")

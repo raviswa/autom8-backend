@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     # Supabase — for REST API calls (customers, menu, tables)
     autom8_supabase_url: str | None = None
     autom8_supabase_service_key: str | None = None
-    supabase_region: str = "ap-southeast-1"
+    supabase_region: str = "ap-south-1"
 
     def get_db_url(self) -> str:
         if self.database_url:

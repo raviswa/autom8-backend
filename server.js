@@ -25,6 +25,7 @@ const {
   menuItemSpecialTodayMiddleware,
 } = require('./src/routes/catalog');
 const { logKdsSecretStatus } = require('./src/config/internalSecret');
+const { verifyScheduledDeliveryTokenType } = require('./src/helpers/schemaChecks');
 
 if (process.env.NODE_ENV === 'production' && !process.env.AUTOM8_KDS_SECRET) {
   throw new Error('AUTOM8_KDS_SECRET must be set in production');
@@ -117,4 +118,7 @@ server.listen(PORT, () => {
   console.log(`📍 Region: ${process.env.REGION || 'IN'}`);
   console.log(`🗄️  Database: ${process.env.SUPABASE_URL}`);
   startAllSchedulers();
+  verifyScheduledDeliveryTokenType().catch((err) => {
+    console.error('[boot] schema probe error:', err.message);
+  });
 });
