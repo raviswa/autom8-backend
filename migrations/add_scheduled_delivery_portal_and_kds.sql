@@ -34,13 +34,30 @@ EXCEPTION
     RAISE NOTICE 'scheduled_delivery enum add skipped: %', SQLERRM;
 END $$;
 
--- CHECK constraint (text/varchar type column) — enum migration above does not cover this.
-ALTER TABLE walk_in_tokens
-  DROP CONSTRAINT IF EXISTS walk_in_tokens_type_check;
+-- CHECK constraint (text/varchar type column) — drop ALL type checks, not just by name.
+DO $$
+DECLARE
+  r record;
+BEGIN
+  FOR r IN
+    SELECT c.conname
+    FROM pg_constraint c
+    WHERE c.conrelid = 'public.walk_in_tokens'::regclass
+      AND c.contype = 'c'
+      AND pg_get_constraintdef(c.oid) ILIKE '%type%'
+  LOOP
+    EXECUTE format('ALTER TABLE public.walk_in_tokens DROP CONSTRAINT %I', r.conname);
+  END LOOP;
+END $$;
 
 ALTER TABLE walk_in_tokens
   ADD CONSTRAINT walk_in_tokens_type_check
-  CHECK (type::text IN ('dinein', 'takeaway', 'large_party', 'scheduled_delivery'));
+  CHECK (type = ANY (ARRAY[
+    'dinein'::text,
+    'takeaway'::text,
+    'large_party'::text,
+    'scheduled_delivery'::text
+  ]));
 
 ALTER TABLE restaurants
   ADD COLUMN IF NOT EXISTS scheduled_kds_lead_minutes integer NOT NULL DEFAULT 150;

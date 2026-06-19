@@ -1,21 +1,20 @@
--- REQUIRED for scheduled delivery manager approval.
--- Run in Supabase SQL Editor → project gedfgfwjofpjwfboyclu (same DB as chat + api.autom8.works).
--- Safe to re-run. After running, you MUST see scheduled_delivery in the output of step 4.
+-- Fix walk_in_tokens.type for scheduled delivery manager approval.
+--
+-- PROBLEM: Supabase often has TWO type checks:
+--   1) Original inline CHECK from CREATE TABLE (auto-named, e.g. walk_in_tokens_type_check)
+--   2) A manually added walk_in_tokens_type_check with scheduled_delivery
+-- INSERT fails until ALL old type checks are dropped.
+--
+-- Run in Supabase SQL Editor (project gedfgfwjofpjwfboyclu). Safe to re-run.
 
--- ── 1) Inspect current type column + constraints (read-only) ─────────────────
-SELECT column_name, data_type, udt_name
-FROM information_schema.columns
-WHERE table_schema = 'public'
-  AND table_name = 'walk_in_tokens'
-  AND column_name = 'type';
-
+-- 1) List every CHECK on walk_in_tokens (inspect before/after)
 SELECT conname, pg_get_constraintdef(oid) AS definition
 FROM pg_constraint
 WHERE conrelid = 'public.walk_in_tokens'::regclass
   AND contype = 'c'
 ORDER BY conname;
 
--- ── 2) If type is a PostgreSQL enum, add the new label ───────────────────────
+-- 2) If type is an enum, add the label (harmless if column is plain text)
 DO $$
 DECLARE
   col_type regtype;
@@ -31,62 +30,62 @@ BEGIN
 
   IF col_type IS NOT NULL AND col_type::text LIKE '%enum%' THEN
     IF NOT EXISTS (
-      SELECT 1
-      FROM pg_enum e
+      SELECT 1 FROM pg_enum e
       JOIN pg_type t ON e.enumtypid = t.oid
-      WHERE t.oid = col_type::oid
-        AND e.enumlabel = 'scheduled_delivery'
+      WHERE t.oid = col_type::oid AND e.enumlabel = 'scheduled_delivery'
     ) THEN
       EXECUTE format('ALTER TYPE %s ADD VALUE ''scheduled_delivery''', col_type);
-      RAISE NOTICE 'Added enum value scheduled_delivery to %', col_type;
     END IF;
   END IF;
-EXCEPTION
-  WHEN duplicate_object THEN NULL;
+EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
--- ── 3) Replace CHECK constraint (this is what blocks inserts today) ───────────
-ALTER TABLE public.walk_in_tokens
-  DROP CONSTRAINT IF EXISTS walk_in_tokens_type_check;
-
-ALTER TABLE public.walk_in_tokens
-  ADD CONSTRAINT walk_in_tokens_type_check
-  CHECK (type::text IN ('dinein', 'takeaway', 'large_party', 'scheduled_delivery'));
-
--- ── 4) Verify — must include scheduled_delivery or migration did not apply ───
+-- 3) Drop ALL check constraints that reference the type column
 DO $$
 DECLARE
-  def text;
+  r record;
 BEGIN
-  SELECT pg_get_constraintdef(oid) INTO def
-  FROM pg_constraint
-  WHERE conrelid = 'public.walk_in_tokens'::regclass
-    AND conname = 'walk_in_tokens_type_check';
-
-  IF def IS NULL THEN
-    RAISE EXCEPTION 'MIGRATION FAILED: walk_in_tokens_type_check missing after ALTER';
-  END IF;
-
-  IF def NOT LIKE '%scheduled_delivery%' THEN
-    RAISE EXCEPTION 'MIGRATION FAILED: constraint still excludes scheduled_delivery: %', def;
-  END IF;
-
-  RAISE NOTICE 'SUCCESS — walk_in_tokens_type_check now allows scheduled_delivery: %', def;
+  FOR r IN
+    SELECT c.conname
+    FROM pg_constraint c
+    WHERE c.conrelid = 'public.walk_in_tokens'::regclass
+      AND c.contype = 'c'
+      AND pg_get_constraintdef(c.oid) ILIKE '%type%'
+  LOOP
+    EXECUTE format('ALTER TABLE public.walk_in_tokens DROP CONSTRAINT %I', r.conname);
+    RAISE NOTICE 'Dropped constraint %', r.conname;
+  END LOOP;
 END $$;
 
--- ── 5) Dry-run insert (rolls back — proves inserts work) ────────────────────
-BEGIN;
+-- 4) Single canonical type check (includes scheduled_delivery)
+ALTER TABLE public.walk_in_tokens
+  ADD CONSTRAINT walk_in_tokens_type_check
+  CHECK (type = ANY (ARRAY[
+    'dinein'::text,
+    'takeaway'::text,
+    'large_party'::text,
+    'scheduled_delivery'::text
+  ]));
+
+-- 5) Verify — must be exactly ONE type check, with scheduled_delivery
+SELECT conname, pg_get_constraintdef(oid) AS definition
+FROM pg_constraint
+WHERE conrelid = 'public.walk_in_tokens'::regclass
+  AND contype = 'c'
+  AND pg_get_constraintdef(oid) ILIKE '%type%';
+
+-- 6) Live insert test (delete after)
 INSERT INTO public.walk_in_tokens
-  (id, restaurant_id, name, phone, type, pax, status, meta)
+  (id, restaurant_id, name, type, pax, status, meta)
 VALUES
   (
-    '__sched_delivery_migration_test__',
+    'T-MIGTEST',
     '46fb9b9e-431a-43c9-9edb-d316b0fef216',
-    'Migration test',
-    NULL,
+    'test',
     'scheduled_delivery',
     1,
     'pending_approval',
     '{}'::jsonb
   );
-ROLLBACK;
+
+DELETE FROM public.walk_in_tokens WHERE id = 'T-MIGTEST';
