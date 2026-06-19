@@ -82,7 +82,9 @@ from agents.customer.booking_helpers import (
     strip_order_quantity,
     ask_continue_or_reset,
     do_reset,
-    expire_session_if_stale,
+    start_fresh_visit,
+    mark_session_visit_complete,
+    is_feedback_reply,
     touch_session_activity,
     handle_awaiting_prepay,
     _DIRECT_RESET_KEYWORDS,
@@ -169,6 +171,10 @@ async def handle_booking_flow(
 
     # ── Global Home / reset keyword (before feedback — active order wins) ─────
     if current_step not in {"awaiting_reset_confirmation"} and is_reset_keyword(message):
+        from tools.feedback_bridge import try_dismiss_feedback_via_api
+        from agents.customer.booking_helpers import abandon_incomplete_session
+
+        await try_dismiss_feedback_via_api(customer_phone, restaurant_id)
         if msg_lower in _DIRECT_RESET_KEYWORDS or msg_lower in _FULL_RESET_KEYWORDS:
             full = msg_lower in _FULL_RESET_KEYWORDS
             await do_reset(
@@ -218,47 +224,74 @@ async def handle_booking_flow(
 
     # ── Closed kitchen: REMIND opt-in ─────────────────────────────────────────
     if message.strip().upper() == "REMIND":
-        from tools.kitchen_hours import is_kitchen_open, next_open_slot_description
-        if not is_kitchen_open():
+        from tools.kitchen_hours import (
+            build_blanket_closed_message,
+            kitchen_accepting_orders,
+            next_open_slot_description,
+            refresh_kitchen_acceptance,
+        )
+        await refresh_kitchen_acceptance(session_state, restaurant_id)
+        if not kitchen_accepting_orders(session_state):
             session_state["remind_when_open"] = True
             await send_whatsapp_message(
                 customer_phone,
                 f"Got it — we'll message you when we open for *{next_open_slot_description()}*. 🙏",
                 restaurant_id,
             )
-            session_state["booking_step"] = "awaiting_service_selection"
+            session_state["booking_step"] = "kitchen_closed"
             return {"status": "remind_scheduled"}
         raw_greeting = await safe_build_greeting(customer_id, restaurant_id)
         greeting = build_smart_greeting(customer_name, raw_greeting, session_state)
         await send_service_menu(
-            customer_phone, restaurant_id, greeting, session_state, announce_closed=False,
+            customer_phone, restaurant_id, greeting, session_state,
         )
         session_state["booking_step"] = "awaiting_service_selection"
         session_state.pop("remind_when_open", None)
         return {"status": "awaiting_service_selection"}
 
+    # ── Kitchen closed — only REMIND / Home / greetings ───────────────────────
+    if current_step == "kitchen_closed":
+        from tools.kitchen_hours import (
+            build_blanket_closed_message,
+            kitchen_accepting_orders,
+            refresh_kitchen_acceptance,
+        )
+        await refresh_kitchen_acceptance(session_state, restaurant_id)
+        if kitchen_accepting_orders(session_state):
+            return await start_fresh_visit(
+                customer_phone, restaurant_id, customer_name, session_state,
+            )
+        if is_reset_keyword(message) or is_greeting(message):
+            await send_whatsapp_message(
+                customer_phone, build_blanket_closed_message(), restaurant_id,
+            )
+            return {"status": "kitchen_closed"}
+        await send_whatsapp_message(
+            customer_phone, build_blanket_closed_message(), restaurant_id,
+        )
+        return {"status": "kitchen_closed"}
+
     # ── Closed kitchen: repeat greeting while stuck in ordering ───────────────
-    from tools.kitchen_hours import is_kitchen_open, ordering_blocked_for_service
+    from tools.kitchen_hours import (
+        kitchen_accepting_orders,
+        ordering_blocked_for_service,
+        refresh_kitchen_acceptance,
+    )
+    await refresh_kitchen_acceptance(session_state, restaurant_id)
     svc = session_state.get("service_type")
     if (
-        not is_kitchen_open()
-        and ordering_blocked_for_service(svc)
+        not kitchen_accepting_orders(session_state)
+        and ordering_blocked_for_service(svc, session_state)
         and current_step in ("awaiting_order", "awaiting_address")
         and (is_greeting(message) or len(message.strip()) < 4)
     ):
-        await send_closed_kitchen_notice(
-            customer_phone, restaurant_id, session_state, service_type=svc,
+        from tools.kitchen_hours import build_blanket_closed_message
+        await send_whatsapp_message(
+            customer_phone, build_blanket_closed_message(), restaurant_id,
         )
-        raw_greeting = await safe_build_greeting(customer_id, restaurant_id)
-        ret_greeting = build_smart_greeting(customer_name, raw_greeting, session_state)
-        await send_service_menu(
-            customer_phone, restaurant_id, ret_greeting, session_state,
-            announce_closed=False,
-        )
-        session_state["booking_step"] = "awaiting_service_selection"
-        session_state.pop("delivery_address", None)
+        session_state["booking_step"] = "kitchen_closed"
         clear_cart(session_state)
-        return {"status": "awaiting_service_selection"}
+        return {"status": "kitchen_closed"}
 
     # ── Greeting guard ────────────────────────────────────────────────────────
     if (current_step not in _STEPS_ALLOWING_SHORT_REPLY and is_greeting(message)):
@@ -337,6 +370,15 @@ async def handle_booking_flow(
                 return await prompt_name_verification(
                     customer_phone, restaurant_id, customer_name, session_state,
                 )
+            if is_feedback_reply(_raw_choice) and raw_message_obj:
+                from tools.feedback_bridge import try_handle_feedback_via_api
+                fb = await try_handle_feedback_via_api(
+                    customer_phone, raw_message_obj, restaurant_id,
+                )
+                if fb.get("consumed"):
+                    if fb.get("completed"):
+                        mark_session_visit_complete(session_state)
+                    return {"status": session_state.get("booking_step", "awaiting_service_selection")}
             if is_greeting(_raw_choice) or _raw_choice.lower() in (
                 "good morning", "good afternoon", "good evening", "morning", "gm",
             ):
@@ -367,28 +409,18 @@ async def handle_booking_flow(
         else:
             session_state.pop("order_mode", None)
 
-        from tools.kitchen_hours import is_kitchen_open, next_open_slot_description
-        if not is_kitchen_open():
-            allowed = (
-                (service_type == "delivery" and order_mode == ORDER_MODE_SCHEDULED)
-                or service_type == "reserve_table"
+        from tools.kitchen_hours import (
+            build_blanket_closed_message,
+            kitchen_accepting_orders,
+            refresh_kitchen_acceptance,
+        )
+        await refresh_kitchen_acceptance(session_state, restaurant_id)
+        if not kitchen_accepting_orders(session_state):
+            await send_whatsapp_message(
+                customer_phone, build_blanket_closed_message(), restaurant_id,
             )
-            if not allowed:
-                await send_whatsapp_message(
-                    customer_phone,
-                    f"The kitchen is still closed — we reopen for *{next_open_slot_description()}*.\n\n"
-                    f"Please choose *Schedule Delivery 📅* or *Reserve a Table 📅*, "
-                    f"or reply *REMIND* for a ping when we open."
-                    + _HOME_HINT,
-                    restaurant_id,
-                )
-                raw_greeting = await safe_build_greeting(customer_id, restaurant_id)
-                greeting = build_smart_greeting(customer_name, raw_greeting, session_state)
-                await send_service_menu(
-                    customer_phone, restaurant_id, greeting, session_state, announce_closed=False,
-                )
-                session_state["booking_step"] = "awaiting_service_selection"
-                return {"status": "awaiting_service_selection"}
+            session_state["booking_step"] = "kitchen_closed"
+            return {"status": "kitchen_closed"}
 
         if order_mode != ORDER_MODE_SCHEDULED:
             session_state.pop("scheduled_at", None)

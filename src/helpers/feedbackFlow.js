@@ -17,6 +17,7 @@ const { closeOpenFeedbackRows } = require('./feedbackDedup');
 const { phoneVariants } = require('./conversationState');
 const {
   classifyFeedbackIntent,
+  extractInteractiveId,
   getFeedbackSubState,
   gracefullyExpireFeedback,
   isReplyWindowExpired,
@@ -420,6 +421,7 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
     if (!phone) return none;
 
     const text = extractMessageText(message);
+    const interactiveId = extractInteractiveId(message);
 
     if (isResetKeyword(text)) {
       await dismissActiveFeedback(restaurantId, phone).catch(() => {});
@@ -461,7 +463,7 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
       }
       if (action !== 'rating') return none;
 
-      const rating = parseRating(text);
+      const rating = parseRating(interactiveId || text);
       if (!rating) return none;
 
       await supabaseAdmin

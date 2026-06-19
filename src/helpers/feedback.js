@@ -24,6 +24,42 @@ const { supabaseAdmin } = require('../config/supabase');
 const { wasInviteSentRecently } = require('./feedbackDedup');
 
 /**
+ * True when the visit included a submitted order (KOT / payment), not just seating.
+ */
+async function tokenHadSubmittedOrder(supabaseAdmin, token, restaurantId) {
+  const cleanPhone = String(token?.phone ?? '').replace(/\D/g, '');
+  if (!cleanPhone || !restaurantId) return false;
+
+  const meta = token?.meta || {};
+  if (meta.order_id || meta.kds_order_id || meta.cart_submitted) return true;
+
+  const since = token.seated_at || token.arrived_at;
+  if (!since) return false;
+
+  const variants = new Set([cleanPhone]);
+  if (cleanPhone.length === 10) variants.add(`91${cleanPhone}`);
+  if (cleanPhone.length > 10) variants.add(cleanPhone.slice(-10));
+  if (cleanPhone.startsWith('91') && cleanPhone.length === 12) {
+    variants.add(cleanPhone.slice(2));
+  }
+
+  const phoneList = [...variants];
+
+  const { data: orders } = await supabaseAdmin
+    .from('orders')
+    .select('id')
+    .eq('restaurant_id', restaurantId)
+    .in('customer_phone', phoneList)
+    .gte('created_at', since)
+    .not('status', 'eq', 'cancelled')
+    .limit(1);
+
+  if (orders?.length) return true;
+
+  return false;
+}
+
+/**
  * Queue a post-visit feedback request for a table.
  *
  * @param {object} opts
@@ -54,6 +90,21 @@ async function queueFeedbackForTable({
     if (!restaurantId) {
       console.info(`[feedback-queue] Skipped — no restaurant_id (${source})`);
       return;
+    }
+
+    if (tokenId) {
+      const { data: tokenRow } = await supabaseAdmin
+        .from('walk_in_tokens')
+        .select('*')
+        .eq('id', tokenId)
+        .eq('restaurant_id', restaurantId)
+        .maybeSingle();
+      if (tokenRow && !(await tokenHadSubmittedOrder(supabaseAdmin, tokenRow, restaurantId))) {
+        console.info(
+          `[feedback-queue] Skipped — no submitted order for token ${tokenId} (${source})`
+        );
+        return;
+      }
     }
 
     // Resolve table_number and visit type from token / table
@@ -149,4 +200,4 @@ async function queueFeedbackForTable({
   }
 }
 
-module.exports = { queueFeedbackForTable };
+module.exports = { queueFeedbackForTable, tokenHadSubmittedOrder };

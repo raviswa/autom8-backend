@@ -710,6 +710,19 @@ router.put('/:id/complete', outletAuth, async (req, res) => {
       .update({ status: 'completed', completed_at: new Date().toISOString() })
       .eq('id', req.params.id).select().single();
 
+    if (token.phone) {
+      const digits = String(token.phone).replace(/\D/g, '');
+      const variants = [digits];
+      if (digits.length === 10) variants.push(`91${digits}`);
+      if (digits.length > 10) variants.push(digits.slice(-10));
+      await supabaseAdmin
+        .from('orders')
+        .update({ status: 'completed', updated_at: new Date().toISOString() })
+        .eq('restaurant_id', restaurantId)
+        .in('customer_phone', variants)
+        .eq('status', 'ready');
+    }
+
     await releaseTablesForToken(supabaseAdmin, token, restaurantId, {
       queueFeedback: true,
       feedbackSource: 'token-complete',

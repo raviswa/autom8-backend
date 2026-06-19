@@ -226,6 +226,9 @@ async def cache_restaurant_pricing(session_state: dict, restaurant_id: str) -> N
     session_state["restaurant_state"] = (info.get("state") or "").strip() or None
     session_state["payment_mode"] = (info.get("payment_mode") or "prepay").strip().lower()
 
+    from tools.kitchen_hours import refresh_kitchen_acceptance
+    await refresh_kitchen_acceptance(session_state, restaurant_id)
+
 
 async def send_special_dishes_note(
     customer_phone: str,
@@ -1252,6 +1255,17 @@ async def send_unified_booking_menu(
         if step == "awaiting_order" and not session_state.get("table_number"):
             logger.info(f"[BOOKING] Skipping menu for dine-in — no table_number yet")
             return "none"
+
+    from tools.kitchen_hours import kitchen_accepting_orders, build_blanket_closed_message
+    if not kitchen_accepting_orders(session_state):
+        logger.info(f"[BOOKING] Kitchen closed — blanket message for {customer_phone}")
+        await send_whatsapp_message(
+            customer_phone,
+            build_blanket_closed_message(),
+            restaurant_id,
+        )
+        session_state["booking_step"] = "kitchen_closed"
+        return "none"
 
     # ── Attempt 1: Option B category picker ───────────────────────────────────
     if await send_catalog_option_b_picker(customer_phone, restaurant_id, session_state):

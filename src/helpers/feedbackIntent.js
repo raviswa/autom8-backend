@@ -212,6 +212,7 @@ async function gracefullyExpireFeedback(record, reason = 'expired:window') {
 module.exports = {
   FEEDBACK_REPLY_WINDOW_MS,
   classifyFeedbackIntent,
+  extractInteractiveId,
   getFeedbackSubState,
   getReplyWindowStart,
   gracefullyExpireFeedback,

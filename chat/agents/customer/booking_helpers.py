@@ -362,6 +362,7 @@ _STEPS_ALLOWING_SHORT_REPLY: set[str] = {
     "awaiting_scheduled_time", "awaiting_scheduled_flow",
     "awaiting_scheduled_delivery_approval", "awaiting_scheduled_delivery_payment",
     "awaiting_takeaway_scheduled_flow", "awaiting_takeaway_scheduled_time",
+    "kitchen_closed",
 }
 
 _FEEDBACK_RE = re.compile(r"^\s*[1-5]\b", re.IGNORECASE)
@@ -402,13 +403,6 @@ def is_greeting(text: str) -> bool:
     return text.strip().lower() in _GREETING_WORDS
 
 
-def _clean_order_summary(summary: str) -> str:
-    """Remove stale prepay suffix from a stored order summary."""
-    if not summary:
-        return summary
-    return re.sub(r"\s*—\s*awaiting payment\s*$", "", summary, flags=re.I).strip()
-
-
 def mark_session_visit_complete(session_state: Dict[str, Any]) -> None:
     """End a visit: clear prepay UX keys, keep identity and last order for greetings."""
     summary = session_state.get("order_confirmed_summary")
@@ -426,6 +420,60 @@ def mark_session_visit_complete(session_state: Dict[str, Any]) -> None:
     session_state["booking_step"] = "visit_complete"
 
 
+_ABANDON_FLOW_KEYS = (
+    "cart", "pending_cart", "pending_item", "pending_item_queue",
+    "service_type", "order_mode", "token_number", "display_token",
+    "table_number", "assigned_tables", "scheduled_at", "delivery_address",
+    "delivery_lat", "delivery_lng", "delivery_charge_preview",
+    "order_from_cart", "booking_mechanism", "booking_mechanism_order_source",
+    "current_category", "_catalog_sent_after_party", "order_totals",
+    "pending_order_text", "schedule_flow_sent", "scheduled_delivery_approved",
+    "booking_id", "flow_token",
+)
+
+
+def _clean_order_summary(summary: str) -> str:
+    """Remove stale prepay suffix from a stored order summary."""
+    if not summary:
+        return summary
+    return re.sub(r"\s*—\s*awaiting payment\s*$", "", summary, flags=re.I).strip()
+
+
+async def abandon_incomplete_session(
+    customer_phone: str,
+    restaurant_id: str,
+    session_state: Dict[str, Any],
+) -> None:
+    """
+    Close an in-progress visit with no submitted order before Home / fresh start.
+    Dismisses feedback invites and clears mid-flow cart state atomically.
+    """
+    from tools.feedback_bridge import try_dismiss_feedback_via_api
+    from tools.feedback_intent import clear_session_feedback
+
+    had_cart = bool(session_state.get("cart"))
+    step = session_state.get("booking_step", "")
+
+    await try_dismiss_feedback_via_api(customer_phone, restaurant_id)
+    clear_session_feedback(session_state)
+    clear_cart(session_state)
+
+    for key in _ABANDON_FLOW_KEYS:
+        session_state.pop(key, None)
+
+    session_state["booking_step"] = "kitchen_closed" if step else "ask_service"
+    session_state["_session_abandoned_at"] = datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
+    if had_cart or step in (
+        "awaiting_order", "awaiting_category_selection", "awaiting_cart_action",
+        "confirming_order", "awaiting_address", "awaiting_table_assignment",
+    ):
+        session_state["_last_visit_abandoned"] = True
+        logger.info(
+            f"[session] Abandoned incomplete visit for {customer_phone} "
+            f"(step={step!r}, had_cart={had_cart})"
+        )
+
+
 async def start_fresh_visit(
     customer_phone: str,
     restaurant_id: str,
@@ -435,6 +483,8 @@ async def start_fresh_visit(
     """Clear mid-flow state and show the service menu (Home / Hi after an order)."""
     from agents.customer.conversation_helpers import safe_build_greeting
 
+    await abandon_incomplete_session(customer_phone, restaurant_id, session_state)
+
     _prev_cid = session_state.get("customer_id")
     _prev_cname = session_state.get("customer_name") or customer_name
     _prev_ret = session_state.get("is_returning_customer", True)
@@ -442,6 +492,7 @@ async def start_fresh_visit(
     _prev_last = session_state.get("last_order_summary", "")
     _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
     _pending_pay = session_state.get("pending_prepay_fulfillment")
+    _abandoned = session_state.pop("_last_visit_abandoned", False)
     session_state.clear()
     if _prev_cid:
         session_state["customer_id"] = _prev_cid
@@ -456,6 +507,8 @@ async def start_fresh_visit(
         session_state["last_service_type"] = _prev_svc
     if _pending_pay:
         session_state["pending_prepay_fulfillment"] = _pending_pay
+    if _abandoned:
+        session_state["_last_visit_abandoned"] = True
     session_state["booking_step"] = "ask_service"
     raw_greeting = await safe_build_greeting(
         session_state.get("customer_id", ""), restaurant_id,
@@ -505,6 +558,8 @@ async def do_reset(
     restaurant_id: str, session_state: Dict[str, Any], *, full_restart: bool = False,
 ) -> None:
     booking_id = session_state.get("booking_id")
+    await abandon_incomplete_session(customer_phone, restaurant_id, session_state)
+
     if booking_id:
         try:
             await update_booking_status(booking_id, "cancelled")
@@ -567,12 +622,27 @@ async def send_service_menu(
     *,
     announce_closed: bool = True,
 ) -> None:
-    from tools.kitchen_hours import is_kitchen_open, next_open_slot_description
+    from tools.kitchen_hours import (
+        build_blanket_closed_message,
+        kitchen_accepting_orders,
+        refresh_kitchen_acceptance,
+    )
 
     state = session_state or {}
-    if "scheduled_delivery_enabled" not in state or "scheduled_takeaway_enabled" not in state:
-        from tools.booking_mechanisms import cache_restaurant_pricing
-        await cache_restaurant_pricing(state, restaurant_id)
+    from tools.booking_mechanisms import cache_restaurant_pricing
+    await cache_restaurant_pricing(state, restaurant_id)
+    await refresh_kitchen_acceptance(state, restaurant_id)
+
+    if not kitchen_accepting_orders(state):
+        await send_whatsapp_message(
+            customer_phone,
+            build_blanket_closed_message(),
+            restaurant_id,
+        )
+        state["booking_step"] = "kitchen_closed"
+        state.pop("_service_menu_rows", None)
+        return
+
     rows = await build_service_menu_rows(restaurant_id, state)
     rows = sanitize_list_rows(rows)
     state["_service_menu_rows"] = rows
@@ -580,44 +650,20 @@ async def send_service_menu(
     tod = _time_of_day_label()
     header = "Welcome back" if (greeting and greeting.strip()) else _MENU_HEADERS.get(tod, "Welcome")
 
-    recall = build_recall_message(state)
-    if recall:
-        await send_whatsapp_message(customer_phone, recall, restaurant_id)
-
-    if not is_kitchen_open() and announce_closed:
-        await send_closed_kitchen_notice(customer_phone, restaurant_id, state)
-
     body_lines = []
     if greeting and greeting.strip():
         body_lines.append(greeting.strip())
 
-    from tools.db_tools import get_ready_takeaway_order
+    if not state.get("_last_visit_abandoned"):
+        from tools.db_tools import get_ready_takeaway_order
+        ready_takeaway = await get_ready_takeaway_order(restaurant_id, customer_phone)
+        if ready_takeaway:
+            token = ready_takeaway.get("display_token") or ready_takeaway.get("order_number", "")
+            body_lines.append(
+                f"Your takeaway order *{token}* is ready — pick up at the counter."
+            )
 
-    ready_takeaway = await get_ready_takeaway_order(restaurant_id, customer_phone)
-    if ready_takeaway:
-        token = ready_takeaway.get("display_token") or ready_takeaway.get("order_number", "")
-        body_lines.append(
-            f"Your takeaway order *{token}* is ready — pick up at the counter."
-        )
-    elif not is_kitchen_open():
-        reopen = next_open_slot_description()
-        option_bits = []
-        row_ids = {r["id"] for r in rows}
-        if "delivery_schedule" in row_ids:
-            option_bits.append("*Schedule Delivery 📅*")
-        if "reserve_table" in row_ids:
-            option_bits.append("*Reserve a Table 📅*")
-        if option_bits:
-            options_line = " or ".join(option_bits)
-            body_lines.append(
-                f"Kitchen is closed — we reopen for *{reopen}*.\n"
-                f"Tap {options_line} below."
-            )
-        else:
-            body_lines.append(
-                f"Kitchen is closed until *{reopen}*. "
-                f"Reply *REMIND* and we'll ping you when we're open."
-            )
+    state.pop("_last_visit_abandoned", None)
     body_lines.append("What would you like to do today?")
     body_text = "\n\n".join(body_lines)
 
@@ -1186,27 +1232,32 @@ async def gate_ordering_service(
     service_type: str,
 ) -> bool:
     """
-    Block takeaway/delivery when the kitchen slot is closed.
+    Block takeaway/delivery when the kitchen is not accepting orders.
     Returns True if the service was blocked (caller should return early).
-
-    Delivery is never hard-blocked here — customers can schedule for later.
-    Takeaway is allowed when scheduled_takeaway_enabled is on (calendar flow).
     """
-    from tools.kitchen_hours import ordering_blocked_for_service
-
-    if service_type == "delivery":
-        return False
-
-    if service_type == "takeaway" and session_state.get("scheduled_takeaway_enabled"):
-        return False
-
-    if not ordering_blocked_for_service(service_type):
-        return False
-
-    await send_closed_kitchen_notice(
-        customer_phone, restaurant_id, session_state, service_type=service_type,
+    from tools.kitchen_hours import (
+        build_blanket_closed_message,
+        kitchen_accepting_orders,
+        ordering_blocked_for_service,
+        refresh_kitchen_acceptance,
     )
-    session_state["booking_step"] = "awaiting_service_selection"
+
+    await refresh_kitchen_acceptance(session_state, restaurant_id)
+
+    if not kitchen_accepting_orders(session_state):
+        await send_whatsapp_message(
+            customer_phone, build_blanket_closed_message(), restaurant_id,
+        )
+        session_state["booking_step"] = "kitchen_closed"
+        return True
+
+    if not ordering_blocked_for_service(service_type, session_state):
+        return False
+
+    await send_whatsapp_message(
+        customer_phone, build_blanket_closed_message(), restaurant_id,
+    )
+    session_state["booking_step"] = "kitchen_closed"
     return True
 
 

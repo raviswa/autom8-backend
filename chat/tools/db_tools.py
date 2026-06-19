@@ -2020,7 +2020,7 @@ async def get_ready_takeaway_order(
 ) -> dict | None:
     """
     Return today's takeaway order marked ready by kitchen/captain (status=ready).
-    Used for service-menu pickup line — not shown on mere returning-customer hint.
+    Excludes stale ready rows and orders tied to completed visits.
     """
     if AsyncSessionLocal is None:
         return None
@@ -2032,17 +2032,25 @@ async def get_ready_takeaway_order(
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             text("""
-                SELECT order_number, status, source
-                FROM orders
-                WHERE restaurant_id = CAST(:rid AS uuid)
-                  AND customer_phone = ANY(:phones)
-                  AND status = 'ready'
+                SELECT o.order_number, o.status, o.source, o.updated_at
+                FROM orders o
+                WHERE o.restaurant_id = CAST(:rid AS uuid)
+                  AND o.customer_phone = ANY(:phones)
+                  AND o.status = 'ready'
                   AND (
-                    source = 'takeaway'
-                    OR source ILIKE '%takeaway%'
+                    o.source = 'takeaway'
+                    OR o.source ILIKE '%takeaway%'
                   )
-                  AND created_at >= CURRENT_DATE
-                ORDER BY created_at DESC
+                  AND o.created_at >= CURRENT_DATE
+                  AND o.updated_at >= NOW() - INTERVAL '3 hours'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM walk_in_tokens t
+                    WHERE t.restaurant_id = o.restaurant_id
+                      AND regexp_replace(t.phone, '\\D', '', 'g') = ANY(:phones)
+                      AND t.status = 'completed'
+                      AND t.completed_at >= o.created_at
+                  )
+                ORDER BY o.updated_at DESC
                 LIMIT 1
             """),
             {"rid": restaurant_id, "phones": phones},

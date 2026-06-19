@@ -332,7 +332,6 @@ async def _process_meta_payload(payload: dict):
                     return
 
             # 5b. Feedback reply — delegate to Node before booking routing
-            # Home/Menu dismiss stale feedback invites, then always go to booking.
             if msg_type in ("text", "button", "interactive") and is_reset_keyword(message_body):
                 await try_dismiss_feedback_via_api(phone, restaurant_id)
             elif msg_type in ("text", "button", "interactive"):

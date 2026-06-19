@@ -120,14 +120,22 @@ async def build_service_menu_rows(
     restaurant_id: str,
     session_state: dict[str, Any] | None = None,
 ) -> list[dict]:
-    """Build WhatsApp list rows — immediate + scheduled options when enabled."""
+    """Build WhatsApp list rows when kitchen is accepting orders."""
+    from tools.kitchen_hours import kitchen_accepting_orders, refresh_kitchen_acceptance
+
+    state = session_state or {}
+    await refresh_kitchen_acceptance(state, restaurant_id)
+
+    if not kitchen_accepting_orders(state):
+        return [{
+            "id": "nothing",
+            "title": "Nothing, thanks ❌",
+            "description": "Exit",
+        }]
+
     features = await get_features(restaurant_id)
     feature_set = set(features)
 
-    from tools.kitchen_hours import is_kitchen_open
-    kitchen_open = is_kitchen_open()
-
-    state = session_state or {}
     sched_delivery = state.get("scheduled_delivery_enabled")
     sched_takeaway = state.get("scheduled_takeaway_enabled")
     if sched_delivery is None or sched_takeaway is None:
@@ -140,63 +148,47 @@ async def build_service_menu_rows(
 
     rows: list[dict] = []
 
-    if kitchen_open:
-        if _feature_val(Feature.DINE_IN) in feature_set:
-            rows.append({
-                "id": "dine_in",
-                "title": "Dine-in Now 🍽️",
-                "description": "Order food at your table",
-            })
+    if _feature_val(Feature.DINE_IN) in feature_set:
+        rows.append({
+            "id": "dine_in",
+            "title": "Dine-in Now 🍽️",
+            "description": "Order food at your table",
+        })
 
-        if _feature_val(Feature.TAKEAWAY) in feature_set:
-            rows.append({
-                "id": "takeaway_now",
-                "title": "Takeaway Now 🛍️",
-                "description": "Pick up as soon as it's ready",
-            })
+    if _feature_val(Feature.TAKEAWAY) in feature_set:
+        rows.append({
+            "id": "takeaway_now",
+            "title": "Takeaway Now 🛍️",
+            "description": "Pick up as soon as it's ready",
+        })
 
-        if _feature_val(Feature.DELIVERY) in feature_set:
-            rows.append({
-                "id": "delivery_now",
-                "title": "Deliver Now 🛵",
-                "description": "We deliver to your door ASAP",
-            })
+    if _feature_val(Feature.DELIVERY) in feature_set:
+        rows.append({
+            "id": "delivery_now",
+            "title": "Deliver Now 🛵",
+            "description": "We deliver to your door ASAP",
+        })
 
-    # Out of hours: only scheduled delivery + table reservations (no immediate kitchen).
-    if not kitchen_open:
-        if _feature_val(Feature.DELIVERY) in feature_set and sched_delivery:
-            rows.append({
-                "id": "delivery_schedule",
-                "title": "Schedule Delivery 📅",
-                "description": "Pick date & time for door delivery",
-            })
-        if _feature_val(Feature.RESERVE_TABLE) in feature_set:
-            rows.append({
-                "id": "reserve_table",
-                "title": "Reserve a Table 📅",
-                "description": "Book a table for a future visit",
-            })
-    else:
-        if _feature_val(Feature.TAKEAWAY) in feature_set and sched_takeaway:
-            rows.append({
-                "id": "takeaway_schedule",
-                "title": "Takeaway 📅",
-                "description": "Choose pickup date & time on the calendar",
-            })
+    if _feature_val(Feature.TAKEAWAY) in feature_set and sched_takeaway:
+        rows.append({
+            "id": "takeaway_schedule",
+            "title": "Takeaway 📅",
+            "description": "Choose pickup date & time on the calendar",
+        })
 
-        if _feature_val(Feature.DELIVERY) in feature_set and sched_delivery:
-            rows.append({
-                "id": "delivery_schedule",
-                "title": "Schedule Delivery 📅",
-                "description": "Scheduled door delivery — pick date & time",
-            })
+    if _feature_val(Feature.DELIVERY) in feature_set and sched_delivery:
+        rows.append({
+            "id": "delivery_schedule",
+            "title": "Schedule Delivery 📅",
+            "description": "Scheduled door delivery — pick date & time",
+        })
 
-        if _feature_val(Feature.RESERVE_TABLE) in feature_set:
-            rows.append({
-                "id": "reserve_table",
-                "title": "Reserve a Table 📅",
-                "description": "Book a table for a future visit",
-            })
+    if _feature_val(Feature.RESERVE_TABLE) in feature_set:
+        rows.append({
+            "id": "reserve_table",
+            "title": "Reserve a Table 📅",
+            "description": "Book a table for a future visit",
+        })
 
     rows.append({
         "id": "nothing",
@@ -232,7 +224,7 @@ async def resolve_service_selection(
     """Returns (service_type, order_mode). order_mode is immediate|scheduled|None."""
     rows = (session_state or {}).get("_service_menu_rows")
     if not rows:
-        rows = await build_service_menu_rows(restaurant_id)
+        rows = await build_service_menu_rows(restaurant_id, session_state)
     return _resolve_choice_from_rows(choice_id, rows)
 
 
