@@ -20,8 +20,9 @@ const router  = express.Router();
 
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const { broadcastToRestaurant }   = require('../websocket');
-const { sendWhatsAppMessage, sendWhatsAppCatalogWithSpecials } = require('../helpers/whatsapp');
+const { sendWhatsAppMessage, sendWhatsAppCatalogWithSpecials, sendWhatsAppInteractive } = require('../helpers/whatsapp');
 const { getManagerPhone } = require('../helpers/restaurantConfig');
+const { validateScheduledDeliverySlot } = require('../helpers/deliverySlots');
 const { assignAndNotifyCaptainTakeaway } = require('../helpers/captainAssignment');
 const { syncConversationForTokenApproval, syncConversationForScheduledDeliveryApproval } = require('../helpers/conversationState');
 const { releaseTablesForToken } = require('../helpers/tableRelease');
@@ -84,6 +85,13 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
     if (!['dinein', 'takeaway', 'large_party', 'scheduled_delivery'].includes(type))
       return res.status(400).json({ error: 'type must be dinein, takeaway, large_party, or scheduled_delivery' });
 
+    if (type === 'scheduled_delivery' && meta?.scheduled_at) {
+      const slotCheck = validateScheduledDeliverySlot(meta.scheduled_at);
+      if (!slotCheck.valid) {
+        return res.status(400).json({ error: slotCheck.message, reason: slotCheck.reason });
+      }
+    }
+
     const tokenId = await generateTokenId(restaurant_id);
     const status  = (type === 'large_party' || type === 'scheduled_delivery') ? 'pending_approval'
                   : type === 'takeaway'    ? 'takeaway'
@@ -132,11 +140,34 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
         const schedAt = meta?.scheduled_at_label || meta?.scheduled_at || '—';
         const addr    = (meta?.delivery_address || '—').slice(0, 80);
         const total   = meta?.total != null ? `₹${Number(meta.total).toFixed(0)}` : '—';
-        sendWhatsAppMessage(
+        const body =
+          `🛵 *Scheduled Door Delivery* — Token *${token.id}*\n` +
+          `👤 ${token.name}\n📱 ${token.phone || '—'}\n` +
+          `🕐 Delivery at: *${schedAt}*\n📍 ${addr}\n💰 ${total}\n\n` +
+          `Order: ${(meta?.order_text || '—').slice(0, 120)}\n\n` +
+          `Approve before the customer pays.`;
+        const sent = await sendWhatsAppInteractive(
           managerPhone,
-          `🛵 *Scheduled Door Delivery* — Token *${token.id}*\n👤 ${token.name}\n📱 ${token.phone || '—'}\n🕐 Delivery at: *${schedAt}*\n📍 ${addr}\n💰 ${total}\n\nOrder: ${(meta?.order_text || '—').slice(0, 120)}\n\n⚠️ *Approve in portal before customer pays:*\n${portalUrl}`,
-          restaurant_id
+          {
+            type: 'button',
+            body: { text: body },
+            footer: { text: 'Manager Portal — Pending approval' },
+            action: {
+              buttons: [
+                { type: 'reply', reply: { id: `SCHED_APPROVE_${token.id}`, title: '✅ Approve' } },
+                { type: 'reply', reply: { id: `SCHED_REJECT_${token.id}`, title: '❌ Reject' } },
+              ],
+            },
+          },
+          restaurant_id,
         );
+        if (!sent) {
+          sendWhatsAppMessage(
+            managerPhone,
+            `${body}\n\n⚠️ *Approve in portal before customer pays:*\n${portalUrl}`,
+            restaurant_id
+          );
+        }
       } else if (type === 'dinein') {
         sendWhatsAppMessage(
           managerPhone,

@@ -68,6 +68,12 @@ from agents.customer.booking_helpers import (
 )
 from agents.customer.conversation_helpers import safe_build_order_suggestion
 from config.settings import settings
+from tools.delivery_slots import (
+    validate_scheduled_delivery_slot,
+    format_slot_rejection_message,
+    next_available_slot,
+    _format_slot_label,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +110,11 @@ async def offer_delivery_schedule(
         "\n\nScheduled deliveries need manager approval before payment."
         if needs_approval else ""
     )
+    earliest_hint = ""
+    try:
+        earliest_hint = f"\n\n_Earliest slot: {_format_slot_label(next_available_slot())}_"
+    except Exception:
+        pass
     if flow_id and flow_id != "your_flow_id_here":
         flow_token = f"delivery_{customer_id}_{int(time.time())}"
         session_state["flow_token"] = flow_token
@@ -111,12 +122,12 @@ async def offer_delivery_schedule(
             flow_body = (
                 f"Hi {customer_name}! We're not taking immediate delivery orders yet "
                 f"— we open at *{next_open_label()}*.\n\n"
-                f"Tap below to pick when you'd like your food delivered.{approval_note}"
+                f"Tap below to pick when you'd like your food delivered.{approval_note}{earliest_hint}"
             )
         else:
             flow_body = (
                 f"Hi {customer_name}! Tap below to pick your delivery date and time "
-                f"on the calendar.{approval_note}"
+                f"on the calendar.{approval_note}{earliest_hint}"
             )
         ok = await send_whatsapp_flow(
             phone=customer_phone,
@@ -185,6 +196,19 @@ async def _parse_delivery_schedule(message: str) -> datetime | None:
     if scheduled is not None:
         return scheduled
     return parse_scheduled_delivery_time(message)
+
+
+async def _validate_and_normalize_schedule(
+    scheduled: datetime,
+) -> tuple[datetime | None, str | None]:
+    """Return (normalized_dt, error_message). None dt means reject."""
+    if scheduled.tzinfo is None:
+        from zoneinfo import ZoneInfo
+        scheduled = scheduled.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+    valid, reason, suggestion = validate_scheduled_delivery_slot(scheduled)
+    if not valid:
+        return None, format_slot_rejection_message(reason, suggestion)
+    return scheduled, None
 
 
 async def _advance_after_delivery_time_set(
@@ -440,6 +464,22 @@ async def _submit_scheduled_delivery_for_approval(
     booking_id: str,
 ) -> Dict[str, Any]:
     """Hold payment until manager approves a scheduled delivery."""
+    sched_raw = session_state.get("scheduled_at")
+    if sched_raw:
+        try:
+            sched_dt = datetime.fromisoformat(str(sched_raw).replace("Z", "+00:00"))
+            valid, reason, suggestion = validate_scheduled_delivery_slot(sched_dt)
+            if not valid:
+                await send_whatsapp_message(
+                    customer_phone,
+                    format_slot_rejection_message(reason, suggestion),
+                    restaurant_id,
+                )
+                session_state["booking_step"] = "awaiting_scheduled_flow"
+                return {"status": "awaiting_scheduled_flow", "reason": reason}
+        except (ValueError, TypeError):
+            pass
+
     sched_label = _scheduled_delivery_label(session_state)
     portal_meta = {
         "booking_id": booking_id,
@@ -601,13 +641,9 @@ async def handle_delivery_flow(
             scheduled = await _parse_delivery_schedule(message)
 
         if scheduled is not None:
-            if scheduled <= datetime.now():
-                await send_whatsapp_message(
-                    customer_phone,
-                    "That time has already passed. Please tap *Select Date & Time* "
-                    "to pick a future slot on the calendar.",
-                    restaurant_id,
-                )
+            scheduled, err = await _validate_and_normalize_schedule(scheduled)
+            if err:
+                await send_whatsapp_message(customer_phone, err, restaurant_id)
                 return {"status": "awaiting_scheduled_flow"}
             return await _advance_after_delivery_time_set(
                 customer_phone, restaurant_id, session_state, scheduled,
