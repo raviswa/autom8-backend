@@ -98,6 +98,31 @@ router.post('/handle-reply', async (req, res) => {
   });
 });
 
+// ── POST /api/feedback/dismiss ───────────────────────────────────────────────
+// Internal: dismiss stale feedback invite when customer sends Home/Menu.
+
+router.post('/dismiss', async (req, res) => {
+  const authHeader = req.headers['authorization'];
+  const bearer     = authHeader?.split(' ')[1];
+
+  if (!isValidKdsSecret(bearer)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const { customer_phone, restaurant_id } = req.body || {};
+  if (!customer_phone || !restaurant_id) {
+    return res.status(400).json({ error: 'customer_phone and restaurant_id required' });
+  }
+
+  const { dismissActiveFeedback } = require('../helpers/feedbackFlow');
+  const { phoneVariants } = require('../helpers/conversationState');
+  await dismissActiveFeedback(restaurant_id, customer_phone).catch(() => {});
+  for (const variant of phoneVariants(customer_phone)) {
+    await closeOpenFeedbackRows(restaurant_id, variant).catch(() => {});
+  }
+  return res.json({ success: true });
+});
+
 // ── Scheduler helpers ─────────────────────────────────────────────────────────
 
 async function releaseSendLease(id) {

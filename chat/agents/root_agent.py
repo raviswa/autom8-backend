@@ -201,6 +201,7 @@ async def route_message(
                 message=message,
                 session_state=session_state,
                 table_number=table_number,
+                raw_message_obj=raw_message_obj,
             )
 
             if result.get("status") != "error":
@@ -259,6 +260,7 @@ async def route_message(
         message=message,
         session_state=session_state,
         table_number=table_number,
+        raw_message_obj=raw_message_obj,
     )
 
     if result.get("status") != "error":
@@ -312,6 +314,7 @@ async def route_message(
                 message=message,
                 session_state=session_state,
                 table_number=table_number,
+                raw_message_obj=raw_message_obj,
             )
 
             if result.get("status") != "error":

@@ -14,17 +14,19 @@
 
 const { supabaseAdmin } = require('../config/supabase');
 const { closeOpenFeedbackRows } = require('./feedbackDedup');
-
-const RESET_KEYWORDS = new Set([
-  'home', 'menu', 'main menu', 'mainmenu', 'restart', 'start over', 'startover',
-  'reboot', 'new', 'begin',
-]);
-
-function isResetKeyword(text) {
-  return RESET_KEYWORDS.has(String(text || '').trim().toLowerCase());
-}
+const { phoneVariants } = require('./conversationState');
+const {
+  classifyFeedbackIntent,
+  getFeedbackSubState,
+  gracefullyExpireFeedback,
+  isReplyWindowExpired,
+  parseRating,
+} = require('./feedbackIntent');
 
 async function dismissActiveFeedback(restaurantId, phone) {
+  const variants = phoneVariants(phone);
+  if (!variants.length) return;
+
   const { error } = await supabaseAdmin
     .from('feedback_pending')
     .update({
@@ -33,10 +35,52 @@ async function dismissActiveFeedback(restaurantId, phone) {
       feedback_text: 'dismissed:user_reset',
     })
     .eq('restaurant_id', restaurantId)
-    .eq('customer_phone', phone)
+    .in('customer_phone', variants)
     .eq('feedback_sent', true)
     .eq('manager_notified', false);
   if (error) throw error;
+}
+
+async function findOpenFeedbackRecord(restaurantId, phone) {
+  for (const variant of phoneVariants(phone)) {
+    const { data } = await supabaseAdmin
+      .from('feedback_pending')
+      .select('*')
+      .eq('customer_phone', variant)
+      .eq('restaurant_id', restaurantId)
+      .eq('feedback_sent', true)
+      .eq('manager_notified', false)
+      .order('freed_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (data) return data;
+  }
+  return null;
+}
+
+async function closeAllStaleFeedbackInvites(restaurantId, phone) {
+  const variants = phoneVariants(phone);
+  if (!variants.length) return;
+
+  await supabaseAdmin
+    .from('feedback_pending')
+    .update({
+      manager_notified: true,
+      feedback_received_at: new Date().toISOString(),
+    })
+    .eq('restaurant_id', restaurantId)
+    .in('customer_phone', variants)
+    .eq('feedback_sent', true)
+    .eq('manager_notified', false);
+}
+
+const RESET_KEYWORDS = new Set([
+  'home', 'menu', 'main menu', 'mainmenu', 'restart', 'start over', 'startover',
+  'reboot', 'new', 'begin',
+]);
+
+function isResetKeyword(text) {
+  return RESET_KEYWORDS.has(String(text || '').trim().toLowerCase());
 }
 const { sendWhatsAppMessage, sendWhatsAppInteractive } = require('./whatsapp');
 const { isWhatsAppAutoReply } = require('./whatsappAutoReply');
@@ -99,8 +143,8 @@ function buildAspectMenu(aspects, prompt) {
 }
 
 function parseAspectReply(text, aspects) {
-  const t = String(text || '').trim().toLowerCase();
-  if (['skip', 's', 'none', 'no', 'done', 'ok', 'okay', 'skip_aspects'].includes(t)) {
+  const t = String(text || '').trim().toLowerCase().replace(/^⏭️\s*/, '');
+  if (['skip', 's', 'none', 'no', 'done', 'ok', 'okay', 'skip_aspects', 'skip_comment'].includes(t)) {
     return [];
   }
   if (['all', 'everything', 'all of the above'].includes(t)) {
@@ -175,16 +219,6 @@ function extractMessageText(message) {
     return (message.button?.payload || message.button?.text || '').trim();
   }
   return (message.text?.body || '').trim();
-}
-
-function parseRating(text) {
-  const raw = String(text || '').trim().toLowerCase();
-  if (RATING_MAP[raw] != null) return RATING_MAP[raw];
-  const digit = raw.match(/\b([1-5])\b/);
-  if (digit) return parseInt(digit[1], 10);
-  const stars = raw.match(/[⭐★]/g);
-  if (stars?.length) return Math.min(stars.length, 5);
-  return null;
 }
 
 function aspectsPayload(record) {
@@ -367,6 +401,9 @@ async function completeFeedback(record, rating, aspectIds, comment, phone) {
     restaurantId: record.restaurant_id,
     customerPhone: record.customer_phone,
   }).catch(() => {});
+
+  // Close any duplicate open invites (e.g. auto-release + token-complete rows).
+  await closeAllStaleFeedbackInvites(record.restaurant_id, phone).catch(() => {});
 }
 
 /**
@@ -394,30 +431,38 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
       return none;
     }
 
-    const { data: record } = await supabaseAdmin
-      .from('feedback_pending')
-      .select('*')
-      .eq('customer_phone', phone)
-      .eq('restaurant_id', restaurantId)
-      .eq('feedback_sent', true)
-      .eq('manager_notified', false)
-      .order('freed_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    const record = await findOpenFeedbackRecord(restaurantId, phone);
 
     if (!record) return none;
 
-    // ── Step 1: Awaiting rating ─────────────────────────────────────────────
+    if (isReplyWindowExpired(record)) {
+      await gracefullyExpireFeedback(record, 'expired:window');
+      return none;
+    }
+
+    const subState = getFeedbackSubState(record, aspectsPayload);
+    const classification = classifyFeedbackIntent({ text, message, subState });
+
+    if (classification.abandon_feedback_flow) {
+      await gracefullyExpireFeedback(
+        record,
+        `abandoned:${classification.intent}`,
+      );
+      return none;
+    }
+
+    const action = classification.feedback_action;
+
+    // ── Step 1: Rating ───────────────────────────────────────────────────────
     if (record.feedback_rating == null) {
-      const rating = parseRating(text);
-      if (!rating) {
-        await sendWhatsAppMessage(
-          phone,
-          'Please tap one of the rating options above, or reply with a number from *1* to *5*. 😊',
-          restaurantId,
-        );
-        return partial;
+      if (action === 'skip') {
+        await gracefullyExpireFeedback(record, 'abandoned:skip');
+        return none;
       }
+      if (action !== 'rating') return none;
+
+      const rating = parseRating(text);
+      if (!rating) return none;
 
       await supabaseAdmin
         .from('feedback_pending')
@@ -431,18 +476,21 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
     const rating = record.feedback_rating;
     const payload = aspectsPayload(record);
 
-    // ── Step 2: Awaiting aspects ────────────────────────────────────────────
+    // ── Step 2: Tags / aspects ───────────────────────────────────────────────
     if (!payload) {
-      const [aspects] = aspectsForRating(rating);
-      const parsed = parseAspectReply(text, aspects);
-      if (parsed === null) {
-        await sendWhatsAppMessage(
-          phone,
-          'Please reply with the numbers that apply (e.g. *1 3*) or type *Skip*. 😊',
-          restaurantId,
-        );
+      if (action === 'skip') {
+        await supabaseAdmin
+          .from('feedback_pending')
+          .update({ feedback_text: JSON.stringify({ aspects: [] }) })
+          .eq('id', record.id);
+        await sendCommentPrompt(record);
         return partial;
       }
+      if (action !== 'tags') return none;
+
+      const [aspects] = aspectsForRating(rating);
+      const parsed = parseAspectReply(text, aspects);
+      if (parsed === null) return none;
 
       await supabaseAdmin
         .from('feedback_pending')
@@ -453,10 +501,16 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
       return partial;
     }
 
-    // ── Step 3: Awaiting comment ────────────────────────────────────────────
+    // ── Step 3: Comment ───────────────────────────────────────────────────────
+    if (action !== 'comment' && action !== 'skip') return none;
+
     const aspectIds = payload.aspects || [];
     const skipComments = ['skip_comment', 'skip', 's', 'no', 'none', ''];
-    const comment = skipComments.includes(text.toLowerCase()) ? null : text.slice(0, 500);
+    const normalized = text.toLowerCase().replace(/^⏭️\s*/, '');
+    const comment =
+      action === 'skip' || skipComments.includes(normalized)
+        ? null
+        : text.slice(0, 500);
 
     await completeFeedback(record, rating, aspectIds, comment, phone);
     return { consumed: true, completed: true };
@@ -469,6 +523,7 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
 module.exports = {
   sendFeedbackInvite,
   handleFeedbackReply,
+  dismissActiveFeedback,
   resolveVisitContext,
   aspectsForRating,
 };

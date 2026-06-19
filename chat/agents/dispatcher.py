@@ -280,6 +280,7 @@ async def route_message(
     whatsapp_profile_name: str | None = None,
     table_number: int | None = None,
     session_state: Dict[str, Any] | None = None,
+    raw_message_obj: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     if session_state is None:
         session_state = {}
@@ -354,6 +355,7 @@ async def route_message(
                 message=message,
                 session_state=session_state,
                 table_number=table_number,
+                raw_message_obj=raw_message_obj,
             )
 
             if result.get("status") != "error":
@@ -414,6 +416,7 @@ async def route_message(
         message=message,
         session_state=session_state,
         table_number=table_number,
+        raw_message_obj=raw_message_obj,
     )
 
     if result.get("status") != "error":

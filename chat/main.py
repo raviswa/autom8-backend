@@ -29,7 +29,7 @@ from tools.db_tools import (
 )
 from tools.whatsapp_tools import parse_incoming, send_whatsapp_message
 from agents.customer.booking_helpers import touch_session_activity, is_reset_keyword, mark_session_visit_complete
-from tools.feedback_bridge import try_handle_feedback_via_api
+from tools.feedback_bridge import try_handle_feedback_via_api, try_dismiss_feedback_via_api
 from tools.payment_tools import (
     verify_webhook_signature,
     handle_payment_webhook,
@@ -332,8 +332,10 @@ async def _process_meta_payload(payload: dict):
                     return
 
             # 5b. Feedback reply — delegate to Node before booking routing
-            # Home/Menu always go to booking reset, never feedback for a past order.
-            if msg_type in ("text", "button", "interactive") and not is_reset_keyword(message_body):
+            # Home/Menu dismiss stale feedback invites, then always go to booking.
+            if msg_type in ("text", "button", "interactive") and is_reset_keyword(message_body):
+                await try_dismiss_feedback_via_api(phone, restaurant_id)
+            elif msg_type in ("text", "button", "interactive"):
                 fb_result = await try_handle_feedback_via_api(phone, message_obj, restaurant_id)
                 if fb_result.get("consumed"):
                     if fb_result.get("completed"):

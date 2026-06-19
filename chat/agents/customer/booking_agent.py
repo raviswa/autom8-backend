@@ -112,6 +112,7 @@ async def handle_booking_flow(
     restaurant_id: str, customer_id: str, customer_name: str,
     customer_phone: str, manager_phone: str, message: str,
     session_state: Dict[str, Any], table_number: int | None = None,
+    raw_message_obj: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
 
     asyncio.create_task(background_analytics(
@@ -191,21 +192,38 @@ async def handle_booking_flow(
         await ask_continue_or_reset(customer_phone, restaurant_id, full_restart=True)
         return {"status": "awaiting_reset_confirmation"}
 
-    # ── Feedback steps — routed entirely to feedback_flow ────────────────────
+    # ── Feedback steps — intent first; feedback never blocks ordering ─────────
     _FEEDBACK_STEPS = {
         "awaiting_feedback_rating",
         "awaiting_feedback_aspects",
         "awaiting_feedback_comment",
     }
     if current_step in _FEEDBACK_STEPS:
-        return await handle_feedback_flow(
-            restaurant_id=restaurant_id,
-            customer_name=customer_name,
-            customer_phone=customer_phone,
-            message=message,
-            session_state=session_state,
-            message_obj=None,   # pass full webhook dict here once dispatcher supports it
+        from tools.feedback_intent import (
+            classify_session_feedback_intent,
+            clear_session_feedback,
+            is_session_feedback_expired,
         )
+
+        if is_session_feedback_expired(session_state):
+            clear_session_feedback(session_state)
+            current_step = session_state.get("booking_step")
+        else:
+            cls = classify_session_feedback_intent(
+                message, current_step, message_obj=raw_message_obj,
+            )
+            if cls.get("abandon_feedback_flow"):
+                clear_session_feedback(session_state)
+                current_step = session_state.get("booking_step")
+            else:
+                return await handle_feedback_flow(
+                    restaurant_id=restaurant_id,
+                    customer_name=customer_name,
+                    customer_phone=customer_phone,
+                    message=message,
+                    session_state=session_state,
+                    message_obj=raw_message_obj,
+                )
 
     # ── Closed kitchen: REMIND opt-in ─────────────────────────────────────────
     if message.strip().upper() == "REMIND":

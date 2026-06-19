@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import logging
 import os as _os
+from datetime import datetime, timezone
 from typing import Dict, Any
 
 import aiohttp
@@ -294,6 +295,7 @@ async def send_feedback_request(
         )
 
     await _mark_feedback_sent(booking_id)
+    session_state["feedback_invite_sent_at"] = datetime.now(timezone.utc).isoformat()
     logger.info(f"[feedback] Rating request sent — booking {booking_id} → {customer_phone}")
 
 
