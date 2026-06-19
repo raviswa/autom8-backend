@@ -1,0 +1,80 @@
+{
+  "version": "5.0",
+  "data_api_version": "3.0",
+  "routing_model": {
+    "RESERVATION_SCREEN": []
+  },
+  "screens": [
+    {
+      "id": "RESERVATION_SCREEN",
+      "title": "Pick date & time",
+      "terminal": true,
+      "data": {
+        "min_date": {
+          "type": "string",
+          "__example__": "2026-06-18"
+        },
+        "max_date": {
+          "type": "string",
+          "__example__": "2026-06-25"
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "schedule_form",
+            "children": [
+              {
+                "type": "DatePicker",
+                "name": "reservation_date",
+                "label": "Date",
+                "required": true,
+                "min-date": "${data.min_date}",
+                "max-date": "${data.max_date}"
+              },
+              {
+                "type": "Dropdown",
+                "name": "reservation_time",
+                "label": "Time",
+                "required": true,
+                "data-source": [
+                  { "id": "06:00", "title": "6:00 AM" },
+                  { "id": "07:00", "title": "7:00 AM" },
+                  { "id": "08:00", "title": "8:00 AM" },
+                  { "id": "09:00", "title": "9:00 AM" },
+                  { "id": "10:00", "title": "10:00 AM" },
+                  { "id": "11:00", "title": "11:00 AM" },
+                  { "id": "12:00", "title": "12:00 PM" },
+                  { "id": "13:00", "title": "1:00 PM" },
+                  { "id": "14:00", "title": "2:00 PM" },
+                  { "id": "15:00", "title": "3:00 PM" },
+                  { "id": "16:00", "title": "4:00 PM" },
+                  { "id": "17:00", "title": "5:00 PM" },
+                  { "id": "18:00", "title": "6:00 PM" },
+                  { "id": "19:00", "title": "7:00 PM" },
+                  { "id": "20:00", "title": "8:00 PM" },
+                  { "id": "21:00", "title": "9:00 PM" },
+                  { "id": "22:00", "title": "10:00 PM" },
+                  { "id": "23:00", "title": "11:00 PM" }
+                ]
+              },
+              {
+                "type": "Footer",
+                "label": "Confirm",
+                "on-click-action": {
+                  "name": "complete",
+                  "payload": {
+                    "reservation_date": "${form.reservation_date}",
+                    "reservation_time": "${form.reservation_time}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

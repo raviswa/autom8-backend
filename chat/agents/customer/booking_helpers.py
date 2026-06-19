@@ -714,6 +714,7 @@ async def offer_whatsapp_schedule_calendar(
     flow_cta: str = "Select Date & Time",
     retry_key: str = "_schedule_flow_retry",
     resend_fn=None,
+    flow_data: dict | None = None,
 ) -> Dict[str, Any]:
     """
     Platform rule (restaurant + supply): future date/time via WhatsApp Flow calendar only.
@@ -721,6 +722,7 @@ async def offer_whatsapp_schedule_calendar(
     """
     import time as _time
     from tools.whatsapp_tools import send_whatsapp_flow, send_whatsapp_message
+    from tools.delivery_slots import build_flow_calendar_data
 
     if not flow_id or flow_id == "your_flow_id_here":
         logger.warning(f"[calendar] Flow ID not configured for {customer_phone}")
@@ -730,6 +732,7 @@ async def offer_whatsapp_schedule_calendar(
 
     flow_token = f"{flow_token_prefix}_{customer_id}_{int(_time.time())}"
     session_state["flow_token"] = flow_token
+    calendar_data = flow_data if flow_data is not None else build_flow_calendar_data()
     ok = await send_whatsapp_flow(
         phone=customer_phone,
         flow_id=flow_id,
@@ -739,6 +742,7 @@ async def offer_whatsapp_schedule_calendar(
         flow_body=flow_body,
         flow_footer=flow_footer,
         restaurant_id=restaurant_id,
+        flow_data=calendar_data,
     )
     if ok:
         session_state["booking_step"] = booking_step

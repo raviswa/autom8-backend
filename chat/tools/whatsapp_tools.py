@@ -153,6 +153,16 @@ async def send_whatsapp_template(
 # Outbound: WhatsApp Flow
 # ---------------------------------------------------------------------------
 
+def _build_flow_navigate_payload(
+    flow_screen: str,
+    flow_data: dict | None,
+) -> dict:
+    payload: dict = {"screen": flow_screen}
+    if flow_data:
+        payload["data"] = flow_data
+    return payload
+
+
 async def send_whatsapp_flow(
     phone: str,
     flow_id: str,
@@ -162,10 +172,14 @@ async def send_whatsapp_flow(
     flow_body: str | None = None,
     flow_footer: str | None = None,
     restaurant_id: str | None = None,
+    *,
+    flow_screen: str = "RESERVATION_SCREEN",
+    flow_data: dict | None = None,
 ) -> bool:
     """Send a WhatsApp Flow message (e.g. date/time picker).
 
     Uses flow_action=navigate (not data_exchange) for Without-Endpoint flows.
+    Pass flow_data (e.g. min_date, max_date) to bind DatePicker limits in Flow JSON.
     Empty header/footer dicts are omitted — Meta rejects them.
     """
     try:
@@ -186,9 +200,9 @@ async def send_whatsapp_flow(
                     "flow_id": flow_id,
                     "flow_cta": flow_cta,
                     "flow_action": "navigate",
-                    "flow_action_payload": {
-                        "screen": "RESERVATION_SCREEN",
-                    },
+                    "flow_action_payload": _build_flow_navigate_payload(
+                        flow_screen, flow_data,
+                    ),
                     "mode": "published",
                 },
             },

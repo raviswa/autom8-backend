@@ -41,6 +41,7 @@ from agents.customer.booking_helpers import (
 )
 from agents.customer.conversation_intelligence import is_affirmative as _is_affirmative
 from config.settings import settings
+from tools.delivery_slots import format_schedule_window_hint
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,11 @@ async def _offer_reserve_calendar(
 ) -> Dict[str, Any]:
     party_size = session_state.get("party_size", "")
     flow_id = settings.meta_flow_reservation_id
+    window_hint = ""
+    try:
+        window_hint = format_schedule_window_hint()
+    except Exception:
+        pass
     return await offer_whatsapp_schedule_calendar(
         customer_phone,
         restaurant_id,
@@ -64,7 +70,7 @@ async def _offer_reserve_calendar(
         flow_header="📅 Reserve a Table",
         flow_body=(
             f"Hi {customer_name}! Tap below to pick your reservation date and time "
-            f"for your party of {party_size} guests."
+            f"for your party of {party_size} guests.{window_hint}"
         ),
         booking_step="awaiting_flow_datetime",
         failure_message=(

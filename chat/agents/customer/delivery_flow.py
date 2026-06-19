@@ -73,6 +73,8 @@ from tools.delivery_slots import (
     format_slot_rejection_message,
     next_available_slot,
     _format_slot_label,
+    build_flow_calendar_data,
+    format_schedule_window_hint,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,10 +84,82 @@ _MANAGER_APPROVAL_NOTE = (
     "We'll message you once confirmed."
 )
 
+_RESCHEDULE_HINT = (
+    "\n\n_Tap *Select Date & Time* on the new calendar below to pick a different slot._"
+)
+
+_RESCHEDULE_KEYWORDS = frozenset({
+    "change", "reschedule", "calendar", "pick again", "edit", "change time",
+    "change date", "new time", "different time", "slot",
+})
+
 
 def _requires_scheduled_delivery_approval(session_state: Dict[str, Any]) -> bool:
     """Calendar-scheduled deliveries always need manager approval before payment."""
     return bool(session_state.get("scheduled_at"))
+
+
+def _wants_reschedule_calendar(message: str) -> bool:
+    """Customer asked to change delivery slot — send a fresh Flow calendar."""
+    t = (message or "").strip().lower()
+    if not t:
+        return False
+    if t in _RESCHEDULE_KEYWORDS:
+        return True
+    return any(
+        phrase in t
+        for phrase in (
+            "change time", "change date", "pick again", "different time",
+            "new slot", "another time", "another date",
+        )
+    )
+
+
+async def _reject_schedule_resend_calendar(
+    customer_phone: str,
+    restaurant_id: str,
+    customer_id: str,
+    customer_name: str,
+    session_state: Dict[str, Any],
+    error_message: str,
+) -> Dict[str, Any]:
+    """Explain rejection and open a new editable calendar (new flow_token)."""
+    from tools.kitchen_hours import is_kitchen_open
+
+    await send_whatsapp_message(
+        customer_phone,
+        f"{error_message}{_RESCHEDULE_HINT}",
+        restaurant_id,
+    )
+    session_state.pop("scheduled_at", None)
+    session_state.pop("_schedule_flow_resend", None)
+    session_state.pop("_schedule_flow_retry", None)
+    return await offer_delivery_schedule(
+        customer_phone, restaurant_id, customer_id, customer_name, session_state,
+        kitchen_closed=not is_kitchen_open(),
+    )
+
+
+async def _maybe_resend_delivery_calendar(
+    message: str,
+    customer_phone: str,
+    restaurant_id: str,
+    customer_id: str,
+    customer_name: str,
+    session_state: Dict[str, Any],
+) -> Dict[str, Any] | None:
+    """If customer wants a new slot, clear the old one and re-send the Flow."""
+    if not _wants_reschedule_calendar(message):
+        return None
+    session_state.pop("scheduled_at", None)
+    session_state.pop("_schedule_flow_resend", None)
+    session_state.pop("_schedule_flow_retry", None)
+    session_state["booking_step"] = "awaiting_scheduled_flow"
+    session_state["order_mode"] = "scheduled"
+    return await offer_delivery_schedule(
+        customer_phone, restaurant_id, customer_id, customer_name, session_state,
+        kitchen_closed=False,
+    )
 
 
 async def offer_delivery_schedule(
@@ -112,9 +186,10 @@ async def offer_delivery_schedule(
     )
     earliest_hint = ""
     try:
-        earliest_hint = f"\n\n_Earliest slot: {_format_slot_label(next_available_slot())}_"
+        earliest_hint = format_schedule_window_hint()
     except Exception:
         pass
+    flow_calendar_data = build_flow_calendar_data()
     if flow_id and flow_id != "your_flow_id_here":
         flow_token = f"delivery_{customer_id}_{int(time.time())}"
         session_state["flow_token"] = flow_token
@@ -138,6 +213,7 @@ async def offer_delivery_schedule(
             flow_body=flow_body,
             flow_footer="Calendar — pick date and time",
             restaurant_id=restaurant_id,
+            flow_data=flow_calendar_data,
         )
         if ok:
             session_state["booking_step"] = "awaiting_scheduled_flow"
@@ -470,13 +546,11 @@ async def _submit_scheduled_delivery_for_approval(
             sched_dt = datetime.fromisoformat(str(sched_raw).replace("Z", "+00:00"))
             valid, reason, suggestion = validate_scheduled_delivery_slot(sched_dt)
             if not valid:
-                await send_whatsapp_message(
-                    customer_phone,
+                return await _reject_schedule_resend_calendar(
+                    customer_phone, restaurant_id, customer_id, customer_name,
+                    session_state,
                     format_slot_rejection_message(reason, suggestion),
-                    restaurant_id,
                 )
-                session_state["booking_step"] = "awaiting_scheduled_flow"
-                return {"status": "awaiting_scheduled_flow", "reason": reason}
         except (ValueError, TypeError):
             pass
 
@@ -598,6 +672,12 @@ async def handle_delivery_flow(
 
     booking_step = session_state.get("booking_step")
 
+    resend = await _maybe_resend_delivery_calendar(
+        message, customer_phone, restaurant_id, customer_id, customer_name, session_state,
+    )
+    if resend is not None:
+        return resend
+
     # ── awaiting_address ──────────────────────────────────────────────────────
     if booking_step == "awaiting_address":
         raw = message.strip()
@@ -643,8 +723,10 @@ async def handle_delivery_flow(
         if scheduled is not None:
             scheduled, err = await _validate_and_normalize_schedule(scheduled)
             if err:
-                await send_whatsapp_message(customer_phone, err, restaurant_id)
-                return {"status": "awaiting_scheduled_flow"}
+                return await _reject_schedule_resend_calendar(
+                    customer_phone, restaurant_id, customer_id, customer_name,
+                    session_state, err,
+                )
             return await _advance_after_delivery_time_set(
                 customer_phone, restaurant_id, session_state, scheduled,
             )

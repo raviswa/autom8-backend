@@ -68,6 +68,7 @@ from agents.customer.booking_helpers import (
 )
 from agents.customer.conversation_helpers import safe_build_order_suggestion
 from config.settings import settings
+from tools.delivery_slots import build_flow_calendar_data, format_schedule_window_hint
 
 logger = logging.getLogger(__name__)
 
@@ -93,15 +94,22 @@ async def offer_takeaway_schedule(
     if flow_id and flow_id != "your_flow_id_here":
         flow_token = f"takeaway_{customer_id}_{int(time.time())}"
         session_state["flow_token"] = flow_token
+        window_hint = ""
+        try:
+            window_hint = format_schedule_window_hint()
+        except Exception:
+            pass
+        flow_calendar_data = build_flow_calendar_data()
         if closed:
             flow_body = (
                 f"Hi {customer_name}! We're not taking immediate takeaway orders yet "
                 f"— we open at *{next_open_label()}*.\n\n"
-                "Tap below to pick when you'd like to collect your order."
+                f"Tap below to pick when you'd like to collect your order.{window_hint}"
             )
         else:
             flow_body = (
                 f"Hi {customer_name}! Tap below to pick your pickup date and time."
+                f"{window_hint}"
             )
         ok = await send_whatsapp_flow(
             phone=customer_phone,
@@ -112,6 +120,7 @@ async def offer_takeaway_schedule(
             flow_body=flow_body,
             flow_footer="Calendar — pick date and time",
             restaurant_id=restaurant_id,
+            flow_data=flow_calendar_data,
         )
         if ok:
             session_state["booking_step"] = "awaiting_takeaway_scheduled_flow"

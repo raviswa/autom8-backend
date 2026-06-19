@@ -111,6 +111,42 @@ def next_available_slot(now: datetime | None = None) -> datetime:
     return future[0] if future else earliest_valid_slot(now)
 
 
+def latest_bookable_date(now: datetime | None = None) -> date:
+    """Last calendar day a slot may be booked (inclusive)."""
+    now = _ensure_ist(now or datetime.now(IST))
+    return now.date() + timedelta(days=MAX_DAYS_AHEAD)
+
+
+def calendar_min_date(now: datetime | None = None) -> str:
+    """ISO date (YYYY-MM-DD) for WhatsApp Flow DatePicker min-date."""
+    now = _ensure_ist(now or datetime.now(IST))
+    return earliest_valid_slot(now).date().isoformat()
+
+
+def calendar_max_date(now: datetime | None = None) -> str:
+    """ISO date (YYYY-MM-DD) for WhatsApp Flow DatePicker max-date."""
+    return latest_bookable_date(now).isoformat()
+
+
+def build_flow_calendar_data(now: datetime | None = None) -> dict[str, str]:
+    """Initial payload for Meta Flow navigate — binds min/max on DatePicker."""
+    return {
+        "min_date": calendar_min_date(now),
+        "max_date": calendar_max_date(now),
+    }
+
+
+def format_schedule_window_hint(now: datetime | None = None) -> str:
+    """User-facing earliest/latest lines for calendar invite messages."""
+    now = _ensure_ist(now or datetime.now(IST))
+    earliest = next_available_slot(now)
+    latest = latest_bookable_date(now)
+    return (
+        f"\n\n_Earliest: {_format_slot_label(earliest)}_\n"
+        f"_Latest: within {MAX_DAYS_AHEAD} days (by {latest.strftime('%d %b %Y')})_"
+    )
+
+
 def _format_slot_label(dt: datetime) -> str:
     dt = _ensure_ist(dt)
     h = dt.hour % 12 or 12

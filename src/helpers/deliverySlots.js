@@ -79,6 +79,17 @@ function sameIstDay(a, b) {
   return pa.year === pb.year && pa.month === pb.month && pa.day === pb.day;
 }
 
+function istDateKey(d) {
+  const { year, month, day } = istDateParts(d);
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function latestBookableDateKey(now = nowInIst()) {
+  const d = new Date(now);
+  d.setDate(d.getDate() + MAX_DAYS_AHEAD);
+  return istDateKey(d);
+}
+
 function validateScheduledDeliverySlot(requestedISO, now = nowInIst()) {
   const requested = new Date(requestedISO);
   if (Number.isNaN(requested.getTime())) {
@@ -89,9 +100,7 @@ function validateScheduledDeliverySlot(requestedISO, now = nowInIst()) {
     return { valid: false, reason: 'past', message: 'Selected time is in the past' };
   }
 
-  const maxDate = new Date(now);
-  maxDate.setDate(maxDate.getDate() + MAX_DAYS_AHEAD);
-  if (requested > maxDate) {
+  if (istDateKey(requested) > latestBookableDateKey(now)) {
     return {
       valid: false,
       reason: 'too_far',
@@ -123,6 +132,12 @@ function validateScheduledDeliverySlot(requestedISO, now = nowInIst()) {
 
 module.exports = {
   MIN_BUFFER_HOURS,
+  MAX_DAYS_AHEAD,
   validateScheduledDeliverySlot,
   earliestValidSlot,
+  latestBookableDateKey,
+  buildFlowCalendarData: (now = nowInIst()) => ({
+    min_date: istDateKey(earliestValidSlot(now)),
+    max_date: latestBookableDateKey(now),
+  }),
 };
