@@ -15,10 +15,14 @@
 
 const { supabaseAdmin }         = require('../config/supabase');
 const { sendWhatsAppMessage }   = require('../helpers/whatsapp');
-const { queueFeedbackForTable } = require('../helpers/feedback');
 const { startFeedbackScheduler } = require('../routes/feedback');
 const { notifyKdsFromSessionContext } = require('../helpers/kdsNotifyClient');
 const { getManagerPhone } = require('../helpers/restaurantConfig');
+const {
+  releaseTablesForToken,
+  releaseOrphanedOccupiedTables,
+  ACTIVE_ORDER_STATUSES,
+} = require('../helpers/tableRelease');
 
 // Slot helpers live in catalog.js (single source of truth — shared with POST /catalog/slot-sync)
 const {
@@ -34,48 +38,62 @@ const { pushInvoiceToAccounting } = require('../routes/invoices');
 // ── startSlotScheduler ────────────────────────────────────────────────────────
 
 function startSlotScheduler() {
-  // Auto-release stale seated tokens after 90 minutes
+  // Auto-release stale seated tokens using each restaurant's dining_duration_minutes
   setInterval(async () => {
     try {
-      const cutoff = new Date(Date.now() - 90 * 60 * 1000).toISOString();
+      const { data: restaurants } = await supabaseAdmin
+        .from('restaurants')
+        .select('id, dining_duration_minutes')
+        .eq('is_active', true);
 
-      const { data: staleTokens } = await supabaseAdmin
-        .from('walk_in_tokens')
-        .update({ status: 'completed', completed_at: new Date().toISOString() })
-        .eq('status', 'seated')
-        .lt('seated_at', cutoff)
-        .select('table_id, phone, name, id, restaurant_id');
+      for (const restaurant of restaurants ?? []) {
+        const minutes = restaurant.dining_duration_minutes || 90;
+        const cutoff = new Date(Date.now() - minutes * 60 * 1000).toISOString();
 
-      for (const token of staleTokens ?? []) {
-        if (token.table_id) {
-          await supabaseAdmin.from('tables').update({ status: 'available' }).eq('id', token.table_id);
-          console.log(`[auto-release] Token ${token.id} freed table ${token.table_id}`);
+        const { data: staleTokens } = await supabaseAdmin
+          .from('walk_in_tokens')
+          .update({ status: 'completed', completed_at: new Date().toISOString() })
+          .eq('status', 'seated')
+          .eq('restaurant_id', restaurant.id)
+          .lt('seated_at', cutoff)
+          .select('*');
 
-          await queueFeedbackForTable({
-            tableId:       token.table_id,
-            customerPhone: token.phone,
-            customerName:  token.name,
-            tokenId:       token.id,
-            restaurantId:  token.restaurant_id,   // BUG FIX: was missing in original
-            source:        'auto-release',
-          }).catch(e => console.error('[auto-release] feedback queue failed:', e.message));
+        for (const token of staleTokens ?? []) {
+          const freed = await releaseTablesForToken(supabaseAdmin, token, restaurant.id, {
+            queueFeedback: true,
+            feedbackSource: 'auto-release',
+          });
+          console.log(
+            `[auto-release] Token ${token.id} freed ${freed.length} table(s) ` +
+            `(duration=${minutes}m)`,
+          );
         }
-      }
 
-      const { data: staleOrders } = await supabaseAdmin
-        .from('orders')
-        .update({ status: 'completed' })
-        .in('status', ['pending', 'confirmed', 'in_progress'])
-        .lt('created_at', cutoff)
-        .select('table_id, id, order_number');
+        const orphans = await releaseOrphanedOccupiedTables(supabaseAdmin, restaurant.id);
+        if (orphans.length) {
+          console.log(
+            `[auto-release] Freed orphaned occupied table(s): ${orphans.join(', ')} ` +
+            `(restaurant ${restaurant.id})`,
+          );
+        }
 
-      for (const order of staleOrders ?? []) {
-        if (!order.table_id) continue;
-        const { data: remaining } = await supabaseAdmin
-          .from('orders').select('id').eq('table_id', order.table_id)
-          .in('status', ['pending', 'confirmed', 'in_progress']);
-        if (!remaining || remaining.length === 0)
-          await supabaseAdmin.from('tables').update({ status: 'available' }).eq('id', order.table_id);
+        const { data: staleOrders } = await supabaseAdmin
+          .from('orders')
+          .update({ status: 'completed' })
+          .eq('restaurant_id', restaurant.id)
+          .in('status', ACTIVE_ORDER_STATUSES)
+          .lt('created_at', cutoff)
+          .select('table_id, id, order_number');
+
+        for (const order of staleOrders ?? []) {
+          if (!order.table_id) continue;
+          const { data: remaining } = await supabaseAdmin
+            .from('orders').select('id').eq('table_id', order.table_id)
+            .in('status', ACTIVE_ORDER_STATUSES);
+          if (!remaining || remaining.length === 0) {
+            await supabaseAdmin.from('tables').update({ status: 'available' }).eq('id', order.table_id);
+          }
+        }
       }
     } catch (err) {
       console.error('[auto-release] Error:', err.message);

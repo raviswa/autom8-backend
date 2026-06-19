@@ -21,10 +21,10 @@ const router  = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const { broadcastToRestaurant }   = require('../websocket');
 const { sendWhatsAppMessage, sendWhatsAppCatalogWithSpecials } = require('../helpers/whatsapp');
-const { queueFeedbackForTable }   = require('../helpers/feedback');
 const { getManagerPhone } = require('../helpers/restaurantConfig');
 const { assignAndNotifyCaptainTakeaway } = require('../helpers/captainAssignment');
 const { syncConversationForTokenApproval, syncConversationForScheduledDeliveryApproval } = require('../helpers/conversationState');
+const { releaseTablesForToken } = require('../helpers/tableRelease');
 const { writeAuditLog } = require('../helpers/auditLog');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { requireKdsSecretOrJwt, requireKdsSecret } = require('../middleware/internalAuth');
@@ -488,7 +488,17 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
 
     const { data: updatedToken } = await supabaseAdmin
       .from('walk_in_tokens')
-      .update({ status: 'seated', table_id: tableIds[0] ?? null, table_number: tableNumbers[0] ?? null, seated_at: new Date().toISOString() })
+      .update({
+        status: 'seated',
+        table_id: tableIds[0] ?? null,
+        table_number: tableNumbers[0] ?? null,
+        seated_at: new Date().toISOString(),
+        meta: {
+          ...(token.meta || {}),
+          table_ids: tableIds,
+          table_numbers: tableNumbers,
+        },
+      })
       .eq('id', req.params.id).select().single();
 
     if (tableIds.length > 0)
@@ -584,25 +594,10 @@ router.put('/:id/complete', outletAuth, async (req, res) => {
       .update({ status: 'completed', completed_at: new Date().toISOString() })
       .eq('id', req.params.id).select().single();
 
-    if (token.table_id) {
-      const { data: activeOrders } = await supabaseAdmin
-        .from('orders').select('id').eq('table_id', token.table_id)
-        .in('status', ['pending', 'confirmed', 'in_progress']);
-
-      if (!activeOrders || activeOrders.length === 0) {
-        await supabaseAdmin.from('tables').update({ status: 'available' }).eq('id', token.table_id).eq('restaurant_id', restaurantId);
-
-        // Feedback queue — 2-hour delayed WhatsApp star rating
-        await queueFeedbackForTable({
-          tableId:       token.table_id,
-          customerPhone: token.phone,
-          customerName:  token.name,
-          tokenId:       token.id,
-          restaurantId,
-          source:        'token-complete',
-        }).catch(e => console.error('[token-complete] feedback queue failed:', e.message));
-      }
-    }
+    await releaseTablesForToken(supabaseAdmin, token, restaurantId, {
+      queueFeedback: true,
+      feedbackSource: 'token-complete',
+    });
 
     broadcastToRestaurant(restaurantId, { type: 'TOKEN_COMPLETED', token: updatedToken, timestamp: new Date().toISOString() });
     res.json({ success: true, token: updatedToken });
