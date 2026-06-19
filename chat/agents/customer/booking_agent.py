@@ -71,8 +71,6 @@ from agents.customer.booking_helpers import (
     _STEPS_ALLOWING_SHORT_REPLY,
     now_display,
     is_greeting,
-    is_feedback_reply,
-    is_feedback_aspect_reply,
     is_reset_keyword,
     send_catalog_with_fallback,
     send_service_menu,
@@ -150,13 +148,6 @@ async def handle_booking_flow(
 
     # ── visit_complete / awaiting_payment: treat new message as fresh visit ───
     if current_step in ("visit_complete", "awaiting_payment"):
-        if is_feedback_reply(message) or is_feedback_aspect_reply(message):
-            await send_whatsapp_message(
-                customer_phone,
-                "Thank you for your feedback! 🙏 We hope to see you again soon. 😊",
-                restaurant_id,
-            )
-            return {"status": "visit_complete"}
         logger.info(f"[visit_complete] New message from {customer_phone} — fresh visit.")
         _prev_cid    = session_state.get("customer_id")
         _prev_cname  = session_state.get("customer_name")
@@ -626,27 +617,6 @@ async def handle_booking_flow(
                 restaurant_id,
             )
         return {"status": "awaiting_numbered_order"}
-
-    # ── Feedback reply interception  (Fix 42) ─────────────────────────────────
-    # Handles rating/aspect replies when Node feedback invite is active.
-    if (
-        (is_feedback_reply(message) or is_feedback_aspect_reply(message))
-        and current_step in {
-            "visit_complete",
-            "awaiting_order", "awaiting_payment", "awaiting_prepay",
-            "awaiting_table_assignment", "awaiting_special_notes",
-        }
-        and not session_state.get("order_from_cart")
-        and not session_state.get("cart")
-    ):
-        await send_whatsapp_message(
-            customer_phone,
-            "Thank you for your rating! 🙏 We hope to see you again soon at Munafe. 😊",
-            restaurant_id,
-        )
-        clear_cart(session_state)
-        session_state["booking_step"] = "visit_complete"
-        return {"status": "visit_complete"}
 
     # ── Dispatch to service flows ─────────────────────────────────────────────
     service_type  = session_state.get("service_type")
