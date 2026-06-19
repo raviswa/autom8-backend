@@ -95,8 +95,13 @@ _RESCHEDULE_KEYWORDS = frozenset({
 
 
 def _requires_scheduled_delivery_approval(session_state: Dict[str, Any]) -> bool:
-    """Calendar-scheduled deliveries always need manager approval before payment."""
-    return bool(session_state.get("scheduled_at"))
+    """Calendar-scheduled deliveries need manager approval before payment."""
+    if not session_state.get("scheduled_at"):
+        return False
+    from tools.feature_gate import ORDER_MODE_SCHEDULED
+    if session_state.get("order_mode") == ORDER_MODE_SCHEDULED:
+        return True
+    return bool(session_state.get("scheduled_delivery_enabled"))
 
 
 def _wants_reschedule_calendar(message: str) -> bool:
@@ -294,32 +299,52 @@ async def _advance_after_delivery_time_set(
     scheduled: datetime | None,
 ) -> Dict[str, Any]:
     """Continue delivery flow once a delivery time (or NOW) is chosen."""
-    session_state["scheduled_at"] = scheduled.isoformat() if scheduled else None
+    if scheduled is not None:
+        from zoneinfo import ZoneInfo
+        if scheduled.tzinfo is None:
+            scheduled = scheduled.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        session_state["scheduled_at"] = scheduled.isoformat()
+        session_state["order_mode"] = "scheduled"
+    else:
+        session_state["scheduled_at"] = None
 
+    when_label = None
     if scheduled is not None:
         h = scheduled.hour % 12 or 12
         ampm = "PM" if scheduled.hour >= 12 else "AM"
-        when = f"{scheduled.strftime('%d %b %Y')}, {h}:{scheduled.minute:02d} {ampm}"
+        when_label = f"{scheduled.strftime('%d %b %Y')}, {h}:{scheduled.minute:02d} {ampm}"
         note = ""
         if session_state.get("scheduled_delivery_enabled"):
-            note = _MANAGER_APPROVAL_NOTE
+            note = (
+                "\n\n📋 *Scheduled door deliveries need manager approval before payment.* "
+                "Share your address next, then add items — we'll notify the manager when you submit."
+            )
         await send_whatsapp_message(
             customer_phone,
-            f"Got it — we'll deliver on *{when}*.{note}",
+            f"Got it — we'll deliver on *{when_label}*.{note}",
             restaurant_id,
         )
 
     if not session_state.get("delivery_address"):
-        sent = await send_location_request(customer_phone, restaurant_id)
+        loc_purpose = "scheduled" if scheduled is not None else "immediate"
+        sent = await send_location_request(
+            customer_phone, restaurant_id,
+            purpose=loc_purpose,
+            scheduled_label=when_label,
+        )
         if not sent:
+            from tools.whatsapp_tools import _location_request_body
             await send_whatsapp_message(
                 customer_phone,
-                "Great! Please *share your location pin* on WhatsApp (tap 📎 → Location) "
-                "so we can calculate delivery charge accurately.\n"
-                "You can also type your full address if needed.",
+                _location_request_body(
+                    purpose=loc_purpose,
+                    scheduled_label=when_label,
+                ),
                 restaurant_id,
             )
         session_state["booking_step"] = "awaiting_address"
+        if scheduled is not None:
+            session_state["order_mode"] = "scheduled"
         return {"status": "awaiting_address"}
 
     return await _proceed_to_delivery_menu(customer_phone, restaurant_id, session_state)

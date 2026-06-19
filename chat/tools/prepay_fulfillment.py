@@ -668,11 +668,28 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
         )
     if manager_phone:
         try:
-            header = "📅 *Scheduled delivery — paid* ✅" if defer else "🛵 *Deliver Now — paid* ✅"
+            is_scheduled = bool(hints.get("scheduled_at"))
+            header = (
+                "📅 *Scheduled delivery — paid* ✅"
+                if is_scheduled
+                else "🛵 *Deliver Now — paid* ✅"
+            )
+            sched_line = ""
+            if is_scheduled and hints.get("scheduled_at"):
+                try:
+                    from datetime import datetime
+                    raw = str(hints["scheduled_at"]).replace("Z", "+00:00")
+                    dt = datetime.fromisoformat(raw)
+                    h = dt.hour % 12 or 12
+                    ampm = "PM" if dt.hour >= 12 else "AM"
+                    sched_line = f"Deliver by: {dt.strftime('%d %b %Y')}, {h}:{dt.minute:02d} {ampm}\n"
+                except (ValueError, TypeError):
+                    sched_line = f"Deliver by: {hints.get('scheduled_at')}\n"
             await send_whatsapp_message(
                 manager_phone,
                 f"{header}\n────────────────────\n"
                 f"Token: {token}\nCustomer: {customer_name}\nPhone: {customer_phone}\n"
+                f"{sched_line}"
                 f"Address: {delivery_address}\n{dist_note}"
                 f"Booking Time: {booking_time}\n"
                 f"Order: {order_text_display}\n"

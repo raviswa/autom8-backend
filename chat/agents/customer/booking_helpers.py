@@ -692,7 +692,9 @@ def parse_flow_datetime(message: str) -> datetime | None:
         date_str = data.get("date", "")
         time_str = data.get("time", "")
         if date_str and time_str:
-            return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+            from zoneinfo import ZoneInfo
+            parsed = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+            return parsed.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
     except Exception:
         return None
     return None

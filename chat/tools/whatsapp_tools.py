@@ -242,7 +242,35 @@ async def send_whatsapp_flow(
 # Outbound: location request
 # ---------------------------------------------------------------------------
 
-async def send_location_request(phone: str, restaurant_id: str) -> bool:
+def _location_request_body(
+    *,
+    purpose: str = "immediate",
+    scheduled_label: str | None = None,
+) -> str:
+    """WhatsApp location-request copy — immediate vs scheduled delivery."""
+    if purpose == "scheduled":
+        slot = f" for *{scheduled_label}*" if scheduled_label else ""
+        return (
+            f"Great! You've selected *Scheduled Delivery* 📅{slot}\n\n"
+            "Tap the button below to *share your delivery location pin* 📍 — "
+            "we use it to calculate distance-based delivery charge.\n"
+            "Or reply with your full address."
+        )
+    return (
+        "Great! You've selected *Deliver Now* 🛵\n\n"
+        "Tap the button below to *share your location pin* 📍 — "
+        "we use it to calculate your delivery charge.\n"
+        "Or reply with your full address."
+    )
+
+
+async def send_location_request(
+    phone: str,
+    restaurant_id: str,
+    *,
+    purpose: str = "immediate",
+    scheduled_label: str | None = None,
+) -> bool:
     """Send a native WhatsApp location-request message."""
     try:
         credentials = await _get_whatsapp_credentials(restaurant_id)
@@ -257,11 +285,9 @@ async def send_location_request(phone: str, restaurant_id: str) -> bool:
             "interactive": {
                 "type": "location_request_message",
                 "body": {
-                    "text": (
-                        "Great! You've selected *Deliver Now* 🛵\n\n"
-                        "Tap the button below to *share your location pin* 📍 — "
-                        "we use it to calculate your delivery charge.\n"
-                        "Or reply with your full address."
+                    "text": _location_request_body(
+                        purpose=purpose,
+                        scheduled_label=scheduled_label,
                     ),
                 },
                 "action": {
