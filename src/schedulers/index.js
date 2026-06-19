@@ -24,6 +24,7 @@ const {
   ACTIVE_ORDER_STATUSES,
 } = require('../helpers/tableRelease');
 const { sendKitchenOpenReminders } = require('../helpers/kitchenReminders');
+const { runDineInAutoAssignJob } = require('../helpers/dineInAutoAssign');
 
 // Slot helpers live in catalog.js (single source of truth — shared with POST /catalog/slot-sync)
 const {
@@ -347,6 +348,23 @@ function startMarketingScheduler() {
   console.log('📣 Marketing scheduler started (scheduled sends + automations every 5 min)');
 }
 
+// ── startDineInAutoAssignScheduler ───────────────────────────────────────────
+// After 2–4 minutes, seat dine-in walk-ins on a free table or approve large parties
+// when the proposed tables are still available and no manager action was taken.
+
+function startDineInAutoAssignScheduler() {
+  const tick = async () => {
+    try {
+      await runDineInAutoAssignJob();
+    } catch (err) {
+      console.error('[dine-in-auto] Error:', err.message);
+    }
+  };
+  tick();
+  setInterval(tick, 60 * 1000);
+  console.log('🪑 Dine-in auto-assign scheduler started (every 60s, delay 2–4 min)');
+}
+
 // ── startAllSchedulers ────────────────────────────────────────────────────────
 
 function startAllSchedulers() {
@@ -355,6 +373,7 @@ function startAllSchedulers() {
   startFeedbackScheduler();
   startAccountingSyncScheduler();
   startMarketingScheduler();
+  startDineInAutoAssignScheduler();
 }
 
 module.exports = { startAllSchedulers };

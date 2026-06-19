@@ -577,6 +577,9 @@ async def approve_scheduled_delivery_token(restaurant_id: str, token_id: str) ->
             data = await resp.json()
             logger.info(f"[scheduled-delivery] approved {token_id}")
             return {"ok": True, "token": data.get("token")}
+        if resp.status == 409:
+            logger.info(f"[scheduled-delivery] approve skipped — already handled ({token_id})")
+            return {"ok": False, "error": "already_handled"}
         body = (await resp.text())[:300]
         logger.error(f"[scheduled-delivery] approve failed {resp.status}: {body}")
         return {"ok": False, "error": body}
@@ -602,6 +605,9 @@ async def reject_scheduled_delivery_token(restaurant_id: str, token_id: str) -> 
             data = await resp.json()
             logger.info(f"[scheduled-delivery] rejected {token_id}")
             return {"ok": True, "token": data.get("token")}
+        if resp.status == 409:
+            logger.info(f"[scheduled-delivery] reject skipped — already handled ({token_id})")
+            return {"ok": False, "error": "already_handled"}
         body = (await resp.text())[:300]
         logger.error(f"[scheduled-delivery] reject failed {resp.status}: {body}")
         return {"ok": False, "error": body}
@@ -928,11 +934,13 @@ async def sync_scheduled_delivery_to_portal(
         "meta":          meta,
     }
 
+    # skip_api_notify: Python sends the single manager WhatsApp alert below.
+    # Node POST already broadcasts TOKEN_NEW to the portal — no rebroadcast needed.
     token_id = await _sync_token_via_api(
         payload, customer_phone, "portal-sync-scheduled", max_attempts,
+        skip_api_notify=True,
     )
     if token_id:
-        await _rebroadcast_portal_token(restaurant_id, token_id)
         return token_id
 
     logger.warning(f"[portal-sync-scheduled] API failed — direct DB fallback for {customer_phone}")

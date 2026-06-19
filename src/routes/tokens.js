@@ -61,6 +61,106 @@ async function generateTokenId(restaurantId) {
   return `T-${Date.now().toString().slice(-6)}`;
 }
 
+/** Approve scheduled_delivery only while status is pending_approval (single winner). */
+async function approveScheduledDeliveryToken(tokenId, restaurantId, token) {
+  const meta = token.meta || {};
+  const { data: updatedToken, error } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .update({
+      status: 'takeaway',
+      meta: { ...meta, approved_at: new Date().toISOString() },
+    })
+    .eq('id', tokenId)
+    .eq('restaurant_id', restaurantId)
+    .eq('status', 'pending_approval')
+    .eq('type', 'scheduled_delivery')
+    .select()
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!updatedToken) {
+    return { ok: false, statusCode: 409, error: 'Token already approved or rejected' };
+  }
+
+  if (meta.booking_id) {
+    await supabaseAdmin.from('bookings')
+      .update({ status: 'confirmed' })
+      .eq('id', meta.booking_id);
+  }
+
+  if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+    const schedLabel = meta.scheduled_at_label || meta.scheduled_at || 'your chosen time';
+    await sendWhatsAppMessage(
+      token.phone,
+      `✅ *Your scheduled delivery is approved!*\n\n`
+      + `Token: *${token.id}*\n`
+      + `Deliver by: *${schedLabel}*\n\n`
+      + `We'll send your payment link shortly. You can also reply *PAY* here when ready.`,
+      restaurantId
+    );
+  }
+
+  await syncConversationForScheduledDeliveryApproval({
+    restaurantId,
+    customerPhone: token.phone,
+    tokenId:       token.id,
+    meta,
+  });
+
+  broadcastToRestaurant(restaurantId, {
+    type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString(),
+  });
+  return { ok: true, token: updatedToken };
+}
+
+/** Reject scheduled_delivery only while status is pending_approval (single winner). */
+async function rejectScheduledDeliveryToken(tokenId, restaurantId, token, reason) {
+  const meta = token.meta || {};
+  const { data: updatedToken, error } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .update({
+      status: 'completed',
+      completed_at: new Date().toISOString(),
+      meta: {
+        ...meta,
+        rejected_at: new Date().toISOString(),
+        ...(reason ? { rejection_reason: reason } : {}),
+      },
+    })
+    .eq('id', tokenId)
+    .eq('restaurant_id', restaurantId)
+    .eq('status', 'pending_approval')
+    .eq('type', 'scheduled_delivery')
+    .select()
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!updatedToken) {
+    return { ok: false, statusCode: 409, error: 'Token already approved or rejected' };
+  }
+
+  if (meta.booking_id) {
+    await supabaseAdmin.from('bookings')
+      .update({ status: 'rejected' })
+      .eq('id', meta.booking_id);
+  }
+
+  if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+    const reasonLine = reason ? `\n\nReason: ${reason}` : '';
+    await sendWhatsAppMessage(
+      token.phone,
+      `😔 *We're unable to confirm your scheduled delivery right now.*${reasonLine}\n\n`
+      + `Please try a different time or reply *Home* to see other options. 🙏`,
+      restaurantId
+    );
+  }
+
+  broadcastToRestaurant(restaurantId, {
+    type: 'TOKEN_REJECTED', token: updatedToken, timestamp: new Date().toISOString(),
+  });
+  return { ok: true, token: updatedToken };
+}
+
 // ── POST /api/tokens ──────────────────────────────────────────────────────────
 
 router.post('/', requireKdsSecretOrJwt, async (req, res) => {
@@ -479,42 +579,11 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
 
     // ── Scheduled delivery: approve before customer payment ─────────────────
     if (token.type === 'scheduled_delivery') {
-      const meta = token.meta || {};
-      const { data: updatedToken } = await supabaseAdmin
-        .from('walk_in_tokens')
-        .update({
-          status: 'takeaway',
-          meta: { ...meta, approved_at: new Date().toISOString() },
-        })
-        .eq('id', req.params.id).select().single();
-
-      if (meta.booking_id) {
-        await supabaseAdmin.from('bookings')
-          .update({ status: 'confirmed' })
-          .eq('id', meta.booking_id);
+      const result = await approveScheduledDeliveryToken(req.params.id, restaurantId, token);
+      if (!result.ok) {
+        return res.status(result.statusCode || 400).json({ error: result.error });
       }
-
-      if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
-        const schedLabel = meta.scheduled_at_label || meta.scheduled_at || 'your chosen time';
-        await sendWhatsAppMessage(
-          token.phone,
-          `✅ *Your scheduled delivery is approved!*\n\n`
-          + `Token: *${token.id}*\n`
-          + `Deliver by: *${schedLabel}*\n\n`
-          + `We'll send your payment link shortly. You can also reply *PAY* here when ready.`,
-          restaurantId
-        );
-      }
-
-      await syncConversationForScheduledDeliveryApproval({
-        restaurantId,
-        customerPhone: token.phone,
-        tokenId:       token.id,
-        meta,
-      });
-
-      broadcastToRestaurant(restaurantId, { type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString() });
-      return res.json({ success: true, token: updatedToken });
+      return res.json({ success: true, token: result.token });
     }
 
     const combo        = token.meta?.combo ?? [];
@@ -582,28 +651,33 @@ router.put('/:id/reject', outletAuth, async (req, res) => {
       .from('walk_in_tokens').select('*').eq('id', req.params.id).eq('restaurant_id', restaurantId).single();
     if (!token) return res.status(404).json({ error: 'Token not found' });
 
+    if (token.type === 'scheduled_delivery') {
+      const result = await rejectScheduledDeliveryToken(
+        req.params.id, restaurantId, token, req.body.reason,
+      );
+      if (!result.ok) {
+        return res.status(result.statusCode || 400).json({ error: result.error });
+      }
+      return res.json({ success: true, token: result.token });
+    }
+
+    if (token.status !== 'pending_approval') {
+      return res.status(409).json({ error: `Token is ${token.status}` });
+    }
+
     const { data: updatedToken } = await supabaseAdmin
       .from('walk_in_tokens')
       .update({ status: 'completed', completed_at: new Date().toISOString() })
-      .eq('id', req.params.id).select().single();
+      .eq('id', req.params.id)
+      .eq('status', 'pending_approval')
+      .select()
+      .maybeSingle();
 
-    if (token.type === 'scheduled_delivery') {
-      const meta = token.meta || {};
-      if (meta.booking_id) {
-        await supabaseAdmin.from('bookings')
-          .update({ status: 'rejected' })
-          .eq('id', meta.booking_id);
-      }
-      if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
-        const reasonLine = req.body.reason ? `\n\nReason: ${req.body.reason}` : '';
-        await sendWhatsAppMessage(
-          token.phone,
-          `😔 *We're unable to confirm your scheduled delivery right now.*${reasonLine}\n\n`
-          + `Please try a different time or reply *Home* to see other options. 🙏`,
-          restaurantId
-        );
-      }
-    } else if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+    if (!updatedToken) {
+      return res.status(409).json({ error: 'Token already approved or rejected' });
+    }
+
+    if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
       const reasonLine = req.body.reason ? `\n\nReason: ${req.body.reason}` : '';
       await sendWhatsAppMessage(
         token.phone,
@@ -656,49 +730,15 @@ router.post('/:id/approve-internal', requireKdsSecret, async (req, res) => {
     const { data: token } = await supabaseAdmin
       .from('walk_in_tokens').select('*').eq('id', req.params.id).eq('restaurant_id', restaurantId).single();
     if (!token) return res.status(404).json({ error: 'Token not found' });
-    if (token.status !== 'pending_approval') {
-      return res.status(400).json({ error: `Token is ${token.status}` });
-    }
     if (token.type !== 'scheduled_delivery') {
       return res.status(400).json({ error: 'Internal approve supports scheduled_delivery only' });
     }
 
-    const meta = token.meta || {};
-    const { data: updatedToken } = await supabaseAdmin
-      .from('walk_in_tokens')
-      .update({
-        status: 'takeaway',
-        meta: { ...meta, approved_at: new Date().toISOString() },
-      })
-      .eq('id', req.params.id).select().single();
-
-    if (meta.booking_id) {
-      await supabaseAdmin.from('bookings')
-        .update({ status: 'confirmed' })
-        .eq('id', meta.booking_id);
+    const result = await approveScheduledDeliveryToken(req.params.id, restaurantId, token);
+    if (!result.ok) {
+      return res.status(result.statusCode || 400).json({ error: result.error });
     }
-
-    if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
-      const schedLabel = meta.scheduled_at_label || meta.scheduled_at || 'your chosen time';
-      await sendWhatsAppMessage(
-        token.phone,
-        `✅ *Your scheduled delivery is approved!*\n\n`
-        + `Token: *${token.id}*\n`
-        + `Delivery at: *${schedLabel}*\n\n`
-        + `We'll send your payment link shortly. You can also reply *PAY* here when ready.`,
-        restaurantId
-      );
-    }
-
-    await syncConversationForScheduledDeliveryApproval({
-      restaurantId,
-      customerPhone: token.phone,
-      tokenId:       token.id,
-      meta,
-    });
-
-    broadcastToRestaurant(restaurantId, { type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString() });
-    res.json({ success: true, token: updatedToken });
+    res.json({ success: true, token: result.token });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -718,29 +758,13 @@ router.post('/:id/reject-internal', requireKdsSecret, async (req, res) => {
       return res.status(400).json({ error: 'Internal reject supports scheduled_delivery only' });
     }
 
-    const meta = token.meta || {};
-    const { data: updatedToken } = await supabaseAdmin
-      .from('walk_in_tokens')
-      .update({ status: 'completed', completed_at: new Date().toISOString() })
-      .eq('id', req.params.id).select().single();
-
-    if (meta.booking_id) {
-      await supabaseAdmin.from('bookings')
-        .update({ status: 'rejected' })
-        .eq('id', meta.booking_id);
+    const result = await rejectScheduledDeliveryToken(
+      req.params.id, restaurantId, token, req.body.reason,
+    );
+    if (!result.ok) {
+      return res.status(result.statusCode || 400).json({ error: result.error });
     }
-
-    if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
-      await sendWhatsAppMessage(
-        token.phone,
-        `😔 *We're unable to confirm your scheduled delivery right now.*\n\n`
-        + `Please try a different time or reply *Home* to see other options. 🙏`,
-        restaurantId
-      );
-    }
-
-    broadcastToRestaurant(restaurantId, { type: 'TOKEN_REJECTED', token: updatedToken, timestamp: new Date().toISOString() });
-    res.json({ success: true, token: updatedToken });
+    res.json({ success: true, token: result.token });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
