@@ -91,7 +91,7 @@ function comboStillAvailable(tablesByNumber, combo) {
 
 async function notifyCustomerSeated(token, restaurantId, tableNumbers, messagePrefix) {
   if (!token.phone || !process.env.WHATSAPP_ACCESS_TOKEN) {
-    return { specialsNoteSent: false };
+    return { catalogOk: false, pickerSent: false, specialsSent: false, mechanism: 'none' };
   }
 
   const tablesLabel = tableNumbers.length === 1
@@ -133,7 +133,7 @@ async function autoAssignDineInToken(token, restaurantId, table) {
     .eq('id', table.id)
     .eq('restaurant_id', restaurantId);
 
-  const { specialsSent: specialsNoteSent } = await notifyCustomerSeated(
+  const menuSendResult = await notifyCustomerSeated(
     token,
     restaurantId,
     [String(table.table_number)],
@@ -145,7 +145,8 @@ async function autoAssignDineInToken(token, restaurantId, table) {
     tokenId: token.id,
     tableNumbers: [String(table.table_number)],
     partySize: token.pax,
-    specialsNoteSent,
+    specialsNoteSent: menuSendResult.specialsSent,
+    menuSendResult,
   });
 
   broadcastToRestaurant(restaurantId, {
@@ -206,7 +207,7 @@ async function autoApproveLargePartyToken(token, restaurantId, combo, tablesByNu
       .eq('restaurant_id', restaurantId);
   }
 
-  const { specialsSent: specialsNoteSent } = await notifyCustomerSeated(
+  const menuSendResult = await notifyCustomerSeated(
     token,
     restaurantId,
     tableNumbers,
@@ -221,7 +222,8 @@ async function autoApproveLargePartyToken(token, restaurantId, combo, tablesByNu
     tokenId: token.id,
     tableNumbers,
     partySize: token.pax,
-    specialsNoteSent,
+    specialsNoteSent: menuSendResult.specialsSent,
+    menuSendResult,
   });
 
   broadcastToRestaurant(restaurantId, {

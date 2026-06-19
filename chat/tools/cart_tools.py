@@ -964,8 +964,12 @@ async def handle_incoming_message(
             category = reply_id.split(":", 1)[1]
             rid = session_state.get("restaurant_id")
             mechanism = session_state.get("booking_mechanism", "")
+            use_waba_catalog = (
+                mechanism in ("catalog_b", "catalog")
+                or current_step == "awaiting_category_selection"
+            )
 
-            if mechanism in ("catalog_b", "catalog"):
+            if use_waba_catalog:
                 from tools.catalog_tools import (
                     CATALOG_PICKER_FULL_ID,
                     send_whatsapp_catalog_for_category,

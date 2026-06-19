@@ -49,6 +49,7 @@ async function syncConversationForTokenApproval({
   tableNumbers = [],
   partySize,
   specialsNoteSent = false,
+  menuSendResult = {},
 }) {
   const phone = canonicalPhone(customerPhone);
   if (!phone || !restaurantId) return;
@@ -62,9 +63,15 @@ async function syncConversationForTokenApproval({
     const prev = existing?.context ?? {};
     const storedPhone = existing?.customer_phone ?? phone;
 
+    const pickerSent = Boolean(menuSendResult.pickerSent);
+    const catalogOk = Boolean(menuSendResult.catalogOk);
+    const mechanism = menuSendResult.mechanism
+      || (pickerSent ? 'catalog_b' : catalogOk ? 'catalog' : prev.booking_mechanism);
+
     const context = {
       ...prev,
-      booking_step:    'awaiting_order',
+      booking_step:    pickerSent ? 'awaiting_category_selection' : 'awaiting_order',
+      booking_mechanism: mechanism,
       service_type:    'dine_in',
       last_service_type: 'dine_in',
       display_token:   tokenId,
@@ -76,8 +83,8 @@ async function syncConversationForTokenApproval({
       assigned_captain: null,
       order_from_cart:  false,
       booking_mechanism_order_source: null,
-      // Portal sends catalog on assign — avoid duplicate from chat poll path
-      _catalog_sent_after_party: true,
+      // Portal sends menu on assign — avoid duplicate from chat poll path
+      _catalog_sent_after_party: catalogOk || pickerSent,
       ...(specialsNoteSent ? { _specials_note_sent: true } : {}),
     };
 

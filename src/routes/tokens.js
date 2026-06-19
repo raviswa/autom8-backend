@@ -532,14 +532,14 @@ router.put('/:id/assign', outletAuth, async (req, res) => {
 
     await supabaseAdmin.from('tables').update({ status: 'occupied' }).eq('id', table_id).eq('restaurant_id', restaurantId);
 
-    let specialsNoteSent = false;
+    let menuSendResult = {};
     if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
       await sendWhatsAppMessage(
         token.phone,
         `✅ *Your table is ready!*\n\nToken: *${token.id}*\nTable: *Table ${table_number}*\n\nPlease proceed to your table. Enjoy! 🍽️`,
         restaurantId
       );
-      ({ specialsSent: specialsNoteSent } = await sendWhatsAppCatalogWithSpecials(token.phone, restaurantId));
+      menuSendResult = await sendWhatsAppCatalogWithSpecials(token.phone, restaurantId);
     }
 
     await syncConversationForTokenApproval({
@@ -548,7 +548,8 @@ router.put('/:id/assign', outletAuth, async (req, res) => {
       tokenId:       token.id,
       tableNumbers:  [String(table_number)],
       partySize:     token.pax,
-      specialsNoteSent,
+      specialsNoteSent: menuSendResult.specialsSent,
+      menuSendResult,
     });
 
     broadcastToRestaurant(restaurantId, { type: 'TOKEN_ASSIGNED', token: updatedToken, timestamp: new Date().toISOString() });
@@ -613,14 +614,14 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
     if (tableIds.length > 0)
       await supabaseAdmin.from('tables').update({ status: 'occupied' }).in('id', tableIds).eq('restaurant_id', restaurantId);
 
-    let specialsNoteSent = false;
+    let menuSendResult = {};
     if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
       await sendWhatsAppMessage(
         token.phone,
         `✅ *Your table arrangement has been confirmed.*\n\nToken: *${token.id}*\nParty of: *${token.pax} people*\nTables: *${tableNumbers.join(', ')}*\n\nPlease head to the restaurant! 🍽️`,
         restaurantId
       );
-      ({ specialsSent: specialsNoteSent } = await sendWhatsAppCatalogWithSpecials(token.phone, restaurantId));
+      menuSendResult = await sendWhatsAppCatalogWithSpecials(token.phone, restaurantId);
     }
 
     await syncConversationForTokenApproval({
@@ -629,7 +630,8 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
       tokenId:       token.id,
       tableNumbers,
       partySize:     token.pax,
-      specialsNoteSent,
+      specialsNoteSent: menuSendResult.specialsSent,
+      menuSendResult,
     });
 
     broadcastToRestaurant(restaurantId, { type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString() });

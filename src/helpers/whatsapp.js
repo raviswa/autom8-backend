@@ -66,70 +66,20 @@ async function sendWhatsAppMessage(toNumber, message, restaurantId = null) {
   }
 }
 
-// ── sendWhatsAppCatalogMessage ────────────────────────────────────────────────
-// Sends a WhatsApp product_list catalog (same format as Python chat takeaway menu).
+// ── sendWhatsAppInteractive ───────────────────────────────────────────────────
+// Sends a WhatsApp interactive message (list, button, product_list, etc.).
 
-async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
+async function sendWhatsAppInteractive(toNumber, interactive, restaurantId = null) {
   try {
-    const catalogId = await getMetaCatalogId(restaurantId);
-    if (!catalogId) {
-      console.error(
-        `[catalog-msg] meta_catalog_id not set for restaurant ${restaurantId} — ` +
-        'skipping (refusing env fallback; wrong catalog is a showstopper)',
-      );
-      return false;
-    }
-
-    const { data: restaurant } = await supabaseAdmin
-      .from('restaurants')
-      .select('name')
-      .eq('id', restaurantId)
-      .maybeSingle();
-    const label = restaurant?.name || 'Hotel Munafe';
-
-    const { data: availableItems } = await supabaseAdmin
-      .from('menu_items')
-      .select('retailer_id')
-      .eq('restaurant_id', restaurantId)
-      .eq('is_stocked', true)
-      .not('retailer_id', 'is', null)
-      .order('name', { ascending: true })
-      .limit(30);
-
-    if (!availableItems?.length) {
-      console.warn(`[catalog-msg] No stocked items for restaurant ${restaurantId}`);
-      return false;
-    }
-
-    const creds = await getWhatsAppIntegration(restaurantId);
+    const creds = restaurantId ? await getWhatsAppIntegration(restaurantId) : null;
     const accessToken   = creds?.accessToken   || process.env.WHATSAPP_ACCESS_TOKEN;
-    const phoneNumberId = creds?.phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const phoneNumberId = creds?.phoneNumberId   || process.env.WHATSAPP_PHONE_NUMBER_ID;
     const apiUrl        = creds?.apiUrl          || process.env.WHATSAPP_API_URL;
 
     if (!accessToken || !phoneNumberId || !apiUrl) {
-      console.warn(`[catalog-msg] Missing WhatsApp credentials for restaurant ${restaurantId}`);
+      console.warn(`[WhatsApp] Missing credentials — skipping interactive to ${toNumber}`);
       return false;
     }
-
-    const productItems = availableItems.map((i) => ({
-      product_retailer_id: i.retailer_id,
-    }));
-
-    const interactive = {
-      type: 'product_list',
-      header: { type: 'text', text: `🍽️ ${label} Menu` },
-      body: {
-        text:
-          "Browse today's items below 👇\n" +
-          'Tap any item to see details and add to your basket.\n' +
-          'When done, send us your basket to place the order.',
-      },
-      footer: { text: `Prices excl. GST • ${label}` },
-      action: {
-        catalog_id: catalogId,
-        sections: [{ title: "Today's Menu", product_items: productItems }],
-      },
-    };
 
     const response = await fetch(`${apiUrl}/${phoneNumberId}/messages`, {
       method:  'POST',
@@ -144,14 +94,262 @@ async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
       signal: AbortSignal.timeout(8_000),
     });
 
-    if (response.ok) {
-      console.log(`[catalog-msg] ✅ product_list sent to ${toNumber} (${productItems.length} items)`);
-      return true;
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      console.error('[WhatsApp] Interactive API error:', JSON.stringify(err).slice(0, 300));
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('[WhatsApp] Interactive send failed:', err.message);
+    return false;
+  }
+}
+
+// ── Catalog helpers (Option B: category picker → filtered product_list) ───────
+
+const CATALOG_PICKER_FULL_ID = '__full__';
+const MAX_CATALOG_SECTIONS = 10;
+const MAX_CATALOG_PRODUCTS = 30;
+const MAX_LIST_ROW_TITLE = 24;
+const MAX_LIST_ROW_DESC = 72;
+
+function truncate(text, maxLen) {
+  const s = String(text || '').trim();
+  if (s.length <= maxLen) return s;
+  return `${s.slice(0, maxLen - 1)}…`;
+}
+
+async function fetchAvailableMenuItems(restaurantId) {
+  const { data, error } = await supabaseAdmin
+    .from('menu_items')
+    .select('retailer_id, name, category')
+    .eq('restaurant_id', restaurantId)
+    .eq('is_available', true)
+    .eq('is_stocked', true)
+    .not('retailer_id', 'is', null)
+    .order('name', { ascending: true });
+
+  if (error) throw error;
+  return (data ?? []).map((i) => ({
+    id: i.retailer_id,
+    title: i.name || '',
+    category: (i.category || 'General').trim() || 'General',
+  }));
+}
+
+function orderedCategories(items) {
+  const seen = new Set();
+  const cats = [];
+  for (const item of items) {
+    const cat = item.category || 'General';
+    if (!seen.has(cat)) {
+      seen.add(cat);
+      cats.push(cat);
+    }
+  }
+  return cats.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+}
+
+function itemsInCategory(items, category) {
+  return items.filter((i) => (i.category || 'General') === category);
+}
+
+function buildProductListSections(items, category = null) {
+  const available = items.filter((i) => i.id);
+  if (!available.length) return [];
+
+  if (category) {
+    const scoped = itemsInCategory(available, category);
+    if (!scoped.length) return [];
+    return [{
+      title: truncate(category, 24),
+      product_items: scoped.slice(0, MAX_CATALOG_PRODUCTS).map((i) => ({
+        product_retailer_id: i.id,
+      })),
+    }];
+  }
+
+  const sections = [];
+  let productCount = 0;
+  for (const cat of orderedCategories(available)) {
+    if (sections.length >= MAX_CATALOG_SECTIONS) break;
+    const catItems = itemsInCategory(available, cat);
+    if (!catItems.length) continue;
+    const remaining = MAX_CATALOG_PRODUCTS - productCount;
+    if (remaining <= 0) break;
+    const chunk = catItems.slice(0, remaining);
+    sections.push({
+      title: truncate(cat, 24),
+      product_items: chunk.map((i) => ({ product_retailer_id: i.id })),
+    });
+    productCount += chunk.length;
+  }
+  return sections;
+}
+
+async function getRestaurantLabel(restaurantId) {
+  const { data: restaurant } = await supabaseAdmin
+    .from('restaurants')
+    .select('name')
+    .eq('id', restaurantId)
+    .maybeSingle();
+  return restaurant?.name || 'Hotel Munafe';
+}
+
+async function sendWhatsAppProductList(toNumber, restaurantId, { header, body, category = null }) {
+  const catalogId = await getMetaCatalogId(restaurantId);
+  if (!catalogId) {
+    console.error(`[catalog-b] meta_catalog_id not set for restaurant ${restaurantId}`);
+    return false;
+  }
+
+  const label = await getRestaurantLabel(restaurantId);
+  const items = await fetchAvailableMenuItems(restaurantId);
+  const sections = buildProductListSections(items, category);
+  if (!sections.length) {
+    console.error(`[catalog-b] No product_list sections (restaurant=${restaurantId}, category=${category})`);
+    return false;
+  }
+
+  const productCount = sections.reduce(
+    (n, s) => n + (s.product_items?.length || 0),
+    0,
+  );
+
+  const ok = await sendWhatsAppInteractive(
+    toNumber,
+    {
+      type: 'product_list',
+      header: { type: 'text', text: truncate(header, 60) },
+      body: { text: body },
+      footer: { text: `Prices excl. GST • ${label}` },
+      action: { catalog_id: catalogId, sections },
+    },
+    restaurantId,
+  );
+
+  if (ok) {
+    const scope = category || 'all categories';
+    console.log(
+      `[catalog-b] ✅ product_list sent to ${toNumber} — ` +
+      `${productCount} items, ${sections.length} section(s), scope=${scope}`,
+    );
+  }
+  return ok;
+}
+
+async function sendCatalogCategoryPicker(toNumber, restaurantId) {
+  const items = await fetchAvailableMenuItems(restaurantId);
+  if (!items.length) {
+    console.warn(`[catalog-b] No available items for category picker (${restaurantId})`);
+    return false;
+  }
+
+  const label = await getRestaurantLabel(restaurantId);
+  const categories = orderedCategories(items);
+  const rows = categories.slice(0, 9).map((cat) => {
+    const catItems = itemsInCategory(items, cat);
+    const sample = catItems.slice(0, 3).map((i) => i.title).join(', ');
+    return {
+      id: `CAT:${cat}`,
+      title: truncate(cat, MAX_LIST_ROW_TITLE),
+      description: truncate(`${catItems.length} items · ${sample}`, MAX_LIST_ROW_DESC),
+    };
+  });
+
+  rows.push({
+    id: `CAT:${CATALOG_PICKER_FULL_ID}`,
+    title: truncate('🍽️ Browse full menu', MAX_LIST_ROW_TITLE),
+    description: truncate(`All ${items.length} items · every category`, MAX_LIST_ROW_DESC),
+  });
+
+  const ok = await sendWhatsAppInteractive(
+    toNumber,
+    {
+      type: 'list',
+      header: { type: 'text', text: truncate(`🍽️ ${label} Menu`, 60) },
+      body: {
+        text:
+          'What are you in the mood for today?\n\n' +
+          'Tap *Browse menu* below, pick a category, ' +
+          'then add items from our catalog to your basket.',
+      },
+      footer: { text: 'Prices excl. GST' },
+      action: {
+        button: 'Browse menu',
+        sections: [{ title: 'Menu categories', rows }],
+      },
+    },
+    restaurantId,
+  );
+
+  if (ok) {
+    console.log(`[catalog-b] ✅ Category picker sent to ${toNumber} (${rows.length} rows)`);
+  }
+  return ok;
+}
+
+// ── sendWhatsAppCatalogMessage ────────────────────────────────────────────────
+// Grouped product_list fallback (legacy / retry when category picker fails).
+
+async function sendWhatsAppCatalogMessage(toNumber, restaurantId) {
+  try {
+    const label = await getRestaurantLabel(restaurantId);
+    const items = await fetchAvailableMenuItems(restaurantId);
+    if (!items.length) {
+      console.warn(`[catalog-msg] No stocked items for restaurant ${restaurantId}`);
+      return false;
     }
 
-    const errBody = await response.json().catch(() => ({}));
-    console.error('[catalog-msg] API error:', JSON.stringify(errBody).slice(0, 300));
-    return false;
+    let sections = buildProductListSections(items);
+    if (!sections.length) {
+      sections = [{
+        title: "Today's Menu",
+        product_items: items.slice(0, MAX_CATALOG_PRODUCTS).map((i) => ({
+          product_retailer_id: i.id,
+        })),
+      }];
+    }
+
+    const catalogId = await getMetaCatalogId(restaurantId);
+    if (!catalogId) {
+      console.error(
+        `[catalog-msg] meta_catalog_id not set for restaurant ${restaurantId} — ` +
+        'skipping (refusing env fallback; wrong catalog is a showstopper)',
+      );
+      return false;
+    }
+
+    const productCount = sections.reduce(
+      (n, s) => n + (s.product_items?.length || 0),
+      0,
+    );
+
+    const ok = await sendWhatsAppInteractive(
+      toNumber,
+      {
+        type: 'product_list',
+        header: { type: 'text', text: `🍽️ ${label} Menu` },
+        body: {
+          text:
+            "Browse today's items below 👇\n" +
+            'Tap any item to see details and add to your basket.\n' +
+            'When done, send us your basket to place the order.',
+        },
+        footer: { text: `Prices excl. GST • ${label}` },
+        action: { catalog_id: catalogId, sections },
+      },
+      restaurantId,
+    );
+
+    if (ok) {
+      console.log(
+        `[catalog-msg] ✅ product_list sent to ${toNumber} — ` +
+        `${productCount} items, ${sections.length} section(s)`,
+      );
+    }
+    return ok;
   } catch (err) {
     console.error('[catalog-msg] Failed:', err.message);
     return false;
@@ -198,14 +396,27 @@ async function sendSpecialDishesNote(toNumber, restaurantId) {
 }
 
 /**
- * Send catalog then today's specials note (catalog first, brief pause, then specials).
+ * Option B menu send: category picker → grouped catalog fallback → specials note.
  */
 async function sendWhatsAppCatalogWithSpecials(toNumber, restaurantId) {
-  const catalogOk = await sendWhatsAppCatalogMessage(toNumber, restaurantId);
-  if (!catalogOk) return { catalogOk: false, specialsSent: false };
+  let pickerSent = await sendCatalogCategoryPicker(toNumber, restaurantId);
+  if (!pickerSent) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    pickerSent = await sendCatalogCategoryPicker(toNumber, restaurantId);
+  }
+
+  let catalogOk = pickerSent;
+  let mechanism = pickerSent ? 'catalog_b' : 'none';
+
+  if (!pickerSent) {
+    catalogOk = await sendWhatsAppCatalogMessage(toNumber, restaurantId);
+    mechanism = catalogOk ? 'catalog' : 'none';
+    if (!catalogOk) return { catalogOk: false, pickerSent: false, specialsSent: false, mechanism: 'none' };
+  }
+
   await new Promise((resolve) => setTimeout(resolve, 1500));
   const specialsSent = await sendSpecialDishesNote(toNumber, restaurantId);
-  return { catalogOk: true, specialsSent };
+  return { catalogOk, pickerSent, specialsSent, mechanism };
 }
 
 // ── notifyOrderReady ──────────────────────────────────────────────────────────
@@ -279,50 +490,16 @@ async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
   }
 }
 
-// ── sendWhatsAppInteractive ───────────────────────────────────────────────────
-// Sends a WhatsApp interactive message (list, button, etc.).
-
-async function sendWhatsAppInteractive(toNumber, interactive, restaurantId = null) {
-  try {
-    const creds = restaurantId ? await getWhatsAppIntegration(restaurantId) : null;
-    const accessToken   = creds?.accessToken   || process.env.WHATSAPP_ACCESS_TOKEN;
-    const phoneNumberId = creds?.phoneNumberId   || process.env.WHATSAPP_PHONE_NUMBER_ID;
-    const apiUrl        = creds?.apiUrl          || process.env.WHATSAPP_API_URL;
-
-    if (!accessToken || !phoneNumberId || !apiUrl) {
-      console.warn(`[WhatsApp] Missing credentials — skipping interactive to ${toNumber}`);
-      return false;
-    }
-
-    const response = await fetch(`${apiUrl}/${phoneNumberId}/messages`, {
-      method:  'POST',
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        to:   String(toNumber),
-        type: 'interactive',
-        interactive,
-      }),
-      signal: AbortSignal.timeout(8_000),
-    });
-
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      console.error('[WhatsApp] Interactive API error:', JSON.stringify(err).slice(0, 300));
-      return false;
-    }
-    return true;
-  } catch (err) {
-    console.error('[WhatsApp] Interactive send failed:', err.message);
-    return false;
-  }
-}
+// ── Exports ───────────────────────────────────────────────────────────────────
 
 module.exports = {
   sendWhatsAppMessage,
   sendWhatsAppInteractive,
   sendWhatsAppCatalogMessage,
+  sendCatalogCategoryPicker,
+  sendWhatsAppProductList,
   sendSpecialDishesNote,
   sendWhatsAppCatalogWithSpecials,
   notifyOrderReady,
+  CATALOG_PICKER_FULL_ID,
 };
