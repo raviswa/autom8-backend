@@ -460,9 +460,9 @@ async function handleWhatsAppOrder(message, metadata, preResolvedRestaurantId = 
       restaurantId
     ).catch(err => {
       console.error('[waHandlers:order] Feedback check error (non-fatal):', err.message);
-      return false;
+      return { consumed: false, completed: false };
     });
-    if (wasFeedback) return;
+    if (wasFeedback.consumed) return;
 
     const normalizedPhone = String(customerPhone).replace(/\D/g, '');
 

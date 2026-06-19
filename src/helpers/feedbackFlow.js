@@ -361,29 +361,37 @@ async function completeFeedback(record, rating, aspectIds, comment, phone) {
     comment,
     phone,
   });
+
+  const { syncConversationForFeedbackComplete } = require('./conversationState');
+  await syncConversationForFeedbackComplete({
+    restaurantId: record.restaurant_id,
+    customerPhone: record.customer_phone,
+  }).catch(() => {});
 }
 
 /**
  * Handle an inbound WhatsApp message that may be part of the feedback flow.
- * Returns true if consumed.
+ * Returns { consumed, completed }.
  */
 async function handleFeedbackReply(customerPhone, message, restaurantId) {
+  const none = { consumed: false, completed: false };
+  const partial = { consumed: true, completed: false };
   try {
-    if (!customerPhone || !restaurantId) return false;
+    if (!customerPhone || !restaurantId) return none;
 
     const phone = String(customerPhone).replace(/\D/g, '');
-    if (!phone) return false;
+    if (!phone) return none;
 
     const text = extractMessageText(message);
 
     if (isResetKeyword(text)) {
       await dismissActiveFeedback(restaurantId, phone).catch(() => {});
       await closeOpenFeedbackRows(restaurantId, phone).catch(() => {});
-      return false;
+      return none;
     }
 
     if (isWhatsAppAutoReply(message, text, process.env.WHATSAPP_PHONE_NUMBER || null)) {
-      return false;
+      return none;
     }
 
     const { data: record } = await supabaseAdmin
@@ -397,7 +405,7 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
       .limit(1)
       .maybeSingle();
 
-    if (!record) return false;
+    if (!record) return none;
 
     // ── Step 1: Awaiting rating ─────────────────────────────────────────────
     if (record.feedback_rating == null) {
@@ -408,7 +416,7 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
           'Please tap one of the rating options above, or reply with a number from *1* to *5*. 😊',
           restaurantId,
         );
-        return true;
+        return partial;
       }
 
       await supabaseAdmin
@@ -417,7 +425,7 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
         .eq('id', record.id);
 
       await sendAspectPrompt(record, rating);
-      return true;
+      return partial;
     }
 
     const rating = record.feedback_rating;
@@ -433,7 +441,7 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
           'Please reply with the numbers that apply (e.g. *1 3*) or type *Skip*. 😊',
           restaurantId,
         );
-        return true;
+        return partial;
       }
 
       await supabaseAdmin
@@ -442,7 +450,7 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
         .eq('id', record.id);
 
       await sendCommentPrompt(record);
-      return true;
+      return partial;
     }
 
     // ── Step 3: Awaiting comment ────────────────────────────────────────────
@@ -451,10 +459,10 @@ async function handleFeedbackReply(customerPhone, message, restaurantId) {
     const comment = skipComments.includes(text.toLowerCase()) ? null : text.slice(0, 500);
 
     await completeFeedback(record, rating, aspectIds, comment, phone);
-    return true;
+    return { consumed: true, completed: true };
   } catch (err) {
     console.error('[feedbackFlow:handleFeedbackReply]', err.message);
-    return false;
+    return none;
   }
 }
 

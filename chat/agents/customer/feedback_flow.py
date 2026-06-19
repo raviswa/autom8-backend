@@ -535,6 +535,8 @@ async def _handle_comment(
         restaurant_id,
     )
 
+    from agents.customer.booking_helpers import mark_session_visit_complete
+
     # Clean up feedback session keys
     for key in (
         "feedback_booking_id", "feedback_token", "feedback_table",
@@ -543,5 +545,5 @@ async def _handle_comment(
     ):
         session_state.pop(key, None)
 
-    session_state["booking_step"] = "visit_complete"
+    mark_session_visit_complete(session_state)
     return {"status": "feedback_complete"}

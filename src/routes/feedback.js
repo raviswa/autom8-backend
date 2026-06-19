@@ -91,8 +91,11 @@ router.post('/handle-reply', async (req, res) => {
   }
 
   const { handleFeedbackReply } = require('../helpers/feedbackFlow');
-  const consumed = await handleFeedbackReply(customer_phone, message, restaurant_id);
-  return res.json({ consumed: !!consumed });
+  const result = await handleFeedbackReply(customer_phone, message, restaurant_id);
+  return res.json({
+    consumed: !!result?.consumed,
+    completed: !!result?.completed,
+  });
 });
 
 // ── Scheduler helpers ─────────────────────────────────────────────────────────

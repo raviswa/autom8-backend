@@ -146,9 +146,51 @@ async function syncConversationForScheduledDeliveryApproval({
   }
 }
 
+/**
+ * After feedback completes, clear prepay UX from the chat session so the
+ * next "Hi" starts a fresh visit instead of resuming awaiting_prepay.
+ */
+async function syncConversationForFeedbackComplete({ restaurantId, customerPhone }) {
+  const phone = canonicalPhone(customerPhone);
+  if (!phone || !restaurantId) return;
+
+  try {
+    const existing = await findConversationRow(restaurantId, customerPhone);
+    if (!existing?.context) return;
+
+    const prev = existing.context;
+    const cleaned = String(prev.order_confirmed_summary || '')
+      .replace(/\s*—\s*awaiting payment\s*$/i, '')
+      .trim();
+
+    const context = { ...prev };
+    delete context.payment_link;
+    delete context.razorpay_payment_link_id;
+    delete context.order_confirmed_summary;
+    delete context.order_total;
+    if (cleaned) {
+      context.last_order_summary = cleaned;
+    }
+    context.booking_step = 'visit_complete';
+
+    await supabaseAdmin
+      .from('conversation_states')
+      .update({
+        context,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', existing.id);
+
+    console.log(`[conversation-sync] ✅ ${phone} → visit_complete (feedback done)`);
+  } catch (err) {
+    console.warn('[conversation-sync] feedback complete sync failed (non-fatal):', err.message);
+  }
+}
+
 module.exports = {
   syncConversationForTokenApproval,
   syncConversationForScheduledDeliveryApproval,
+  syncConversationForFeedbackComplete,
   canonicalPhone,
   phoneVariants,
 };

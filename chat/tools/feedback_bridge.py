@@ -61,18 +61,18 @@ async def try_handle_feedback_via_api(
     customer_phone: str,
     message_obj: dict[str, Any],
     restaurant_id: str,
-) -> bool:
+) -> dict[str, bool]:
     """
-    Delegate to Node handleFeedbackReply. Returns True if the message was
-    consumed as part of the feedback flow (no booking routing needed).
+    Delegate to Node handleFeedbackReply. Returns consumed/completed flags.
     """
+    result = {"consumed": False, "completed": False}
     if not KDS_SECRET:
         logger.debug("[feedback-bridge] AUTOM8_KDS_SECRET unset — skip API delegate")
-        return False
+        return result
 
     phone = "".join(c for c in str(customer_phone) if c.isdigit())
     if not phone or not restaurant_id or not message_obj:
-        return False
+        return result
 
     try:
         resp = await get_http().post(
@@ -93,12 +93,16 @@ async def try_handle_feedback_via_api(
                 f"[feedback-bridge] handle-reply HTTP {resp.status}: "
                 f"{(await resp.text())[:200]}"
             )
-            return False
+            return result
         data = await resp.json()
-        consumed = bool(data.get("consumed"))
-        if consumed:
-            logger.info(f"[feedback-bridge] Feedback consumed for {phone}")
-        return consumed
+        result["consumed"] = bool(data.get("consumed"))
+        result["completed"] = bool(data.get("completed"))
+        if result["consumed"]:
+            logger.info(
+                f"[feedback-bridge] Feedback consumed for {phone} "
+                f"(completed={result['completed']})"
+            )
+        return result
     except Exception as e:
         logger.warning(f"[feedback-bridge] handle-reply failed (non-fatal): {e}")
-        return False
+        return result

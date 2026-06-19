@@ -106,11 +106,11 @@ router.post('/webhook', async (req, res) => {
             const wasFeedback = restaurantId
               ? await handleFeedbackReply(message.from, message, restaurantId).catch(err => {
                   console.error('[WA Webhook] handleFeedbackReply failed:', err.message);
-                  return false;
+                  return { consumed: false, completed: false };
                 })
-              : false;
+              : { consumed: false, completed: false };
 
-            if (wasFeedback) continue;
+            if (wasFeedback.consumed) continue;
 
             // ── Priority 2: Referral code ──────────────────────────────────
             const referralMatch = messageText.match(REFERRAL_CODE_REGEX);

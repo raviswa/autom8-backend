@@ -141,10 +141,10 @@ def expire_session_if_stale(
         session_state["order_confirmed_summary"] = _order_summary
     if _order_total is not None:
         session_state["order_total"] = _order_total
-    if step == "awaiting_prepay":
-        session_state["booking_step"] = "awaiting_prepay"
-    else:
-        session_state["booking_step"] = "ask_service"
+    # Never resume prepay UX after idle — visit is over; webhooks still use preserved ids.
+    session_state["booking_step"] = (
+        "visit_complete" if step in ("awaiting_prepay", "awaiting_payment") else "ask_service"
+    )
     touch_session_activity(session_state)
     return True
 
@@ -400,6 +400,71 @@ def is_feedback_aspect_reply(text: str) -> bool:
 
 def is_greeting(text: str) -> bool:
     return text.strip().lower() in _GREETING_WORDS
+
+
+def _clean_order_summary(summary: str) -> str:
+    """Remove stale prepay suffix from a stored order summary."""
+    if not summary:
+        return summary
+    return re.sub(r"\s*—\s*awaiting payment\s*$", "", summary, flags=re.I).strip()
+
+
+def mark_session_visit_complete(session_state: Dict[str, Any]) -> None:
+    """End a visit: clear prepay UX keys, keep identity and last order for greetings."""
+    summary = session_state.get("order_confirmed_summary")
+    if summary:
+        cleaned = _clean_order_summary(str(summary))
+        if cleaned:
+            session_state["last_order_summary"] = strip_order_quantity(cleaned)
+    for key in (
+        "payment_link",
+        "razorpay_payment_link_id",
+        "order_confirmed_summary",
+        "order_total",
+    ):
+        session_state.pop(key, None)
+    session_state["booking_step"] = "visit_complete"
+
+
+async def start_fresh_visit(
+    customer_phone: str,
+    restaurant_id: str,
+    customer_name: str,
+    session_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Clear mid-flow state and show the service menu (Home / Hi after an order)."""
+    from agents.customer.conversation_helpers import safe_build_greeting
+
+    _prev_cid = session_state.get("customer_id")
+    _prev_cname = session_state.get("customer_name") or customer_name
+    _prev_ret = session_state.get("is_returning_customer", True)
+    _prev_visits = session_state.get("visit_count", 0)
+    _prev_last = session_state.get("last_order_summary", "")
+    _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
+    _pending_pay = session_state.get("pending_prepay_fulfillment")
+    session_state.clear()
+    if _prev_cid:
+        session_state["customer_id"] = _prev_cid
+    if _prev_cname:
+        session_state["customer_name"] = _prev_cname
+    session_state["is_returning_customer"] = _prev_ret
+    if _prev_visits:
+        session_state["visit_count"] = _prev_visits
+    if _prev_last:
+        session_state["last_order_summary"] = strip_order_quantity(_prev_last)
+    if _prev_svc:
+        session_state["last_service_type"] = _prev_svc
+    if _pending_pay:
+        session_state["pending_prepay_fulfillment"] = _pending_pay
+    session_state["booking_step"] = "ask_service"
+    raw_greeting = await safe_build_greeting(
+        session_state.get("customer_id", ""), restaurant_id,
+    )
+    ret_greeting = build_smart_greeting(_prev_cname or customer_name, raw_greeting, session_state)
+    await send_service_menu(customer_phone, restaurant_id, ret_greeting, session_state)
+    session_state["booking_step"] = "awaiting_service_selection"
+    touch_session_activity(session_state)
+    return {"status": "awaiting_service_selection"}
 
 
 def is_placeholder_payment_link(link: str) -> bool:
@@ -723,16 +788,14 @@ async def handle_awaiting_prepay(
     )
 
     msg_lower = message.strip().lower()
-    if msg_lower in ("new order", "new", "order again"):
-        from agents.customer.conversation_helpers import safe_build_greeting
-        session_state["booking_step"] = "ask_service"
-        raw_greeting = await safe_build_greeting(
-            session_state.get("customer_id", ""), restaurant_id,
+    if (
+        is_greeting(message)
+        or msg_lower in _DIRECT_RESET_KEYWORDS
+        or msg_lower in ("new order", "new", "order again")
+    ):
+        return await start_fresh_visit(
+            customer_phone, restaurant_id, customer_name, session_state,
         )
-        ret_greeting = build_smart_greeting(customer_name, raw_greeting, session_state)
-        await send_service_menu(customer_phone, restaurant_id, ret_greeting, session_state)
-        session_state["booking_step"] = "awaiting_service_selection"
-        return {"status": "awaiting_service_selection"}
 
     booking_id = session_state.get("booking_id")
     summary = session_state.get(
@@ -745,24 +808,24 @@ async def handle_awaiting_prepay(
     if booking_id:
         recovery = await recover_prepay_if_already_paid(str(booking_id), session_state)
         if recovery["state"] == "already_confirmed":
+            clean_summary = _clean_order_summary(str(summary))
             await send_whatsapp_message(
                 customer_phone,
-                f"✅ Your order is already confirmed!\n_{summary}_\n\n"
+                f"✅ Your order is already confirmed!\n_{clean_summary}_\n\n"
                 f"Reply *Home* to place a new order.",
                 restaurant_id,
             )
-            session_state["booking_step"] = "visit_complete"
-            session_state.pop("payment_link", None)
+            mark_session_visit_complete(session_state)
             return {"status": "visit_complete"}
         if recovery["state"] == "kds_retried":
+            clean_summary = _clean_order_summary(str(summary))
             await send_whatsapp_message(
                 customer_phone,
-                f"✅ Your order is confirmed — we've just sent it to the kitchen.\n_{summary}_\n\n"
+                f"✅ Your order is confirmed — we've just sent it to the kitchen.\n_{clean_summary}_\n\n"
                 f"Reply *Home* to place a new order.",
                 restaurant_id,
             )
-            session_state["booking_step"] = "visit_complete"
-            session_state.pop("payment_link", None)
+            mark_session_visit_complete(session_state)
             return {"status": "visit_complete"}
         if recovery["state"] == "kds_retry_failed":
             await send_whatsapp_message(
@@ -775,9 +838,7 @@ async def handle_awaiting_prepay(
             touch_session_activity(session_state)
             return {"status": "visit_complete"}
         if recovery["state"] == "fulfilled":
-            session_state["booking_step"] = "visit_complete"
-            session_state.pop("payment_link", None)
-            session_state.pop("razorpay_payment_link_id", None)
+            mark_session_visit_complete(session_state)
             return {"status": "visit_complete"}
         if recovery["state"] == "fulfill_failed":
             await send_whatsapp_message(

@@ -219,6 +219,7 @@ async def _finalize_special_notes_and_kitchen(
         session_state["_deferred_special_notes"] = special_notes
         session_state["_notes_finalized_pending_payment"] = True
         session_state.pop("special_notes_asked_at", None)
+        session_state["booking_step"] = "awaiting_prepay"
         await save_session_state(restaurant_id, customer_phone, session_state)
         if notify_customer:
             if special_notes:
@@ -1080,7 +1081,8 @@ async def handle_dine_in_flow(
             special_notes=special_notes,
             notify_customer=True,
         )
-        return {"status": "visit_complete"}
+        step = session_state.get("booking_step", "visit_complete")
+        return {"status": step if step in ("awaiting_prepay", "visit_complete") else "visit_complete"}
 
     return await handle_unknown_booking_step(
         customer_phone, restaurant_id, session_state, flow_name="dine_in", booking_step=booking_step,
