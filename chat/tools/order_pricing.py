@@ -21,8 +21,10 @@ _IST = ZoneInfo("Asia/Kolkata")
 
 DEFAULT_DELIVERY_TIERS = [
     {"max_km": 3, "charge": 20},
-    {"max_km": 6, "charge": 30},
-    {"max_km": None, "charge": 40},
+    {"max_km": 5, "charge": 30},
+    {"max_km": 8, "charge": 40},
+    {"max_km": 12, "charge": 50},
+    {"max_km": None, "charge": 60},
 ]
 
 

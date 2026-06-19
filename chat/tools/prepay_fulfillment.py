@@ -70,6 +70,8 @@ _SESSION_HINT_KEYS = (
     "delivery_address",
     "delivery_distance_km",
     "delivery_distance_method",
+    "delivery_travel_minutes",
+    "delivery_travel_traffic_aware",
 )
 
 

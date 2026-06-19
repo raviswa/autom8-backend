@@ -8,8 +8,10 @@ Falls back to straight-line haversine when the API key is missing or calls fail.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
+import time as _time
 from typing import Any
 
 from config.settings import settings
@@ -110,11 +112,14 @@ async def geocode_address(address: str, *, city: str = "", state_name: str = "")
         return None
 
 
-async def road_distance_km(
+async def road_route_metrics(
     origin: tuple[float, float],
     destination: tuple[float, float],
-) -> float | None:
-    """Driving distance in km via Google Distance Matrix API."""
+) -> dict[str, Any] | None:
+    """
+    Road distance + drive time via Google Distance Matrix API.
+    Uses duration_in_traffic when departure_time is set (city vs suburb aware).
+    """
     api_key = maps_api_key()
     if not api_key:
         return None
@@ -128,6 +133,8 @@ async def road_distance_km(
                 "origins": f"{o_lat},{o_lng}",
                 "destinations": f"{d_lat},{d_lng}",
                 "mode": "driving",
+                "departure_time": int(_time.time()),
+                "traffic_model": "best_guess",
                 "key": api_key,
             },
             timeout=__import__("aiohttp").ClientTimeout(total=8),
@@ -144,11 +151,37 @@ async def road_distance_km(
         el = rows[0]["elements"][0]
         if el.get("status") != "OK":
             return None
+
         metres = el["distance"]["value"]
-        return round(metres / 1000.0, 2)
+        duration_sec = el.get("duration", {}).get("value")
+        traffic_sec = el.get("duration_in_traffic", {}).get("value")
+
+        duration_min = math.ceil(duration_sec / 60) if duration_sec else None
+        traffic_min = math.ceil(traffic_sec / 60) if traffic_sec else None
+        travel_minutes = traffic_min or duration_min
+
+        if not travel_minutes:
+            return None
+
+        return {
+            "distance_km": round(metres / 1000.0, 2),
+            "duration_minutes": duration_min,
+            "duration_in_traffic_minutes": traffic_min,
+            "travel_minutes": travel_minutes,
+            "traffic_aware": traffic_min is not None,
+        }
     except Exception as e:
         logger.warning(f"[distance-matrix] failed: {e}")
         return None
+
+
+async def road_distance_km(
+    origin: tuple[float, float],
+    destination: tuple[float, float],
+) -> float | None:
+    """Driving distance in km via Google Distance Matrix API."""
+    metrics = await road_route_metrics(origin, destination)
+    return metrics["distance_km"] if metrics else None
 
 
 async def ensure_customer_coordinates(
@@ -201,15 +234,23 @@ async def compute_delivery_distance(session_state: dict[str, Any]) -> dict[str, 
     if not origin or not dest:
         session_state.pop("delivery_distance_km", None)
         session_state.pop("delivery_distance_method", None)
+        session_state.pop("delivery_travel_minutes", None)
+        session_state.pop("delivery_travel_traffic_aware", None)
         return result
 
-    road_km = await road_distance_km(origin, dest)
-    if road_km is not None:
-        distance = road_km
+    route = await road_route_metrics(origin, dest)
+    if route is not None:
+        distance = route["distance_km"]
         method = "road"
+        session_state["delivery_travel_minutes"] = route["travel_minutes"]
+        session_state["delivery_travel_traffic_aware"] = route["traffic_aware"]
+        result["travel_minutes"] = route["travel_minutes"]
+        result["travel_traffic_aware"] = route["traffic_aware"]
     else:
         distance = haversine_km(origin[0], origin[1], dest[0], dest[1])
         method = "straight"
+        session_state.pop("delivery_travel_minutes", None)
+        session_state.pop("delivery_travel_traffic_aware", None)
 
     session_state["delivery_distance_km"] = distance
     session_state["delivery_distance_method"] = method
@@ -317,7 +358,15 @@ def build_distance_charge_preview(session_state: dict[str, Any], charge: float |
         float(distance),
         session_state.get("delivery_distance_method"),
     )
-    return f"📍 You're about *{dist_label}* from our kitchen. Delivery charge: *₹{fee:.0f}*."
+    travel_note = ""
+    travel = session_state.get("delivery_travel_minutes")
+    if travel and session_state.get("delivery_distance_method") == "road":
+        traffic = " (current traffic)" if session_state.get("delivery_travel_traffic_aware") else ""
+        travel_note = f" Drive time{traffic}: *~{int(travel)} mins*."
+    return (
+        f"📍 You're about *{dist_label}* from our kitchen.{travel_note} "
+        f"Delivery charge: *₹{fee:.0f}*."
+    )
 
 
 def format_delivery_line(totals: dict[str, float], session_state: dict[str, Any] | None) -> str:
