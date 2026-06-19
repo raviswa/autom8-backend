@@ -82,6 +82,7 @@ from agents.customer.booking_helpers import (
     strip_order_quantity,
     ask_continue_or_reset,
     do_reset,
+    expire_session_if_stale,
     start_fresh_visit,
     mark_session_visit_complete,
     is_feedback_reply,
