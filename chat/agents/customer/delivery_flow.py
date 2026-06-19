@@ -617,8 +617,9 @@ async def _submit_scheduled_delivery_for_approval(
                 manager_phone,
                 f"⚠️ *Scheduled delivery needs portal setup*\n"
                 f"Customer: {customer_name} ({customer_phone})\n"
-                f"Order: {order_text[:120]}\n"
-                f"Run migration add_scheduled_delivery_portal_and_kds.sql if approvals are missing.",
+                f"Order: {order_text[:120]}\n\n"
+                f"Run in Supabase SQL editor:\n"
+                f"`migrations/fix_walk_in_tokens_scheduled_delivery_check.sql`",
                 restaurant_id,
             )
         except Exception as alert_err:

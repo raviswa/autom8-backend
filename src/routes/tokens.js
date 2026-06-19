@@ -111,7 +111,16 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
 
     const { data: token, error: insertError } = await supabaseAdmin
       .from('walk_in_tokens').insert(tokenRecord).select().single();
-    if (insertError) throw insertError;
+    if (insertError) {
+      const detail = insertError.message || String(insertError);
+      if (detail.includes('walk_in_tokens_type_check')) {
+        throw new Error(
+          'Database migration required: run migrations/fix_walk_in_tokens_scheduled_delivery_check.sql '
+          + 'in Supabase SQL editor (walk_in_tokens.type must allow scheduled_delivery)'
+        );
+      }
+      throw insertError;
+    }
 
     const arrivalTime = new Date().toLocaleString('en-GB', {
       timeZone: 'Asia/Kolkata',

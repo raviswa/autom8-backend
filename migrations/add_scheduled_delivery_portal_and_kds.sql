@@ -40,7 +40,7 @@ ALTER TABLE walk_in_tokens
 
 ALTER TABLE walk_in_tokens
   ADD CONSTRAINT walk_in_tokens_type_check
-  CHECK (type IN ('dinein', 'takeaway', 'large_party', 'scheduled_delivery'));
+  CHECK (type::text IN ('dinein', 'takeaway', 'large_party', 'scheduled_delivery'));
 
 ALTER TABLE restaurants
   ADD COLUMN IF NOT EXISTS scheduled_kds_lead_minutes integer NOT NULL DEFAULT 150;
