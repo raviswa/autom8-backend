@@ -962,6 +962,32 @@ async def handle_incoming_message(
 
         if reply_id.startswith("CAT:"):
             category = reply_id.split(":", 1)[1]
+            rid = session_state.get("restaurant_id")
+            mechanism = session_state.get("booking_mechanism", "")
+
+            if mechanism in ("catalog_b", "catalog"):
+                from tools.catalog_tools import (
+                    CATALOG_PICKER_FULL_ID,
+                    send_whatsapp_catalog_for_category,
+                    send_whatsapp_catalog_grouped,
+                )
+                if category == CATALOG_PICKER_FULL_ID:
+                    ok = await send_whatsapp_catalog_grouped(customer_phone, rid)
+                else:
+                    session_state["current_category"] = category
+                    ok = await send_whatsapp_catalog_for_category(
+                        customer_phone, rid, category,
+                    )
+                if ok:
+                    session_state["booking_mechanism"] = "catalog"
+                    session_state["booking_step"] = "awaiting_order"
+                    return True
+                logger.warning(
+                    f"[cart] WABA catalog for CAT:{category} failed — "
+                    "falling back to interactive item list"
+                )
+
+            session_state["current_category"] = category
             await send_item_list(customer_phone, category, session_state)
             return True
 
@@ -979,7 +1005,13 @@ async def handle_incoming_message(
             return False
 
         if reply_id == "CART:ADD_MORE":
-            await send_category_list(customer_phone, session_state)
+            mechanism = session_state.get("booking_mechanism", "")
+            rid = session_state.get("restaurant_id")
+            if mechanism in ("catalog_b", "catalog") and rid:
+                from tools.catalog_tools import send_catalog_category_picker
+                await send_catalog_category_picker(customer_phone, rid, session_state)
+            else:
+                await send_category_list(customer_phone, session_state, rid)
             return True
 
         if reply_id == "CART:CLEAR":

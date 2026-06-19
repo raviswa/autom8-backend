@@ -68,7 +68,7 @@ BOOKING_MECHANISM_CONFIG: dict[str, Any] = {
     "log_mechanism":   True,        # Track mechanism usage
 }
 
-MechanismType = Literal["catalog", "cart", "cart_text", "none"]
+MechanismType = Literal["catalog", "catalog_b", "cart", "cart_text", "none"]
 
 
 # ─────────────────────────────────────────────
@@ -1140,6 +1140,27 @@ async def send_catalog_booking(
         return False
 
 
+async def send_catalog_option_b_picker(
+    customer_phone: str,
+    restaurant_id: str,
+    session_state: dict[str, Any],
+) -> bool:
+    """Option B — category List Message before native WABA catalog."""
+    try:
+        from tools.catalog_tools import send_catalog_category_picker
+        success = await send_catalog_category_picker(
+            customer_phone, restaurant_id, session_state,
+        )
+        if success:
+            logger.info(f"[BOOKING] {customer_phone} → Option B: category picker sent")
+            return True
+        logger.warning(f"[BOOKING] {customer_phone} → Option B picker failed")
+        return False
+    except Exception as e:
+        logger.error(f"[BOOKING] {customer_phone} → Option B picker error: {e}")
+        return False
+
+
 # ─────────────────────────────────────────────
 # FALLBACK: INTERACTIVE CART BOOKING
 # ─────────────────────────────────────────────
@@ -1203,13 +1224,15 @@ async def send_unified_booking_menu(
     """
     Send booking menu with layered fallback strategy:
 
-      1. Catalog attempt 1  (native WhatsApp Catalog)
-      2. Catalog attempt 2  (2-second retry — handles transient Meta API blips)
-      3. Interactive cart   (send_category_list)
-      4. Plain-text menu    (numbered list)
-      5. Last resort        (Fix 40: direct to 🛍️ Shop icon — never silent)
+      1. Option B picker  (category List → WABA catalog per category)
+      2. Picker retry
+      3. Flat / grouped native catalog
+      4. Catalog retry
+      5. Interactive cart   (send_category_list)
+      6. Plain-text menu
+      7. Last resort        (Fix 40: direct to 🛍️ Shop icon — never silent)
 
-    Returns which mechanism was used: "catalog", "cart", "cart_text", or "none".
+    Returns which mechanism was used: "catalog_b", "catalog", "cart", "cart_text", or "none".
     Sets session_state["booking_mechanism"] accordingly.
     """
     logger.info(f"[BOOKING] send_unified_booking_menu called for {customer_phone}")
@@ -1230,7 +1253,25 @@ async def send_unified_booking_menu(
             logger.info(f"[BOOKING] Skipping menu for dine-in — no table_number yet")
             return "none"
 
-    # ── Attempt 1: Catalog ───────────────────────────────────────────────────
+    # ── Attempt 1: Option B category picker ───────────────────────────────────
+    if await send_catalog_option_b_picker(customer_phone, restaurant_id, session_state):
+        await asyncio.sleep(1.0)
+        await maybe_send_special_dishes_note(
+            customer_phone, restaurant_id, session_state, menu_items=items,
+        )
+        return "catalog_b"
+
+    # ── Attempt 2: Retry Option B picker ─────────────────────────────────────
+    logger.warning(f"[BOOKING] {customer_phone} → Option B attempt 1 failed, retrying in 2 s")
+    await asyncio.sleep(2)
+    if await send_catalog_option_b_picker(customer_phone, restaurant_id, session_state):
+        await asyncio.sleep(1.0)
+        await maybe_send_special_dishes_note(
+            customer_phone, restaurant_id, session_state, menu_items=items,
+        )
+        return "catalog_b"
+
+    # ── Attempt 3: Flat native catalog (grouped sections) ─────────────────────
     if await send_catalog_booking(customer_phone, restaurant_id, session_state):
         if session_state.get("service_type") in ("dine_in", "takeaway", "delivery"):
             session_state["booking_step"] = "awaiting_order"
@@ -1240,7 +1281,7 @@ async def send_unified_booking_menu(
         )
         return "catalog"
 
-    # ── Attempt 2: Retry catalog after 2 s ───────────────────────────────────
+    # ── Attempt 4: Retry flat catalog ─────────────────────────────────────────
     logger.warning(f"[BOOKING] {customer_phone} → catalog attempt 1 failed, retrying in 2 s")
     await asyncio.sleep(2)
     if await send_catalog_booking(customer_phone, restaurant_id, session_state):
@@ -1252,7 +1293,7 @@ async def send_unified_booking_menu(
         )
         return "catalog"
 
-    # ── Attempt 3: Interactive cart ───────────────────────────────────────────
+    # ── Attempt 5: Interactive cart (numbered list fallback) ──────────────────
     if await send_cart_booking(customer_phone, restaurant_id, session_state):
         await asyncio.sleep(1.0)
         await maybe_send_special_dishes_note(

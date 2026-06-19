@@ -181,6 +181,260 @@ def items_for_category(category: str | None = None) -> list[dict]:
     return [i for i in available if i.get("category", "General") == category]
 
 
+# ── Option B: category picker → filtered native catalog ───────────────────────
+
+CATALOG_PICKER_FULL_ID = "__full__"
+_MAX_CATALOG_SECTIONS = 10
+_MAX_CATALOG_PRODUCTS = 30
+_MAX_LIST_ROW_TITLE = 24
+_MAX_LIST_ROW_DESC = 72
+
+
+def _truncate(text: str, max_len: int) -> str:
+    text = (text or "").strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
+
+
+def _available_menu_items(restaurant_id: str | None) -> list[dict]:
+    return [i for i in MENU_ITEMS if i.get("is_available", True)]
+
+
+def _ordered_categories(items: list[dict]) -> list[str]:
+    """Distinct menu categories in stable sorted order (matches manager portal)."""
+    return sorted(
+        list(dict.fromkeys((i.get("category") or "General").strip() or "General" for i in items)),
+        key=str.lower,
+    )
+
+
+def _items_in_category(items: list[dict], category: str) -> list[dict]:
+    return [i for i in items if (i.get("category") or "General") == category]
+
+
+def build_product_list_sections(
+    items: list[dict],
+    *,
+    category: str | None = None,
+) -> list[dict]:
+    """
+    Build WhatsApp product_list sections grouped by menu_items.category.
+    category set → single section; otherwise one section per category (≤10, ≤30 items).
+    """
+    available = [i for i in items if i.get("is_available", True)]
+    if not available:
+        return []
+
+    if category:
+        scoped = _items_in_category(available, category)
+        if not scoped:
+            return []
+        title = _truncate(category, 24)
+        return [{
+            "title": title,
+            "product_items": [
+                {"product_retailer_id": i["id"]} for i in scoped[:_MAX_CATALOG_PRODUCTS]
+            ],
+        }]
+
+    sections: list[dict] = []
+    product_count = 0
+    for cat in _ordered_categories(available):
+        if len(sections) >= _MAX_CATALOG_SECTIONS:
+            break
+        cat_items = _items_in_category(available, cat)
+        if not cat_items:
+            continue
+        remaining = _MAX_CATALOG_PRODUCTS - product_count
+        if remaining <= 0:
+            break
+        chunk = cat_items[:remaining]
+        sections.append({
+            "title": _truncate(cat, 24),
+            "product_items": [{"product_retailer_id": i["id"]} for i in chunk],
+        })
+        product_count += len(chunk)
+    return sections
+
+
+async def _send_whatsapp_interactive(
+    customer_phone: str,
+    interactive: dict,
+    restaurant_id: str | None,
+) -> bool:
+    credentials = await _get_catalog_credentials(restaurant_id)
+    if not credentials:
+        logger.error(f"[catalog] No WhatsApp credentials for {restaurant_id}")
+        return False
+
+    access_token = credentials.get("access_token") or _TOKEN
+    phone_number_id = credentials.get("phone_number_id") or _PHONE_ID
+    if not access_token or not phone_number_id:
+        logger.error("[catalog] Missing access_token or phone_number_id")
+        return False
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type":    "individual",
+        "to":                customer_phone,
+        "type":              "interactive",
+        "interactive":       interactive,
+    }
+    url = f"{credentials['api_endpoint']}/{phone_number_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type":  "application/json",
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(url, headers=headers, json=payload)
+        data = resp.json()
+
+    if resp.status_code == 200:
+        return True
+    logger.error(f"[catalog] Interactive send failed {resp.status_code}: {data}")
+    return False
+
+
+async def send_catalog_category_picker(
+    customer_phone: str,
+    restaurant_id: str | None,
+    session_state: dict | None = None,
+) -> bool:
+    """
+    Option B step 1 — List Message to pick a menu category before native catalog.
+    """
+    items = await fetch_menu_items(restaurant_id)
+    available = [i for i in items if i.get("is_available", True)]
+    if not available:
+        logger.error(f"[catalog-b] No available items for category picker ({restaurant_id})")
+        return False
+
+    restaurant_label = await _get_restaurant_label(restaurant_id)
+    categories = _ordered_categories(available)
+    rows: list[dict] = []
+    for cat in categories[:9]:
+        cat_items = _items_in_category(available, cat)
+        sample = ", ".join(i["title"] for i in cat_items[:3])
+        rows.append({
+            "id":          f"CAT:{cat}",
+            "title":       _truncate(cat, _MAX_LIST_ROW_TITLE),
+            "description": _truncate(f"{len(cat_items)} items · {sample}", _MAX_LIST_ROW_DESC),
+        })
+
+    rows.append({
+        "id":          f"CAT:{CATALOG_PICKER_FULL_ID}",
+        "title":       _truncate("🍽️ Browse full menu", _MAX_LIST_ROW_TITLE),
+        "description": _truncate(f"All {len(available)} items · every category", _MAX_LIST_ROW_DESC),
+    })
+
+    ok = await _send_whatsapp_interactive(
+        customer_phone,
+        {
+            "type": "list",
+            "header": {"type": "text", "text": _truncate(f"🍽️ {restaurant_label} Menu", 60)},
+            "body": {
+                "text": (
+                    "What are you in the mood for today?\n\n"
+                    "Tap *Browse menu* below, pick a category, "
+                    "then add items from our catalog to your basket."
+                ),
+            },
+            "footer": {"text": "Prices excl. GST"},
+            "action": {
+                "button": "Browse menu",
+                "sections": [{"title": "Menu categories", "rows": rows}],
+            },
+        },
+        restaurant_id,
+    )
+    if ok and session_state is not None:
+        session_state["booking_step"] = "awaiting_category_selection"
+        session_state["booking_mechanism"] = "catalog_b"
+        logger.info(f"[catalog-b] Category picker sent to {customer_phone} ({len(rows)} rows)")
+    return ok
+
+
+async def send_whatsapp_catalog_for_category(
+    customer_phone: str,
+    restaurant_id: str | None,
+    category: str,
+) -> bool:
+    """Option B step 2 — native catalog filtered to one menu category."""
+    return await _send_whatsapp_product_list(
+        customer_phone,
+        restaurant_id,
+        header=f"🍽️ {_truncate(category, 20)}",
+        body=(
+            f"*{category}* — tap items to add to your basket.\n"
+            "When you're done, send your basket to place the order."
+        ),
+        category=category,
+    )
+
+
+async def send_whatsapp_catalog_grouped(
+    customer_phone: str,
+    restaurant_id: str | None,
+) -> bool:
+    """Browse full menu — all categories as product_list sections."""
+    return await _send_whatsapp_product_list(
+        customer_phone,
+        restaurant_id,
+        header="🍽️ Full menu",
+        body=(
+            "Browse today's menu by category below.\n"
+            "Tap items to add to your basket, then send your basket when ready."
+        ),
+        category=None,
+    )
+
+
+async def _send_whatsapp_product_list(
+    customer_phone: str,
+    restaurant_id: str | None,
+    *,
+    header: str,
+    body: str,
+    category: str | None,
+) -> bool:
+    restaurant_label = await _get_restaurant_label(restaurant_id)
+    items = await fetch_menu_items(restaurant_id)
+    sections = build_product_list_sections(items, category=category)
+    if not sections:
+        logger.error(
+            f"[catalog-b] No product_list sections "
+            f"(restaurant={restaurant_id}, category={category!r})"
+        )
+        return False
+
+    from tools.restaurant_config import get_meta_catalog_id
+    catalog_id = await get_meta_catalog_id(restaurant_id)
+    if not catalog_id:
+        logger.error(f"[catalog] meta_catalog_id not set for restaurant {restaurant_id}")
+        return False
+
+    product_count = sum(len(s.get("product_items") or []) for s in sections)
+    ok = await _send_whatsapp_interactive(
+        customer_phone,
+        {
+            "type": "product_list",
+            "header": {"type": "text", "text": _truncate(header, 60)},
+            "body":   {"text": body},
+            "footer": {"text": f"Prices excl. GST • {restaurant_label}"},
+            "action": {"catalog_id": catalog_id, "sections": sections},
+        },
+        restaurant_id,
+    )
+    if ok:
+        scope = category or "all categories"
+        logger.info(
+            f"[catalog-b] product_list sent to {customer_phone} — "
+            f"{product_count} items, {len(sections)} section(s), scope={scope!r}"
+        )
+    return ok
+
+
 # ── 1. Facebook Catalog sync ───────────────────────────────────────────────────
 
 async def sync_catalog_to_facebook(restaurant_id: str | None = None) -> dict[str, Any]:
@@ -286,44 +540,25 @@ async def send_whatsapp_catalog_message(
     restaurant_id: str | None = None,
 ) -> bool:
     """
-    Send an interactive multi-product WhatsApp catalog message showing all
-    available menu items in a single "Today's Menu" section.
-
-    Returns True on success, False on failure.
+    Flat fallback — single-section product_list (legacy / retry path).
+    Primary menu flow uses Option B: send_catalog_category_picker().
     """
-    # Resolve credentials (per-restaurant or fallback to global)
-    credentials = await _get_catalog_credentials(restaurant_id)
-    if not credentials:
-        logger.error(
-            f"Cannot send catalog message: no credentials for restaurant {restaurant_id}"
-        )
-        return False
-
-    if not credentials.get("access_token"):
-        if not _TOKEN:
-            raise EnvironmentError(
-                "META_GRAPH_API_TOKEN is not set in environment and "
-                "no restaurant integration found."
-            )
-        logger.warning("Using global META_GRAPH_API_TOKEN for catalog access")
-
-    # Fetch restaurant name for footer
     restaurant_label = await _get_restaurant_label(restaurant_id)
-
     items = await fetch_menu_items(restaurant_id)
-    items = [i for i in items if i.get("is_available", True)]
-
-    if not items:
+    if not _available_menu_items(restaurant_id):
         logger.error(
             f"[catalog] No available menu items for {customer_phone} — "
             "check manager availability toggles and /api/internal/menu-items."
         )
         return False
 
-    product_items   = [{"product_retailer_id": i["id"]} for i in items]
-    thumbnail_id    = items[0]["id"]
-    access_token    = credentials.get("access_token") or _TOKEN
-    phone_number_id = credentials.get("phone_number_id") or _PHONE_ID
+    sections = build_product_list_sections(items)
+    if not sections:
+        product_items = [
+            {"product_retailer_id": i["id"]}
+            for i in _available_menu_items(restaurant_id)[:_MAX_CATALOG_PRODUCTS]
+        ]
+        sections = [{"title": "Today's Menu", "product_items": product_items}]
 
     from tools.restaurant_config import get_meta_catalog_id
     catalog_id = await get_meta_catalog_id(restaurant_id)
@@ -331,17 +566,11 @@ async def send_whatsapp_catalog_message(
         logger.error(f"[catalog] meta_catalog_id not set for restaurant {restaurant_id}")
         return False
 
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type":    "individual",
-        "to":                customer_phone,
-        "type":              "interactive",
-        "interactive": {
+    ok = await _send_whatsapp_interactive(
+        customer_phone,
+        {
             "type": "product_list",
-            "header": {
-                "type": "text",
-                "text": f"🍽️ {restaurant_label} Menu",
-            },
+            "header": {"type": "text", "text": f"🍽️ {restaurant_label} Menu"},
             "body": {
                 "text": (
                     "Browse today's items below.\n"
@@ -350,40 +579,17 @@ async def send_whatsapp_catalog_message(
                 ),
             },
             "footer": {"text": f"Prices excl. GST • {restaurant_label}"},
-            "action": {
-                "catalog_id": catalog_id,
-                "sections": [
-                    {
-                        "title": "Today's Menu",
-                        "product_items": product_items,
-                    }
-                ],
-            },
+            "action": {"catalog_id": catalog_id, "sections": sections},
         },
-    }
-
-    url     = f"{credentials['api_endpoint']}/{phone_number_id}/messages"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type":  "application/json",
-    }
-
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        data = resp.json()
-
-    if resp.status_code == 200:
+        restaurant_id,
+    )
+    if ok:
+        n = sum(len(s.get("product_items") or []) for s in sections)
         logger.info(
-            f"[catalog] Sent to {customer_phone} — {len(items)} items, "
-            f"1 section 'Today's Menu' (restaurant={restaurant_id})"
+            f"[catalog] Sent to {customer_phone} — {n} items, "
+            f"{len(sections)} section(s) (restaurant={restaurant_id})"
         )
-        return True
-    else:
-        logger.error(
-            f"[catalog] Failed for {customer_phone}: "
-            f"{resp.status_code} — {data}"
-        )
-        return False
+    return ok
 
 
 # ── 3. Parse incoming WhatsApp cart (order from customer) ─────────────────────

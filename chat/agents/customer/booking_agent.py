@@ -533,10 +533,10 @@ async def handle_booking_flow(
 
     # ── stale catalog sub-steps ───────────────────────────────────────────────
     if current_step in ("awaiting_category_selection", "awaiting_item_selection"):
-        logger.info(f"[router] stale step {current_step} — re-sending catalog")
-        session_state["booking_step"] = "awaiting_order"
+        logger.info(f"[router] stale step {current_step} — re-sending category picker")
+        session_state["booking_step"] = "awaiting_category_selection"
         await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
-        return {"status": session_state.get("booking_step", "awaiting_order")}
+        return {"status": session_state.get("booking_step", "awaiting_category_selection")}
 
     # ── awaiting_cart_action ──────────────────────────────────────────────────
     if current_step == "awaiting_cart_action":
