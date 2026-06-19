@@ -498,14 +498,19 @@ async def _notify_manager_scheduled_delivery(
     customer_name: str,
     customer_phone: str,
     meta: dict | None = None,
+    *,
+    manager_phone: str | None = None,
 ) -> None:
-    """Manager WhatsApp when a scheduled delivery order awaits approval (chat service path)."""
+    """Manager WhatsApp when a scheduled delivery order awaits approval."""
     from tools.restaurant_config import get_manager_phone
 
-    manager_phone = await get_manager_phone(restaurant_id)
-    if not manager_phone:
-        logger.warning(
-            f"[scheduled-delivery-alert] No manager phone for restaurant {restaurant_id}"
+    alert_phone = (manager_phone or "").strip()
+    if not alert_phone:
+        alert_phone = (await get_manager_phone(restaurant_id) or "").strip()
+    if not alert_phone:
+        logger.error(
+            f"[scheduled-delivery-alert] No manager phone for restaurant {restaurant_id} "
+            f"(token {token_id})"
         )
         return
 
@@ -528,30 +533,31 @@ async def _notify_manager_scheduled_delivery(
         f"📍 {addr}\n"
         f"💰 {total_label}\n\n"
         f"Order: {order_text}\n\n"
-        f"Approve before the customer pays."
+        f"Approve before the customer pays.\n\n"
+        f"Portal: {portal_url}"
     )
     try:
         from tools.whatsapp_buttons_helper import send_whatsapp_buttons
 
         ok = await send_whatsapp_buttons(
-            to=manager_phone,
+            to=alert_phone,
             body=body,
             buttons=[
                 {"id": f"SCHED_APPROVE_{token_id}", "title": "✅ Approve"},
                 {"id": f"SCHED_REJECT_{token_id}", "title": "❌ Reject"},
             ],
             restaurant_id=restaurant_id,
-            footer=f"Portal: {portal_url.split('/')[-1]}",
+            footer="Manager Portal — Pending approval",
         )
         if not ok:
-            await send_whatsapp_message(
-                manager_phone,
-                f"{body}\n\n⚠️ *Approve in portal:*\n{portal_url}",
-                restaurant_id,
-            )
-        logger.info(f"[scheduled-delivery-alert] ✅ {token_id} → manager")
+            await send_whatsapp_message(alert_phone, body, restaurant_id)
+        logger.info(f"[scheduled-delivery-alert] ✅ {token_id} → manager {alert_phone}")
     except Exception as e:
-        logger.warning(f"[scheduled-delivery-alert] failed for {token_id}: {e}")
+        logger.error(f"[scheduled-delivery-alert] failed for {token_id}: {e}")
+        try:
+            await send_whatsapp_message(alert_phone, body, restaurant_id)
+        except Exception as e2:
+            logger.error(f"[scheduled-delivery-alert] plain-text fallback failed: {e2}")
 
 
 async def approve_scheduled_delivery_token(restaurant_id: str, token_id: str) -> dict[str, Any]:
@@ -924,12 +930,8 @@ async def sync_scheduled_delivery_to_portal(
 
     token_id = await _sync_token_via_api(
         payload, customer_phone, "portal-sync-scheduled", max_attempts,
-        skip_api_notify=True,
     )
     if token_id:
-        await _notify_manager_scheduled_delivery(
-            restaurant_id, token_id, customer_name, customer_phone, meta,
-        )
         await _rebroadcast_portal_token(restaurant_id, token_id)
         return token_id
 
@@ -943,9 +945,6 @@ async def sync_scheduled_delivery_to_portal(
         meta=meta,
     )
     if token_id:
-        await _notify_manager_scheduled_delivery(
-            restaurant_id, token_id, customer_name, customer_phone, meta,
-        )
         await _rebroadcast_portal_token(restaurant_id, token_id)
     return token_id
 

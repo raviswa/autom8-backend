@@ -56,6 +56,7 @@ from tools.booking_mechanisms import (
     receipt_qr_url,
     cache_restaurant_pricing,
     sync_scheduled_delivery_to_portal,
+    _notify_manager_scheduled_delivery,
 )
 from agents.customer.booking_helpers import (
     _HOME_HINT,
@@ -96,12 +97,7 @@ _RESCHEDULE_KEYWORDS = frozenset({
 
 def _requires_scheduled_delivery_approval(session_state: Dict[str, Any]) -> bool:
     """Calendar-scheduled deliveries need manager approval before payment."""
-    if not session_state.get("scheduled_at"):
-        return False
-    from tools.feature_gate import ORDER_MODE_SCHEDULED
-    if session_state.get("order_mode") == ORDER_MODE_SCHEDULED:
-        return True
-    return bool(session_state.get("scheduled_delivery_enabled"))
+    return bool(session_state.get("scheduled_at"))
 
 
 def _wants_reschedule_calendar(message: str) -> bool:
@@ -599,6 +595,18 @@ async def _submit_scheduled_delivery_for_approval(
     if portal_token:
         session_state["display_token"] = portal_token
         session_state["token_number"] = portal_token
+        logger.info(
+            f"[delivery] scheduled delivery portal token {portal_token} for {customer_phone} "
+            f"slot={sched_label}"
+        )
+        await _notify_manager_scheduled_delivery(
+            restaurant_id,
+            portal_token,
+            customer_name,
+            customer_phone,
+            portal_meta,
+            manager_phone=manager_phone,
+        )
     else:
         logger.error(
             f"[delivery] scheduled delivery portal token missing for {customer_phone} "
@@ -901,6 +909,11 @@ async def handle_delivery_flow(
             session_state["booking_id"] = booking_id
 
             if _requires_scheduled_delivery_approval(session_state):
+                logger.info(
+                    f"[delivery] routing to manager approval "
+                    f"scheduled_at={session_state.get('scheduled_at')!r} "
+                    f"order_mode={session_state.get('order_mode')!r}"
+                )
                 return await _submit_scheduled_delivery_for_approval(
                     restaurant_id, customer_id, customer_name, customer_phone, manager_phone,
                     session_state,
