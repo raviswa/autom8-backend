@@ -3,25 +3,90 @@
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const { sendTransactionalEmail } = require('./email');
 
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://app.autom8.works';
+const PRODUCTION_APP_ORIGIN = 'https://app.autom8.works';
+const ALLOWED_RESET_ORIGINS = new Set([
+  PRODUCTION_APP_ORIGIN,
+  'https://autom8.works',
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5173',
+]);
 
-async function sendPasswordResetEmail(email) {
+function resolveFrontendOrigin() {
+  const fromEnv = (process.env.FRONTEND_URL || '').trim().replace(/\/$/, '');
+  const isProd = process.env.NODE_ENV === 'production';
+
+  if (isProd) {
+    if (fromEnv && !/localhost|127\.0\.0\.1/i.test(fromEnv)) {
+      try {
+        return new URL(fromEnv).origin;
+      } catch (_) {
+        return PRODUCTION_APP_ORIGIN;
+      }
+    }
+    return PRODUCTION_APP_ORIGIN;
+  }
+
+  if (fromEnv) {
+    try {
+      return new URL(fromEnv).origin;
+    } catch (_) {}
+  }
+  return 'http://localhost:5173';
+}
+
+/**
+ * Password-reset links must land on the app the user is using, not localhost in prod.
+ * Accepts optional redirectTo from the browser (e.g. https://app.autom8.works/reset-password).
+ */
+function resolvePasswordResetRedirectUrl(redirectTo) {
+  const fallback = `${resolveFrontendOrigin()}/reset-password`;
+
+  if (!redirectTo || typeof redirectTo !== 'string') {
+    return fallback;
+  }
+
+  try {
+    const url = new URL(redirectTo.trim());
+    if (!ALLOWED_RESET_ORIGINS.has(url.origin)) {
+      console.warn(`[password-reset] Rejected redirect origin ${url.origin} — using fallback`);
+      return fallback;
+    }
+    url.hash = '';
+    url.search = '';
+    if (!url.pathname.endsWith('/reset-password')) {
+      url.pathname = '/reset-password';
+    }
+    return url.toString();
+  } catch (_) {
+    return fallback;
+  }
+}
+
+const FRONTEND_URL = resolveFrontendOrigin();
+
+async function sendPasswordResetEmail(email, redirectTo) {
   const normalized = String(email || '').trim().toLowerCase();
   if (!normalized) throw new Error('Email is required');
 
+  const resetRedirect = resolvePasswordResetRedirectUrl(redirectTo);
+  console.log(`[password-reset] redirectTo=${resetRedirect}`);
+
   const { error } = await supabase.auth.resetPasswordForEmail(normalized, {
-    redirectTo: `${FRONTEND_URL}/reset-password`,
+    redirectTo: resetRedirect,
   });
   if (error) throw error;
   return true;
 }
 
-async function generateRecoveryLink(email) {
+async function generateRecoveryLink(email, redirectTo) {
   const normalized = String(email || '').trim().toLowerCase();
+  const resetRedirect = resolvePasswordResetRedirectUrl(redirectTo);
   const { data, error } = await supabaseAdmin.auth.admin.generateLink({
     type:    'recovery',
     email:   normalized,
-    options: { redirectTo: `${FRONTEND_URL}/reset-password` },
+    options: { redirectTo: resetRedirect },
   });
   if (error) throw error;
   return data?.properties?.action_link || null;
@@ -119,13 +184,14 @@ async function requestPasswordReset({
   employeeName = null,
   restaurantId = null,
   triggeredBy = 'self',
+  redirectTo = null,
 }) {
   const normalized = String(email || '').trim().toLowerCase();
   let employeeNotified = false;
   let resetLink = null;
 
   try {
-    await sendPasswordResetEmail(normalized);
+    await sendPasswordResetEmail(normalized, redirectTo);
     employeeNotified = true;
   } catch (err) {
     console.warn(`[password-reset] Supabase email failed for ${normalized}:`, err.message);
@@ -135,7 +201,7 @@ async function requestPasswordReset({
 
   if (!employeeNotified) {
     try {
-      resetLink = await generateRecoveryLink(normalized);
+      resetLink = await generateRecoveryLink(normalized, redirectTo);
     } catch (err) {
       console.warn(`[password-reset] generateLink failed for ${normalized}:`, err.message);
     }
@@ -164,6 +230,8 @@ async function requestPasswordReset({
 
 module.exports = {
   FRONTEND_URL,
+  resolveFrontendOrigin,
+  resolvePasswordResetRedirectUrl,
   sendPasswordResetEmail,
   generateRecoveryLink,
   getManagerOwnerEmails,

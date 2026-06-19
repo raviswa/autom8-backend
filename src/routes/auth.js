@@ -161,7 +161,7 @@ router.post('/login', async (req, res) => {
 
 router.post('/forgot-password', async (req, res) => {
   try {
-    const { email } = req.body;
+    const { email, redirectTo } = req.body;
     if (!email?.trim()) {
       return res.status(400).json({ error: 'Email is required' });
     }
@@ -175,11 +175,15 @@ router.post('/forgot-password', async (req, res) => {
       .maybeSingle();
 
     if (emp?.is_active) {
+      const resetRedirect = redirectTo
+        || (req.headers.origin ? `${req.headers.origin}/reset-password` : null);
+
       await requestPasswordReset({
         email:          normalized,
         employeeName:   emp.full_name,
         restaurantId:   emp.restaurant_id,
         triggeredBy:    'self',
+        redirectTo:     resetRedirect,
       });
     }
 
