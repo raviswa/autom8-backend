@@ -23,7 +23,7 @@ const {
   releaseOrphanedOccupiedTables,
   ACTIVE_ORDER_STATUSES,
 } = require('../helpers/tableRelease');
-const { sendKitchenOpenReminders } = require('../helpers/kitchenReminders');
+const { onKitchenOpened } = require('../helpers/kitchenReminders');
 const { runDineInAutoAssignJob } = require('../helpers/dineInAutoAssign');
 
 // Slot helpers live in catalog.js (single source of truth — shared with POST /catalog/slot-sync)
@@ -112,8 +112,13 @@ function startSlotScheduler() {
       if (currentSlot !== lastAppliedSlot) {
         console.log(`🔄 Slot changed: ${String(lastAppliedSlot)} → ${currentSlot}`);
         if (lastAppliedSlot !== Symbol('init') && currentSlot && !lastAppliedSlot) {
-          const n = await sendKitchenOpenReminders();
-          if (n) console.log(`[kitchen-remind] Sent ${n} open notification(s)`);
+          const { data: restaurants } = await supabaseAdmin
+            .from('restaurants')
+            .select('id')
+            .eq('is_active', true);
+          for (const r of restaurants ?? []) {
+            await onKitchenOpened(r.id, { source: 'slot-open' });
+          }
         }
         lastAppliedSlot = currentSlot;
         await applySlotForAllRestaurants();

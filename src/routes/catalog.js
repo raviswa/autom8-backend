@@ -365,6 +365,9 @@ router.post('/kitchen-toggle', authenticateToken, getRestaurantId, async (req, r
     if (typeof open !== 'boolean')
       return res.status(400).json({ error: 'open (boolean) required' });
 
+    const { onKitchenOpened, countAvailableMenuItems } = require('../helpers/kitchenReminders');
+    const wasOpen = (await countAvailableMenuItems(req.restaurant_id)) > 0;
+
     let result;
     if (open) {
       const slot = getCurrentSlotIST();
@@ -381,6 +384,12 @@ router.post('/kitchen-toggle', authenticateToken, getRestaurantId, async (req, r
       }
     } else {
       result = await applySlotAvailability(req.restaurant_id, null);
+    }
+
+    if (open && !wasOpen) {
+      onKitchenOpened(req.restaurant_id, { source: 'manager-toggle' }).catch(err =>
+        console.error('[kitchen-remind] manager-toggle notify failed:', err.message),
+      );
     }
 
     res.json({ success: true, is_open: open, ...result });
@@ -431,7 +440,14 @@ router.post('/slot-sync', authenticateToken, getRestaurantId, async (req, res) =
     if (req.body.slot !== undefined && !validSlots.includes(req.body.slot))
       return res.status(400).json({ error: `Invalid slot. Must be one of: ${SLOTS.map(s => s.dbValue).join(', ')}` });
 
+    const { onKitchenOpened, countAvailableMenuItems } = require('../helpers/kitchenReminders');
+    const wasOpen = (await countAvailableMenuItems(req.restaurant_id)) > 0;
     const result = await applySlotAvailability(req.restaurant_id, slot);
+    if (slot && !wasOpen) {
+      onKitchenOpened(req.restaurant_id, { source: 'slot-sync' }).catch(err =>
+        console.error('[kitchen-remind] slot-sync notify failed:', err.message),
+      );
+    }
     res.json({ success: true, ...result });
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -228,7 +228,6 @@ async def handle_booking_flow(
         from tools.kitchen_hours import (
             build_blanket_closed_message,
             kitchen_accepting_orders,
-            next_open_slot_description,
             refresh_kitchen_acceptance,
         )
         await refresh_kitchen_acceptance(session_state, restaurant_id)
@@ -236,7 +235,7 @@ async def handle_booking_flow(
             session_state["remind_when_open"] = True
             await send_whatsapp_message(
                 customer_phone,
-                f"Got it — we'll message you when we open for *{next_open_slot_description()}*. 🙏",
+                "Got it — we'll message you as soon as we're open for ordering. 🙏",
                 restaurant_id,
             )
             session_state["booking_step"] = "kitchen_closed"
