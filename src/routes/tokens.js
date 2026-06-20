@@ -61,6 +61,42 @@ async function generateTokenId(restaurantId) {
   return `T-${Date.now().toString().slice(-6)}`;
 }
 
+/** One non-terminal visit per phone per day — idempotency for chat retries. */
+function phoneLookupVariants(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (!digits) return [];
+  const variants = new Set([digits]);
+  if (digits.length === 10) variants.add(`91${digits}`);
+  if (digits.length > 10) variants.add(digits.slice(-10));
+  if (digits.startsWith('91') && digits.length === 12) variants.add(digits.slice(2));
+  return [...variants];
+}
+
+async function findActiveTokenForPhone(restaurantId, phone) {
+  const variants = phoneLookupVariants(phone);
+  if (!variants.length) return null;
+
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+
+  const { data, error } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .select('*')
+    .eq('restaurant_id', restaurantId)
+    .in('phone', variants)
+    .in('status', ['waiting', 'pending_approval', 'seated', 'takeaway'])
+    .gte('arrived_at', todayStart.toISOString())
+    .order('arrived_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.warn('[tokens] findActiveTokenForPhone failed:', error.message);
+    return null;
+  }
+  return data;
+}
+
 /** Approve scheduled_delivery only while status is pending_approval (single winner). */
 async function approveScheduledDeliveryToken(tokenId, restaurantId, token) {
   const meta = token.meta || {};
@@ -192,6 +228,18 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
       }
     }
 
+    const cleanPhone = phone ? String(phone).replace(/\D/g, '') : null;
+    if (cleanPhone && ['dinein', 'large_party', 'takeaway', 'scheduled_delivery'].includes(type)) {
+      const existing = await findActiveTokenForPhone(restaurant_id, cleanPhone);
+      if (existing) {
+        console.log(
+          `[tokens] Reusing active token ${existing.id} for ${cleanPhone} ` +
+          `(status=${existing.status}, deduplicated)`,
+        );
+        return res.status(200).json({ success: true, token: existing, deduplicated: true });
+      }
+    }
+
     const tokenId = await generateTokenId(restaurant_id);
     const status  = (type === 'large_party' || type === 'scheduled_delivery') ? 'pending_approval'
                   : type === 'takeaway'    ? 'takeaway'
@@ -234,7 +282,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
 
     // notify=false skips the manager alert (e.g. duplicate guard). Default: send from API.
     const shouldNotify = req.query.notify !== 'false';
-    if (shouldNotify && managerPhone && await isWhatsAppConfigured(restaurantId)) {
+    if (shouldNotify && managerPhone && await isWhatsAppConfigured(restaurant_id)) {
       if (type === 'large_party') {
         const combo      = meta?.combo ?? [];
         const tableLines = combo.length > 0

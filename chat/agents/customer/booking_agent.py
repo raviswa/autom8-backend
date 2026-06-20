@@ -445,6 +445,15 @@ async def handle_booking_flow(
                 return {"status": "awaiting_service_selection"}
 
         if service_type == "dine_in":
+            from agents.customer.dine_in_flow import resume_active_dine_in_token
+
+            resumed = await resume_active_dine_in_token(
+                restaurant_id, customer_phone, customer_name, session_state,
+            )
+            if resumed:
+                touch_session_activity(session_state)
+                return resumed
+
             session_state["last_service_type"] = "dine_in"
             await send_whatsapp_message(customer_phone, "How many people are dining today?", restaurant_id)
             session_state["booking_step"] = "awaiting_party_size"

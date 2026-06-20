@@ -319,8 +319,27 @@ async def _process_meta_payload(payload: dict):
                         message_obj, session_state, restaurant_id
                     )
                 if bridge_success:
-                    logger.info(f"[CATALOG] Successfully bridged order to cart for {phone}")
-                    message_body = "CART:CONFIRM"
+                    logger.info(f"[CATALOG] Successfully merged order into cart for {phone}")
+                    in_checkout = session_state.get("booking_step") in (
+                        "awaiting_special_notes",
+                        "awaiting_prepay",
+                        "confirming_order",
+                    )
+                    if in_checkout:
+                        await send_whatsapp_message(
+                            phone,
+                            "We've noted those items — please finish payment for your "
+                            "current order first. Reply *Home* to start a fresh order.",
+                            restaurant_id,
+                        )
+                    else:
+                        from tools.cart_tools import send_catalog_cart_acknowledgment
+                        await send_catalog_cart_acknowledgment(
+                            phone, restaurant_id, session_state,
+                        )
+                    touch_session_activity(session_state)
+                    await save_session_state(restaurant_id, phone, session_state)
+                    return
                 else:
                     logger.warning(f"[CATALOG] Failed to bridge order for {phone}")
                     await send_whatsapp_message(

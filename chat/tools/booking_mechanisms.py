@@ -698,10 +698,13 @@ async def _sync_token_via_api(
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=8),
             )
-            if resp.status == 201:
+            if resp.status in (200, 201):
                 data = await resp.json()
                 token_id = data.get("token", {}).get("id")
-                logger.info(f"[{log_label}] API token created: {token_id}")
+                if data.get("deduplicated"):
+                    logger.info(f"[{log_label}] Reused active token {token_id} for {customer_phone}")
+                else:
+                    logger.info(f"[{log_label}] API token created: {token_id}")
                 return token_id
             body = await resp.text()
             logger.error(
@@ -851,8 +854,17 @@ async def sync_token_to_portal(
     """
     Create a walk_in_tokens row for the manager portal.
     Tries Node API first; falls back to direct Postgres insert.
+    Reuses an existing non-terminal token for this phone when present.
     """
-    from tools.db_tools import create_walk_in_token_direct
+    from tools.db_tools import create_walk_in_token_direct, get_active_walk_in_token
+
+    existing = await get_active_walk_in_token(restaurant_id, customer_phone)
+    if existing and existing.get("type") == token_type:
+        logger.info(
+            f"[portal-sync] Reusing active token {existing['id']} for {customer_phone} "
+            f"(status={existing.get('status')})"
+        )
+        return existing["id"]
 
     payload = {
         "restaurant_id": restaurant_id,
@@ -887,13 +899,16 @@ async def sync_token_to_portal_large_party(
     restaurant_id: str,
     max_attempts: int = 3,
 ) -> str | None:
-    from tools.db_tools import create_walk_in_token_direct
+    from tools.db_tools import create_walk_in_token_direct, get_active_walk_in_token
+
+    existing = await get_active_walk_in_token(restaurant_id, customer_phone)
+    if existing and existing.get("type") == "large_party":
+        logger.info(
+            f"[portal-sync-large] Reusing active token {existing['id']} for {customer_phone}"
+        )
+        return existing["id"]
 
     payload = {
-        "restaurant_id": restaurant_id,
-        "name":          customer_name,
-        "phone":         customer_phone,
-        "type":          "large_party",
         "pax":           pax,
         "meta":          {"combo": combo},
     }
@@ -1454,21 +1469,28 @@ async def bridge_catalog_order_to_cart(
         )
         invalidate_menu_cache(restaurant_id)
 
-    cart = {}
+    cart = session_state.get("cart") or {}
     for item_line in items:
         item_id = item_line["id"]
-        cart[item_id] = {
+        line = {
             "title":      item_line["title"],
             "qty":        item_line["qty"],
             "unit_price": item_line["unit_price"],
         }
+        if item_id in cart:
+            cart[item_id]["qty"] = int(cart[item_id].get("qty", 0)) + int(line["qty"])
+        else:
+            cart[item_id] = line
 
     await enrich_cart_titles(cart, restaurant_id)
     session_state["cart"] = cart
     session_state["booking_mechanism_order_source"] = "catalog"
-    session_state["booking_step"] = "confirming_order"
+    session_state["booking_step"] = "awaiting_cart_action"
 
-    logger.info(f"Catalog order bridged to cart: {len(items)} items, total ₹{total:.0f}")
+    logger.info(
+        f"Catalog order merged into cart: +{len(items)} line(s), "
+        f"{len(cart)} unique item(s), session total ₹{sum(v['qty']*v['unit_price'] for v in cart.values()):.0f}"
+    )
     return True
 
 

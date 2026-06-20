@@ -19,6 +19,8 @@ from tools.db_tools import (
     create_booking,
     update_booking_status,
     recover_session_from_walk_in_token,
+    get_active_walk_in_token,
+    apply_walk_in_token_to_session,
     _coerce_table_number,
     get_session_state,
     save_session_state,
@@ -643,6 +645,67 @@ async def _confirm_dine_in_order(
     return {"status": "awaiting_special_notes", "booking_id": booking_id, "total": total}
 
 
+async def resume_active_dine_in_token(
+    restaurant_id: str,
+    customer_phone: str,
+    customer_name: str,
+    session_state: Dict[str, Any],
+) -> Dict[str, Any] | None:
+    """
+    If this phone already has a non-terminal dine-in token today, resume that
+    visit instead of creating a duplicate (Hi/dine-in retries during slow states).
+    """
+    token = await get_active_walk_in_token(restaurant_id, customer_phone)
+    if not token or token.get("type") not in ("dinein", "large_party"):
+        return None
+
+    token_id = token.get("id")
+    status = token.get("status")
+    session_state["service_type"] = "dine_in"
+    session_state["last_service_type"] = "dine_in"
+    session_state["token_number"] = token_id
+    session_state["display_token"] = token_id
+    if token.get("pax"):
+        session_state["party_size"] = int(token["pax"])
+
+    if status == "seated":
+        apply_walk_in_token_to_session(session_state, token)
+        tables = session_state.get("assigned_tables") or [session_state.get("table_number")]
+        tables_txt = ", ".join(str(t) for t in tables if t)
+        await send_whatsapp_message(
+            customer_phone,
+            f"Welcome back! You're at *Table {tables_txt or '?'}* "
+            f"(Token *{token_id}*).\n\nBrowse the menu below to add items. 🍽️",
+            restaurant_id,
+        )
+        if not session_state.get("_catalog_sent_after_party"):
+            await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+            session_state["_catalog_sent_after_party"] = True
+        return {"status": status_after_booking_menu(session_state)}
+
+    if status == "pending_approval":
+        session_state["booking_step"] = "awaiting_manager_approval"
+        await send_whatsapp_message(
+            customer_phone,
+            f"We're still confirming your table for *{session_state.get('party_size', token.get('pax'))}* "
+            f"guests (Token *{token_id}*). You'll hear from us shortly. 🙏",
+            restaurant_id,
+        )
+        return {"status": "awaiting_manager_approval"}
+
+    if status == "waiting":
+        session_state["booking_step"] = "awaiting_table_assignment"
+        await send_whatsapp_message(
+            customer_phone,
+            f"We're still finding your table, {customer_name}! 🍽️\n\n"
+            f"*Token: {token_id}* — we'll message you when it's ready.",
+            restaurant_id,
+        )
+        return {"status": "awaiting_table_assignment"}
+
+    return None
+
+
 async def handle_dine_in_flow(
     restaurant_id: str, customer_id: str, customer_name: str,
     customer_phone: str, manager_phone: str, message: str,
@@ -718,6 +781,12 @@ async def handle_dine_in_flow(
 
             booking_time = now_display()
             session_state["booking_time"] = booking_time
+
+            resumed = await resume_active_dine_in_token(
+                restaurant_id, customer_phone, customer_name, session_state,
+            )
+            if resumed:
+                return resumed
 
             portal_token_id = await sync_token_to_portal(
                 customer_name=customer_name, customer_phone=customer_phone,

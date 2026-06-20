@@ -1843,6 +1843,14 @@ async def create_walk_in_token_direct(
     )
     actual_pax = 1 if token_type in ("takeaway", "scheduled_delivery") else max(1, int(pax or 1))
 
+    existing = await get_active_walk_in_token(restaurant_id, phone)
+    if existing and existing.get("type") == token_type:
+        logger.info(
+            f"[walk-in-token] Reusing active {existing['id']} for {phone} "
+            f"(status={existing.get('status')})"
+        )
+        return existing["id"]
+
     try:
         async with AsyncSessionLocal() as session:
             token_id = await _next_portal_token_id(session, restaurant_id)
@@ -1899,7 +1907,7 @@ async def get_active_walk_in_token(
                 FROM walk_in_tokens
                 WHERE restaurant_id = CAST(:rid AS uuid)
                   AND phone = ANY(:phones)
-                  AND status IN ('seated', 'takeaway', 'waiting')
+                  AND status IN ('seated', 'takeaway', 'waiting', 'pending_approval')
                   AND arrived_at >= CURRENT_DATE
                 ORDER BY arrived_at DESC
                 LIMIT 1

@@ -554,6 +554,21 @@ async def send_item_list(
     return ok
 
 
+async def send_catalog_cart_acknowledgment(
+    customer_phone: str,
+    restaurant_id: str | None,
+    session_state: dict[str, Any],
+) -> bool:
+    """
+    After a WABA catalog 'send to business', show merged cart + confirm/add-more.
+    Does NOT auto-checkout — customer confirms when ready (unified cart).
+    """
+    if restaurant_id:
+        session_state["restaurant_id"] = restaurant_id
+    session_state["booking_step"] = "awaiting_cart_action"
+    return await send_cart_summary_buttons(customer_phone, session_state)
+
+
 # ── Phase 3: Cart action buttons ──────────────────────────────────────────────
 
 async def send_cart_summary_buttons(
