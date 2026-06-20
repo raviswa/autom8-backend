@@ -112,6 +112,23 @@ def kitchen_blocked_pending_payment(session_state: dict[str, Any]) -> bool:
     )
 
 
+def reset_kitchen_state_for_new_checkout(session_state: dict[str, Any]) -> None:
+    """Clear flags from a prior paid/served checkout so reorders start fresh."""
+    for key in (
+        "_kitchen_sent",
+        "_kds_order_id",
+        "_receipt_sent",
+        "_kitchen_send_claimed",
+        "_customer_finalize_sent",
+        "_notes_finalized_pending_payment",
+        "_deferred_special_notes",
+        "_payment_received",
+        "booking_id",
+        "_manager_order_notified_for",
+    ):
+        session_state.pop(key, None)
+
+
 def stash_prepay_payload(
     session_state: dict[str, Any],
     booking_id: str,
@@ -268,6 +285,7 @@ async def _dispatch_to_kds(
             service_type=service_type,
             restaurant_id=restaurant_id,
             special_notes=special_notes,
+            booking_id=booking_id,
         )
         if order_id:
             if booking_id:

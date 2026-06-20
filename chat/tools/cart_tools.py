@@ -1037,6 +1037,8 @@ async def handle_incoming_message(
             return False
 
         if reply_id == "CART:ADD_MORE":
+            from tools.prepay_fulfillment import reset_kitchen_state_for_new_checkout
+            reset_kitchen_state_for_new_checkout(session_state)
             mechanism = session_state.get("booking_mechanism", "")
             rid = session_state.get("restaurant_id")
             if mechanism in ("catalog_b", "catalog") and rid:

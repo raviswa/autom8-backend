@@ -1014,6 +1014,7 @@ async def notify_kds(
     table_number: str | int | None, token_number: str, service_type: str,
     restaurant_id: str,
     special_notes: str | None = None,
+    booking_id: str | None = None,
 ) -> str | None:
     """POST order to Node KDS API. Returns order_id on success, else None."""
     try:
@@ -1054,6 +1055,8 @@ async def notify_kds(
             "service_type": service_type, "items": items,
             "special_notes": special_notes, "secret": secret,
         }
+        if booking_id:
+            payload["booking_id"] = booking_id
         headers = _portal_auth_headers()
 
         for attempt in range(3):
@@ -1066,21 +1069,36 @@ async def notify_kds(
                 )
                 if resp.status in (200, 201):
                     data = await resp.json()
-                    kds_count = int(data.get("kds_items_created") or 0)
                     expected = len(items)
-                    if kds_count <= 0 or kds_count < expected:
+                    kds_added = int(data.get("kds_items_added", 0))
+                    if data.get("deduplicated"):
+                        if kds_added > 0:
+                            logger.info(
+                                f"[kds-notify] ♻️ idempotent retry OK ({kds_added} line(s)) "
+                                f"for token {token_number} | order {data.get('order_id')}"
+                            )
+                            return data.get("order_id")
                         logger.error(
-                            f"[kds-notify] attempt {attempt + 1}/3 — expected {expected} KDS line(s) "
-                            f"but got {kds_count} for token {token_number} | restaurant {restaurant_id} | {data}"
+                            f"[kds-notify] attempt {attempt + 1}/3 — dedup blocked new items "
+                            f"for token {token_number} (expected {expected}) | {data}"
                         )
                         if attempt < 2:
                             await asyncio.sleep(0.75 * (attempt + 1))
                         continue
-                    tag = "deduped" if data.get("deduplicated") else "created"
+                    if kds_added <= 0:
+                        kds_added = int(data.get("kds_items_created") or 0)
+                    if kds_added <= 0 or kds_added < expected:
+                        logger.error(
+                            f"[kds-notify] attempt {attempt + 1}/3 — expected {expected} new KDS line(s) "
+                            f"but got {kds_added} for token {token_number} | restaurant {restaurant_id} | {data}"
+                        )
+                        if attempt < 2:
+                            await asyncio.sleep(0.75 * (attempt + 1))
+                        continue
                     logger.info(
-                        f"[kds-notify] ✅ {kds_count} item(s) "
-                        f"({tag}) for token {token_number} | table {table_number} | "
-                        f"order {data.get('order_id', '?')} | restaurant {restaurant_id}"
+                        f"[kds-notify] ✅ {kds_added} item(s) created for token {token_number} | "
+                        f"table {table_number} | order {data.get('order_id', '?')} | "
+                        f"restaurant {restaurant_id}"
                     )
                     return data.get("order_id")
                 body = await resp.text()

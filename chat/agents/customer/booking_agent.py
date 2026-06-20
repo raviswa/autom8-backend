@@ -600,6 +600,8 @@ async def handle_booking_flow(
                 mp, ot, session_state, table_number,
             )
         elif action in ("CART:ADD_MORE","ADD MORE","ADD","MORE"):
+            from tools.prepay_fulfillment import reset_kitchen_state_for_new_checkout
+            reset_kitchen_state_for_new_checkout(session_state)
             session_state["booking_step"] = "awaiting_order"
             await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
             return {"status": session_state.get("booking_step", "awaiting_order")}

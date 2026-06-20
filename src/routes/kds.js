@@ -57,6 +57,7 @@ router.post('/notify', async (req, res) => {
     items          = [],
     special_notes,
     advance_credit = 0,
+    booking_id,
   } = req.body;
 
   if (!restaurant_id) return res.status(400).json({ error: 'restaurant_id required' });
@@ -76,22 +77,82 @@ router.post('/notify', async (req, res) => {
     }
 
     // ── Step 2: Create orders row ─────────────────────────────────────────────
-    const orderNumber = token_number
-      ? `ORD-${String(token_number).replace(/^T-/, '')}`
-      : `ORD-WA-${Date.now()}`;
+    // Each checkout round gets its own order_number so dine-in reorders (same token,
+    // new items) always produce a fresh KOT. booking_id makes webhook retries idempotent.
+    const tokenSuffix = token_number
+      ? String(token_number).replace(/^T-/i, '')
+      : null;
 
     const cleanPhone = customer_phone
       ? String(customer_phone).replace(/\D/g, '')
       : null;
 
-    const { data: existingOrder } = await supabaseAdmin
+    let orderNumber;
+    if (booking_id) {
+      const bidShort = String(booking_id).replace(/-/g, '').slice(0, 8);
+      orderNumber = tokenSuffix
+        ? `ORD-${tokenSuffix}-${bidShort}`
+        : `ORD-B-${bidShort}`;
+    } else if (tokenSuffix) {
+      orderNumber = `ORD-${tokenSuffix}`;
+    } else {
+      orderNumber = `ORD-WA-${Date.now()}`;
+    }
+
+    const lineAlreadyOnOrder = (item, existingLines) => {
+      const lines = existingLines ?? [];
+      const rid = item.retailer_id;
+      if (rid && rid !== 'manual') {
+        return lines.some((l) => l.menu_item?.retailer_id === rid);
+      }
+      const name = (item.name || '').trim().toLowerCase();
+      if (!name) return false;
+      return lines.some(
+        (l) => (l.menu_item?.name || '').trim().toLowerCase() === name,
+      );
+    };
+
+    let { data: existingOrder } = await supabaseAdmin
       .from('orders')
       .select('id, order_number')
       .eq('restaurant_id', restaurant_id)
       .eq('order_number', orderNumber)
       .maybeSingle();
 
-    // ── Dedup / repair: one ticket per token; fill missing lines on partial sends ─
+    // Legacy path (no booking_id): if token order exists but cart has NEW items, open a new round.
+    if (!booking_id && tokenSuffix && existingOrder?.id) {
+      const { data: previewLines } = await supabaseAdmin
+        .from('order_items')
+        .select('id, menu_item:menu_item_id(retailer_id, name)')
+        .eq('order_id', existingOrder.id);
+      const preview = previewLines ?? [];
+      const hasNewItems = items.some((item) => !lineAlreadyOnOrder(item, preview));
+      if (hasNewItems) {
+        const { count: roundCount } = await supabaseAdmin
+          .from('orders')
+          .select('id', { count: 'exact', head: true })
+          .eq('restaurant_id', restaurant_id)
+          .like('order_number', `ORD-${tokenSuffix}%`);
+        const round = (roundCount ?? 1) + 1;
+        orderNumber = `ORD-${tokenSuffix}-R${round}`;
+        existingOrder = null;
+        console.log(
+          `[kds-notify] 🔁 reorder round ${orderNumber} for token ${token_number} (${items.length} item(s))`
+        );
+      }
+    }
+
+    if (!existingOrder) {
+      const { data: byRound } = await supabaseAdmin
+        .from('orders')
+        .select('id, order_number')
+        .eq('restaurant_id', restaurant_id)
+        .eq('order_number', orderNumber)
+        .maybeSingle();
+      existingOrder = byRound;
+    }
+
+    // ── Dedup / repair: idempotent retry for the SAME order_number only ───────
     let orderRow = existingOrder;
     let existingOrderLines = [];
 
@@ -111,10 +172,10 @@ router.post('/notify', async (req, res) => {
         existingKdsCount = count ?? 0;
       }
 
-      const requestedLines = items.length;
-      if (existingKdsCount >= requestedLines && existingKdsCount > 0) {
+      const newItemsNeeded = items.filter((item) => !lineAlreadyOnOrder(item, existingOrderLines));
+      if (newItemsNeeded.length === 0 && existingKdsCount > 0) {
         console.log(
-          `[kds-notify] ♻️ deduped ${orderNumber} — ${existingKdsCount} item(s) already on KDS`
+          `[kds-notify] ♻️ deduped ${orderNumber} — all ${items.length} item(s) already on KDS`
         );
         broadcastToRestaurant(restaurant_id, {
           type:             'ORDER_NEW',
@@ -137,27 +198,19 @@ router.post('/notify', async (req, res) => {
           order_id:          existingOrder.id,
           order_number:      existingOrder.order_number,
           kds_items_created: existingKdsCount,
+          kds_items_added:   0,
           deduplicated:      true,
         });
       }
-      if (existingKdsCount > 0 && existingKdsCount < requestedLines) {
+      if (existingKdsCount > 0 && newItemsNeeded.length > 0) {
         console.warn(
-          `[kds-notify] ⚠️ partial ${orderNumber} — ${existingKdsCount}/${requestedLines} on KDS, adding missing lines`
+          `[kds-notify] ⚠️ partial ${orderNumber} — adding ${newItemsNeeded.length} missing line(s)`
         );
       }
     }
 
-    const lineAlreadyOnOrder = (item) => {
-      const rid = item.retailer_id;
-      if (rid && rid !== 'manual') {
-        return existingOrderLines.some((l) => l.menu_item?.retailer_id === rid);
-      }
-      const name = (item.name || '').trim().toLowerCase();
-      if (!name) return false;
-      return existingOrderLines.some(
-        (l) => (l.menu_item?.name || '').trim().toLowerCase() === name,
-      );
-    };
+    const lineOnThisOrder = (item) => lineAlreadyOnOrder(item, existingOrderLines);
+
     if (!orderRow) {
       const { data: inserted, error: orderErr } = await supabaseAdmin
         .from('orders')
@@ -190,7 +243,7 @@ router.post('/notify', async (req, res) => {
     let   kdsItemsCreated = 0;
 
     for (const item of items) {
-      if (lineAlreadyOnOrder(item)) {
+      if (lineOnThisOrder(item)) {
         continue;
       }
       // 3a: Resolve by retailer_id
@@ -279,6 +332,7 @@ router.post('/notify', async (req, res) => {
     }
 
     // ── Step 4: Bulk-insert kds_items ─────────────────────────────────────────
+    const kdsItemsAdded = kdsInserts.length;
     if (kdsInserts.length > 0) {
       const { error: kdsErr } = await supabaseAdmin.from('kds_items').insert(kdsInserts);
       if (kdsErr) {
@@ -331,7 +385,7 @@ router.post('/notify', async (req, res) => {
       kotPrinterIp &&
       (kitchenWorkflow === 'KOT_only' || kitchenWorkflow === 'Both_KOT_and_KDS');
 
-    if (shouldPrintKot && kdsItemsCreated > 0) {
+    if (shouldPrintKot && kdsItemsAdded > 0) {
       const kotLines = buildKotLines({
         restaurant_name: restaurantName,
         order_number: orderRow.order_number,
@@ -409,15 +463,16 @@ router.post('/notify', async (req, res) => {
       ` | restaurant ${restaurant_id}`
     );
 
-    if (kdsItemsCreated === 0) {
+    if (kdsItemsAdded === 0) {
       console.error(
-        `[kds-notify] ❌ order ${orderRow.order_number} created but 0 KDS items — check menu_items schema`
+        `[kds-notify] ❌ order ${orderRow.order_number} — 0 new KDS items added (${items.length} requested)`
       );
       return res.status(500).json({
-        error:           'No KDS items could be created for this order',
-        order_id:        orderRow.id,
-        order_number:    orderRow.order_number,
-        kds_items_created: 0,
+        error:             'No KDS items could be created for this order',
+        order_id:          orderRow.id,
+        order_number:      orderRow.order_number,
+        kds_items_created: kdsItemsCreated,
+        kds_items_added:   0,
       });
     }
 
@@ -426,6 +481,7 @@ router.post('/notify', async (req, res) => {
       order_id:          orderRow.id,
       order_number:      orderRow.order_number,
       kds_items_created: kdsItemsCreated,
+      kds_items_added:   kdsItemsAdded,
     });
 
   } catch (err) {

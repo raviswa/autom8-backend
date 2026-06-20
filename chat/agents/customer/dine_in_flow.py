@@ -25,9 +25,11 @@ from tools.db_tools import (
     get_session_state,
     save_session_state,
     customer_lock,
+    mark_booking_kds_sent,
 )
 from tools.payment_tools import build_payment_line
 from tools.prepay_fulfillment import (
+    reset_kitchen_state_for_new_checkout,
     prepay_fulfillment_required,
     build_prepay_payload,
     stash_and_persist_prepay_payload,
@@ -239,7 +241,17 @@ async def _finalize_special_notes_and_kitchen(
                 )
         return
 
-    if session_state.get("_kitchen_sent") and not force_kitchen_send:
+    stale_kitchen = session_state.get("_kitchen_sent") and not force_kitchen_send
+    if stale_kitchen and session_state.get("booking_step") in (
+        "awaiting_special_notes", "awaiting_prepay",
+    ):
+        session_state.pop("_kitchen_sent", None)
+        stale_kitchen = False
+    if stale_kitchen and kitchen_blocked_pending_payment(session_state):
+        session_state.pop("_kitchen_sent", None)
+        stale_kitchen = False
+
+    if stale_kitchen:
         token = session_state.get("display_token", session_state.get("token_number", ""))
         if special_notes:
             await update_kds_order_notes(
@@ -433,7 +445,11 @@ async def _fire_kitchen_and_receipt(
         service_type="dine_in",
         restaurant_id=restaurant_id,
         special_notes=special_notes,
+        booking_id=session_state.get("booking_id"),
     )
+
+    if order_id and session_state.get("booking_id"):
+        await mark_booking_kds_sent(session_state["booking_id"])
 
     if not RECEIPT_AVAILABLE:
         return order_id
@@ -491,6 +507,8 @@ async def _confirm_dine_in_order(
     cart_snapshot: dict,
 ) -> Dict[str, Any]:
     """Create booking + send confirmation. Raises on failure."""
+    reset_kitchen_state_for_new_checkout(session_state)
+
     await enrich_cart_titles(cart_snapshot, restaurant_id)
     if cart_snapshot:
         order_text = cart_to_order_text(cart_snapshot)

@@ -18,6 +18,7 @@ from tools.db_tools import (
     mark_reservation_reminder_sent,
     get_bookings_due_for_kds,
     mark_booking_kds_sent,
+    get_paid_bookings_missing_kds,
 )
 from tools.personalisation_tools import update_customer_profile
 from tools.campaign_tools import (
@@ -133,6 +134,13 @@ async def start_scheduler():
         id="send_prepay_payment_reminders",
         name="Remind customers with pending Razorpay prepay",
     )
+
+    scheduler.add_job(
+        reconcile_paid_orders_without_kds,
+        trigger=CronTrigger(minute="*/10"),  # Every 10 minutes
+        id="reconcile_paid_orders_without_kds",
+        name="Reconcile paid orders missing KDS tickets",
+    )
     
     scheduler.start()
     logger.info("APScheduler started with jobs")
@@ -222,6 +230,7 @@ async def dispatch_deferred_scheduled_kds():
                     token_number=str(token),
                     service_type=service_type,
                     restaurant_id=row["restaurant_id"],
+                    booking_id=row.get("booking_id"),
                 )
                 await mark_booking_kds_sent(row["booking_id"])
                 dispatched += 1
@@ -473,3 +482,53 @@ async def send_delayed_menu_prompts():
     
     except Exception as e:
         logger.error(f"Error in send_delayed_menu_prompts: {e}")
+
+
+async def reconcile_paid_orders_without_kds():
+    """
+    Alert and auto-retry when payment was captured but no KDS ticket exists.
+    """
+    logger.info("Running reconcile_paid_orders_without_kds job")
+    try:
+        from tools.prepay_fulfillment import retry_kds_for_confirmed_booking
+
+        rows = await get_paid_bookings_missing_kds()
+        if not rows:
+            return
+
+        retried = 0
+        alerted = 0
+        for row in rows:
+            booking_id = row["booking_id"]
+            ok = await retry_kds_for_confirmed_booking(booking_id)
+            if ok:
+                retried += 1
+                logger.warning(
+                    f"[reconcile] Auto-retried KDS for paid booking {booking_id} "
+                    f"({row.get('service_type')} token {row.get('token_number')})"
+                )
+            else:
+                manager = row.get("manager_phone")
+                if manager:
+                    await send_whatsapp_message(
+                        manager,
+                        f"⚠️ *Paid order missing from kitchen*\n\n"
+                        f"Booking: {booking_id[:8]}…\n"
+                        f"Customer: {row.get('customer_name')} ({row.get('customer_phone')})\n"
+                        f"Token: {row.get('token_number') or '—'}\n"
+                        f"Service: {row.get('service_type')}\n\n"
+                        f"Payment was captured but no KDS ticket was created. "
+                        f"Please verify the kitchen display and contact support if needed.",
+                        row["restaurant_id"],
+                    )
+                    alerted += 1
+                logger.error(
+                    f"[reconcile] Paid booking {booking_id} has no KDS — retry failed"
+                )
+
+        logger.info(
+            f"[reconcile] Processed {len(rows)} paid-without-KDS booking(s): "
+            f"{retried} retried, {alerted} manager alerts"
+        )
+    except Exception as e:
+        logger.error(f"Error in reconcile_paid_orders_without_kds: {e}")

@@ -1037,6 +1037,47 @@ async def mark_booking_kds_sent(booking_id: str) -> None:
         await session.commit()
 
 
+async def get_paid_bookings_missing_kds(max_age_hours: int = 48) -> list[dict[str, Any]]:
+    """
+    Paid food orders with no KDS dispatch recorded — financial-integrity backstop.
+    Excludes reserve_table and scheduled orders still before their release window.
+    """
+    if AsyncSessionLocal is None:
+        return []
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    SELECT
+                      b.id::text AS booking_id,
+                      b.restaurant_id::text AS restaurant_id,
+                      b.service_type,
+                      b.token_number,
+                      b.payment_status,
+                      b.kds_sent_at,
+                      c.phone AS customer_phone,
+                      c.name AS customer_name,
+                      r.name AS restaurant_name,
+                      COALESCE(r.manager_phone, r.phone) AS manager_phone
+                    FROM bookings b
+                    JOIN customers c ON c.id = b.customer_id
+                    JOIN restaurants r ON r.id = b.restaurant_id
+                    WHERE b.payment_status = 'paid'
+                      AND b.kds_sent_at IS NULL
+                      AND b.service_type IN ('dine_in', 'takeaway', 'delivery')
+                      AND b.status IN ('confirmed', 'pending')
+                      AND b.created_at > NOW() - (:max_age || ' hours')::interval
+                    ORDER BY b.created_at ASC
+                    LIMIT 20
+                """),
+                {"max_age": str(max_age_hours)},
+            )
+            return [dict(r) for r in result.mappings().all()]
+    except Exception as e:
+        logger.warning(f"[reconcile] get_paid_bookings_missing_kds failed: {e}")
+        return []
+
+
 async def get_bookings_due_for_kds() -> list[dict]:
     """
     Confirmed scheduled delivery/takeaway bookings whose KDS release window has opened.
