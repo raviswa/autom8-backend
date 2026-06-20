@@ -313,18 +313,23 @@ async def send_catalog_category_picker(
     restaurant_label = await _get_restaurant_label(restaurant_id)
     categories = _ordered_categories(available)
     rows: list[dict] = []
-    for cat in categories[:9]:
+    category_row_map: dict[str, str] = {}
+    for index, cat in enumerate(categories[:9]):
+        row_key = str(index)
+        category_row_map[row_key] = cat
         cat_items = _items_in_category(available, cat)
         sample = ", ".join(i["title"] for i in cat_items[:3])
         rows.append({
-            "id":          f"CAT:{cat}",
+            # Meta list row ids: alphanumeric, underscores, dashes only.
+            "id":          f"CAT:{row_key}",
             "title":       _truncate(cat, _MAX_LIST_ROW_TITLE),
             "description": _truncate(f"{len(cat_items)} items · {sample}", _MAX_LIST_ROW_DESC),
         })
 
+    category_row_map[CATALOG_PICKER_FULL_ID] = CATALOG_PICKER_FULL_ID
     rows.append({
         "id":          f"CAT:{CATALOG_PICKER_FULL_ID}",
-        "title":       _truncate("🍽️ Browse full menu", _MAX_LIST_ROW_TITLE),
+        "title":       _truncate("Browse full menu", _MAX_LIST_ROW_TITLE),
         "description": _truncate(f"All {len(available)} items · every category", _MAX_LIST_ROW_DESC),
     })
 
@@ -351,6 +356,7 @@ async def send_catalog_category_picker(
     if ok and session_state is not None:
         session_state["booking_step"] = "awaiting_category_selection"
         session_state["booking_mechanism"] = "catalog_b"
+        session_state["_category_row_map"] = category_row_map
         logger.info(f"[catalog-b] Category picker sent to {customer_phone} ({len(rows)} rows)")
     return ok
 

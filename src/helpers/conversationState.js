@@ -85,6 +85,9 @@ async function syncConversationForTokenApproval({
       booking_mechanism_order_source: null,
       // Portal sends menu on assign — avoid duplicate from chat poll path
       _catalog_sent_after_party: catalogOk || pickerSent,
+      ...(menuSendResult.categoryRowMap
+        ? { _category_row_map: menuSendResult.categoryRowMap }
+        : {}),
       ...(specialsNoteSent ? { _specials_note_sent: true } : {}),
     };
 

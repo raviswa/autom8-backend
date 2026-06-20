@@ -14,7 +14,18 @@ const { supabaseAdmin } = require('../config/supabase');
 const { broadcastToRestaurant } = require('../websocket');
 const { getMetaCatalogId, getWhatsAppIntegration } = require('./restaurantConfig');
 
-// ── sendWhatsAppMessage ───────────────────────────────────────────────────────
+async function isWhatsAppConfigured(restaurantId = null) {
+  try {
+    const creds = restaurantId ? await getWhatsAppIntegration(restaurantId) : null;
+    const accessToken   = creds?.accessToken   || process.env.WHATSAPP_ACCESS_TOKEN;
+    const phoneNumberId = creds?.phoneNumberId   || process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const apiUrl        = creds?.apiUrl          || process.env.WHATSAPP_API_URL;
+    return Boolean(accessToken && phoneNumberId && apiUrl);
+  } catch {
+    return false;
+  }
+}
+
 // Sends a plain-text WhatsApp message.
 // Looks up per-outlet credentials from restaurant_integrations if restaurantId
 // is supplied; falls back to global env vars for standalone installs.
@@ -239,30 +250,43 @@ async function sendWhatsAppProductList(toNumber, restaurantId, { header, body, c
   return ok;
 }
 
+function buildCategoryPickerRows(items) {
+  const categories = orderedCategories(items);
+  const categoryRowMap = {};
+  const rows = [];
+
+  categories.slice(0, 9).forEach((cat, index) => {
+    const rowKey = String(index);
+    categoryRowMap[rowKey] = cat;
+    const catItems = itemsInCategory(items, cat);
+    const sample = catItems.slice(0, 3).map((i) => i.title).join(', ');
+    rows.push({
+      // Meta list row ids: alphanumeric, underscores, dashes only (no spaces/&).
+      id: `CAT:${rowKey}`,
+      title: truncate(cat, MAX_LIST_ROW_TITLE),
+      description: truncate(`${catItems.length} items · ${sample}`, MAX_LIST_ROW_DESC),
+    });
+  });
+
+  categoryRowMap[CATALOG_PICKER_FULL_ID] = CATALOG_PICKER_FULL_ID;
+  rows.push({
+    id: `CAT:${CATALOG_PICKER_FULL_ID}`,
+    title: truncate('Browse full menu', MAX_LIST_ROW_TITLE),
+    description: truncate(`All ${items.length} items · every category`, MAX_LIST_ROW_DESC),
+  });
+
+  return { rows, categoryRowMap };
+}
+
 async function sendCatalogCategoryPicker(toNumber, restaurantId) {
   const items = await fetchAvailableMenuItems(restaurantId);
   if (!items.length) {
     console.warn(`[catalog-b] No available items for category picker (${restaurantId})`);
-    return false;
+    return { ok: false, categoryRowMap: null };
   }
 
   const label = await getRestaurantLabel(restaurantId);
-  const categories = orderedCategories(items);
-  const rows = categories.slice(0, 9).map((cat) => {
-    const catItems = itemsInCategory(items, cat);
-    const sample = catItems.slice(0, 3).map((i) => i.title).join(', ');
-    return {
-      id: `CAT:${cat}`,
-      title: truncate(cat, MAX_LIST_ROW_TITLE),
-      description: truncate(`${catItems.length} items · ${sample}`, MAX_LIST_ROW_DESC),
-    };
-  });
-
-  rows.push({
-    id: `CAT:${CATALOG_PICKER_FULL_ID}`,
-    title: truncate('🍽️ Browse full menu', MAX_LIST_ROW_TITLE),
-    description: truncate(`All ${items.length} items · every category`, MAX_LIST_ROW_DESC),
-  });
+  const { rows, categoryRowMap } = buildCategoryPickerRows(items);
 
   const ok = await sendWhatsAppInteractive(
     toNumber,
@@ -286,8 +310,10 @@ async function sendCatalogCategoryPicker(toNumber, restaurantId) {
 
   if (ok) {
     console.log(`[catalog-b] ✅ Category picker sent to ${toNumber} (${rows.length} rows)`);
+  } else {
+    console.error(`[catalog-b] Category picker rejected by Meta for ${toNumber}`);
   }
-  return ok;
+  return { ok, categoryRowMap: ok ? categoryRowMap : null };
 }
 
 // ── sendWhatsAppCatalogMessage ────────────────────────────────────────────────
@@ -395,28 +421,99 @@ async function sendSpecialDishesNote(toNumber, restaurantId) {
   }
 }
 
+async function sendPlainTextMenuFallback(toNumber, restaurantId) {
+  const items = await fetchAvailableMenuItems(restaurantId);
+  if (!items.length) return false;
+
+  const byCategory = orderedCategories(items);
+  const lines = [];
+  let n = 1;
+  for (const cat of byCategory) {
+    lines.push(`*${cat}*`);
+    for (const item of itemsInCategory(items, cat).slice(0, 8)) {
+      lines.push(`${n}. ${item.title}`);
+      n += 1;
+      if (n > 25) break;
+    }
+    if (n > 25) break;
+    lines.push('');
+  }
+
+  const ok = await sendWhatsAppMessage(
+    toNumber,
+    '🍽️ *Today\'s Menu*\n\n'
+      + `${lines.join('\n').trim()}\n\n`
+      + 'Reply with item names to order, or type *MENU* to reopen the catalog.',
+    restaurantId,
+  );
+  if (ok) console.log(`[catalog-fallback] Plain-text menu sent to ${toNumber}`);
+  return ok;
+}
+
+async function sendMenuLastResortPrompt(toNumber, restaurantId) {
+  const ok = await sendWhatsAppMessage(
+    toNumber,
+    '🍽️ Our menu is ready for you!\n\n'
+      + '👆 Tap the *🛍️ Shop* icon at the top of this chat to browse '
+      + 'and add items to your basket — then come back here to confirm.\n\n'
+      + 'Or type *MENU* for a text list of today\'s items.',
+    restaurantId,
+  );
+  if (ok) console.log(`[catalog-fallback] Shop-icon prompt sent to ${toNumber}`);
+  return ok;
+}
+
 /**
- * Option B menu send: category picker → grouped catalog fallback → specials note.
+ * Option B menu send with full fallback chain (mirrors Python send_unified_booking_menu).
  */
 async function sendWhatsAppCatalogWithSpecials(toNumber, restaurantId) {
-  let pickerSent = await sendCatalogCategoryPicker(toNumber, restaurantId);
-  if (!pickerSent) {
+  let categoryRowMap = null;
+
+  let pickerResult = await sendCatalogCategoryPicker(toNumber, restaurantId);
+  if (!pickerResult.ok) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
-    pickerSent = await sendCatalogCategoryPicker(toNumber, restaurantId);
+    pickerResult = await sendCatalogCategoryPicker(toNumber, restaurantId);
   }
+
+  let pickerSent = pickerResult.ok;
+  if (pickerSent) categoryRowMap = pickerResult.categoryRowMap;
 
   let catalogOk = pickerSent;
   let mechanism = pickerSent ? 'catalog_b' : 'none';
 
   if (!pickerSent) {
     catalogOk = await sendWhatsAppCatalogMessage(toNumber, restaurantId);
+    if (!catalogOk) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      catalogOk = await sendWhatsAppCatalogMessage(toNumber, restaurantId);
+    }
     mechanism = catalogOk ? 'catalog' : 'none';
-    if (!catalogOk) return { catalogOk: false, pickerSent: false, specialsSent: false, mechanism: 'none' };
+  }
+
+  if (!catalogOk && !pickerSent) {
+    const textOk = await sendPlainTextMenuFallback(toNumber, restaurantId);
+    if (textOk) {
+      mechanism = 'cart_text';
+      catalogOk = true;
+    }
+  }
+
+  if (!catalogOk && !pickerSent) {
+    await sendMenuLastResortPrompt(toNumber, restaurantId);
+    console.error(
+      `[catalog-b] ALL menu mechanisms failed for ${toNumber} (restaurant ${restaurantId})`,
+    );
   }
 
   await new Promise((resolve) => setTimeout(resolve, 1500));
   const specialsSent = await sendSpecialDishesNote(toNumber, restaurantId);
-  return { catalogOk, pickerSent, specialsSent, mechanism };
+  return {
+    catalogOk: catalogOk || pickerSent,
+    pickerSent,
+    specialsSent,
+    mechanism,
+    categoryRowMap,
+  };
 }
 
 // ── notifyOrderReady ──────────────────────────────────────────────────────────
@@ -493,6 +590,7 @@ async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
 // ── Exports ───────────────────────────────────────────────────────────────────
 
 module.exports = {
+  isWhatsAppConfigured,
   sendWhatsAppMessage,
   sendWhatsAppInteractive,
   sendWhatsAppCatalogMessage,

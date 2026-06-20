@@ -174,6 +174,19 @@ def _truncate_desc(text: str, max_len: int = _MAX_ROW_DESC) -> str:
     return text[: max_len - 1] + "…"
 
 
+def _resolve_category_list_reply(reply_id: str, session_state: dict[str, Any]) -> str:
+    """Map CAT:0 style list ids back to menu category names (Option B)."""
+    from tools.catalog_tools import CATALOG_PICKER_FULL_ID
+
+    raw = reply_id.split(":", 1)[1]
+    if raw == CATALOG_PICKER_FULL_ID:
+        return CATALOG_PICKER_FULL_ID
+    row_map = session_state.get("_category_row_map") or {}
+    if raw in row_map:
+        return row_map[raw]
+    return raw
+
+
 # ── Cart helpers ──────────────────────────────────────────────────────────────
 
 def get_cart(session_state: dict[str, Any]) -> dict[str, Any]:
@@ -961,7 +974,7 @@ async def handle_incoming_message(
             return True
 
         if reply_id.startswith("CAT:"):
-            category = reply_id.split(":", 1)[1]
+            category = _resolve_category_list_reply(reply_id, session_state)
             rid = session_state.get("restaurant_id")
             mechanism = session_state.get("booking_mechanism", "")
             use_waba_catalog = (

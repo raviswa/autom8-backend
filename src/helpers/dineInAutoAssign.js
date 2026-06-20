@@ -8,6 +8,7 @@ const { broadcastToRestaurant } = require('../websocket');
 const {
   sendWhatsAppMessage,
   sendWhatsAppCatalogWithSpecials,
+  isWhatsAppConfigured,
 } = require('./whatsapp');
 const { syncConversationForTokenApproval } = require('./conversationState');
 
@@ -90,7 +91,10 @@ function comboStillAvailable(tablesByNumber, combo) {
 }
 
 async function notifyCustomerSeated(token, restaurantId, tableNumbers, messagePrefix) {
-  if (!token.phone || !process.env.WHATSAPP_ACCESS_TOKEN) {
+  if (!token.phone || !(await isWhatsAppConfigured(restaurantId))) {
+    console.warn(
+      `[dine-in-auto] Skip WA notify for ${token.id} — missing phone or credentials`,
+    );
     return { catalogOk: false, pickerSent: false, specialsSent: false, mechanism: 'none' };
   }
 
@@ -102,7 +106,16 @@ async function notifyCustomerSeated(token, restaurantId, tableNumbers, messagePr
     ?? `✅ *Your table is ready!*\n\nToken: *${token.id}*\nTable: *${tablesLabel}*\n\nPlease proceed to your table. Enjoy! 🍽️`;
 
   await sendWhatsAppMessage(token.phone, body, restaurantId);
-  return sendWhatsAppCatalogWithSpecials(token.phone, restaurantId);
+  // Brief pause — back-to-back text + interactive often fails on Meta.
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+
+  const menuSendResult = await sendWhatsAppCatalogWithSpecials(token.phone, restaurantId);
+  if (!menuSendResult.catalogOk && !menuSendResult.pickerSent) {
+    console.error(
+      `[dine-in-auto] Menu send failed after seating ${token.id} → ${token.phone}`,
+    );
+  }
+  return menuSendResult;
 }
 
 async function autoAssignDineInToken(token, restaurantId, table) {

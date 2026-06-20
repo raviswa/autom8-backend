@@ -20,7 +20,7 @@ const router  = express.Router();
 
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const { broadcastToRestaurant }   = require('../websocket');
-const { sendWhatsAppMessage, sendWhatsAppCatalogWithSpecials, sendWhatsAppInteractive } = require('../helpers/whatsapp');
+const { sendWhatsAppMessage, sendWhatsAppCatalogWithSpecials, sendWhatsAppInteractive, isWhatsAppConfigured } = require('../helpers/whatsapp');
 const { getManagerPhone } = require('../helpers/restaurantConfig');
 const { validateScheduledDeliverySlot } = require('../helpers/deliverySlots');
 const { assignAndNotifyCaptainTakeaway } = require('../helpers/captainAssignment');
@@ -88,7 +88,7 @@ async function approveScheduledDeliveryToken(tokenId, restaurantId, token) {
       .eq('id', meta.booking_id);
   }
 
-  if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+  if (token.phone && await isWhatsAppConfigured(restaurantId)) {
     const schedLabel = meta.scheduled_at_label || meta.scheduled_at || 'your chosen time';
     await sendWhatsAppMessage(
       token.phone,
@@ -145,7 +145,7 @@ async function rejectScheduledDeliveryToken(tokenId, restaurantId, token, reason
       .eq('id', meta.booking_id);
   }
 
-  if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+  if (token.phone && await isWhatsAppConfigured(restaurantId)) {
     const reasonLine = reason ? `\n\nReason: ${reason}` : '';
     await sendWhatsAppMessage(
       token.phone,
@@ -234,7 +234,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
 
     // notify=false skips the manager alert (e.g. duplicate guard). Default: send from API.
     const shouldNotify = req.query.notify !== 'false';
-    if (shouldNotify && managerPhone && process.env.WHATSAPP_ACCESS_TOKEN) {
+    if (shouldNotify && managerPhone && await isWhatsAppConfigured(restaurantId)) {
       if (type === 'large_party') {
         const combo      = meta?.combo ?? [];
         const tableLines = combo.length > 0
@@ -533,12 +533,13 @@ router.put('/:id/assign', outletAuth, async (req, res) => {
     await supabaseAdmin.from('tables').update({ status: 'occupied' }).eq('id', table_id).eq('restaurant_id', restaurantId);
 
     let menuSendResult = {};
-    if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+    if (token.phone && await isWhatsAppConfigured(restaurantId)) {
       await sendWhatsAppMessage(
         token.phone,
         `✅ *Your table is ready!*\n\nToken: *${token.id}*\nTable: *Table ${table_number}*\n\nPlease proceed to your table. Enjoy! 🍽️`,
         restaurantId
       );
+      await new Promise((resolve) => setTimeout(resolve, 1500));
       menuSendResult = await sendWhatsAppCatalogWithSpecials(token.phone, restaurantId);
     }
 
@@ -615,12 +616,13 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
       await supabaseAdmin.from('tables').update({ status: 'occupied' }).in('id', tableIds).eq('restaurant_id', restaurantId);
 
     let menuSendResult = {};
-    if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+    if (token.phone && await isWhatsAppConfigured(restaurantId)) {
       await sendWhatsAppMessage(
         token.phone,
         `✅ *Your table arrangement has been confirmed.*\n\nToken: *${token.id}*\nParty of: *${token.pax} people*\nTables: *${tableNumbers.join(', ')}*\n\nPlease head to the restaurant! 🍽️`,
         restaurantId
       );
+      await new Promise((resolve) => setTimeout(resolve, 1500));
       menuSendResult = await sendWhatsAppCatalogWithSpecials(token.phone, restaurantId);
     }
 
@@ -679,7 +681,7 @@ router.put('/:id/reject', outletAuth, async (req, res) => {
       return res.status(409).json({ error: 'Token already approved or rejected' });
     }
 
-    if (token.phone && process.env.WHATSAPP_ACCESS_TOKEN) {
+    if (token.phone && await isWhatsAppConfigured(restaurantId)) {
       const reasonLine = req.body.reason ? `\n\nReason: ${req.body.reason}` : '';
       await sendWhatsAppMessage(
         token.phone,
