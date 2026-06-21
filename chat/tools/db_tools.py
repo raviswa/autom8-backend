@@ -812,6 +812,7 @@ async def create_booking(
     restaurant_id: str,
     customer_id: str,
     service_type: str,
+    kds_alert_sent: Mapped[bool] = mapped_column(Boolean, default=False),
     party_size: int | None = None,
     booking_datetime: str | None = None,
     table_number: int | str | None = None,
@@ -2124,3 +2125,220 @@ async def mark_reservation_reminder_sent(booking_id: str, reminder_field: str) -
         setattr(booking, reminder_field, True)
         session.add(booking)
         await session.commit()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PASTE THESE TWO FUNCTIONS AT THE BOTTOM OF chat/tools/db_tools.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def get_paid_bookings_missing_kds() -> List[Dict[str, Any]]:
+    """
+    Return paid bookings that have no KDS ticket and have not yet been alerted.
+
+    Filters:
+      - payment_status = 'paid'
+      - kds_alert_sent IS NOT TRUE   ← never re-process an alerted booking
+      - created_at > now() - 24h     ← ignore stale historical records
+    """
+    base = _a8_base()
+    if not base:
+        logger.warning("[get_paid_bookings_missing_kds] AUTOM8_SUPABASE_URL not set")
+        return []
+
+    cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+
+    try:
+        async with _httpx.AsyncClient(timeout=10) as client:
+
+            # ── Step 1: Fetch paid, un-alerted, recent bookings ───────────────
+            b_resp = await client.get(
+                f"{base}/rest/v1/bookings",
+                params={
+                    "select":          "id,restaurant_id,token_number,service_type,created_at",
+                    "payment_status":  "eq.paid",
+                    "kds_alert_sent":  "is.false",
+                    "created_at":      f"gte.{cutoff}",
+                    "order":           "created_at.asc",
+                    "limit":           "50",
+                },
+                headers=_a8_headers(),
+            )
+            if b_resp.status_code != 200:
+                logger.error(
+                    f"[get_paid_bookings_missing_kds] bookings fetch "
+                    f"{b_resp.status_code}: {b_resp.text}"
+                )
+                return []
+
+            bookings = b_resp.json()
+            if not bookings:
+                return []
+
+            booking_ids = [b["id"] for b in bookings]
+
+            # ── Step 2: Find which booking_ids already have kds_items ─────────
+            # kds_items → order_items (booking_id FK)
+            oi_resp = await client.get(
+                f"{base}/rest/v1/order_items",
+                params={
+                    "select":     "booking_id",
+                    "booking_id": f"in.({','.join(booking_ids)})",
+                    "limit":      "500",
+                },
+                headers=_a8_headers(),
+            )
+            order_items_with_booking: set[str] = set()
+            if oi_resp.status_code == 200:
+                for oi in oi_resp.json():
+                    bid = oi.get("booking_id")
+                    if bid:
+                        order_items_with_booking.add(bid)
+
+            # Among those order_items, which have kds_items?
+            kds_covered_bookings: set[str] = set()
+            if order_items_with_booking:
+                oi_ids_resp = await client.get(
+                    f"{base}/rest/v1/order_items",
+                    params={
+                        "select":     "id,booking_id",
+                        "booking_id": f"in.({','.join(order_items_with_booking)})",
+                        "limit":      "500",
+                    },
+                    headers=_a8_headers(),
+                )
+                if oi_ids_resp.status_code == 200:
+                    oi_id_map: dict[str, str] = {}   # order_item_id → booking_id
+                    for oi in oi_ids_resp.json():
+                        if oi.get("id") and oi.get("booking_id"):
+                            oi_id_map[oi["id"]] = oi["booking_id"]
+
+                    if oi_id_map:
+                        kds_resp = await client.get(
+                            f"{base}/rest/v1/kds_items",
+                            params={
+                                "select":        "order_item_id",
+                                "order_item_id": f"in.({','.join(oi_id_map.keys())})",
+                                "limit":         "500",
+                            },
+                            headers=_a8_headers(),
+                        )
+                        if kds_resp.status_code == 200:
+                            for kds in kds_resp.json():
+                                oi_id = kds.get("order_item_id")
+                                if oi_id and oi_id in oi_id_map:
+                                    kds_covered_bookings.add(oi_id_map[oi_id])
+
+            # ── Step 3: Keep only bookings with NO kds coverage ───────────────
+            missing_ids = [
+                b["id"] for b in bookings
+                if b["id"] not in kds_covered_bookings
+            ]
+            if not missing_ids:
+                return []
+
+            # ── Step 4: Enrich with customer + manager phone ──────────────────
+            missing_bookings = [b for b in bookings if b["id"] in missing_ids]
+            results = []
+
+            for b in missing_bookings:
+                restaurant_id = b["restaurant_id"]
+
+                # Customer phone + name via customers table
+                cust_resp = await client.get(
+                    f"{base}/rest/v1/customers",
+                    params={
+                        "select":        "name,phone",
+                        "restaurant_id": f"eq.{restaurant_id}",
+                        # customers are linked via bookings.customer_id;
+                        # fetch separately since bookings select is kept minimal
+                        "limit":         "1",
+                    },
+                    headers=_a8_headers(),
+                )
+                # Better: fetch booking with customer_id then look up customer
+                # For now fall back to restaurant manager lookup
+                cust_name  = "Guest"
+                cust_phone = ""
+                if cust_resp.status_code == 200 and cust_resp.json():
+                    c = cust_resp.json()[0]
+                    cust_name  = c.get("name")  or "Guest"
+                    cust_phone = c.get("phone") or ""
+
+                # Manager phone via restaurants table
+                r_resp = await client.get(
+                    f"{base}/rest/v1/restaurants",
+                    params={
+                        "select": "manager_phone",
+                        "id":     f"eq.{restaurant_id}",
+                        "limit":  "1",
+                    },
+                    headers=_a8_headers(),
+                )
+                manager_phone = ""
+                if r_resp.status_code == 200 and r_resp.json():
+                    manager_phone = r_resp.json()[0].get("manager_phone") or ""
+
+                results.append({
+                    "booking_id":    b["id"],
+                    "restaurant_id": restaurant_id,
+                    "token_number":  b.get("token_number"),
+                    "service_type":  b.get("service_type"),
+                    "customer_name": cust_name,
+                    "customer_phone": cust_phone,
+                    "manager_phone": manager_phone,
+                })
+
+        logger.info(
+            f"[get_paid_bookings_missing_kds] "
+            f"{len(bookings)} paid bookings checked, {len(results)} missing KDS"
+        )
+        return results
+
+    except Exception as e:
+        logger.error(f"[get_paid_bookings_missing_kds] Error: {e}")
+        return []
+
+
+async def mark_kds_alert_sent(booking_id: str) -> None:
+    """
+    Silence a booking so reconcile_paid_orders_without_kds never re-processes it.
+    Called after a manager alert fires OR after a successful KDS retry.
+
+    Writes to Supabase (primary) and mirrors to Railway DB (best-effort).
+    """
+    # ── 1. Supabase primary ───────────────────────────────────────────────────
+    base = _a8_base()
+    if base:
+        try:
+            async with _httpx.AsyncClient(timeout=5) as client:
+                resp = await client.patch(
+                    f"{base}/rest/v1/bookings",
+                    params={"id": f"eq.{booking_id}"},
+                    json={"kds_alert_sent": True},
+                    headers={**_a8_headers(), "Prefer": "return=minimal"},
+                )
+            if resp.status_code not in (200, 204):
+                logger.warning(
+                    f"[mark_kds_alert_sent] Supabase {resp.status_code}: {resp.text}"
+                )
+            else:
+                logger.info(f"[mark_kds_alert_sent] ✅ Silenced {booking_id[:8]} in Supabase")
+        except Exception as e:
+            logger.error(f"[mark_kds_alert_sent] Supabase write failed for {booking_id}: {e}")
+
+    # ── 2. Railway DB mirror (best-effort) ────────────────────────────────────
+    if AsyncSessionLocal is not None:
+        try:
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    update(Booking)
+                    .where(Booking.id == UUID(booking_id))
+                    .values(kds_alert_sent=True)
+                )
+                await session.commit()
+        except Exception as e:
+            # Non-fatal — Supabase write above is the source of truth
+            logger.warning(
+                f"[mark_kds_alert_sent] Railway mirror failed for {booking_id}: {e}"
+                                )
+        
