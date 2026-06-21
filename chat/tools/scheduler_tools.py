@@ -19,6 +19,7 @@ from tools.db_tools import (
     get_bookings_due_for_kds,
     mark_booking_kds_sent,
     get_paid_bookings_missing_kds,
+    mark_kds_alert_sent,              # ← NEW: add this function to db_tools (see note below)
 )
 from tools.personalisation_tools import update_customer_profile
 from tools.campaign_tools import (
@@ -28,6 +29,24 @@ from tools.campaign_tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# db_tools.py changes required alongside this file:
+#
+# 1. Add column filter to get_paid_bookings_missing_kds():
+#       WHERE kds_alert_sent IS NOT TRUE
+#       AND created_at > NOW() - INTERVAL '24 hours'
+#
+# 2. Add new function mark_kds_alert_sent(booking_id):
+#       UPDATE bookings SET kds_alert_sent = TRUE WHERE id = booking_id
+#
+# 3. Run in Supabase SQL editor once before deploying:
+#       ALTER TABLE bookings
+#         ADD COLUMN IF NOT EXISTS kds_alert_sent boolean DEFAULT false;
+#       UPDATE bookings
+#         SET kds_alert_sent = true
+#         WHERE created_at < now() - interval '3 hours';
+# ─────────────────────────────────────────────────────────────────────────────
 
 scheduler = AsyncIOScheduler()
 
@@ -109,10 +128,10 @@ async def start_scheduler():
     )
 
     scheduler.add_job(
-    lambda: asyncio.create_task(cleanup_expired_receipts()),
-    'cron', hour=3, minute=0, id='cleanup_receipts',
-    replace_existing=True,
-    )    
+        lambda: asyncio.create_task(cleanup_expired_receipts()),
+        'cron', hour=3, minute=0, id='cleanup_receipts',
+        replace_existing=True,
+    )
     
     scheduler.add_job(
         track_campaign_conversions,
@@ -395,7 +414,6 @@ async def send_missed_you_messages():
         logger.error(f"Error in send_missed_you_messages: {e}")
 
 
-# NEW JOBS FOR PERSONALISATION AND CAMPAIGNS
 async def update_customer_profiles():
     """Update customer profiles with latest booking data."""
     logger.info("Running update_customer_profiles job")
@@ -461,6 +479,7 @@ async def track_campaign_conversions():
     except Exception as e:
         logger.error(f"Error in track_campaign_conversions: {e}")
 
+
 async def send_delayed_menu_prompts():
     """Send WhatsApp menu prompts 3 minutes after table confirmation."""
     logger.info("Running send_delayed_menu_prompts job")
@@ -487,11 +506,18 @@ async def send_delayed_menu_prompts():
 async def reconcile_paid_orders_without_kds():
     """
     Alert and auto-retry when payment was captured but no KDS ticket exists.
+
+    Each booking is alerted at most once: after a manager alert fires (or after a
+    successful retry), mark_kds_alert_sent() sets kds_alert_sent = TRUE on the
+    booking row so get_paid_bookings_missing_kds() never returns it again.
     """
     logger.info("Running reconcile_paid_orders_without_kds job")
     try:
         from tools.prepay_fulfillment import retry_kds_for_confirmed_booking
 
+        # get_paid_bookings_missing_kds must filter:
+        #   WHERE kds_alert_sent IS NOT TRUE
+        #   AND created_at > NOW() - INTERVAL '24 hours'
         rows = await get_paid_bookings_missing_kds()
         if not rows:
             return
@@ -500,14 +526,19 @@ async def reconcile_paid_orders_without_kds():
         alerted = 0
         for row in rows:
             booking_id = row["booking_id"]
+
             ok = await retry_kds_for_confirmed_booking(booking_id)
+
             if ok:
+                # Retry succeeded — KDS ticket now exists, silence future checks
                 retried += 1
+                await mark_kds_alert_sent(booking_id)          # ← NEW
                 logger.warning(
                     f"[reconcile] Auto-retried KDS for paid booking {booking_id} "
                     f"({row.get('service_type')} token {row.get('token_number')})"
                 )
             else:
+                # Retry failed — alert manager once, then never again
                 manager = row.get("manager_phone")
                 if manager:
                     await send_whatsapp_message(
@@ -522,6 +553,8 @@ async def reconcile_paid_orders_without_kds():
                         row["restaurant_id"],
                     )
                     alerted += 1
+
+                await mark_kds_alert_sent(booking_id)          # ← NEW
                 logger.error(
                     f"[reconcile] Paid booking {booking_id} has no KDS — retry failed"
                 )
