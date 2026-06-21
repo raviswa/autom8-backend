@@ -225,6 +225,7 @@ class Booking(Base):
     token_advance    = Column(Numeric(12, 2))
     payment_status   = Column(Enum("pending","paid","refunded","na", name="payment_status_enum"), nullable=False, default="pending")
     razorpay_order_id     = Column(String(255))
+    kds_alert_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     table_confirmed_at    = Column(DateTime(timezone=True))
     menu_prompt_sent      = Column(Boolean, default=False, nullable=False)
     reminder_24h_sent     = Column(Boolean, default=False, nullable=False)
