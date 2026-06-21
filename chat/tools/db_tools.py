@@ -812,7 +812,6 @@ async def create_booking(
     restaurant_id: str,
     customer_id: str,
     service_type: str,
-    kds_alert_sent: Mapped[bool] = mapped_column(Boolean, default=False),
     party_size: int | None = None,
     booking_datetime: str | None = None,
     table_number: int | str | None = None,
