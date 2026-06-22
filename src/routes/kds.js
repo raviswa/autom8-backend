@@ -58,6 +58,7 @@ router.post('/notify', async (req, res) => {
     special_notes,
     advance_credit = 0,
     booking_id,
+    create_kot = false,
   } = req.body;
 
   if (!restaurant_id) return res.status(400).json({ error: 'restaurant_id required' });
@@ -342,6 +343,38 @@ router.post('/notify', async (req, res) => {
       kdsItemsCreated = kdsInserts.length;
     }
 
+    // ── KOT ticket (scheduled orders — AC7 payment/KOT coupling) ─────────────
+    let kotTicketId = null;
+    if (create_kot && orderRow?.id) {
+      const ticketNumber = `KOT-${orderRow.order_number.replace(/^ORD-/, '')}`;
+      const { data: kotRow, error: kotErr } = await supabaseAdmin
+        .from('kot_tickets')
+        .insert({
+          restaurant_id,
+          order_id:      orderRow.id,
+          ticket_number: ticketNumber,
+          status:        'pending',
+          priority:      'normal',
+        })
+        .select('id')
+        .maybeSingle();
+      if (kotErr) {
+        console.error('[kds-notify] kot_tickets insert failed:', kotErr.message);
+        return res.status(500).json({ error: `KOT creation failed: ${kotErr.message}` });
+      }
+      kotTicketId = kotRow?.id ?? null;
+      if (kotTicketId && kdsInserts.length > 0) {
+        const { data: oiRows } = await supabaseAdmin
+          .from('order_items').select('id').eq('order_id', orderRow.id);
+        const oiIds = (oiRows ?? []).map((r) => r.id);
+        if (oiIds.length) {
+          await supabaseAdmin.from('kds_items')
+            .update({ kot_ticket_id: kotTicketId })
+            .in('order_item_id', oiIds);
+        }
+      }
+    }
+
     if (orderRow?.id) {
       const { data: oiRows } = await supabaseAdmin
         .from('order_items').select('id').eq('order_id', orderRow.id);
@@ -482,6 +515,7 @@ router.post('/notify', async (req, res) => {
       order_number:      orderRow.order_number,
       kds_items_created: kdsItemsCreated,
       kds_items_added:   kdsItemsAdded,
+      kot_ticket_id:     kotTicketId,
     });
 
   } catch (err) {

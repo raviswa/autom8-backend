@@ -311,6 +311,20 @@ async def send_catalog_category_picker(
         return False
 
     restaurant_label = await _get_restaurant_label(restaurant_id)
+    state = session_state or {}
+    from agents.customer.message_templates import (
+        build_menu_intro,
+        ensure_restaurant_greeting_context,
+        resolve_is_new_customer,
+    )
+    await ensure_restaurant_greeting_context(state, restaurant_id or "")
+    is_new = await resolve_is_new_customer(state, restaurant_id or "", customer_phone)
+    menu_body = build_menu_intro(
+        restaurant_display_name=state.get("_restaurant_display_name", restaurant_label),
+        restaurant_cuisine=state.get("_restaurant_cuisine", []),
+        customer_name=state.get("_customer_db_name") or state.get("customer_name"),
+        is_new=is_new,
+    )
     categories = _ordered_categories(available)
     rows: list[dict] = []
     category_row_map: dict[str, str] = {}
@@ -337,14 +351,8 @@ async def send_catalog_category_picker(
         customer_phone,
         {
             "type": "list",
-            "header": {"type": "text", "text": _truncate(f"🍽️ {restaurant_label} Menu", 60)},
-            "body": {
-                "text": (
-                    "What are you in the mood for today?\n\n"
-                    "Tap *Browse menu* below, pick a category, "
-                    "then add items from our catalog to your basket."
-                ),
-            },
+            "header": {"type": "text", "text": _truncate(f"🍽️ {restaurant_label}", 60)},
+            "body": {"text": menu_body},
             "footer": {"text": "Prices excl. GST"},
             "action": {
                 "button": "Browse menu",

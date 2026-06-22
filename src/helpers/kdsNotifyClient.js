@@ -76,4 +76,57 @@ async function notifyKdsFromSessionContext(session) {
   }
 }
 
-module.exports = { notifyKdsFromSessionContext, buildItemsFromCart };
+async def notifyKdsFromPayload({
+  restaurant_id,
+  customer_name,
+  customer_phone,
+  token_number,
+  service_type,
+  items,
+  special_notes,
+  booking_id,
+  create_kot = false,
+}) {
+  const secret = getKdsSecret();
+  const base   = (process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT || 3001}`).replace(/\/$/, '');
+
+  const payload = {
+    secret,
+    restaurant_id,
+    customer_name:  customer_name || 'Guest',
+    customer_phone,
+    token_number,
+    service_type:   service_type || 'takeaway',
+    items:          items?.length ? items : [],
+    special_notes:  special_notes || null,
+    booking_id:     booking_id || null,
+    create_kot:     !!create_kot,
+  };
+
+  if (!payload.items.length) return null;
+
+  try {
+    const resp = await fetch(`${base}/api/kds/notify`, {
+      method:  'POST',
+      headers: {
+        'Content-Type':      'application/json',
+        'x-internal-secret': secret,
+        Authorization:       `Bearer ${secret}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      console.error(`[kds-notify-client] failed ${resp.status}:`, JSON.stringify(data).slice(0, 300));
+      return null;
+    }
+    const added = Number(data.kds_items_added ?? data.kds_items_created ?? 0);
+    if (added <= 0 && !data.deduplicated) return null;
+    return data.order_id || true;
+  } catch (err) {
+    console.error('[kds-notify-client] error:', err.message);
+    return null;
+  }
+}
+
+module.exports = { notifyKdsFromSessionContext, buildItemsFromCart, notifyKdsFromPayload };

@@ -836,17 +836,32 @@ async def handle_dine_in_flow(
             session_state["token_number"]  = portal_token_id
             session_state["display_token"] = portal_token_id
 
-            # Manager alert is sent by POST /api/tokens (notify=true) — same as T-077 flow.
-            # Menu catalog is sent only after table assignment (portal or chat poll below).
-            await send_whatsapp_message(
-                customer_phone,
-                (
+            from tools.db_tools import get_walk_in_token_by_id
+            from tools.wait_estimate import build_dinein_customer_message
+
+            token_row = await get_walk_in_token_by_id(restaurant_id, portal_token_id) if portal_token_id else None
+            estimate_display = (token_row or {}).get("estimate_display")
+            est_min = (token_row or {}).get("estimated_wait_minutes")
+
+            if token_row and estimate_display is not None and est_min is not None:
+                customer_msg = build_dinein_customer_message(
+                    party_size,
+                    portal_token_id,
+                    {
+                        "estimate_minutes": est_min,
+                        "display": estimate_display,
+                        "low": 0,
+                        "high": 0,
+                    },
+                )
+            else:
+                customer_msg = (
                     f"Party of *{party_size}* — perfect! We're finding you a table... 🍽️\n\n"
                     f"*Token: {portal_token_id}*\n\n"
                     f"We'll send you our menu on WhatsApp once your table is ready. 🙏"
-                ),
-                restaurant_id,
-            )
+                )
+
+            await send_whatsapp_message(customer_phone, customer_msg, restaurant_id)
             clear_cart(session_state)
             session_state["booking_step"] = "awaiting_table_assignment"
             return {"status": "awaiting_table_assignment"}

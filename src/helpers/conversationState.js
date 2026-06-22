@@ -157,6 +157,58 @@ async function syncConversationForScheduledDeliveryApproval({
 }
 
 /**
+ * After manager approves a scheduled takeaway, sync session so the chat agent
+ * can send the payment link and enqueue KDS jobs after payment.
+ */
+async function syncConversationForScheduledTakeawayApproval({
+  restaurantId,
+  customerPhone,
+  tokenId,
+  meta = {},
+}) {
+  const phone = canonicalPhone(customerPhone);
+  if (!phone || !restaurantId) return;
+
+  try {
+    const existing = await findConversationRow(restaurantId, customerPhone);
+    const prev = existing?.context ?? {};
+    const storedPhone = existing?.customer_phone ?? phone;
+
+    const context = {
+      ...prev,
+      booking_step:                'awaiting_scheduled_takeaway_payment',
+      service_type:                'takeaway',
+      last_service_type:           'takeaway',
+      display_token:               tokenId,
+      token_number:                tokenId,
+      scheduled_takeaway_approved: true,
+      booking_id:                  meta.booking_id ?? prev.booking_id,
+      scheduled_at:                meta.scheduled_at ?? prev.scheduled_at,
+      kitchen_start_at:            meta.kitchen_start_at ?? prev.kitchen_start_at,
+      kitchen_start_at_label:      meta.kitchen_start_at_label ?? prev.kitchen_start_at_label,
+      total_cook_minutes:          meta.total_cook_minutes ?? prev.total_cook_minutes,
+      order_total:                 meta.total ?? prev.order_total,
+      order_totals:                meta.totals ?? prev.order_totals,
+      pending_order_text:          meta.order_text ?? prev.pending_order_text,
+      pending_cart:                meta.cart ?? prev.pending_cart,
+    };
+
+    await supabaseAdmin.from('conversation_states').upsert({
+      restaurant_id:  restaurantId,
+      customer_phone: storedPhone,
+      adk_session_id: `${restaurantId}:${storedPhone}`,
+      current_state:  'booking',
+      context,
+      updated_at:     new Date().toISOString(),
+    }, { onConflict: 'restaurant_id,customer_phone' });
+
+    console.log(`[conversation-sync] ✅ ${phone} → awaiting_scheduled_takeaway_payment (${tokenId})`);
+  } catch (err) {
+    console.warn('[conversation-sync] scheduled takeaway sync failed (non-fatal):', err.message);
+  }
+}
+
+/**
  * After feedback completes, clear prepay UX from the chat session so the
  * next "Hi" starts a fresh visit instead of resuming awaiting_prepay.
  */
@@ -200,6 +252,7 @@ async function syncConversationForFeedbackComplete({ restaurantId, customerPhone
 module.exports = {
   syncConversationForTokenApproval,
   syncConversationForScheduledDeliveryApproval,
+  syncConversationForScheduledTakeawayApproval,
   syncConversationForFeedbackComplete,
   canonicalPhone,
   phoneVariants,

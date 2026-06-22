@@ -337,6 +337,10 @@ async def route_message(
         if result.get("status") == "identified":
             session_state["customer_id"]   = result.get("customer_id")
             session_state["customer_name"] = result.get("customer_name")
+            if "is_new_customer" in result:
+                session_state["is_new_customer"] = result["is_new_customer"]
+            if "is_returning_customer" in result:
+                session_state["is_returning_customer"] = result["is_returning_customer"]
             session_state["current_state"] = result.get("next_state", "booking")
             session_state["booking_step"]  = "ask_service"
             session_state.pop("identity_step", None)

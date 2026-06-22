@@ -25,6 +25,7 @@ const {
 } = require('../helpers/tableRelease');
 const { onKitchenOpened } = require('../helpers/kitchenReminders');
 const { runDineInAutoAssignJob } = require('../helpers/dineInAutoAssign');
+const { runDueScheduledJobs } = require('../helpers/scheduledJobs');
 
 // Slot helpers live in catalog.js (single source of truth — shared with POST /catalog/slot-sync)
 const {
@@ -49,7 +50,7 @@ function startSlotScheduler() {
         .eq('is_active', true);
 
       for (const restaurant of restaurants ?? []) {
-        const minutes = restaurant.dining_duration_minutes || 90;
+        const minutes = restaurant.dining_duration_minutes || 45;
         const cutoff = new Date(Date.now() - minutes * 60 * 1000).toISOString();
 
         const { data: staleTokens } = await supabaseAdmin
@@ -372,6 +373,20 @@ function startDineInAutoAssignScheduler() {
 
 // ── startAllSchedulers ────────────────────────────────────────────────────────
 
+function startScheduledJobsRunner() {
+  const tick = async () => {
+    try {
+      const n = await runDueScheduledJobs();
+      if (n > 0) console.log(`[scheduled-jobs] Executed ${n} job(s)`);
+    } catch (err) {
+      console.error('[scheduled-jobs] Error:', err.message);
+    }
+  };
+  tick();
+  setInterval(tick, 60 * 1000);
+  console.log('⏰ Scheduled jobs runner started (every 60s)');
+}
+
 function startAllSchedulers() {
   startSlotScheduler();
   startSpecialNotesTimeoutMonitor();
@@ -379,6 +394,7 @@ function startAllSchedulers() {
   startAccountingSyncScheduler();
   startMarketingScheduler();
   startDineInAutoAssignScheduler();
+  startScheduledJobsRunner();
 }
 
 module.exports = { startAllSchedulers };

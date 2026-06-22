@@ -229,6 +229,7 @@ class Booking(Base):
     kds_alert_sent = Column(Boolean, default=False)
     table_confirmed_at    = Column(DateTime(timezone=True))
     menu_prompt_sent      = Column(Boolean, default=False, nullable=False)
+    kds_alert_sent        = Column(Boolean, default=False, nullable=False)
     reminder_24h_sent     = Column(Boolean, default=False, nullable=False)
     reminder_1h_sent      = Column(Boolean, default=False, nullable=False)
     feedback_requested    = Column(Boolean, default=False, nullable=False)

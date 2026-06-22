@@ -12,6 +12,20 @@ logger = logging.getLogger(__name__)
 
 _PLACEHOLDER_URL = "https://payment-placeholder.com"
 
+RAZORPAY_NON_REFUND_NOTICE = (
+    "⚠️ *Please note:* Payment cannot be reversed once completed. "
+    "Cancellations or amendments are *not* possible after payment."
+)
+
+
+def format_razorpay_payment_line(
+    link: str,
+    *,
+    label: str = "💳 Pay here to confirm your order:",
+) -> str:
+    """Payment link block with non-refundable disclaimer shown before the link."""
+    return f"{RAZORPAY_NON_REFUND_NOTICE}\n\n{label}\n{link}"
+
 _RAZORPAY_IMPORT_ERROR: str | None = None
 
 try:
@@ -273,7 +287,7 @@ async def build_payment_line(
                 f"(status={razorpay_status_message()})"
             )
             return counter_fallback if service_type != "delivery" else delivery_fallback
-        return f"💳 Pay here to confirm your order:\n{link}"
+        return format_razorpay_payment_line(link)
     except Exception as e:
         logger.warning(f"[payment] build_payment_line failed for {booking_id}: {e}")
         return counter_fallback if service_type != "delivery" else delivery_fallback

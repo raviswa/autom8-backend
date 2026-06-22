@@ -83,7 +83,7 @@ from tools.db_tools import (
     get_restaurant_by_whatsapp_number,
     get_next_token_number,
 )
-from tools.payment_tools import create_payment_link
+from tools.payment_tools import create_payment_link, format_razorpay_payment_line
 from tools.whatsapp_tools import send_whatsapp_message, send_location_request
 from agents.customer.conversation_intelligence import (
     load_conversation_context,
@@ -1042,7 +1042,7 @@ async def handle_dine_in_flow(
                 f"Order: {order_text}\n"
                 f"────────────────────\n"
                 f"Total: ₹{total:.0f}\n\n"
-                f"Pay here: {payment_link}"
+                f"{format_razorpay_payment_line(payment_link, label='Pay here:')}"
             )
             if suggestion:
                 confirmation += f"\n\n{suggestion}"
@@ -1218,7 +1218,7 @@ async def handle_takeaway_flow(
                 f"Order: {order_text}\n"
                 f"────────────────────\n"
                 f"{format_order_total_lines(totals)}\n\n"
-                f"Pay here: {payment_link}"
+                f"{format_razorpay_payment_line(payment_link, label='Pay here:')}"
             )
             timing_note = ready_time_note_from_session(session_state, "takeaway")
             if timing_note:
@@ -1348,7 +1348,7 @@ async def handle_delivery_flow(
                 f"Order: {order_text}\n"
                 f"────────────────────\n"
                 f"{format_order_total_lines(totals)}\n\n"
-                f"Pay here: {payment_link}"
+                f"{format_razorpay_payment_line(payment_link, label='Pay here:')}"
             )
             timing_note = ready_time_note_from_session(session_state, "delivery")
             if timing_note:
@@ -1552,8 +1552,7 @@ async def handle_reserve_table_flow(
                 f"Guests: {party_size}\n"
                 f"Advance: ₹{advance_amount:.0f}\n"
                 f"────────────────────\n\n"
-                f"Please complete payment to secure your table:\n"
-                f"{payment_link}\n\n"
+                f"{format_razorpay_payment_line(payment_link, label='Please complete payment to secure your table:')}\n\n"
                 f"Just tell our staff your token *{token}* when you arrive!"
             )
             await send_whatsapp_message(customer_phone, summary, restaurant_id)

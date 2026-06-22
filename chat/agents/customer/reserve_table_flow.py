@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Dict, Any
 
 from tools.db_tools import get_next_token_number, create_booking, update_booking_status
-from tools.payment_tools import create_payment_link
+from tools.payment_tools import create_payment_link, format_razorpay_payment_line
 from tools.prepay_fulfillment import (
     build_prepay_payload,
     stash_and_persist_prepay_payload,
@@ -300,7 +300,10 @@ async def handle_reserve_table_flow(
                     display_dt=display_dt,
                 ),
             )
-            payment_line = f"Please complete payment to secure your table:\n{payment_link}"
+            payment_line = format_razorpay_payment_line(
+                payment_link,
+                label="Please complete payment to secure your table:",
+            )
             summary = (
                 f"Reservation received! 📅\n────────────────────\n"
                 f"Token: {token}\nBooking Time: {booking_time}\n"

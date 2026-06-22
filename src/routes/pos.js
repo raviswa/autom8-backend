@@ -292,6 +292,75 @@ router.get('/kds/feed', authenticateToken, getRestaurantId, async (req, res) => 
   }
 });
 
+router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (!req.restaurant_id) {
+      return res.status(403).json({ error: 'No outlet linked to this account.' });
+    }
+    const now = new Date();
+    const fourHoursMs = 4 * 60 * 60 * 1000;
+
+    const { data: bookings, error } = await supabaseAdmin
+      .from('bookings')
+      .select(`
+        id, token_number, booking_datetime, scheduled_slot_at, kitchen_start_at,
+        total_cook_minutes, total_packing_minutes, schedule_meta, kds_sent_at,
+        status, payment_status, service_type,
+        customer:customer_id(name, phone)
+      `)
+      .eq('restaurant_id', req.restaurant_id)
+      .eq('service_type', 'takeaway')
+      .not('kitchen_start_at', 'is', null)
+      .in('status', ['pending', 'confirmed'])
+      .gte('scheduled_slot_at', now.toISOString())
+      .order('kitchen_start_at', { ascending: true });
+
+    if (error) throw error;
+
+    const orders = (bookings ?? []).map((b) => {
+      const meta = b.schedule_meta || {};
+      const kitchenStart = b.kitchen_start_at ? new Date(b.kitchen_start_at) : null;
+      const slotAt = b.scheduled_slot_at || b.booking_datetime;
+      const msToStart = kitchenStart ? kitchenStart.getTime() - now.getTime() : null;
+      let bucket = 'future';
+      if (kitchenStart && msToStart <= fourHoursMs && msToStart > 0 && !b.kds_sent_at) {
+        bucket = 'todays_future';
+      } else if (kitchenStart && msToStart <= 0 && !b.kds_sent_at) {
+        bucket = 'present';
+      } else if (b.kds_sent_at) {
+        bucket = 'live';
+      }
+      return {
+        booking_id: b.id,
+        token_number: b.token_number,
+        customer_name: b.customer?.name,
+        customer_phone: b.customer?.phone,
+        scheduled_slot_at: slotAt,
+        kitchen_start_at: b.kitchen_start_at,
+        total_cook_minutes: b.total_cook_minutes,
+        order_text: meta.order_text || '',
+        cart: meta.cart || {},
+        bucket,
+        kds_sent_at: b.kds_sent_at,
+        status: b.status,
+        payment_status: b.payment_status,
+      };
+    });
+
+    const summary = {};
+    for (const o of orders.filter((x) => x.bucket === 'future')) {
+      const day = o.scheduled_slot_at?.slice(0, 10) || 'unknown';
+      if (!summary[day]) summary[day] = { orders: 0, covers: 0 };
+      summary[day].orders += 1;
+      summary[day].covers += 1;
+    }
+
+    res.json({ success: true, orders, summary, now: now.toISOString() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 router.put('/kds/:id/status', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const { status } = req.body;
@@ -476,6 +545,7 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
   'delivery_charge_default','delivery_charge_tiers',
   'min_delivery_order_amount','min_takeaway_order_amount',
   'scheduled_delivery_enabled','scheduled_takeaway_enabled','scheduled_kds_lead_minutes','max_delivery_radius_km',
+  'scheduled_slot_max_orders','schedule_buffer_minutes','schedule_rounding_minutes','schedule_early_start_max_minutes',
   'subscribed_features', 'enabled_services',
     ];
     const updates = Object.fromEntries(

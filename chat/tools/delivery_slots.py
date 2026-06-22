@@ -17,8 +17,8 @@ from tools.kitchen_hours import _SLOTS
 
 IST = ZoneInfo("Asia/Kolkata")
 
-MIN_BUFFER_HOURS = max(1, int(os.getenv("SCHEDULED_DELIVERY_MIN_BUFFER_HOURS", "3")))
-SLOT_GRANULARITY_MINUTES = max(15, int(os.getenv("SCHEDULED_DELIVERY_SLOT_MINUTES", "60")))
+MIN_BUFFER_HOURS = max(1, int(os.getenv("SCHEDULED_DELIVERY_MIN_BUFFER_HOURS", "2")))
+SLOT_GRANULARITY_MINUTES = max(15, int(os.getenv("SCHEDULED_DELIVERY_SLOT_MINUTES", "30")))
 MAX_DAYS_AHEAD = max(1, int(os.getenv("SCHEDULED_DELIVERY_MAX_DAYS", "7")))
 
 

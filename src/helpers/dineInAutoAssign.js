@@ -142,7 +142,11 @@ async function autoAssignDineInToken(token, restaurantId, table) {
 
   await supabaseAdmin
     .from('tables')
-    .update({ status: 'occupied' })
+    .update({
+      status: 'occupied',
+      seated_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
     .eq('id', table.id)
     .eq('restaurant_id', restaurantId);
 
@@ -215,7 +219,11 @@ async function autoApproveLargePartyToken(token, restaurantId, combo, tablesByNu
   if (tableIds.length) {
     await supabaseAdmin
       .from('tables')
-      .update({ status: 'occupied' })
+      .update({
+        status: 'occupied',
+        seated_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
       .in('id', tableIds)
       .eq('restaurant_id', restaurantId);
   }

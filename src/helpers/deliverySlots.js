@@ -8,11 +8,11 @@ const IST = 'Asia/Kolkata';
 
 const MIN_BUFFER_HOURS = Math.max(
   1,
-  parseInt(process.env.SCHEDULED_DELIVERY_MIN_BUFFER_HOURS || '3', 10),
+  parseInt(process.env.SCHEDULED_DELIVERY_MIN_BUFFER_HOURS || '2', 10),
 );
 const SLOT_GRANULARITY_MINUTES = Math.max(
   15,
-  parseInt(process.env.SCHEDULED_DELIVERY_SLOT_MINUTES || '60', 10),
+  parseInt(process.env.SCHEDULED_DELIVERY_SLOT_MINUTES || '30', 10),
 );
 const MAX_DAYS_AHEAD = Math.max(
   1,

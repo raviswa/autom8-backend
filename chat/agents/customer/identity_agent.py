@@ -183,6 +183,14 @@ async def handle_identity_flow(
     """
     customer = await get_customer(restaurant_id, customer_phone)
 
+    if customer:
+        session_state["is_new_customer"] = False
+        session_state["is_returning_customer"] = True
+        session_state["_customer_db_name"] = customer.get("name")
+    else:
+        session_state["is_new_customer"] = True
+        session_state["is_returning_customer"] = False
+
     if not customer:
         return await handle_new_customer(
             restaurant_id, customer_phone, whatsapp_profile_name,
@@ -319,7 +327,9 @@ async def _finalise_new_customer(
         "next_state": "booking",
         "identity_step": "completed",
         "booking_step": "ask_service",
-        "pending_button_step": None,   # clear stale-button guard
+        "pending_button_step": None,
+        "is_new_customer": True,
+        "is_returning_customer": False,
     }
 
 
@@ -383,6 +393,8 @@ async def handle_returning_customer(
             "identity_step": "completed",
             "booking_step": "ask_service",
             "pending_button_step": None,
+            "is_new_customer": False,
+            "is_returning_customer": True,
         }
 
     # ── STEP 2: Process long-absence name confirmation ───────────────────────
@@ -477,6 +489,8 @@ async def _finalise_returning_customer(
         "identity_step": "completed",
         "booking_step": "ask_service",
         "pending_button_step": None,
+        "is_new_customer": False,
+        "is_returning_customer": True,
     }
 
 

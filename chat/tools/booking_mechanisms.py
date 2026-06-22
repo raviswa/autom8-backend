@@ -165,7 +165,7 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict:
         resp = await get_http().get(
             f"{base}/rest/v1/restaurants",
             params={
-                "select": "name,whatsapp_number,address,phone,gstin,website,city,state,parcel_charge_per_item,takeaway_ready_range,delivery_ready_range,kitchen_busy,restaurant_type,pickup_address,pickup_latitude,pickup_longitude,delivery_charge_default,delivery_charge_tiers,min_delivery_order_amount,min_takeaway_order_amount,scheduled_delivery_enabled,scheduled_takeaway_enabled,scheduled_kds_lead_minutes,max_delivery_radius_km,payment_mode",
+                "select": "name,display_name,cuisine_type,timezone,whatsapp_number,address,phone,gstin,website,city,state,parcel_charge_per_item,takeaway_ready_range,delivery_ready_range,kitchen_busy,restaurant_type,pickup_address,pickup_latitude,pickup_longitude,delivery_charge_default,delivery_charge_tiers,min_delivery_order_amount,min_takeaway_order_amount,scheduled_delivery_enabled,scheduled_takeaway_enabled,scheduled_kds_lead_minutes,max_delivery_radius_km,scheduled_slot_max_orders,schedule_buffer_minutes,schedule_rounding_minutes,payment_mode",
                 "id":     f"eq.{restaurant_id}",
                 "limit":  "1",
             },
@@ -658,6 +658,12 @@ async def _send_manager_walk_in_alert(
             f"👤 {customer_name}\n🕐 {arrival} IST\n\n"
             f"⚠️ *Approve in portal before customer pays:*\n{portal_url}"
         )
+    elif token_type == "scheduled_takeaway":
+        body = (
+            f"🥡 *Scheduled Takeaway* — Token *{token_id}*\n"
+            f"👤 {customer_name}\n🕐 {arrival} IST\n\n"
+            f"⚠️ *Approve in portal before customer pays:*\n{portal_url}"
+        )
     else:
         body = (
             f"🟣 *Large Party Request* — Token *{token_id}*\n"
@@ -872,6 +878,7 @@ async def sync_token_to_portal(
         "phone":         customer_phone,
         "type":          token_type,
         "pax":           pax,
+        "customer_notify": False,
     }
 
     token_id = await _sync_token_via_api(payload, customer_phone, "portal-sync", max_attempts)
@@ -973,6 +980,170 @@ async def sync_scheduled_delivery_to_portal(
     if token_id:
         await _rebroadcast_portal_token(restaurant_id, token_id)
     return token_id
+
+
+async def sync_scheduled_takeaway_to_portal(
+    customer_name: str,
+    customer_phone: str,
+    restaurant_id: str,
+    meta: dict,
+    max_attempts: int = 3,
+) -> str | None:
+    """Queue a scheduled takeaway in the manager portal for approval before payment."""
+    from tools.db_tools import create_walk_in_token_direct
+
+    payload = {
+        "restaurant_id": restaurant_id,
+        "name":          customer_name,
+        "phone":         customer_phone,
+        "type":          "scheduled_takeaway",
+        "pax":           1,
+        "meta":          meta,
+    }
+
+    token_id = await _sync_token_via_api(
+        payload, customer_phone, "portal-sync-scheduled-takeaway", max_attempts,
+        skip_api_notify=True,
+    )
+    if token_id:
+        return token_id
+
+    logger.warning(f"[portal-sync-scheduled-takeaway] API failed — direct DB fallback for {customer_phone}")
+    token_id = await create_walk_in_token_direct(
+        restaurant_id=restaurant_id,
+        name=customer_name,
+        phone=customer_phone,
+        token_type="scheduled_takeaway",
+        pax=1,
+        meta=meta,
+    )
+    if token_id:
+        await _rebroadcast_portal_token(restaurant_id, token_id)
+    return token_id
+
+
+async def _notify_manager_scheduled_takeaway(
+    restaurant_id: str,
+    token_id: str,
+    customer_name: str,
+    customer_phone: str,
+    meta: dict | None = None,
+    *,
+    manager_phone: str | None = None,
+) -> None:
+    """Manager WhatsApp when a scheduled takeaway order awaits approval."""
+    from tools.restaurant_config import get_manager_phone
+
+    alert_phone = (manager_phone or "").strip()
+    if not alert_phone:
+        alert_phone = (await get_manager_phone(restaurant_id) or "").strip()
+    if not alert_phone:
+        logger.error(
+            f"[scheduled-takeaway-alert] No manager phone for restaurant {restaurant_id} "
+            f"(token {token_id})"
+        )
+        return
+
+    meta = meta or {}
+    sched_at = meta.get("scheduled_at_label") or meta.get("scheduled_at") or "—"
+    kitchen_at = meta.get("kitchen_start_at_label") or meta.get("kitchen_start_at") or "—"
+    total = meta.get("total")
+    total_label = f"₹{float(total):.0f}" if total is not None else "—"
+    order_text = str(meta.get("order_text") or "—")[:120]
+    portal_url = (
+        f"{_os.getenv('FRONTEND_URL', 'https://app.autom8.works').rstrip('/')}"
+        "/dashboard/manager"
+    )
+
+    body = (
+        f"🥡 *Scheduled Takeaway* — Token *{token_id}*\n"
+        f"👤 {customer_name}\n"
+        f"📱 {customer_phone or '—'}\n"
+        f"🕐 Pickup at: *{sched_at}*\n"
+        f"👨‍🍳 Kitchen start: *{kitchen_at}*\n"
+        f"💰 {total_label}\n\n"
+        f"Order: {order_text}\n\n"
+        f"Approve before the customer pays.\n\n"
+        f"Portal: {portal_url}"
+    )
+    try:
+        from tools.whatsapp_buttons_helper import send_whatsapp_buttons
+
+        ok = await send_whatsapp_buttons(
+            to=alert_phone,
+            body=body,
+            buttons=[
+                {"id": f"SCHED_APPROVE_{token_id}", "title": "✅ Approve"},
+                {"id": f"SCHED_REJECT_{token_id}", "title": "❌ Reject"},
+            ],
+            restaurant_id=restaurant_id,
+            footer="Manager Portal — Pending approval",
+        )
+        if not ok:
+            await send_whatsapp_message(alert_phone, body, restaurant_id)
+        logger.info(f"[scheduled-takeaway-alert] ✅ {token_id} → manager {alert_phone}")
+    except Exception as e:
+        logger.error(f"[scheduled-takeaway-alert] failed for {token_id}: {e}")
+        try:
+            await send_whatsapp_message(alert_phone, body, restaurant_id)
+        except Exception as e2:
+            logger.error(f"[scheduled-takeaway-alert] plain-text fallback failed: {e2}")
+
+
+async def approve_scheduled_takeaway_token(restaurant_id: str, token_id: str) -> dict[str, Any]:
+    """Manager approved a scheduled takeaway via WhatsApp button."""
+    secret = _get_kds_secret()
+    if not secret:
+        return {"ok": False, "error": "not_configured"}
+    url = f"{PORTAL_API_URL}/{token_id}/approve-internal"
+    try:
+        resp = await get_http().post(
+            url,
+            json={"restaurant_id": restaurant_id, "secret": secret},
+            headers=_portal_auth_headers(),
+            timeout=aiohttp.ClientTimeout(total=8),
+        )
+        if resp.status in (200, 201):
+            data = await resp.json()
+            logger.info(f"[scheduled-takeaway] approved {token_id}")
+            return {"ok": True, "token": data.get("token")}
+        if resp.status == 409:
+            logger.info(f"[scheduled-takeaway] approve skipped — already handled ({token_id})")
+            return {"ok": False, "error": "already_handled"}
+        body = (await resp.text())[:300]
+        logger.error(f"[scheduled-takeaway] approve failed {resp.status}: {body}")
+        return {"ok": False, "error": body}
+    except Exception as e:
+        logger.error(f"[scheduled-takeaway] approve error: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+async def reject_scheduled_takeaway_token(restaurant_id: str, token_id: str) -> dict[str, Any]:
+    """Manager rejected a scheduled takeaway via WhatsApp button."""
+    secret = _get_kds_secret()
+    if not secret:
+        return {"ok": False, "error": "not_configured"}
+    url = f"{PORTAL_API_URL}/{token_id}/reject-internal"
+    try:
+        resp = await get_http().post(
+            url,
+            json={"restaurant_id": restaurant_id, "secret": secret},
+            headers=_portal_auth_headers(),
+            timeout=aiohttp.ClientTimeout(total=8),
+        )
+        if resp.status in (200, 201):
+            data = await resp.json()
+            logger.info(f"[scheduled-takeaway] rejected {token_id}")
+            return {"ok": True, "token": data.get("token")}
+        if resp.status == 409:
+            logger.info(f"[scheduled-takeaway] reject skipped — already handled ({token_id})")
+            return {"ok": False, "error": "already_handled"}
+        body = (await resp.text())[:300]
+        logger.error(f"[scheduled-takeaway] reject failed {resp.status}: {body}")
+        return {"ok": False, "error": body}
+    except Exception as e:
+        logger.error(f"[scheduled-takeaway] reject error: {e}")
+        return {"ok": False, "error": str(e)}
 
 
 async def lookup_table_assignment(customer_phone: str, restaurant_id: str) -> str | None:

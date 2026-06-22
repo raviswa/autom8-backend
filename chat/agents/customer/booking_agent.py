@@ -66,7 +66,6 @@ from tools.booking_mechanisms import cache_restaurant_pricing
 from agents.customer.booking_helpers import (
     MANAGER_PORTAL_URL,
     _HOME_HINT,
-    _GENERIC_GREETINGS,
     _RESET_KEYWORDS,
     _STEPS_ALLOWING_SHORT_REPLY,
     now_display,
@@ -74,7 +73,6 @@ from agents.customer.booking_helpers import (
     is_reset_keyword,
     send_catalog_with_fallback,
     send_service_menu,
-    build_smart_greeting,
     is_name_correction_trigger,
     prompt_name_verification,
     gate_ordering_service,
@@ -91,8 +89,8 @@ from agents.customer.booking_helpers import (
     _DIRECT_RESET_KEYWORDS,
     _FULL_RESET_KEYWORDS,
 )
+from agents.customer.message_templates import build_conversation_greeting
 from agents.customer.conversation_helpers import (
-    safe_build_greeting,
     safe_log_event,
     background_analytics,
 )
@@ -154,7 +152,6 @@ async def handle_booking_flow(
         logger.info(f"[visit_complete] New message from {customer_phone} — fresh visit.")
         _prev_cid    = session_state.get("customer_id")
         _prev_cname  = session_state.get("customer_name")
-        _prev_ret    = session_state.get("is_returning_customer", True)
         _prev_visits = session_state.get("visit_count", 0)
         _prev_last   = session_state.get("last_order_summary", "")
         _prev_svc    = session_state.get("service_type") or session_state.get("last_service_type")
@@ -162,7 +159,8 @@ async def handle_booking_flow(
         session_state.clear()
         if _prev_cid:    session_state["customer_id"]          = _prev_cid
         if _prev_cname:  session_state["customer_name"]        = _prev_cname
-        session_state["is_returning_customer"] = _prev_ret
+        session_state["is_returning_customer"] = True
+        session_state["is_new_customer"] = False
         if _prev_visits: session_state["visit_count"]          = _prev_visits
         if _prev_last:   session_state["last_order_summary"]   = strip_order_quantity(_prev_last)
         if _prev_svc:    session_state["last_service_type"]    = _prev_svc
@@ -240,8 +238,10 @@ async def handle_booking_flow(
             )
             session_state["booking_step"] = "kitchen_closed"
             return {"status": "remind_scheduled"}
-        raw_greeting = await safe_build_greeting(customer_id, restaurant_id)
-        greeting = build_smart_greeting(customer_name, raw_greeting, session_state)
+        raw_greeting = await build_conversation_greeting(
+            session_state, restaurant_id, customer_phone, customer_name,
+        )
+        greeting = raw_greeting
         await send_service_menu(
             customer_phone, restaurant_id, greeting, session_state,
         )
@@ -311,9 +311,12 @@ async def handle_booking_flow(
             if _cid:    session_state["customer_id"]   = _cid
             if _cname:  session_state["customer_name"] = _cname
             if _mphone: session_state["manager_phone"] = _mphone
-            raw_greeting = await safe_build_greeting(customer_id, restaurant_id)
-            session_state["is_returning_customer"] = True
-            ret_greeting = build_smart_greeting(customer_name, raw_greeting, session_state)
+            if _cid:
+                session_state["is_new_customer"] = False
+                session_state["is_returning_customer"] = True
+            ret_greeting = await build_conversation_greeting(
+                session_state, restaurant_id, customer_phone, customer_name,
+            )
             await send_service_menu(customer_phone, restaurant_id, ret_greeting, session_state)
             session_state["booking_step"] = "awaiting_service_selection"
             return {"status": "awaiting_service_selection"}
@@ -334,8 +337,9 @@ async def handle_booking_flow(
     # ── ask_service ───────────────────────────────────────────────────────────
     if current_step == "ask_service":
         if not session_state.get("_menu_sent"):
-            raw_greeting = await safe_build_greeting(customer_id, restaurant_id)
-            greeting     = build_smart_greeting(customer_name, raw_greeting, session_state)
+            greeting = await build_conversation_greeting(
+                session_state, restaurant_id, customer_phone, customer_name,
+            )
             await send_service_menu(customer_phone, restaurant_id, greeting, session_state)
             session_state["_menu_sent"]   = True
             session_state["booking_step"] = "awaiting_service_selection"
@@ -382,8 +386,9 @@ async def handle_booking_flow(
             if is_greeting(_raw_choice) or _raw_choice.lower() in (
                 "good morning", "good afternoon", "good evening", "morning", "gm",
             ):
-                raw_greeting = await safe_build_greeting(customer_id, restaurant_id)
-                greeting = build_smart_greeting(customer_name, raw_greeting, session_state)
+                greeting = await build_conversation_greeting(
+                    session_state, restaurant_id, customer_phone, customer_name,
+                )
                 await send_service_menu(
                     customer_phone, restaurant_id, greeting, session_state, announce_closed=False,
                 )
@@ -672,11 +677,8 @@ async def handle_booking_flow(
         return result
 
     # Fallback: no service type set — re-send service menu
-    raw_greeting = await safe_build_greeting(customer_id, restaurant_id)
-    greeting = (
-        raw_greeting
-        if raw_greeting and raw_greeting.strip().lower() not in _GENERIC_GREETINGS
-        else f"Welcome, {customer_name}! 😊"
+    greeting = await build_conversation_greeting(
+        session_state, restaurant_id, customer_phone, customer_name,
     )
     await send_service_menu(customer_phone, restaurant_id, greeting, session_state)
     session_state["booking_step"] = "awaiting_service_selection"

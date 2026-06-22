@@ -107,7 +107,6 @@ def expire_session_if_stale(
     logger.info(f"[session] Expiring stale step={step!r} (idle>{SESSION_IDLE_SECONDS}s)")
     _prev_cid = session_state.get("customer_id") or customer_id
     _prev_cname = session_state.get("customer_name") or customer_name
-    _prev_ret = session_state.get("is_returning_customer", True)
     _prev_visits = session_state.get("visit_count", 0)
     _prev_last = session_state.get("last_order_summary", "")
     _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
@@ -122,7 +121,9 @@ def expire_session_if_stale(
         session_state["customer_id"] = _prev_cid
     if _prev_cname:
         session_state["customer_name"] = _prev_cname
-    session_state["is_returning_customer"] = _prev_ret
+    if _prev_cid:
+        session_state["is_returning_customer"] = True
+        session_state["is_new_customer"] = False
     if _prev_visits:
         session_state["visit_count"] = _prev_visits
     if _prev_last:
@@ -361,6 +362,7 @@ _STEPS_ALLOWING_SHORT_REPLY: set[str] = {
     "awaiting_order","awaiting_address","confirming_order","awaiting_cart_action",
     "awaiting_scheduled_time", "awaiting_scheduled_flow",
     "awaiting_scheduled_delivery_approval", "awaiting_scheduled_delivery_payment",
+    "awaiting_scheduled_takeaway_approval", "awaiting_scheduled_takeaway_payment",
     "awaiting_takeaway_scheduled_flow", "awaiting_takeaway_scheduled_time",
     "kitchen_closed",
 }
@@ -428,6 +430,7 @@ _ABANDON_FLOW_KEYS = (
     "order_from_cart", "booking_mechanism", "booking_mechanism_order_source",
     "current_category", "_catalog_sent_after_party", "order_totals",
     "pending_order_text", "schedule_flow_sent", "scheduled_delivery_approved",
+    "scheduled_takeaway_approved", "kitchen_start_at", "kitchen_start_at_label",
     "booking_id", "flow_token",
 )
 
@@ -481,13 +484,12 @@ async def start_fresh_visit(
     session_state: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Clear mid-flow state and show the service menu (Home / Hi after an order)."""
-    from agents.customer.conversation_helpers import safe_build_greeting
+    from agents.customer.message_templates import build_conversation_greeting
 
     await abandon_incomplete_session(customer_phone, restaurant_id, session_state)
 
     _prev_cid = session_state.get("customer_id")
     _prev_cname = session_state.get("customer_name") or customer_name
-    _prev_ret = session_state.get("is_returning_customer", True)
     _prev_visits = session_state.get("visit_count", 0)
     _prev_last = session_state.get("last_order_summary", "")
     _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
@@ -498,7 +500,8 @@ async def start_fresh_visit(
         session_state["customer_id"] = _prev_cid
     if _prev_cname:
         session_state["customer_name"] = _prev_cname
-    session_state["is_returning_customer"] = _prev_ret
+    session_state["is_returning_customer"] = True
+    session_state["is_new_customer"] = False
     if _prev_visits:
         session_state["visit_count"] = _prev_visits
     if _prev_last:
@@ -510,11 +513,10 @@ async def start_fresh_visit(
     if _abandoned:
         session_state["_last_visit_abandoned"] = True
     session_state["booking_step"] = "ask_service"
-    raw_greeting = await safe_build_greeting(
-        session_state.get("customer_id", ""), restaurant_id,
+    greeting = await build_conversation_greeting(
+        session_state, restaurant_id, customer_phone, _prev_cname or customer_name,
     )
-    ret_greeting = build_smart_greeting(_prev_cname or customer_name, raw_greeting, session_state)
-    await send_service_menu(customer_phone, restaurant_id, ret_greeting, session_state)
+    await send_service_menu(customer_phone, restaurant_id, greeting, session_state)
     session_state["booking_step"] = "awaiting_service_selection"
     touch_session_activity(session_state)
     return {"status": "awaiting_service_selection"}
@@ -568,9 +570,9 @@ async def do_reset(
             logger.error(f"Failed to cancel booking {booking_id} on reset: {e}")
 
     if full_restart:
-        # Fix 39: preserve returning-customer signals before wipe so greeting
-        # never falls into the first-timer branch after a full restart.
+        # Preserve returning-customer signals before wipe so greeting stays correct.
         _prev_ret    = session_state.get("is_returning_customer", False)
+        _prev_is_new = session_state.get("is_new_customer")
         _prev_visits = session_state.get("visit_count", 0)
         _prev_last   = session_state.get("last_order_summary", "")
         _prev_svc    = session_state.get("service_type") or session_state.get("last_service_type")
@@ -579,7 +581,11 @@ async def do_reset(
         session_state["identity_step"] = "initial"
         if _prev_ret or _prev_visits:
             session_state["is_returning_customer"] = True
-            session_state["visit_count"]           = _prev_visits
+            session_state["is_new_customer"] = False
+            session_state["visit_count"] = _prev_visits
+        elif _prev_is_new is not None:
+            session_state["is_new_customer"] = _prev_is_new
+            session_state["is_returning_customer"] = not _prev_is_new
         if _prev_last:
             session_state["last_order_summary"] = strip_order_quantity(_prev_last)
         if _prev_svc:
@@ -591,6 +597,7 @@ async def do_reset(
     _mphone  = session_state.get("manager_phone")
     _last    = session_state.get("last_order_summary")
     _ret     = session_state.get("is_returning_customer")
+    _is_new  = session_state.get("is_new_customer")
     _visits  = session_state.get("visit_count", 0)
     _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
     session_state.clear()
@@ -599,15 +606,20 @@ async def do_reset(
     if _mphone: session_state["manager_phone"]         = _mphone
     if _last:   session_state["last_order_summary"]    = strip_order_quantity(_last)
     if _ret:    session_state["is_returning_customer"] = _ret
+    if _is_new is not None:
+        session_state["is_new_customer"] = _is_new
+    elif _cid:
+        session_state["is_new_customer"] = False
+        session_state["is_returning_customer"] = True
     if _visits: session_state["visit_count"]           = _visits
     if _prev_svc: session_state["last_service_type"]   = _prev_svc
     session_state["booking_step"]          = "awaiting_service_selection"
-    session_state["is_returning_customer"] = True
 
-    from agents.customer.conversation_helpers import safe_build_greeting
-    raw_greeting   = await safe_build_greeting(customer_id, restaurant_id) if customer_id else ""
-    reset_greeting = build_smart_greeting(customer_name, raw_greeting, session_state)
-    await send_service_menu(customer_phone, restaurant_id, reset_greeting, session_state)
+    from agents.customer.message_templates import build_conversation_greeting
+    greeting = await build_conversation_greeting(
+        session_state, restaurant_id, customer_phone, customer_name,
+    )
+    await send_service_menu(customer_phone, restaurant_id, greeting, session_state)
 
 
 # ─────────────────────────────────────────────
@@ -647,8 +659,13 @@ async def send_service_menu(
     rows = sanitize_list_rows(rows)
     state["_service_menu_rows"] = rows
     normalize_last_order_summary(state)
-    tod = _time_of_day_label()
-    header = "Welcome back" if (greeting and greeting.strip()) else _MENU_HEADERS.get(tod, "Welcome")
+    from agents.customer.message_templates import (
+        ensure_restaurant_greeting_context,
+        get_time_period,
+    )
+    await ensure_restaurant_greeting_context(state, restaurant_id)
+    period, _ = get_time_period(state.get("_restaurant_timezone", "Asia/Kolkata"))
+    header = f"Good {period}".capitalize()
 
     body_lines = []
     if greeting and greeting.strip():
@@ -848,6 +865,7 @@ async def handle_awaiting_prepay(
         create_payment_link,
         is_placeholder_payment_link,
         build_payment_line,
+        format_razorpay_payment_line,
         recover_prepay_if_already_paid,
         resolve_payment_link_status,
     )
@@ -941,7 +959,9 @@ async def handle_awaiting_prepay(
             logger.warning(f"[awaiting_prepay] link regen failed for {booking_id}: {e}")
 
     if payment_link and not is_placeholder_payment_link(str(payment_link)):
-        pay_line = f"💳 Pay here to confirm:\n{payment_link}"
+        pay_line = format_razorpay_payment_line(
+            str(payment_link), label="💳 Pay here to confirm:",
+        )
     else:
         pay_line = await build_payment_line(
             str(booking_id or ""), total, customer_name, customer_phone,
@@ -1173,26 +1193,26 @@ def build_smart_greeting(
     raw_greeting: str,
     session_state: Dict[str, Any],
 ) -> str:
-    if raw_greeting and raw_greeting.strip().lower() not in _GENERIC_GREETINGS:
-        return raw_greeting
+    """
+    Deprecated — use build_conversation_greeting() for async greeting generation.
+    Kept for backwards compatibility in tests; does not use visit_count or raw_greeting bypass.
+    """
+    from agents.customer.message_templates import build_greeting
 
-    tod   = _time_of_day_label()
-    first = _first_name(customer_name)
-    idx   = (len(customer_name) + len(first)) % 4
+    is_new = bool(session_state.get("is_new_customer", True))
+    if "is_new_customer" not in session_state:
+        is_new = not session_state.get("is_returning_customer", False)
 
-    normalize_last_order_summary(session_state)
-    last_order   = session_state.get("last_order_summary", "")
-    is_returning = session_state.get("is_returning_customer", False)
-    visit_count  = session_state.get("visit_count", 0)
+    db_name = session_state.get("_customer_db_name")
+    name_for_greeting = None if is_new else (db_name or customer_name or None)
 
-    if is_returning or visit_count > 1:
-        base     = _RETURNING_VARIANTS.get(tod, _RETURNING_VARIANTS["evening"])[idx]
-        greeting = base.format(first=first)
-    else:
-        variants = _FIRST_TIME_VARIANTS.get(tod, _FIRST_TIME_VARIANTS["evening"])
-        greeting = variants[idx % len(variants)].format(first=first)
-
-    return greeting
+    return build_greeting(
+        is_new=is_new,
+        customer_name=name_for_greeting,
+        restaurant_display_name=session_state.get("_restaurant_display_name", "our restaurant"),
+        restaurant_cuisine=session_state.get("_restaurant_cuisine", []),
+        timezone=session_state.get("_restaurant_timezone", "Asia/Kolkata"),
+    )
 
 
 def build_recall_message(session_state: Dict[str, Any]) -> str | None:

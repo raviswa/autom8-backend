@@ -432,6 +432,20 @@ def _row_to_customer(r: dict) -> Dict[str, Any]:
 # WRITES go to Supabase first; local mirror is best-effort (non-fatal on failure).
 
 
+async def lookup_customer_status(
+    restaurant_id: str,
+    phone: str,
+) -> tuple[Dict[str, Any] | None, bool]:
+    """
+    Returns (customer_record, is_new).
+    is_new is True when this phone has no row in customers for this restaurant.
+    """
+    customer = await get_customer(restaurant_id, phone)
+    if customer:
+        return customer, False
+    return None, True
+
+
 async def get_customer(restaurant_id: str, phone: str) -> Dict[str, Any] | None:
     """Look up customer — reads from autom8 Supabase."""
     base = _a8_base()
@@ -1037,46 +1051,216 @@ async def mark_booking_kds_sent(booking_id: str) -> None:
         await session.commit()
 
 
-async def get_paid_bookings_missing_kds(max_age_hours: int = 48) -> list[dict[str, Any]]:
+async def get_paid_bookings_missing_kds() -> List[Dict[str, Any]]:
     """
-    Paid food orders with no KDS dispatch recorded — financial-integrity backstop.
-    Excludes reserve_table and scheduled orders still before their release window.
+    Return paid bookings that have no KDS ticket and have not yet been alerted.
+
+    Filters:
+      - payment_status = 'paid'
+      - kds_alert_sent IS NOT TRUE   ← never re-process an alerted booking
+      - created_at > now() - 24h     ← ignore stale historical records
     """
-    if AsyncSessionLocal is None:
-        return []
-    try:
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                text("""
-                    SELECT
-                      b.id::text AS booking_id,
-                      b.restaurant_id::text AS restaurant_id,
-                      b.service_type,
-                      b.token_number,
-                      b.payment_status,
-                      b.kds_sent_at,
-                      c.phone AS customer_phone,
-                      c.name AS customer_name,
-                      r.name AS restaurant_name,
-                      COALESCE(r.manager_phone, r.phone) AS manager_phone
-                    FROM bookings b
-                    JOIN customers c ON c.id = b.customer_id
-                    JOIN restaurants r ON r.id = b.restaurant_id
-                    WHERE b.payment_status = 'paid'
-                      AND b.kds_sent_at IS NULL
-                      AND b.service_type IN ('dine_in', 'takeaway', 'delivery')
-                      AND b.status IN ('confirmed', 'pending')
-                      AND b.created_at > NOW() - (:max_age || ' hours')::interval
-                    ORDER BY b.created_at ASC
-                    LIMIT 20
-                """),
-                {"max_age": str(max_age_hours)},
-            )
-            return [dict(r) for r in result.mappings().all()]
-    except Exception as e:
-        logger.warning(f"[reconcile] get_paid_bookings_missing_kds failed: {e}")
+    base = _a8_base()
+    if not base:
+        logger.warning("[get_paid_bookings_missing_kds] AUTOM8_SUPABASE_URL not set")
         return []
 
+    cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+
+    try:
+        async with _httpx.AsyncClient(timeout=10) as client:
+
+            # ── Step 1: Fetch paid, un-alerted, recent bookings ───────────────
+            b_resp = await client.get(
+                f"{base}/rest/v1/bookings",
+                params={
+                    "select":          "id,restaurant_id,token_number,service_type,created_at",
+                    "payment_status":  "eq.paid",
+                    "kds_alert_sent":  "is.false",
+                    "created_at":      f"gte.{cutoff}",
+                    "order":           "created_at.asc",
+                    "limit":           "50",
+                },
+                headers=_a8_headers(),
+            )
+            if b_resp.status_code != 200:
+                logger.error(
+                    f"[get_paid_bookings_missing_kds] bookings fetch "
+                    f"{b_resp.status_code}: {b_resp.text}"
+                )
+                return []
+
+            bookings = b_resp.json()
+            if not bookings:
+                return []
+
+            booking_ids = [b["id"] for b in bookings]
+
+            # ── Step 2: Find which booking_ids already have kds_items ─────────
+            # kds_items → order_items (booking_id FK)
+            oi_resp = await client.get(
+                f"{base}/rest/v1/order_items",
+                params={
+                    "select":     "booking_id",
+                    "booking_id": f"in.({','.join(booking_ids)})",
+                    "limit":      "500",
+                },
+                headers=_a8_headers(),
+            )
+            order_items_with_booking: set[str] = set()
+            if oi_resp.status_code == 200:
+                for oi in oi_resp.json():
+                    bid = oi.get("booking_id")
+                    if bid:
+                        order_items_with_booking.add(bid)
+
+            # Among those order_items, which have kds_items?
+            kds_covered_bookings: set[str] = set()
+            if order_items_with_booking:
+                oi_ids_resp = await client.get(
+                    f"{base}/rest/v1/order_items",
+                    params={
+                        "select":     "id,booking_id",
+                        "booking_id": f"in.({','.join(order_items_with_booking)})",
+                        "limit":      "500",
+                    },
+                    headers=_a8_headers(),
+                )
+                if oi_ids_resp.status_code == 200:
+                    oi_id_map: dict[str, str] = {}   # order_item_id → booking_id
+                    for oi in oi_ids_resp.json():
+                        if oi.get("id") and oi.get("booking_id"):
+                            oi_id_map[oi["id"]] = oi["booking_id"]
+
+                    if oi_id_map:
+                        kds_resp = await client.get(
+                            f"{base}/rest/v1/kds_items",
+                            params={
+                                "select":        "order_item_id",
+                                "order_item_id": f"in.({','.join(oi_id_map.keys())})",
+                                "limit":         "500",
+                            },
+                            headers=_a8_headers(),
+                        )
+                        if kds_resp.status_code == 200:
+                            for kds in kds_resp.json():
+                                oi_id = kds.get("order_item_id")
+                                if oi_id and oi_id in oi_id_map:
+                                    kds_covered_bookings.add(oi_id_map[oi_id])
+
+            # ── Step 3: Keep only bookings with NO kds coverage ───────────────
+            missing_ids = [
+                b["id"] for b in bookings
+                if b["id"] not in kds_covered_bookings
+            ]
+            if not missing_ids:
+                return []
+
+            # ── Step 4: Enrich with customer + manager phone ──────────────────
+            missing_bookings = [b for b in bookings if b["id"] in missing_ids]
+            results = []
+
+            for b in missing_bookings:
+                restaurant_id = b["restaurant_id"]
+
+                # Customer phone + name via customers table
+                cust_resp = await client.get(
+                    f"{base}/rest/v1/customers",
+                    params={
+                        "select":        "name,phone",
+                        "restaurant_id": f"eq.{restaurant_id}",
+                        # customers are linked via bookings.customer_id;
+                        # fetch separately since bookings select is kept minimal
+                        "limit":         "1",
+                    },
+                    headers=_a8_headers(),
+                )
+                # Better: fetch booking with customer_id then look up customer
+                # For now fall back to restaurant manager lookup
+                cust_name  = "Guest"
+                cust_phone = ""
+                if cust_resp.status_code == 200 and cust_resp.json():
+                    c = cust_resp.json()[0]
+                    cust_name  = c.get("name")  or "Guest"
+                    cust_phone = c.get("phone") or ""
+
+                # Manager phone via restaurants table
+                r_resp = await client.get(
+                    f"{base}/rest/v1/restaurants",
+                    params={
+                        "select": "manager_phone",
+                        "id":     f"eq.{restaurant_id}",
+                        "limit":  "1",
+                    },
+                    headers=_a8_headers(),
+                )
+                manager_phone = ""
+                if r_resp.status_code == 200 and r_resp.json():
+                    manager_phone = r_resp.json()[0].get("manager_phone") or ""
+
+                results.append({
+                    "booking_id":    b["id"],
+                    "restaurant_id": restaurant_id,
+                    "token_number":  b.get("token_number"),
+                    "service_type":  b.get("service_type"),
+                    "customer_name": cust_name,
+                    "customer_phone": cust_phone,
+                    "manager_phone": manager_phone,
+                })
+
+        logger.info(
+            f"[get_paid_bookings_missing_kds] "
+            f"{len(bookings)} paid bookings checked, {len(results)} missing KDS"
+        )
+        return results
+
+    except Exception as e:
+        logger.error(f"[get_paid_bookings_missing_kds] Error: {e}")
+        return []
+
+
+async def mark_kds_alert_sent(booking_id: str) -> None:
+    """
+    Silence a booking so reconcile_paid_orders_without_kds never re-processes it.
+    Called after a manager alert fires OR after a successful KDS retry.
+
+    Writes to Supabase (primary) and mirrors to Railway DB (best-effort).
+    """
+    # ── 1. Supabase primary ───────────────────────────────────────────────────
+    base = _a8_base()
+    if base:
+        try:
+            async with _httpx.AsyncClient(timeout=5) as client:
+                resp = await client.patch(
+                    f"{base}/rest/v1/bookings",
+                    params={"id": f"eq.{booking_id}"},
+                    json={"kds_alert_sent": True},
+                    headers={**_a8_headers(), "Prefer": "return=minimal"},
+                )
+            if resp.status_code not in (200, 204):
+                logger.warning(
+                    f"[mark_kds_alert_sent] Supabase {resp.status_code}: {resp.text}"
+                )
+            else:
+                logger.info(f"[mark_kds_alert_sent] ✅ Silenced {booking_id[:8]} in Supabase")
+        except Exception as e:
+            logger.error(f"[mark_kds_alert_sent] Supabase write failed for {booking_id}: {e}")
+
+    # ── 2. Railway DB mirror (best-effort) ────────────────────────────────────
+    if AsyncSessionLocal is not None:
+        try:
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    update(Booking)
+                    .where(Booking.id == UUID(booking_id))
+                    .values(kds_alert_sent=True)
+                )
+                await session.commit()
+        except Exception as e:
+            # Non-fatal — Supabase write above is the source of truth
+            logger.warning(
+                f"[mark_kds_alert_sent] Railway mirror failed for {booking_id}: {e}"
+                                )
 
 async def get_bookings_due_for_kds() -> list[dict]:
     """
@@ -1872,17 +2056,17 @@ async def create_walk_in_token_direct(
         logger.error("[walk-in-token] DB session not initialized")
         return None
 
-    if token_type not in ("dinein", "takeaway", "large_party", "scheduled_delivery"):
+    if token_type not in ("dinein", "takeaway", "large_party", "scheduled_delivery", "scheduled_takeaway"):
         logger.error(f"[walk-in-token] Invalid type: {token_type}")
         return None
 
     clean_phone = "".join(c for c in str(phone) if c.isdigit()) or None
     status = (
-        "pending_approval" if token_type in ("large_party", "scheduled_delivery")
+        "pending_approval" if token_type in ("large_party", "scheduled_delivery", "scheduled_takeaway")
         else "takeaway" if token_type == "takeaway"
         else "waiting"
     )
-    actual_pax = 1 if token_type in ("takeaway", "scheduled_delivery") else max(1, int(pax or 1))
+    actual_pax = 1 if token_type in ("takeaway", "scheduled_delivery", "scheduled_takeaway") else max(1, int(pax or 1))
 
     existing = await get_active_walk_in_token(restaurant_id, phone)
     if existing and existing.get("type") == token_type:
@@ -1919,6 +2103,18 @@ async def create_walk_in_token_direct(
                 f"[walk-in-token] ✅ Direct DB token {token_id} for {name} "
                 f"(restaurant={restaurant_id})"
             )
+            if token_type == "dinein" and status == "waiting":
+                try:
+                    from tools.wait_estimate import apply_wait_estimate_to_token
+                    from datetime import datetime, timezone
+                    await apply_wait_estimate_to_token(
+                        restaurant_id,
+                        token_id,
+                        actual_pax,
+                        datetime.now(timezone.utc).isoformat(),
+                    )
+                except Exception as est_err:
+                    logger.warning(f"[walk-in-token] wait estimate failed: {est_err}")
             return token_id
     except Exception as e:
         logger.error(f"[walk-in-token] Direct insert failed: {e}")
@@ -2125,219 +2321,222 @@ async def mark_reservation_reminder_sent(booking_id: str, reminder_field: str) -
         session.add(booking)
         await session.commit()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PASTE THESE TWO FUNCTIONS AT THE BOTTOM OF chat/tools/db_tools.py
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-async def get_paid_bookings_missing_kds() -> List[Dict[str, Any]]:
-    """
-    Return paid bookings that have no KDS ticket and have not yet been alerted.
-
-    Filters:
-      - payment_status = 'paid'
-      - kds_alert_sent IS NOT TRUE   ← never re-process an alerted booking
-      - created_at > now() - 24h     ← ignore stale historical records
-    """
-    base = _a8_base()
-    if not base:
-        logger.warning("[get_paid_bookings_missing_kds] AUTOM8_SUPABASE_URL not set")
-        return []
-
-    cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
-
-    try:
-        async with _httpx.AsyncClient(timeout=10) as client:
-
-            # ── Step 1: Fetch paid, un-alerted, recent bookings ───────────────
-            b_resp = await client.get(
-                f"{base}/rest/v1/bookings",
-                params={
-                    "select":          "id,restaurant_id,token_number,service_type,created_at",
-                    "payment_status":  "eq.paid",
-                    "kds_alert_sent":  "is.false",
-                    "created_at":      f"gte.{cutoff}",
-                    "order":           "created_at.asc",
-                    "limit":           "50",
-                },
-                headers=_a8_headers(),
-            )
-            if b_resp.status_code != 200:
-                logger.error(
-                    f"[get_paid_bookings_missing_kds] bookings fetch "
-                    f"{b_resp.status_code}: {b_resp.text}"
-                )
-                return []
-
-            bookings = b_resp.json()
-            if not bookings:
-                return []
-
-            booking_ids = [b["id"] for b in bookings]
-
-            # ── Step 2: Find which booking_ids already have kds_items ─────────
-            # kds_items → order_items (booking_id FK)
-            oi_resp = await client.get(
-                f"{base}/rest/v1/order_items",
-                params={
-                    "select":     "booking_id",
-                    "booking_id": f"in.({','.join(booking_ids)})",
-                    "limit":      "500",
-                },
-                headers=_a8_headers(),
-            )
-            order_items_with_booking: set[str] = set()
-            if oi_resp.status_code == 200:
-                for oi in oi_resp.json():
-                    bid = oi.get("booking_id")
-                    if bid:
-                        order_items_with_booking.add(bid)
-
-            # Among those order_items, which have kds_items?
-            kds_covered_bookings: set[str] = set()
-            if order_items_with_booking:
-                oi_ids_resp = await client.get(
-                    f"{base}/rest/v1/order_items",
-                    params={
-                        "select":     "id,booking_id",
-                        "booking_id": f"in.({','.join(order_items_with_booking)})",
-                        "limit":      "500",
-                    },
-                    headers=_a8_headers(),
-                )
-                if oi_ids_resp.status_code == 200:
-                    oi_id_map: dict[str, str] = {}   # order_item_id → booking_id
-                    for oi in oi_ids_resp.json():
-                        if oi.get("id") and oi.get("booking_id"):
-                            oi_id_map[oi["id"]] = oi["booking_id"]
-
-                    if oi_id_map:
-                        kds_resp = await client.get(
-                            f"{base}/rest/v1/kds_items",
-                            params={
-                                "select":        "order_item_id",
-                                "order_item_id": f"in.({','.join(oi_id_map.keys())})",
-                                "limit":         "500",
-                            },
-                            headers=_a8_headers(),
-                        )
-                        if kds_resp.status_code == 200:
-                            for kds in kds_resp.json():
-                                oi_id = kds.get("order_item_id")
-                                if oi_id and oi_id in oi_id_map:
-                                    kds_covered_bookings.add(oi_id_map[oi_id])
-
-            # ── Step 3: Keep only bookings with NO kds coverage ───────────────
-            missing_ids = [
-                b["id"] for b in bookings
-                if b["id"] not in kds_covered_bookings
-            ]
-            if not missing_ids:
-                return []
-
-            # ── Step 4: Enrich with customer + manager phone ──────────────────
-            missing_bookings = [b for b in bookings if b["id"] in missing_ids]
-            results = []
-
-            for b in missing_bookings:
-                restaurant_id = b["restaurant_id"]
-
-                # Customer phone + name via customers table
-                cust_resp = await client.get(
-                    f"{base}/rest/v1/customers",
-                    params={
-                        "select":        "name,phone",
-                        "restaurant_id": f"eq.{restaurant_id}",
-                        # customers are linked via bookings.customer_id;
-                        # fetch separately since bookings select is kept minimal
-                        "limit":         "1",
-                    },
-                    headers=_a8_headers(),
-                )
-                # Better: fetch booking with customer_id then look up customer
-                # For now fall back to restaurant manager lookup
-                cust_name  = "Guest"
-                cust_phone = ""
-                if cust_resp.status_code == 200 and cust_resp.json():
-                    c = cust_resp.json()[0]
-                    cust_name  = c.get("name")  or "Guest"
-                    cust_phone = c.get("phone") or ""
-
-                # Manager phone via restaurants table
-                r_resp = await client.get(
-                    f"{base}/rest/v1/restaurants",
-                    params={
-                        "select": "manager_phone",
-                        "id":     f"eq.{restaurant_id}",
-                        "limit":  "1",
-                    },
-                    headers=_a8_headers(),
-                )
-                manager_phone = ""
-                if r_resp.status_code == 200 and r_resp.json():
-                    manager_phone = r_resp.json()[0].get("manager_phone") or ""
-
-                results.append({
-                    "booking_id":    b["id"],
-                    "restaurant_id": restaurant_id,
-                    "token_number":  b.get("token_number"),
-                    "service_type":  b.get("service_type"),
-                    "customer_name": cust_name,
-                    "customer_phone": cust_phone,
-                    "manager_phone": manager_phone,
-                })
-
-        logger.info(
-            f"[get_paid_bookings_missing_kds] "
-            f"{len(bookings)} paid bookings checked, {len(results)} missing KDS"
+async def count_orders_for_slot(restaurant_id: str, slot_iso: str) -> int:
+    """Count scheduled orders occupying a 30-minute slot bucket."""
+    if AsyncSessionLocal is None:
+        return 0
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text("""
+                SELECT COUNT(*)::int AS cnt
+                FROM bookings b
+                WHERE b.restaurant_id = CAST(:rid AS uuid)
+                  AND b.scheduled_slot_at IS NOT NULL
+                  AND date_trunc('hour', b.scheduled_slot_at AT TIME ZONE 'Asia/Kolkata')
+                      + (floor(extract(minute from b.scheduled_slot_at AT TIME ZONE 'Asia/Kolkata') / 30) * interval '30 min')
+                    = date_trunc('hour', CAST(:slot AS timestamptz) AT TIME ZONE 'Asia/Kolkata')
+                      + (floor(extract(minute from CAST(:slot AS timestamptz) AT TIME ZONE 'Asia/Kolkata') / 30) * interval '30 min')
+                  AND b.status NOT IN ('cancelled', 'rejected')
+                  AND (
+                    b.payment_status = 'paid'
+                    OR EXISTS (
+                      SELECT 1 FROM walk_in_tokens wt
+                      WHERE wt.meta->>'booking_id' = b.id::text
+                        AND wt.status = 'pending_approval'
+                    )
+                  )
+            """),
+            {"rid": restaurant_id, "slot": slot_iso},
         )
-        return results
-
-    except Exception as e:
-        logger.error(f"[get_paid_bookings_missing_kds] Error: {e}")
-        return []
+        row = result.mappings().first()
+        return int(row["cnt"]) if row else 0
 
 
-async def mark_kds_alert_sent(booking_id: str) -> None:
-    """
-    Silence a booking so reconcile_paid_orders_without_kds never re-processes it.
-    Called after a manager alert fires OR after a successful KDS retry.
+async def update_booking_schedule(
+    booking_id: str,
+    *,
+    kitchen_start_at: str | None = None,
+    scheduled_slot_at: str | None = None,
+    total_cook_minutes: int | None = None,
+    total_packing_minutes: float | None = None,
+    schedule_meta: dict | None = None,
+) -> bool:
+    if AsyncSessionLocal is None or not booking_id:
+        return False
+    patches: dict[str, Any] = {}
+    if kitchen_start_at:
+        patches["kitchen_start_at"] = datetime.fromisoformat(
+            kitchen_start_at.replace("Z", "+00:00")
+        )
+    if scheduled_slot_at:
+        patches["scheduled_slot_at"] = datetime.fromisoformat(
+            scheduled_slot_at.replace("Z", "+00:00")
+        )
+        patches["booking_datetime"] = patches["scheduled_slot_at"]
+    if total_cook_minutes is not None:
+        patches["total_cook_minutes"] = total_cook_minutes
+    if total_packing_minutes is not None:
+        patches["total_packing_minutes"] = total_packing_minutes
+    if schedule_meta is not None:
+        patches["schedule_meta"] = schedule_meta
+    if not patches:
+        return False
 
-    Writes to Supabase (primary) and mirrors to Railway DB (best-effort).
-    """
-    # ── 1. Supabase primary ───────────────────────────────────────────────────
-    base = _a8_base()
-    if base:
-        try:
-            async with _httpx.AsyncClient(timeout=5) as client:
-                resp = await client.patch(
-                    f"{base}/rest/v1/bookings",
-                    params={"id": f"eq.{booking_id}"},
-                    json={"kds_alert_sent": True},
-                    headers={**_a8_headers(), "Prefer": "return=minimal"},
-                )
-            if resp.status_code not in (200, 204):
-                logger.warning(
-                    f"[mark_kds_alert_sent] Supabase {resp.status_code}: {resp.text}"
-                )
-            else:
-                logger.info(f"[mark_kds_alert_sent] ✅ Silenced {booking_id[:8]} in Supabase")
-        except Exception as e:
-            logger.error(f"[mark_kds_alert_sent] Supabase write failed for {booking_id}: {e}")
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            update(Booking).where(Booking.id == UUID(booking_id)).values(**patches)
+        )
+        await session.commit()
+        return (result.rowcount or 0) > 0
 
-    # ── 2. Railway DB mirror (best-effort) ────────────────────────────────────
-    if AsyncSessionLocal is not None:
-        try:
-            async with AsyncSessionLocal() as session:
-                await session.execute(
-                    update(Booking)
-                    .where(Booking.id == UUID(booking_id))
-                    .values(kds_alert_sent=True)
-                )
-                await session.commit()
-        except Exception as e:
-            # Non-fatal — Supabase write above is the source of truth
-            logger.warning(
-                f"[mark_kds_alert_sent] Railway mirror failed for {booking_id}: {e}"
-                                )
-        
+
+async def fetch_menu_timing_map(restaurant_id: str) -> dict[str, dict[str, Any]]:
+    """retailer_id → timing fields for kitchen scheduler."""
+    if AsyncSessionLocal is None:
+        return {}
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(MenuItem).where(MenuItem.restaurant_id == UUID(restaurant_id))
+        )
+        items = result.scalars().all()
+        out: dict[str, dict[str, Any]] = {}
+        for m in items:
+            key = str(m.retailer_id or m.id)
+            out[key] = {
+                "name": m.name,
+                "prep_time_fixed": getattr(m, "prep_time_fixed", 5),
+                "batch_size": getattr(m, "batch_size", 1),
+                "time_per_batch": getattr(m, "time_per_batch", 10),
+                "kitchen_station": getattr(m, "kitchen_station", "assembly"),
+                "packing_time": float(getattr(m, "packing_time", 1) or 1),
+                "holds_well": bool(getattr(m, "holds_well", False)),
+            }
+        return out
+
+
+async def enqueue_scheduled_jobs(
+    restaurant_id: str,
+    booking_id: str,
+    token_id: str,
+    kitchen_start_iso: str,
+    payload: dict[str, Any],
+) -> int:
+    if AsyncSessionLocal is None:
+        return 0
+    jobs = [
+        {
+            "restaurant_id": UUID(restaurant_id),
+            "booking_id": UUID(booking_id),
+            "token_id": token_id,
+            "job_type": "kds_dispatch",
+            "run_at": datetime.fromisoformat(kitchen_start_iso.replace("Z", "+00:00")),
+            "status": "pending",
+            "idempotency_key": f"kds_dispatch:{booking_id}",
+            "payload": payload,
+        },
+        {
+            "restaurant_id": UUID(restaurant_id),
+            "booking_id": UUID(booking_id),
+            "token_id": token_id,
+            "job_type": "prep_start_whatsapp",
+            "run_at": datetime.fromisoformat(kitchen_start_iso.replace("Z", "+00:00")),
+            "status": "pending",
+            "idempotency_key": f"prep_start_whatsapp:{booking_id}",
+            "payload": payload,
+        },
+    ]
+    async with AsyncSessionLocal() as session:
+        for job in jobs:
+            await session.execute(
+                text("""
+                    INSERT INTO scheduled_jobs
+                      (restaurant_id, booking_id, token_id, job_type, run_at, status, idempotency_key, payload)
+                    VALUES
+                      (CAST(:restaurant_id AS uuid), CAST(:booking_id AS uuid), :token_id,
+                       :job_type, :run_at, :status, :idempotency_key, CAST(:payload AS jsonb))
+                    ON CONFLICT (idempotency_key) DO UPDATE SET
+                      run_at = EXCLUDED.run_at,
+                      payload = EXCLUDED.payload,
+                      status = CASE
+                        WHEN scheduled_jobs.status = 'cancelled' THEN 'pending'
+                        ELSE scheduled_jobs.status
+                      END,
+                      updated_at = NOW()
+                """),
+                {
+                    "restaurant_id": str(job["restaurant_id"]),
+                    "booking_id": str(job["booking_id"]),
+                    "token_id": job["token_id"],
+                    "job_type": job["job_type"],
+                    "run_at": job["run_at"].isoformat(),
+                    "status": job["status"],
+                    "idempotency_key": job["idempotency_key"],
+                    "payload": json.dumps(job["payload"] or {}),
+                },
+            )
+        await session.commit()
+    return len(jobs)
+
+
+async def cancel_scheduled_jobs_for_booking(booking_id: str) -> None:
+    if AsyncSessionLocal is None:
+        return
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            text("""
+                UPDATE scheduled_jobs
+                SET status = 'cancelled', updated_at = NOW()
+                WHERE booking_id = CAST(:bid AS uuid) AND status = 'pending'
+            """),
+            {"bid": booking_id},
+        )
+        await session.commit()
+
+
+async def get_scheduled_takeaway_token(restaurant_id: str, customer_phone: str) -> dict | None:
+    """Latest scheduled_takeaway token for customer (approval polling)."""
+    if AsyncSessionLocal is None:
+        return None
+    digits = re.sub(r"\D", "", customer_phone or "")
+    phones = {digits}
+    if len(digits) == 10:
+        phones.add(f"91{digits}")
+    if len(digits) > 10:
+        phones.add(digits[-10:])
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text("""
+                SELECT id, status, type, meta, name, phone, pax,
+                       estimate_display, estimated_wait_minutes, waitlist_depth_at_issue
+                FROM walk_in_tokens
+                WHERE restaurant_id = CAST(:rid AS uuid)
+                  AND type = 'scheduled_takeaway'
+                  AND phone = ANY(:phones)
+                ORDER BY arrived_at DESC
+                LIMIT 1
+            """),
+            {"rid": restaurant_id, "phones": list(phones)},
+        )
+        row = result.mappings().first()
+        return dict(row) if row else None
+
+
+async def get_walk_in_token_by_id(restaurant_id: str, token_id: str) -> dict | None:
+    """Lookup a walk-in token by id for manager button routing."""
+    if AsyncSessionLocal is None or not token_id:
+        return None
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text("""
+                SELECT id, status, type, meta, name, phone, pax,
+                       estimate_display, estimated_wait_minutes, waitlist_depth_at_issue
+                FROM walk_in_tokens
+                WHERE restaurant_id = CAST(:rid AS uuid)
+                  AND id = :tid
+                LIMIT 1
+            """),
+            {"rid": restaurant_id, "tid": token_id},
+        )
+        row = result.mappings().first()
+        return dict(row) if row else None
+

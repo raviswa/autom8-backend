@@ -24,7 +24,9 @@ const { sendWhatsAppMessage, sendWhatsAppCatalogWithSpecials, sendWhatsAppIntera
 const { getManagerPhone } = require('../helpers/restaurantConfig');
 const { validateScheduledDeliverySlot } = require('../helpers/deliverySlots');
 const { assignAndNotifyCaptainTakeaway } = require('../helpers/captainAssignment');
-const { syncConversationForTokenApproval, syncConversationForScheduledDeliveryApproval } = require('../helpers/conversationState');
+const { syncConversationForTokenApproval, syncConversationForScheduledDeliveryApproval, syncConversationForScheduledTakeawayApproval } = require('../helpers/conversationState');
+const { cancelScheduledJobsForBooking } = require('../helpers/scheduledJobs');
+const { calculateWaitEstimate, buildDineInCustomerMessage } = require('../helpers/waitEstimate');
 const { releaseTablesForToken } = require('../helpers/tableRelease');
 const { writeAuditLog } = require('../helpers/auditLog');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
@@ -176,6 +178,7 @@ async function rejectScheduledDeliveryToken(tokenId, restaurantId, token, reason
   }
 
   if (meta.booking_id) {
+    await cancelScheduledJobsForBooking(meta.booking_id);
     await supabaseAdmin.from('bookings')
       .update({ status: 'rejected' })
       .eq('id', meta.booking_id);
@@ -186,6 +189,109 @@ async function rejectScheduledDeliveryToken(tokenId, restaurantId, token, reason
     await sendWhatsAppMessage(
       token.phone,
       `😔 *We're unable to confirm your scheduled delivery right now.*${reasonLine}\n\n`
+      + `Please try a different time or reply *Home* to see other options. 🙏`,
+      restaurantId
+    );
+  }
+
+  broadcastToRestaurant(restaurantId, {
+    type: 'TOKEN_REJECTED', token: updatedToken, timestamp: new Date().toISOString(),
+  });
+  return { ok: true, token: updatedToken };
+}
+
+/** Approve scheduled_takeaway only while status is pending_approval (single winner). */
+async function approveScheduledTakeawayToken(tokenId, restaurantId, token) {
+  const meta = token.meta || {};
+  const { data: updatedToken, error } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .update({
+      status: 'takeaway',
+      meta: { ...meta, approved_at: new Date().toISOString() },
+    })
+    .eq('id', tokenId)
+    .eq('restaurant_id', restaurantId)
+    .eq('status', 'pending_approval')
+    .eq('type', 'scheduled_takeaway')
+    .select()
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!updatedToken) {
+    return { ok: false, statusCode: 409, error: 'Token already approved or rejected' };
+  }
+
+  if (meta.booking_id) {
+    await supabaseAdmin.from('bookings')
+      .update({ status: 'pending' })
+      .eq('id', meta.booking_id);
+  }
+
+  if (token.phone && await isWhatsAppConfigured(restaurantId)) {
+    const schedLabel = meta.scheduled_at_label || meta.scheduled_at || 'your chosen time';
+    const kitchenLabel = meta.kitchen_start_at_label || meta.kitchen_start_at || '';
+    await sendWhatsAppMessage(
+      token.phone,
+      `✅ *Your scheduled takeaway is approved!*\n\n`
+      + `Token: *${token.id}*\n`
+      + `Pickup at: *${schedLabel}*\n`
+      + (kitchenLabel ? `Kitchen starts: *${kitchenLabel}*\n\n` : '\n')
+      + `We'll send your payment link shortly. You can also reply *PAY* here when ready.`,
+      restaurantId
+    );
+  }
+
+  await syncConversationForScheduledTakeawayApproval({
+    restaurantId,
+    customerPhone: token.phone,
+    tokenId:       token.id,
+    meta,
+  });
+
+  broadcastToRestaurant(restaurantId, {
+    type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString(),
+  });
+  return { ok: true, token: updatedToken };
+}
+
+/** Reject scheduled_takeaway only while status is pending_approval (single winner). */
+async function rejectScheduledTakeawayToken(tokenId, restaurantId, token, reason) {
+  const meta = token.meta || {};
+  const { data: updatedToken, error } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .update({
+      status: 'completed',
+      completed_at: new Date().toISOString(),
+      meta: {
+        ...meta,
+        rejected_at: new Date().toISOString(),
+        ...(reason ? { rejection_reason: reason } : {}),
+      },
+    })
+    .eq('id', tokenId)
+    .eq('restaurant_id', restaurantId)
+    .eq('status', 'pending_approval')
+    .eq('type', 'scheduled_takeaway')
+    .select()
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!updatedToken) {
+    return { ok: false, statusCode: 409, error: 'Token already approved or rejected' };
+  }
+
+  if (meta.booking_id) {
+    await cancelScheduledJobsForBooking(meta.booking_id);
+    await supabaseAdmin.from('bookings')
+      .update({ status: 'rejected' })
+      .eq('id', meta.booking_id);
+  }
+
+  if (token.phone && await isWhatsAppConfigured(restaurantId)) {
+    const reasonLine = reason ? `\n\nReason: ${reason}` : '';
+    await sendWhatsAppMessage(
+      token.phone,
+      `😔 *We're unable to confirm your scheduled takeaway right now.*${reasonLine}\n\n`
       + `Please try a different time or reply *Home* to see other options. 🙏`,
       restaurantId
     );
@@ -218,10 +324,10 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
     if (!name?.trim())    return res.status(400).json({ error: 'name is required' });
     if (!type)            return res.status(400).json({ error: 'type is required' });
     if (!restaurant_id)   return res.status(400).json({ error: 'restaurant_id is required' });
-    if (!['dinein', 'takeaway', 'large_party', 'scheduled_delivery'].includes(type))
-      return res.status(400).json({ error: 'type must be dinein, takeaway, large_party, or scheduled_delivery' });
+    if (!['dinein', 'takeaway', 'large_party', 'scheduled_delivery', 'scheduled_takeaway'].includes(type))
+      return res.status(400).json({ error: 'type must be dinein, takeaway, large_party, scheduled_delivery, or scheduled_takeaway' });
 
-    if (type === 'scheduled_delivery' && meta?.scheduled_at) {
+    if ((type === 'scheduled_delivery' || type === 'scheduled_takeaway') && meta?.scheduled_at) {
       const slotCheck = validateScheduledDeliverySlot(meta.scheduled_at);
       if (!slotCheck.valid) {
         return res.status(400).json({ error: slotCheck.message, reason: slotCheck.reason });
@@ -229,7 +335,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
     }
 
     const cleanPhone = phone ? String(phone).replace(/\D/g, '') : null;
-    if (cleanPhone && ['dinein', 'large_party', 'takeaway', 'scheduled_delivery'].includes(type)) {
+    if (cleanPhone && ['dinein', 'large_party', 'takeaway', 'scheduled_delivery', 'scheduled_takeaway'].includes(type)) {
       const existing = await findActiveTokenForPhone(restaurant_id, cleanPhone);
       if (existing) {
         console.log(
@@ -241,7 +347,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
     }
 
     const tokenId = await generateTokenId(restaurant_id);
-    const status  = (type === 'large_party' || type === 'scheduled_delivery') ? 'pending_approval'
+    const status  = (type === 'large_party' || type === 'scheduled_delivery' || type === 'scheduled_takeaway') ? 'pending_approval'
                   : type === 'takeaway'    ? 'takeaway'
                   : 'waiting';
 
@@ -251,7 +357,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
       name:        name.trim(),
       phone:       phone ? String(phone).replace(/\D/g, '') : null,
       type,
-      pax:         (type === 'takeaway' || type === 'scheduled_delivery') ? 1 : (parseInt(pax) || 1),
+      pax:         (type === 'takeaway' || type === 'scheduled_delivery' || type === 'scheduled_takeaway') ? 1 : (parseInt(pax) || 1),
       status,
       arrived_at:  new Date().toISOString(),
       meta:        meta || {},
@@ -268,6 +374,50 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
         );
       }
       throw insertError;
+    }
+
+    let finalToken = token;
+
+    // Static wait estimate for dine-in queue tokens
+    if (type === 'dinein' && status === 'waiting') {
+      try {
+        const partySize = parseInt(pax, 10) || 1;
+        const estimate = await calculateWaitEstimate(
+          supabaseAdmin,
+          restaurant_id,
+          partySize,
+          token.arrived_at,
+          token.id,
+        );
+        const { data: withEstimate, error: estErr } = await supabaseAdmin
+          .from('walk_in_tokens')
+          .update({
+            capacity_requested:      partySize,
+            estimated_wait_minutes:  estimate.estimate_minutes,
+            waitlist_depth_at_issue: estimate.waitlist_depth,
+            estimate_display:        estimate.display,
+          })
+          .eq('id', token.id)
+          .select()
+          .single();
+        if (!estErr && withEstimate) {
+          finalToken = withEstimate;
+        }
+
+        if (
+          cleanPhone
+          && req.body.customer_notify !== false
+          && await isWhatsAppConfigured(restaurant_id)
+        ) {
+          await sendWhatsAppMessage(
+            cleanPhone,
+            buildDineInCustomerMessage(partySize, finalToken.id, estimate),
+            restaurant_id,
+          );
+        }
+      } catch (estExc) {
+        console.warn('[tokens] wait estimate failed (non-fatal):', estExc.message);
+      }
     }
 
     const arrivalTime = new Date().toLocaleString('en-GB', {
@@ -325,6 +475,38 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
             restaurant_id
           );
         }
+      } else if (type === 'scheduled_takeaway') {
+        const schedAt = meta?.scheduled_at_label || meta?.scheduled_at || '—';
+        const kitchenAt = meta?.kitchen_start_at_label || meta?.kitchen_start_at || '—';
+        const total   = meta?.total != null ? `₹${Number(meta.total).toFixed(0)}` : '—';
+        const body =
+          `🥡 *Scheduled Takeaway* — Token *${token.id}*\n` +
+          `👤 ${token.name}\n📱 ${token.phone || '—'}\n` +
+          `🕐 Pickup at: *${schedAt}*\n👨‍🍳 Kitchen start: *${kitchenAt}*\n💰 ${total}\n\n` +
+          `Order: ${(meta?.order_text || '—').slice(0, 120)}\n\n` +
+          `Approve before the customer pays.`;
+        const sent = await sendWhatsAppInteractive(
+          managerPhone,
+          {
+            type: 'button',
+            body: { text: body },
+            footer: { text: 'Manager Portal — Pending approval' },
+            action: {
+              buttons: [
+                { type: 'reply', reply: { id: `SCHED_APPROVE_${token.id}`, title: '✅ Approve' } },
+                { type: 'reply', reply: { id: `SCHED_REJECT_${token.id}`, title: '❌ Reject' } },
+              ],
+            },
+          },
+          restaurant_id,
+        );
+        if (!sent) {
+          sendWhatsAppMessage(
+            managerPhone,
+            `${body}\n\n⚠️ *Approve in portal before customer pays:*\n${portalUrl}`,
+            restaurant_id
+          );
+        }
       } else if (type === 'dinein') {
         sendWhatsAppMessage(
           managerPhone,
@@ -345,11 +527,11 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
 
     broadcastToRestaurant(restaurant_id, {
       type:        'TOKEN_NEW',
-      token_id:    token.id,
-      token,
+      token_id:    finalToken.id,
+      token:       finalToken,
       timestamp:   new Date().toISOString(),
     });
-    res.status(201).json({ success: true, token });
+    res.status(201).json({ success: true, token: finalToken });
   } catch (err) {
     res.status(500).json({ error: err.message || 'Failed to create token' });
   }
@@ -578,7 +760,11 @@ router.put('/:id/assign', outletAuth, async (req, res) => {
       .select().single();
     if (updateError) throw updateError;
 
-    await supabaseAdmin.from('tables').update({ status: 'occupied' }).eq('id', table_id).eq('restaurant_id', restaurantId);
+    await supabaseAdmin.from('tables').update({
+      status: 'occupied',
+      seated_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }).eq('id', table_id).eq('restaurant_id', restaurantId);
 
     let menuSendResult = {};
     if (token.phone && await isWhatsAppConfigured(restaurantId)) {
@@ -636,6 +822,14 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
       return res.json({ success: true, token: result.token });
     }
 
+    if (token.type === 'scheduled_takeaway') {
+      const result = await approveScheduledTakeawayToken(req.params.id, restaurantId, token);
+      if (!result.ok) {
+        return res.status(result.statusCode || 400).json({ error: result.error });
+      }
+      return res.json({ success: true, token: result.token });
+    }
+
     const combo        = token.meta?.combo ?? [];
     const tableNumbers = combo.map(t => String(t[0]));
     let tableIds       = [];
@@ -660,8 +854,14 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
       })
       .eq('id', req.params.id).select().single();
 
-    if (tableIds.length > 0)
-      await supabaseAdmin.from('tables').update({ status: 'occupied' }).in('id', tableIds).eq('restaurant_id', restaurantId);
+    if (tableIds.length > 0) {
+      const seatedAt = new Date().toISOString();
+      await supabaseAdmin.from('tables').update({
+        status: 'occupied',
+        seated_at: seatedAt,
+        updated_at: seatedAt,
+      }).in('id', tableIds).eq('restaurant_id', restaurantId);
+    }
 
     let menuSendResult = {};
     if (token.phone && await isWhatsAppConfigured(restaurantId)) {
@@ -705,6 +905,16 @@ router.put('/:id/reject', outletAuth, async (req, res) => {
 
     if (token.type === 'scheduled_delivery') {
       const result = await rejectScheduledDeliveryToken(
+        req.params.id, restaurantId, token, req.body.reason,
+      );
+      if (!result.ok) {
+        return res.status(result.statusCode || 400).json({ error: result.error });
+      }
+      return res.json({ success: true, token: result.token });
+    }
+
+    if (token.type === 'scheduled_takeaway') {
+      const result = await rejectScheduledTakeawayToken(
         req.params.id, restaurantId, token, req.body.reason,
       );
       if (!result.ok) {
@@ -795,15 +1005,21 @@ router.post('/:id/approve-internal', requireKdsSecret, async (req, res) => {
     const { data: token } = await supabaseAdmin
       .from('walk_in_tokens').select('*').eq('id', req.params.id).eq('restaurant_id', restaurantId).single();
     if (!token) return res.status(404).json({ error: 'Token not found' });
-    if (token.type !== 'scheduled_delivery') {
-      return res.status(400).json({ error: 'Internal approve supports scheduled_delivery only' });
+    if (token.type === 'scheduled_delivery') {
+      const result = await approveScheduledDeliveryToken(req.params.id, restaurantId, token);
+      if (!result.ok) {
+        return res.status(result.statusCode || 400).json({ error: result.error });
+      }
+      return res.json({ success: true, token: result.token });
     }
-
-    const result = await approveScheduledDeliveryToken(req.params.id, restaurantId, token);
-    if (!result.ok) {
-      return res.status(result.statusCode || 400).json({ error: result.error });
+    if (token.type === 'scheduled_takeaway') {
+      const result = await approveScheduledTakeawayToken(req.params.id, restaurantId, token);
+      if (!result.ok) {
+        return res.status(result.statusCode || 400).json({ error: result.error });
+      }
+      return res.json({ success: true, token: result.token });
     }
-    res.json({ success: true, token: result.token });
+    return res.status(400).json({ error: 'Internal approve supports scheduled_delivery and scheduled_takeaway only' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -819,17 +1035,25 @@ router.post('/:id/reject-internal', requireKdsSecret, async (req, res) => {
     const { data: token } = await supabaseAdmin
       .from('walk_in_tokens').select('*').eq('id', req.params.id).eq('restaurant_id', restaurantId).single();
     if (!token) return res.status(404).json({ error: 'Token not found' });
-    if (token.type !== 'scheduled_delivery') {
-      return res.status(400).json({ error: 'Internal reject supports scheduled_delivery only' });
+    if (token.type === 'scheduled_delivery') {
+      const result = await rejectScheduledDeliveryToken(
+        req.params.id, restaurantId, token, req.body.reason,
+      );
+      if (!result.ok) {
+        return res.status(result.statusCode || 400).json({ error: result.error });
+      }
+      return res.json({ success: true, token: result.token });
     }
-
-    const result = await rejectScheduledDeliveryToken(
-      req.params.id, restaurantId, token, req.body.reason,
-    );
-    if (!result.ok) {
-      return res.status(result.statusCode || 400).json({ error: result.error });
+    if (token.type === 'scheduled_takeaway') {
+      const result = await rejectScheduledTakeawayToken(
+        req.params.id, restaurantId, token, req.body.reason,
+      );
+      if (!result.ok) {
+        return res.status(result.statusCode || 400).json({ error: result.error });
+      }
+      return res.json({ success: true, token: result.token });
     }
-    res.json({ success: true, token: result.token });
+    return res.status(400).json({ error: 'Internal reject supports scheduled_delivery and scheduled_takeaway only' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

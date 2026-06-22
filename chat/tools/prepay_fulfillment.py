@@ -63,9 +63,13 @@ _SESSION_HINT_KEYS = (
     "delivery_ready_range",
     "kitchen_busy",
     "scheduled_at",
+    "scheduled_at_label",
     "order_mode",
     "service_type",
     "scheduled_kds_lead_minutes",
+    "kitchen_start_at",
+    "kitchen_start_at_label",
+    "total_cook_minutes",
     "payment_mode",
     "delivery_address",
     "delivery_distance_km",
@@ -240,7 +244,20 @@ async def _should_defer_kds_for_scheduled(
     *,
     restaurant_id: str | None = None,
 ) -> tuple[bool, str | None]:
-    """Return (defer, customer_note) when KDS should wait until the lead window."""
+    """Return (defer, customer_note) when KDS should wait until kitchen_start or lead window."""
+    kitchen_start = session_hints.get("kitchen_start_at")
+    if kitchen_start:
+        from datetime import datetime, timezone
+        from tools.kitchen_scheduler import format_ist_label, parse_slot_datetime
+
+        ks = parse_slot_datetime(kitchen_start)
+        if ks and ks > datetime.now(tz=ks.tzinfo):
+            label = session_hints.get("kitchen_start_at_label") or format_ist_label(ks)
+            return True, (
+                f"👨‍🍳 We'll start your order at *{label}*. "
+                "You'll get a message when prep begins and when it's ready."
+            )
+
     restaurant_info = None
     if restaurant_id:
         restaurant_info = await fetch_restaurant_info(restaurant_id)
@@ -498,6 +515,62 @@ async def _send_receipt(
         logger.warning(f"[prepay-fulfill] receipt failed (non-fatal): {exc}")
 
 
+async def _enqueue_scheduled_takeaway_jobs(payload: dict[str, Any]) -> bool:
+    """Persist KDS + prep-start WhatsApp jobs when kitchen_start_at is in the future."""
+    from datetime import datetime
+    from tools.db_tools import enqueue_scheduled_jobs
+    from tools.kitchen_scheduler import format_ist_label, parse_slot_datetime
+
+    hints = payload.get("session_hints") or {}
+    kitchen_start = hints.get("kitchen_start_at")
+    if not kitchen_start:
+        return False
+
+    ks = parse_slot_datetime(kitchen_start)
+    if not ks or ks <= datetime.now(tz=ks.tzinfo):
+        return False
+
+    booking_id = payload["booking_id"]
+    restaurant_id = payload["restaurant_id"]
+    token = str(payload.get("token") or payload.get("display_token") or "—")
+    cart = payload.get("cart_snapshot") or {}
+
+    items = []
+    for item_id, line in cart.items():
+        if not isinstance(line, dict):
+            continue
+        items.append({
+            "retailer_id": str(item_id),
+            "name": line.get("title") or line.get("name") or str(item_id),
+            "qty": int(line.get("qty") or 1),
+            "unit_price": float(line.get("unit_price") or 0),
+        })
+
+    job_payload = {
+        "customer_name": payload.get("customer_name"),
+        "customer_phone": payload.get("customer_phone"),
+        "token_number": token,
+        "service_type": "takeaway",
+        "items": items,
+        "special_notes": None,
+        "slot_label": hints.get("scheduled_at_label") or hints.get("scheduled_at") or "",
+        "kitchen_start_label": hints.get("kitchen_start_at_label") or format_ist_label(ks),
+    }
+
+    await enqueue_scheduled_jobs(
+        restaurant_id,
+        booking_id,
+        token,
+        ks.isoformat(),
+        job_payload,
+    )
+    logger.info(
+        f"[prepay-fulfill] Enqueued scheduled jobs for takeaway booking {booking_id} "
+        f"at {ks.isoformat()}"
+    )
+    return True
+
+
 async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
     restaurant_id = payload["restaurant_id"]
     customer_phone = payload["customer_phone"]
@@ -509,27 +582,65 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
     totals = payload.get("totals") or {}
     booking_time = payload["booking_time"]
     token = payload.get("token") or payload.get("display_token")
-
-    portal_token_id = await sync_token_to_portal(
-        customer_name=customer_name,
-        customer_phone=customer_phone,
-        token_type="takeaway",
-        pax=1,
-        restaurant_id=restaurant_id,
-    )
-    display_token = portal_token_id or token
     hints = payload.get("session_hints") or {}
-    if portal_token_id and hints.get("scheduled_at"):
-        await patch_walk_in_token_meta(
-            portal_token_id,
-            restaurant_id,
-            {
-                "booking_id": booking_id,
-                "order_text": order_text_display,
-                "cart": cart_snapshot,
-                "scheduled_at": hints.get("scheduled_at"),
-            },
+    scheduled_flow = bool(hints.get("kitchen_start_at") or hints.get("scheduled_at"))
+
+    portal_token_id = None
+    if not scheduled_flow:
+        portal_token_id = await sync_token_to_portal(
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            token_type="takeaway",
+            pax=1,
+            restaurant_id=restaurant_id,
         )
+    display_token = portal_token_id or token
+
+    jobs_enqueued = await _enqueue_scheduled_takeaway_jobs(payload)
+    defer, defer_note = await _should_defer_kds_for_scheduled(
+        hints, restaurant_id=restaurant_id,
+    )
+
+    if jobs_enqueued or defer:
+        sched_label = hints.get("scheduled_at_label") or hints.get("scheduled_at") or "your slot"
+        confirm_body = (
+            f"Payment received! ✅\n────────────────────\n"
+            f"Token: {display_token}\n"
+            f"Your scheduled takeaway is confirmed for *{sched_label}*."
+        )
+        if defer_note:
+            confirm_body += f"\n\n{defer_note}"
+        await send_whatsapp_message(customer_phone, confirm_body, restaurant_id)
+
+        try:
+            await notify_manager_order_alert(
+                restaurant_id,
+                token_number=display_token,
+                customer_name=customer_name,
+                customer_phone=customer_phone,
+                order_text=order_text_display,
+                total=total,
+                table_number=None,
+                party_size=None,
+                booking_time=booking_time,
+                service_type="takeaway",
+            )
+        except Exception as exc:
+            logger.warning(f"[prepay-fulfill] manager alert failed (non-fatal): {exc}")
+
+        await _send_receipt(
+            restaurant_id=restaurant_id,
+            customer_phone=customer_phone,
+            customer_name=customer_name,
+            token=display_token,
+            service_type="takeaway",
+            cart_snapshot=cart_snapshot,
+            totals=totals,
+            parcel_charge=float(totals.get("parcel_charge") or 0),
+        )
+        await update_booking_status(booking_id, "confirmed")
+        logger.info(f"[prepay-fulfill] Scheduled takeaway {booking_id} confirmed — jobs queued")
+        return True
 
     captain_result = await assign_and_notify_captain_takeaway(
         restaurant_id,

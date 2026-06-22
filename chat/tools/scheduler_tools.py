@@ -19,7 +19,7 @@ from tools.db_tools import (
     get_bookings_due_for_kds,
     mark_booking_kds_sent,
     get_paid_bookings_missing_kds,
-    mark_kds_alert_sent,              # ← NEW: add this function to db_tools (see note below)
+    mark_kds_alert_sent,
 )
 from tools.personalisation_tools import update_customer_profile
 from tools.campaign_tools import (
@@ -273,7 +273,7 @@ async def send_prepay_payment_reminders():
         get_pending_prepay_reminder_candidates,
         increment_prepay_reminder_count,
     )
-    from tools.payment_tools import create_payment_link, is_placeholder_payment_link
+    from tools.payment_tools import create_payment_link, is_placeholder_payment_link, format_razorpay_payment_line
 
     logger.info("Running send_prepay_payment_reminders job")
     try:
@@ -300,7 +300,9 @@ async def send_prepay_payment_reminders():
                         customer_phone=phone,
                     )
                     if not is_placeholder_payment_link(link):
-                        pay_line = f"\n\n💳 Pay here:\n{link}"
+                        pay_line = "\n\n" + format_razorpay_payment_line(
+                            link, label="💳 Pay here:",
+                        )
                 except Exception as link_err:
                     logger.warning(f"[prepay-reminder] link failed for {booking_id}: {link_err}")
 
@@ -530,9 +532,8 @@ async def reconcile_paid_orders_without_kds():
             ok = await retry_kds_for_confirmed_booking(booking_id)
 
             if ok:
-                # Retry succeeded — KDS ticket now exists, silence future checks
                 retried += 1
-                await mark_kds_alert_sent(booking_id)          # ← NEW
+                await mark_kds_alert_sent(booking_id)
                 logger.warning(
                     f"[reconcile] Auto-retried KDS for paid booking {booking_id} "
                     f"({row.get('service_type')} token {row.get('token_number')})"
@@ -554,7 +555,7 @@ async def reconcile_paid_orders_without_kds():
                     )
                     alerted += 1
 
-                await mark_kds_alert_sent(booking_id)          # ← NEW
+                await mark_kds_alert_sent(booking_id)
                 logger.error(
                     f"[reconcile] Paid booking {booking_id} has no KDS — retry failed"
                 )

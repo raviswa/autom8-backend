@@ -21,7 +21,14 @@ from typing import Dict, Any
 import aiohttp
 
 from tools.cart_tools import enrich_cart_titles
-from tools.db_tools import get_next_token_number, create_booking, update_booking_status
+from tools.db_tools import (
+    get_next_token_number,
+    create_booking,
+    update_booking_status,
+    get_scheduled_takeaway_token,
+    fetch_menu_timing_map,
+    update_booking_schedule,
+)
 from tools.payment_tools import build_payment_line
 from tools.prepay_fulfillment import (
     prepay_fulfillment_required,
@@ -55,6 +62,19 @@ from tools.booking_mechanisms import (
     notify_manager_order_alert,
     assign_and_notify_captain_takeaway,
     cache_restaurant_pricing,
+    sync_scheduled_takeaway_to_portal,
+    _notify_manager_scheduled_takeaway,
+)
+from tools.slot_capacity import validate_scheduled_slot_with_capacity, format_slot_full_message
+from tools.kitchen_scheduler import (
+    compute_kitchen_start_at,
+    cart_lines_from_snapshot,
+    format_ist_label,
+)
+from tools.delivery_slots import (
+    validate_scheduled_delivery_slot,
+    format_slot_rejection_message,
+    _format_slot_label,
 )
 from agents.customer.booking_helpers import (
     _HOME_HINT,
@@ -71,6 +91,121 @@ from config.settings import settings
 from tools.delivery_slots import build_flow_calendar_data, format_schedule_window_hint
 
 logger = logging.getLogger(__name__)
+
+_MANAGER_APPROVAL_NOTE = (
+    "\n\n📋 *Scheduled takeaway needs manager approval before payment.* "
+    "We'll message you once your slot is confirmed."
+)
+
+
+def _requires_scheduled_takeaway_approval(session_state: Dict[str, Any]) -> bool:
+    """Calendar-scheduled takeaway needs manager approval before payment."""
+    return bool(session_state.get("scheduled_at"))
+
+
+def _scheduled_takeaway_label(session_state: Dict[str, Any]) -> str:
+    raw = session_state.get("scheduled_at")
+    if not raw:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        h = dt.hour % 12 or 12
+        ampm = "PM" if dt.hour >= 12 else "AM"
+        return f"{dt.strftime('%d %b %Y')}, {h}:{dt.minute:02d} {ampm}"
+    except (ValueError, TypeError):
+        return str(raw)
+
+
+async def _reject_takeaway_schedule_resend_calendar(
+    customer_phone: str,
+    restaurant_id: str,
+    customer_id: str,
+    customer_name: str,
+    session_state: Dict[str, Any],
+    error_message: str,
+) -> Dict[str, Any]:
+    await send_whatsapp_message(
+        customer_phone,
+        f"{error_message}\n\nTap *Select Date & Time* below to pick another slot.",
+        restaurant_id,
+    )
+    session_state.pop("scheduled_at", None)
+    return await offer_takeaway_schedule(
+        customer_phone, restaurant_id, customer_id, customer_name, session_state,
+    )
+
+
+async def _validate_takeaway_slot(
+    restaurant_id: str,
+    scheduled: datetime,
+) -> tuple[datetime | None, str | None]:
+    from zoneinfo import ZoneInfo
+
+    if scheduled.tzinfo is None:
+        scheduled = scheduled.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+
+    rest = await fetch_restaurant_info(restaurant_id)
+    max_orders = int(rest.get("scheduled_slot_max_orders") or 10)
+    valid, reason, suggestion = await validate_scheduled_slot_with_capacity(
+        restaurant_id, scheduled, max_orders,
+    )
+    if not valid:
+        if reason == "full":
+            label = _format_slot_label(scheduled)
+            return None, format_slot_full_message(label, suggestion)
+        return None, format_slot_rejection_message(reason, suggestion)
+    return scheduled, None
+
+
+async def _compute_and_persist_takeaway_schedule(
+    restaurant_id: str,
+    booking_id: str,
+    session_state: Dict[str, Any],
+    cart_snapshot: dict,
+    order_text: str,
+) -> dict[str, Any]:
+    sched_raw = session_state.get("scheduled_at")
+    if not sched_raw:
+        raise ValueError("scheduled_at missing")
+
+    rest = await fetch_restaurant_info(restaurant_id)
+    menu_map = await fetch_menu_timing_map(restaurant_id)
+    slot_dt = datetime.fromisoformat(str(sched_raw).replace("Z", "+00:00"))
+    cart_lines = cart_lines_from_snapshot(cart_snapshot)
+
+    schedule = compute_kitchen_start_at(
+        slot_dt,
+        service_type="takeaway",
+        cart_lines=cart_lines,
+        menu_by_retailer_id=menu_map,
+        buffer_minutes=int(rest.get("schedule_buffer_minutes") or 15),
+        rounding_minutes=int(rest.get("schedule_rounding_minutes") or 15),
+        transit_minutes=0,
+    )
+
+    kitchen_start = schedule["kitchen_start_at"]
+    slot_at = schedule["scheduled_slot_at"]
+    schedule_meta = {
+        "order_text": order_text,
+        "cart": cart_snapshot,
+        "kitchen_start_label": format_ist_label(kitchen_start),
+        "scheduled_at_label": _scheduled_takeaway_label(session_state),
+        "station_breakdown": schedule.get("station_breakdown") or {},
+    }
+
+    await update_booking_schedule(
+        booking_id,
+        kitchen_start_at=kitchen_start.isoformat(),
+        scheduled_slot_at=slot_at.isoformat(),
+        total_cook_minutes=schedule["total_cook_minutes"],
+        total_packing_minutes=schedule["total_packing_minutes"],
+        schedule_meta=schedule_meta,
+    )
+
+    session_state["kitchen_start_at"] = kitchen_start.isoformat()
+    session_state["scheduled_slot_at"] = slot_at.isoformat()
+    session_state["total_cook_minutes"] = schedule["total_cook_minutes"]
+    return schedule
 
 
 async def offer_takeaway_schedule(
@@ -167,18 +302,28 @@ async def _parse_takeaway_schedule(message: str) -> datetime | None:
 async def _advance_after_takeaway_time_set(
     customer_phone: str,
     restaurant_id: str,
+    customer_id: str,
+    customer_name: str,
     session_state: Dict[str, Any],
     scheduled: datetime | None,
 ) -> Dict[str, Any]:
-    session_state["scheduled_at"] = scheduled.isoformat() if scheduled else None
-
     if scheduled is not None:
+        normalized, err = await _validate_takeaway_slot(restaurant_id, scheduled)
+        if err:
+            return await _reject_takeaway_schedule_resend_calendar(
+                customer_phone, restaurant_id, customer_id, customer_name,
+                session_state, err,
+            )
+        scheduled = normalized
+        session_state["scheduled_at"] = scheduled.isoformat()
+
         h = scheduled.hour % 12 or 12
         ampm = "PM" if scheduled.hour >= 12 else "AM"
         when = f"{scheduled.strftime('%d %b %Y')}, {h}:{scheduled.minute:02d} {ampm}"
+        note = _MANAGER_APPROVAL_NOTE if session_state.get("scheduled_takeaway_enabled") else ""
         await send_whatsapp_message(
             customer_phone,
-            f"Got it — we'll have your order ready for pickup on *{when}*.",
+            f"Got it — we'll have your order ready for pickup on *{when}*.{note}",
             restaurant_id,
         )
 
@@ -190,6 +335,195 @@ async def _advance_after_takeaway_time_set(
     session_state["booking_step"] = "awaiting_order"
     await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
     return {"status": "awaiting_order"}
+
+
+async def _complete_scheduled_takeaway_after_approval(
+    restaurant_id: str,
+    customer_id: str,
+    customer_name: str,
+    customer_phone: str,
+    session_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Send payment link after manager approves a scheduled takeaway."""
+    cart = session_state.get("pending_cart") or session_state.get("cart") or {}
+    order_text = (
+        session_state.get("pending_order_text")
+        or (cart_to_order_text(cart) if cart else "")
+    )
+    if not order_text:
+        await send_whatsapp_message(
+            customer_phone,
+            "Sorry, we couldn't find your order details. Please contact the restaurant." + _HOME_HINT,
+            restaurant_id,
+        )
+        return {"status": "error"}
+
+    totals = session_state.get("order_totals") or {}
+    total = float(session_state.get("order_total") or totals.get("grand_total") or 0)
+    token = session_state.get("display_token") or session_state.get("token_number") or "—"
+    booking_id = session_state.get("booking_id")
+    cart_snapshot = dict(cart)
+    booking_time = session_state.get("booking_time", now_display())
+
+    payment_line = await build_payment_line(
+        booking_id or "", total, customer_name, customer_phone,
+        f"Scheduled takeaway {token}", session_state, service_type="takeaway",
+    ) if booking_id else "💳 Payment can be made at pickup."
+
+    confirmation = (
+        f"Your scheduled takeaway is confirmed! 🎉\n────────────────────\n"
+        f"Token: {token}\nOrder: {order_text}\n"
+        f"────────────────────\n"
+        f"{format_order_total_lines(totals)}\n\n{payment_line}"
+    )
+    sched_label = _scheduled_takeaway_label(session_state)
+    if sched_label:
+        confirmation += f"\n\n🕐 Pickup at: *{sched_label}*"
+    kitchen_label = session_state.get("kitchen_start_at_label")
+    if kitchen_label:
+        confirmation += f"\n👨‍🍳 Kitchen starts: *{kitchen_label}*"
+
+    prepay_pending = prepay_fulfillment_required(session_state)
+    if prepay_pending:
+        confirmation += f"\n\n{PREPAY_PENDING_FOOTER}"
+
+    await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
+    session_state["_scheduled_payment_sent"] = True
+
+    if prepay_pending and booking_id:
+        await stash_and_persist_prepay_payload(
+            session_state,
+            booking_id,
+            build_prepay_payload(
+                service_type="takeaway",
+                session_state=session_state,
+                restaurant_id=restaurant_id,
+                customer_id=customer_id,
+                customer_name=customer_name,
+                customer_phone=customer_phone,
+                booking_id=booking_id,
+                token=str(token),
+                cart_snapshot=cart_snapshot,
+                order_text_display=order_text,
+                total=total,
+                totals=totals,
+                booking_time=booking_time,
+            ),
+        )
+        session_state["order_confirmed_summary"] = (
+            f"Scheduled takeaway *{token}* — {order_text[:40]} (₹{total:.0f}) — awaiting payment"
+        )
+        _first_item = strip_order_quantity(order_text.split(",")[0].strip())[:40]
+        session_state["last_order_summary"] = _first_item
+        session_state["booking_step"] = "awaiting_prepay"
+        clear_cart(session_state)
+        return {"status": "awaiting_prepay", "booking_id": booking_id, "total": total}
+
+    session_state["booking_step"] = "visit_complete"
+    clear_cart(session_state)
+    return {"status": "visit_complete", "booking_id": booking_id, "total": total}
+
+
+async def _submit_scheduled_takeaway_for_approval(
+    restaurant_id: str,
+    customer_id: str,
+    customer_name: str,
+    customer_phone: str,
+    manager_phone: str,
+    session_state: Dict[str, Any],
+    *,
+    order_text: str,
+    cart_snapshot: dict,
+    totals: dict,
+    total: float,
+    token: str,
+    booking_id: str,
+    booking_time: str,
+) -> Dict[str, Any]:
+    """Hold payment until manager approves a scheduled takeaway."""
+    sched_raw = session_state.get("scheduled_at")
+    if sched_raw:
+        try:
+            sched_dt = datetime.fromisoformat(str(sched_raw).replace("Z", "+00:00"))
+            normalized, err = await _validate_takeaway_slot(restaurant_id, sched_dt)
+            if err:
+                return await _reject_takeaway_schedule_resend_calendar(
+                    customer_phone, restaurant_id, customer_id, customer_name,
+                    session_state, err,
+                )
+            session_state["scheduled_at"] = normalized.isoformat()
+        except (ValueError, TypeError):
+            pass
+
+    try:
+        schedule = await _compute_and_persist_takeaway_schedule(
+            restaurant_id, booking_id, session_state, cart_snapshot, order_text,
+        )
+        kitchen_label = format_ist_label(schedule["kitchen_start_at"])
+        session_state["kitchen_start_at_label"] = kitchen_label
+    except Exception as exc:
+        logger.error(f"[takeaway] schedule compute failed for {booking_id}: {exc}")
+
+    sched_label = _scheduled_takeaway_label(session_state)
+    session_state["scheduled_at_label"] = sched_label
+    portal_meta = {
+        "booking_id": booking_id,
+        "scheduled_at": session_state.get("scheduled_at"),
+        "scheduled_at_label": sched_label,
+        "kitchen_start_at": session_state.get("kitchen_start_at"),
+        "kitchen_start_at_label": session_state.get("kitchen_start_at_label"),
+        "total_cook_minutes": session_state.get("total_cook_minutes"),
+        "order_text": order_text,
+        "total": total,
+        "totals": totals,
+        "cart": cart_snapshot,
+    }
+
+    portal_token = await sync_scheduled_takeaway_to_portal(
+        customer_name, customer_phone, restaurant_id, portal_meta,
+    )
+    if portal_token:
+        session_state["display_token"] = portal_token
+        session_state["token_number"] = portal_token
+        await _notify_manager_scheduled_takeaway(
+            restaurant_id, portal_token, customer_name, customer_phone,
+            portal_meta, manager_phone=manager_phone,
+        )
+    else:
+        await send_whatsapp_message(
+            customer_phone,
+            "We couldn't submit your scheduled takeaway for manager approval right now. "
+            "Please contact the restaurant directly, or reply *Home* to try again later."
+            + _HOME_HINT,
+            restaurant_id,
+        )
+        session_state["booking_step"] = "visit_complete"
+        clear_cart(session_state)
+        return {"status": "error", "reason": "portal_token_missing"}
+
+    session_state["pending_order_text"] = order_text
+    session_state["pending_cart"] = cart_snapshot
+    session_state["booking_time"] = booking_time
+    session_state["booking_step"] = "awaiting_scheduled_takeaway_approval"
+
+    confirmation = (
+        f"Your scheduled takeaway request has been submitted! 📋\n────────────────────\n"
+        f"Token: {session_state.get('token_number', token)}\n"
+        f"Order: {order_text}\n"
+        f"────────────────────\n"
+        f"{format_order_total_lines(totals)}"
+    )
+    if sched_label:
+        confirmation += f"\n\n🕐 Pickup at: *{sched_label}*"
+    if session_state.get("kitchen_start_at_label"):
+        confirmation += f"\n👨‍🍳 Kitchen start: *{session_state['kitchen_start_at_label']}*"
+    confirmation += (
+        "\n\n⏳ *Manager approval required* before payment.\n"
+        "We'll message you as soon as your slot is confirmed — usually within a few minutes."
+    )
+    await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
+
+    return {"status": "awaiting_scheduled_takeaway_approval", "booking_id": booking_id}
 
 
 async def handle_takeaway_flow(
@@ -216,7 +550,7 @@ async def handle_takeaway_flow(
                 )
                 return {"status": "awaiting_takeaway_scheduled_flow"}
             return await _advance_after_takeaway_time_set(
-                customer_phone, restaurant_id, session_state, scheduled,
+                customer_phone, restaurant_id, customer_id, customer_name, session_state, scheduled,
             )
 
         if not session_state.get("_schedule_flow_resend"):
@@ -239,6 +573,37 @@ async def handle_takeaway_flow(
         return await offer_takeaway_schedule(
             customer_phone, restaurant_id, customer_id, customer_name, session_state,
         )
+
+    # ── awaiting_scheduled_takeaway_approval ──────────────────────────────────
+    elif booking_step == "awaiting_scheduled_takeaway_approval":
+        token = await get_scheduled_takeaway_token(restaurant_id, customer_phone)
+        if token and token.get("status") == "takeaway":
+            session_state["scheduled_takeaway_approved"] = True
+            session_state["display_token"] = token.get("id") or session_state.get("display_token")
+            session_state["token_number"] = session_state["display_token"]
+            session_state["booking_step"] = "awaiting_scheduled_takeaway_payment"
+            return await _complete_scheduled_takeaway_after_approval(
+                restaurant_id, customer_id, customer_name, customer_phone, session_state,
+            )
+        if token and token.get("status") == "completed":
+            await send_whatsapp_message(
+                customer_phone,
+                "Sorry, we couldn't confirm your scheduled takeaway slot. "
+                "Please pick another time or reply *Home* to start over." + _HOME_HINT,
+                restaurant_id,
+            )
+            session_state["booking_step"] = "visit_complete"
+            clear_cart(session_state)
+            return {"status": "rejected"}
+        return {"status": "awaiting_scheduled_takeaway_approval"}
+
+    # ── awaiting_scheduled_takeaway_payment ───────────────────────────────────
+    elif booking_step == "awaiting_scheduled_takeaway_payment":
+        if session_state.get("scheduled_takeaway_approved") or session_state.get("_scheduled_payment_sent"):
+            return await _complete_scheduled_takeaway_after_approval(
+                restaurant_id, customer_id, customer_name, customer_phone, session_state,
+            )
+        return {"status": "awaiting_scheduled_takeaway_payment"}
 
     elif booking_step == "awaiting_order":
         order_text = message.strip()
@@ -288,12 +653,26 @@ async def handle_takeaway_flow(
             booking_id = booking["id"]
             session_state["booking_id"] = booking_id
 
+            order_text_display = cart_to_order_text(cart) if cart else order_text
+
+            if _requires_scheduled_takeaway_approval(session_state):
+                return await _submit_scheduled_takeaway_for_approval(
+                    restaurant_id, customer_id, customer_name, customer_phone, manager_phone,
+                    session_state,
+                    order_text=order_text_display,
+                    cart_snapshot=cart_snapshot,
+                    totals=totals,
+                    total=total,
+                    token=token,
+                    booking_id=booking_id,
+                    booking_time=booking_time,
+                )
+
             payment_line = await build_payment_line(
                 booking_id, total, customer_name, customer_phone,
                 f"Takeaway {token}", session_state, service_type="takeaway",
             )
 
-            order_text_display = cart_to_order_text(cart) if cart else order_text
             prepay_pending = prepay_fulfillment_required(session_state)
 
             portal_token_id = None
