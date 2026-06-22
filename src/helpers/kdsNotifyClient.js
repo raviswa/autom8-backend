@@ -76,7 +76,7 @@ async function notifyKdsFromSessionContext(session) {
   }
 }
 
-async def notifyKdsFromPayload({
+async function notifyKdsFromPayload({
   restaurant_id,
   customer_name,
   customer_phone,
