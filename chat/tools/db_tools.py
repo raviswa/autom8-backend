@@ -2335,7 +2335,7 @@ async def count_orders_for_slot(restaurant_id: str, slot_iso: str) -> int:
                       + (floor(extract(minute from b.scheduled_slot_at AT TIME ZONE 'Asia/Kolkata') / 30) * interval '30 min')
                     = date_trunc('hour', CAST(:slot AS timestamptz) AT TIME ZONE 'Asia/Kolkata')
                       + (floor(extract(minute from CAST(:slot AS timestamptz) AT TIME ZONE 'Asia/Kolkata') / 30) * interval '30 min')
-                  AND b.status NOT IN ('cancelled', 'rejected')
+                  AND b.status IN ('pending', 'confirmed')
                   AND (
                     b.payment_status = 'paid'
                     OR EXISTS (
