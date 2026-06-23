@@ -2396,21 +2396,41 @@ async def fetch_menu_timing_map(restaurant_id: str) -> dict[str, dict[str, Any]]
     if AsyncSessionLocal is None:
         return {}
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(MenuItem).where(MenuItem.restaurant_id == UUID(restaurant_id))
-        )
-        items = result.scalars().all()
+        try:
+            result = await session.execute(
+                text("""
+                    SELECT retailer_id, name, prep_time_fixed, batch_size, time_per_batch,
+                           kitchen_station, packing_time, holds_well
+                    FROM menu_items
+                    WHERE restaurant_id = CAST(:rid AS uuid)
+                      AND retailer_id IS NOT NULL
+                """),
+                {"rid": restaurant_id},
+            )
+        except Exception:
+            logger.exception("[menu-timing] Full timing query failed; falling back to retailer_id + name")
+            result = await session.execute(
+                text("""
+                    SELECT retailer_id, name
+                    FROM menu_items
+                    WHERE restaurant_id = CAST(:rid AS uuid)
+                      AND retailer_id IS NOT NULL
+                """),
+                {"rid": restaurant_id},
+            )
         out: dict[str, dict[str, Any]] = {}
-        for m in items:
-            key = str(m.retailer_id or m.id)
-            out[key] = {
-                "name": m.name,
-                "prep_time_fixed": getattr(m, "prep_time_fixed", 5),
-                "batch_size": getattr(m, "batch_size", 1),
-                "time_per_batch": getattr(m, "time_per_batch", 10),
-                "kitchen_station": getattr(m, "kitchen_station", "assembly"),
-                "packing_time": float(getattr(m, "packing_time", 1) or 1),
-                "holds_well": bool(getattr(m, "holds_well", False)),
+        for row in result.mappings():
+            rid = str(row.get("retailer_id") or "").strip()
+            if not rid:
+                continue
+            out[rid] = {
+                "name": row.get("name"),
+                "prep_time_fixed": row.get("prep_time_fixed") or 5,
+                "batch_size": row.get("batch_size") or 1,
+                "time_per_batch": row.get("time_per_batch") or 10,
+                "kitchen_station": row.get("kitchen_station") or "assembly",
+                "packing_time": float(row.get("packing_time") or 1),
+                "holds_well": bool(row.get("holds_well", False)),
             }
         return out
 
@@ -2507,8 +2527,7 @@ async def get_scheduled_takeaway_token(restaurant_id: str, customer_phone: str) 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             text("""
-                SELECT id, status, type, meta, name, phone, pax,
-                       estimate_display, estimated_wait_minutes, waitlist_depth_at_issue
+                SELECT id, status, type, meta, name, phone, pax
                 FROM walk_in_tokens
                 WHERE restaurant_id = CAST(:rid AS uuid)
                   AND type = 'scheduled_takeaway'
@@ -2529,8 +2548,7 @@ async def get_walk_in_token_by_id(restaurant_id: str, token_id: str) -> dict | N
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             text("""
-                SELECT id, status, type, meta, name, phone, pax,
-                       estimate_display, estimated_wait_minutes, waitlist_depth_at_issue
+                SELECT id, status, type, meta, name, phone, pax
                 FROM walk_in_tokens
                 WHERE restaurant_id = CAST(:rid AS uuid)
                   AND id = :tid
