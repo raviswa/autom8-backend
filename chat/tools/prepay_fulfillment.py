@@ -616,7 +616,7 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
         confirm_body = (
             f"Payment received! ✅\n────────────────────\n"
             f"Token: {display_token}\n"
-            f"Your scheduled takeaway is confirmed for *{sched_label}*."
+            f"Your scheduled take-away is confirmed for *{sched_label}*."
         )
         if defer_note:
             confirm_body += f"\n\n{defer_note}"

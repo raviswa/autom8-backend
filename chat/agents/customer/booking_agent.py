@@ -131,6 +131,7 @@ async def handle_booking_flow(
     msg_lower = message.strip().lower()
 
     if message.strip() == "FLOW_PARSE_FAILED":
+        step = session_state.get("booking_step", "")
         await send_whatsapp_message(
             customer_phone,
             "We couldn't read your calendar selection. Please tap *Select Date & Time* again, "
@@ -140,7 +141,17 @@ async def handle_booking_flow(
         )
         session_state["schedule_text_fallback"] = True
         touch_session_activity(session_state)
-        return {"status": session_state.get("booking_step", "awaiting_service_selection")}
+        if step in ("awaiting_takeaway_scheduled_flow", "awaiting_takeaway_scheduled_time"):
+            return await handle_takeaway_flow(
+                restaurant_id, customer_id, customer_name, customer_phone,
+                manager_phone, message, session_state,
+            )
+        if step in ("awaiting_scheduled_flow", "awaiting_scheduled_time"):
+            return await handle_delivery_flow(
+                restaurant_id, customer_id, customer_name, customer_phone,
+                manager_phone, message, session_state,
+            )
+        return {"status": step or "awaiting_service_selection"}
     if current_step == "awaiting_prepay":
         touch_session_activity(session_state)
         return await handle_awaiting_prepay(
@@ -350,8 +361,10 @@ async def handle_booking_flow(
         _SERVICE_TEXT_MAP = {
             "dine":"dine_in","dine in":"dine_in","dinein":"dine_in","dine-in":"dine_in",
             "dine in now":"dine_in","dining":"dine_in","table":"dine_in","eat in":"dine_in",
-            "takeaway now":"takeaway_now","takeaway":"takeaway_schedule","take away":"takeaway_schedule",
-            "take-away":"takeaway_schedule","pickup":"takeaway_now","pick up":"takeaway_now",
+            "takeaway now":"takeaway_now","take-away now":"takeaway_now","take away now":"takeaway_now",
+            "takeaway":"takeaway_schedule","take away":"takeaway_schedule",
+            "take-away":"takeaway_schedule","scheduled take-away":"takeaway_schedule",
+            "pickup":"takeaway_now","pick up":"takeaway_now",
             "carry out":"takeaway_now","parcel":"takeaway_now","take out":"takeaway_now",
             "deliver now":"delivery_now","delivery now":"delivery_now",
             "deliver":"delivery_schedule","delivery":"delivery_schedule",
@@ -443,8 +456,8 @@ async def handle_booking_flow(
             if service_type == "takeaway" and not session_state.get("scheduled_takeaway_enabled"):
                 await send_whatsapp_message(
                     customer_phone,
-                    "Scheduled takeaway isn't enabled for this restaurant yet. "
-                    "Please choose *Takeaway Now 🛍️* or another option." + _HOME_HINT,
+                    "Scheduled take-away isn't enabled for this restaurant yet. "
+                    "Please choose *Take-away now 🛍️* or another option." + _HOME_HINT,
                     restaurant_id,
                 )
                 return {"status": "awaiting_service_selection"}

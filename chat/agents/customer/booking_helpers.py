@@ -754,13 +754,26 @@ def parse_flow_datetime(message: str) -> datetime | None:
                 data[k.strip()] = v.strip()
         date_str = data.get("date", "")
         time_str = data.get("time", "")
-        if date_str and time_str:
-            from zoneinfo import ZoneInfo
-            parsed = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-            return parsed.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        if not date_str or not time_str:
+            return None
+
+        from zoneinfo import ZoneInfo
+
+        time_norm = time_str.strip().upper()
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %I:%M %p", "%Y-%m-%d %I %p"):
+            try:
+                parsed = datetime.strptime(f"{date_str} {time_norm}", fmt)
+                return parsed.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+            except ValueError:
+                continue
     except Exception:
         return None
     return None
+
+
+def now_ist() -> datetime:
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("Asia/Kolkata"))
 
 
 async def offer_whatsapp_schedule_calendar(

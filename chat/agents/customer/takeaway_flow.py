@@ -85,6 +85,7 @@ from agents.customer.booking_helpers import (
     parse_flow_datetime,
     format_captain_pickup_line,
     handle_unknown_booking_step,
+    now_ist,
 )
 from agents.customer.conversation_helpers import safe_build_order_suggestion
 from config.settings import settings
@@ -93,7 +94,7 @@ from tools.delivery_slots import build_flow_calendar_data, format_schedule_windo
 logger = logging.getLogger(__name__)
 
 _MANAGER_APPROVAL_NOTE = (
-    "\n\n📋 *Scheduled takeaway needs manager approval before payment.* "
+    "\n\n📋 *Scheduled take-away needs manager approval before payment.* "
     "We'll message you once your slot is confirmed."
 )
 
@@ -251,7 +252,7 @@ async def offer_takeaway_schedule(
             flow_id=flow_id,
             flow_token=flow_token,
             flow_cta="Select Date & Time",
-            flow_header="🥡 Takeaway 📅",
+            flow_header="🥡 Scheduled take-away 📅",
             flow_body=flow_body,
             flow_footer="Calendar — pick date and time",
             restaurant_id=restaurant_id,
@@ -279,7 +280,7 @@ async def offer_takeaway_schedule(
         customer_phone,
         "We couldn't open the date picker. You can type your preferred date and time "
         "(e.g. *tomorrow 7:30 PM* or *18 Jun 7pm*).\n\n"
-        "Or reply *Home* and choose *Takeaway 📅* again.",
+        "Or reply *Home* and choose *Scheduled take-away 📅* again.",
         restaurant_id,
     )
     session_state["booking_step"] = "awaiting_takeaway_scheduled_flow"
@@ -367,11 +368,11 @@ async def _complete_scheduled_takeaway_after_approval(
 
     payment_line = await build_payment_line(
         booking_id or "", total, customer_name, customer_phone,
-        f"Scheduled takeaway {token}", session_state, service_type="takeaway",
+        f"Scheduled take-away {token}", session_state, service_type="takeaway",
     ) if booking_id else "💳 Payment can be made at pickup."
 
     confirmation = (
-        f"Your scheduled takeaway is confirmed! 🎉\n────────────────────\n"
+        f"Your scheduled take-away is confirmed! 🎉\n────────────────────\n"
         f"Token: {token}\nOrder: {order_text}\n"
         f"────────────────────\n"
         f"{format_order_total_lines(totals)}\n\n{payment_line}"
@@ -411,7 +412,7 @@ async def _complete_scheduled_takeaway_after_approval(
             ),
         )
         session_state["order_confirmed_summary"] = (
-            f"Scheduled takeaway *{token}* — {order_text[:40]} (₹{total:.0f}) — awaiting payment"
+            f"Scheduled take-away *{token}* — {order_text[:40]} (₹{total:.0f}) — awaiting payment"
         )
         _first_item = strip_order_quantity(order_text.split(",")[0].strip())[:40]
         session_state["last_order_summary"] = _first_item
@@ -492,7 +493,7 @@ async def _submit_scheduled_takeaway_for_approval(
     else:
         await send_whatsapp_message(
             customer_phone,
-            "We couldn't submit your scheduled takeaway for manager approval right now. "
+            "We couldn't submit your scheduled take-away for manager approval right now. "
             "Please contact the restaurant directly, or reply *Home* to try again later."
             + _HOME_HINT,
             restaurant_id,
@@ -507,7 +508,7 @@ async def _submit_scheduled_takeaway_for_approval(
     session_state["booking_step"] = "awaiting_scheduled_takeaway_approval"
 
     confirmation = (
-        f"Your scheduled takeaway request has been submitted! 📋\n────────────────────\n"
+        f"Your scheduled take-away request has been submitted! 📋\n────────────────────\n"
         f"Token: {session_state.get('token_number', token)}\n"
         f"Order: {order_text}\n"
         f"────────────────────\n"
@@ -541,7 +542,7 @@ async def handle_takeaway_flow(
             scheduled = await _parse_takeaway_schedule(message)
 
         if scheduled is not None:
-            if scheduled <= datetime.now():
+            if scheduled <= now_ist():
                 await send_whatsapp_message(
                     customer_phone,
                     "That time has already passed. Please tap *Select Date & Time* "
@@ -562,7 +563,7 @@ async def handle_takeaway_flow(
         await send_whatsapp_message(
             customer_phone,
             "Please tap *Select Date & Time* above to choose your pickup slot from the calendar.\n\n"
-            "For immediate pickup, reply *Home* and choose *Takeaway Now 🛍️*.",
+            "For immediate pickup, reply *Home* and choose *Take-away now 🛍️*.",
             restaurant_id,
         )
         return {"status": "awaiting_takeaway_scheduled_flow"}
@@ -588,7 +589,7 @@ async def handle_takeaway_flow(
         if token and token.get("status") == "completed":
             await send_whatsapp_message(
                 customer_phone,
-                "Sorry, we couldn't confirm your scheduled takeaway slot. "
+                "Sorry, we couldn't confirm your scheduled take-away slot. "
                 "Please pick another time or reply *Home* to start over." + _HOME_HINT,
                 restaurant_id,
             )

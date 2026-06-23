@@ -660,7 +660,7 @@ async def _send_manager_walk_in_alert(
         )
     elif token_type == "scheduled_takeaway":
         body = (
-            f"🥡 *Scheduled Takeaway* — Token *{token_id}*\n"
+            f"🥡 *Scheduled take-away* — Token *{token_id}*\n"
             f"👤 {customer_name}\n🕐 {arrival} IST\n\n"
             f"⚠️ *Approve in portal before customer pays:*\n{portal_url}"
         )
@@ -1056,7 +1056,7 @@ async def _notify_manager_scheduled_takeaway(
     )
 
     body = (
-        f"🥡 *Scheduled Takeaway* — Token *{token_id}*\n"
+        f"🥡 *Scheduled take-away* — Token *{token_id}*\n"
         f"👤 {customer_name}\n"
         f"📱 {customer_phone or '—'}\n"
         f"🕐 Pickup at: *{sched_at}*\n"

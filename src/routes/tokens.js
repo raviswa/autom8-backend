@@ -232,7 +232,7 @@ async function approveScheduledTakeawayToken(tokenId, restaurantId, token) {
     const kitchenLabel = meta.kitchen_start_at_label || meta.kitchen_start_at || '';
     await sendWhatsAppMessage(
       token.phone,
-      `✅ *Your scheduled takeaway is approved!*\n\n`
+      `✅ *Your scheduled take-away is approved!*\n\n`
       + `Token: *${token.id}*\n`
       + `Pickup at: *${schedLabel}*\n`
       + (kitchenLabel ? `Kitchen starts: *${kitchenLabel}*\n\n` : '\n')
@@ -291,7 +291,7 @@ async function rejectScheduledTakeawayToken(tokenId, restaurantId, token, reason
     const reasonLine = reason ? `\n\nReason: ${reason}` : '';
     await sendWhatsAppMessage(
       token.phone,
-      `😔 *We're unable to confirm your scheduled takeaway right now.*${reasonLine}\n\n`
+      `😔 *We're unable to confirm your scheduled take-away right now.*${reasonLine}\n\n`
       + `Please try a different time or reply *Home* to see other options. 🙏`,
       restaurantId
     );
@@ -480,7 +480,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
         const kitchenAt = meta?.kitchen_start_at_label || meta?.kitchen_start_at || '—';
         const total   = meta?.total != null ? `₹${Number(meta.total).toFixed(0)}` : '—';
         const body =
-          `🥡 *Scheduled Takeaway* — Token *${token.id}*\n` +
+          `🥡 *Scheduled take-away* — Token *${token.id}*\n` +
           `👤 ${token.name}\n📱 ${token.phone || '—'}\n` +
           `🕐 Pickup at: *${schedAt}*\n👨‍🍳 Kitchen start: *${kitchenAt}*\n💰 ${total}\n\n` +
           `Order: ${(meta?.order_text || '—').slice(0, 120)}\n\n` +

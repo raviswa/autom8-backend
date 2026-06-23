@@ -159,7 +159,12 @@ def _extract_message_body(message_obj: dict) -> str:
             nfm = interactive.get("nfm_reply", {})
             raw = nfm.get("response_json", "{}")
             try:
-                data       = json.loads(raw)
+                if isinstance(raw, dict):
+                    data = raw
+                elif isinstance(raw, str) and raw.strip():
+                    data = json.loads(raw)
+                else:
+                    data = {}
                 date_str   = (
                     data.get("reservation_date")
                     or data.get("date")
@@ -244,10 +249,17 @@ async def _process_meta_payload(payload: dict):
         message_body = _extract_message_body(message_obj)
         logger.info(f"[DIAG] Extracted type={msg_type!r} body={message_body!r}")
 
-        # Skip truly unhandled types (not order, not a known interactive type)
-        if not message_body and msg_type not in ("order",):
+        # Skip truly unhandled types (not order, not interactive calendar replies)
+        if not message_body and msg_type not in ("order", "interactive"):
             logger.info(f"Skipping unhandled message type={msg_type!r}")
             return
+        if not message_body and msg_type == "interactive":
+            interactive_type = message_obj.get("interactive", {}).get("type", "")
+            if interactive_type == "nfm_reply":
+                message_body = "FLOW_PARSE_FAILED"
+            else:
+                logger.info(f"Skipping unhandled interactive type={interactive_type!r}")
+                return
 
         # 2b. Skip auto-replies (WhatsApp Business auto-responders)
         # These fire when the customer's number has an auto-reply configured.

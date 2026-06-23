@@ -292,7 +292,7 @@ async def _send_service_menu(
                         },
                         {
                             "id":          "2",
-                            "title":       "Takeaway Now 🛍️",
+                            "title":       "Take-away now 🛍️",
                             "description": "Pick up your order at the counter",
                         },
                         {
@@ -323,7 +323,7 @@ async def _send_service_menu(
             f"{greeting}\n\n"
             "How can we help you today?\n\n"
             "1. Dine-in Now 🍽️\n"
-            "2. Takeaway now🛍️\n"
+            "2. Take-away now 🛍️\n"
             "3. Delivery now 🛵\n"
             "4. Reserve a Table (for future booking) 📅\n"
             "5. Nothing, thanks ❌\n\n"
@@ -604,7 +604,7 @@ async def handle_booking_flow(
             await cache_restaurant_pricing(session_state, restaurant_id)
             await send_whatsapp_message(
                 customer_phone,
-                "Great! You've selected Takeaway now 🛍️\n\n"
+                "Great! You've selected Take-away now 🛍️\n\n"
                 "Browse today's menu below and add items to your basket 🛒",
                 restaurant_id,
             )

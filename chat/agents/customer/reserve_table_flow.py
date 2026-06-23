@@ -38,6 +38,7 @@ from agents.customer.booking_helpers import (
     parse_booking_datetime,
     offer_whatsapp_schedule_calendar,
     handle_unknown_booking_step,
+    now_ist,
 )
 from agents.customer.conversation_intelligence import is_affirmative as _is_affirmative
 from config.settings import settings
@@ -132,7 +133,7 @@ async def handle_reserve_table_flow(
             )
             return {"status": "awaiting_flow_datetime"}
 
-        if parsed_dt <= datetime.now():
+        if parsed_dt <= now_ist():
             await send_whatsapp_message(
                 customer_phone,
                 "That time has already passed. Please tap *Select Date & Time* "

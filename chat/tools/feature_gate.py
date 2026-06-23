@@ -158,7 +158,7 @@ async def build_service_menu_rows(
     if _feature_val(Feature.TAKEAWAY) in feature_set:
         rows.append({
             "id": "takeaway_now",
-            "title": "Takeaway Now 🛍️",
+            "title": "Take-away now 🛍️",
             "description": "Pick up as soon as it's ready",
         })
 
@@ -172,7 +172,7 @@ async def build_service_menu_rows(
     if _feature_val(Feature.TAKEAWAY) in feature_set and sched_takeaway:
         rows.append({
             "id": "takeaway_schedule",
-            "title": "Takeaway 📅",
+            "title": "Scheduled take-away 📅",
             "description": "Choose pickup date & time on the calendar",
         })
 
