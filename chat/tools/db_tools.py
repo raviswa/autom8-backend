@@ -2320,10 +2320,12 @@ async def mark_reservation_reminder_sent(booking_id: str, reminder_field: str) -
         session.add(booking)
         await session.commit()
 
-async def count_orders_for_slot(restaurant_id: str, slot_iso: str) -> int:
+async def count_orders_for_slot(restaurant_id: str, slot_at: datetime | str) -> int:
     """Count scheduled orders occupying a 30-minute slot bucket."""
     if AsyncSessionLocal is None:
         return 0
+    if isinstance(slot_at, str):
+        slot_at = datetime.fromisoformat(slot_at.replace("Z", "+00:00"))
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             text("""
@@ -2333,8 +2335,8 @@ async def count_orders_for_slot(restaurant_id: str, slot_iso: str) -> int:
                   AND b.scheduled_slot_at IS NOT NULL
                   AND date_trunc('hour', b.scheduled_slot_at AT TIME ZONE 'Asia/Kolkata')
                       + (floor(extract(minute from b.scheduled_slot_at AT TIME ZONE 'Asia/Kolkata') / 30) * interval '30 min')
-                    = date_trunc('hour', CAST(:slot AS timestamptz) AT TIME ZONE 'Asia/Kolkata')
-                      + (floor(extract(minute from CAST(:slot AS timestamptz) AT TIME ZONE 'Asia/Kolkata') / 30) * interval '30 min')
+                    = date_trunc('hour', :slot AT TIME ZONE 'Asia/Kolkata')
+                      + (floor(extract(minute from :slot AT TIME ZONE 'Asia/Kolkata') / 30) * interval '30 min')
                   AND b.status::text NOT IN ('cancelled', 'no_show', 'completed')
                   AND (
                     b.payment_status = 'paid'
@@ -2345,7 +2347,7 @@ async def count_orders_for_slot(restaurant_id: str, slot_iso: str) -> int:
                     )
                   )
             """),
-            {"rid": restaurant_id, "slot": slot_iso},
+            {"rid": restaurant_id, "slot": slot_at},
         )
         row = result.mappings().first()
         return int(row["cnt"]) if row else 0

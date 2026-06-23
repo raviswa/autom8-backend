@@ -34,7 +34,7 @@ async def slot_occupancy(
     slot_at: datetime,
 ) -> dict[str, Any]:
     bucket = slot_bucket_start(slot_at)
-    count = await count_orders_for_slot(restaurant_id, bucket.isoformat())
+    count = await count_orders_for_slot(restaurant_id, bucket)
     return {"slot_at": bucket, "count": count}
 
 
