@@ -129,6 +129,26 @@ async def handle_booking_flow(
         current_step = session_state.get("booking_step", "ask_service")
 
     msg_lower = message.strip().lower()
+
+    # ── Home / HOM / Menu — always wins (before payment & scheduled flows) ────
+    if current_step not in {"awaiting_reset_confirmation"} and is_reset_keyword(message):
+        from tools.feedback_bridge import try_dismiss_feedback_via_api
+
+        await try_dismiss_feedback_via_api(customer_phone, restaurant_id)
+        if msg_lower in _DIRECT_RESET_KEYWORDS or msg_lower in _FULL_RESET_KEYWORDS:
+            full = msg_lower in _FULL_RESET_KEYWORDS
+            await do_reset(
+                customer_id, customer_name, customer_phone, restaurant_id,
+                session_state, full_restart=full,
+            )
+            touch_session_activity(session_state)
+            return {"status": "identity_restart" if full else "reset_complete"}
+        session_state["step_before_reset"] = current_step
+        session_state["booking_step"] = "awaiting_reset_confirmation"
+        session_state["_full_restart_pending"] = True
+        await ask_continue_or_reset(customer_phone, restaurant_id, full_restart=True)
+        return {"status": "awaiting_reset_confirmation"}
+
     msg_token = message.strip().upper()
 
     # ── Typed shortcuts (expand to canonical ids / global actions) ────────────
@@ -190,6 +210,18 @@ async def handle_booking_flow(
             touch_session_activity(session_state)
             return pay_result
 
+    # ── Greeting while stuck waiting on scheduled approval/payment ────────────
+    _SCHEDULED_WAIT_STEPS = frozenset({
+        "awaiting_scheduled_takeaway_approval",
+        "awaiting_scheduled_takeaway_payment",
+        "awaiting_scheduled_delivery_approval",
+        "awaiting_scheduled_delivery_payment",
+    })
+    if is_greeting(message) and current_step in _SCHEDULED_WAIT_STEPS:
+        return await start_fresh_visit(
+            customer_phone, restaurant_id, customer_name, session_state,
+        )
+
     # ── Scheduled payment steps — route before visit_complete reset ───────────
     if current_step in (
         "awaiting_scheduled_takeaway_payment",
@@ -231,10 +263,9 @@ async def handle_booking_flow(
         session_state["booking_step"] = "ask_service"
         current_step = "ask_service"
 
-    # ── Global Home / reset keyword (before feedback — active order wins) ─────
+    # ── Global Home / reset keyword (mid-flow continue vs start-over prompt) ──
     if current_step not in {"awaiting_reset_confirmation"} and is_reset_keyword(message):
         from tools.feedback_bridge import try_dismiss_feedback_via_api
-        from agents.customer.booking_helpers import abandon_incomplete_session
 
         await try_dismiss_feedback_via_api(customer_phone, restaurant_id)
         if msg_lower in _DIRECT_RESET_KEYWORDS or msg_lower in _FULL_RESET_KEYWORDS:
@@ -399,7 +430,7 @@ async def handle_booking_flow(
 
     # ── ask_service ───────────────────────────────────────────────────────────
     if current_step == "ask_service":
-        if not session_state.get("_menu_sent"):
+        if not session_state.get("_menu_sent") or is_greeting(message):
             greeting = await build_conversation_greeting(
                 session_state, restaurant_id, customer_phone, customer_name,
             )

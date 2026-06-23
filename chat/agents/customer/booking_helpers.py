@@ -444,7 +444,7 @@ _ABANDON_FLOW_KEYS = (
     "current_category", "_catalog_sent_after_party", "order_totals",
     "pending_order_text", "schedule_flow_sent", "scheduled_delivery_approved",
     "scheduled_takeaway_approved", "kitchen_start_at", "kitchen_start_at_label",
-    "booking_id", "flow_token",
+    "booking_id", "flow_token", "_scheduled_payment_sent", "_menu_sent",
 )
 
 

@@ -157,7 +157,17 @@ async def handle_global_shortcut(
     from tools.cart_tools import get_cart, cart_summary_text, send_cart_summary_buttons
 
     if token in {"HOM", "HOME", "MNU", "MENU", "MAINMENU"}:
-        return None  # handled by is_reset_keyword after we add hom/mnu aliases
+        from agents.customer.booking_helpers import do_reset, touch_session_activity
+        from tools.feedback_bridge import try_dismiss_feedback_via_api
+
+        await try_dismiss_feedback_via_api(customer_phone, restaurant_id)
+        customer_id = session_state.get("customer_id", "")
+        await do_reset(
+            str(customer_id), customer_name, customer_phone, restaurant_id,
+            session_state, full_restart=False,
+        )
+        touch_session_activity(session_state)
+        return {"status": "reset_complete"}
 
     if is_pay_keyword(token):
         return None  # handled by scheduled_payment.try_trigger_scheduled_payment_on_pay
