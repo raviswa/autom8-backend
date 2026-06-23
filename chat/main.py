@@ -227,6 +227,8 @@ async def verify_webhook(request: Request):
 
 
 async def _process_meta_payload(payload: dict):
+    phone: str | None = None
+    restaurant_id: str | None = None
     try:
         # 1. Extraction & in-process dedup
         value = payload.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {})
@@ -414,6 +416,16 @@ async def _process_meta_payload(payload: dict):
 
     except Exception as e:
         logger.error(f"Webhook processing failed: {e}", exc_info=True)
+        if phone and restaurant_id:
+            try:
+                await send_whatsapp_message(
+                    phone,
+                    "Sorry, something went wrong while saving your pickup time. "
+                    "Please try again in a moment, or reply *Home* to start over.",
+                    restaurant_id,
+                )
+            except Exception:
+                logger.exception("Failed to send webhook error fallback to customer")
 
 
 @app.get("/health/razorpay")
