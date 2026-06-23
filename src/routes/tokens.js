@@ -125,6 +125,95 @@ async function findActiveTokenForPhone(restaurantId, phone) {
   return data;
 }
 
+const SCHEDULED_TOKEN_TYPES = new Set(['scheduled_delivery', 'scheduled_takeaway']);
+
+/** Cancel jobs and mark booking cancelled when a scheduled order is superseded. */
+async function supersedeWalkInToken(token, restaurantId, reason) {
+  const meta = token.meta || {};
+  const { error } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .update({
+      status:       'completed',
+      completed_at: new Date().toISOString(),
+      meta: {
+        ...meta,
+        superseded_at:    new Date().toISOString(),
+        supersede_reason: reason,
+      },
+    })
+    .eq('id', token.id)
+    .eq('restaurant_id', restaurantId);
+  if (error) {
+    console.warn(`[tokens] supersede ${token.id} failed:`, error.message);
+    return;
+  }
+  if (meta.booking_id) {
+    await cancelScheduledJobsForBooking(meta.booking_id);
+    await supabaseAdmin.from('bookings')
+      .update({ status: 'cancelled' })
+      .eq('id', meta.booking_id);
+  }
+  console.log(`[tokens] Superseded ${token.id} (${reason})`);
+}
+
+/**
+ * Idempotent token reuse — only for true retries, not new orders.
+ * Scheduled orders: reuse only when same booking_id is still pending_approval.
+ * Otherwise supersede unpaid/stale scheduled tokens and allocate a new id.
+ */
+async function findReusableTokenForPhone(restaurantId, phone, type, meta = {}) {
+  const existing = await findActiveTokenForPhone(restaurantId, phone);
+  if (!existing) return null;
+
+  if (SCHEDULED_TOKEN_TYPES.has(type)) {
+    if (!SCHEDULED_TOKEN_TYPES.has(existing.type)) {
+      // e.g. immediate takeaway active — do not block a new scheduled order
+      return null;
+    }
+
+    const incomingBid = meta?.booking_id;
+    const existingBid = existing.meta?.booking_id;
+
+    if (
+      incomingBid
+      && existingBid === incomingBid
+      && existing.status === 'pending_approval'
+      && existing.type === type
+    ) {
+      const { data: updated, error } = await supabaseAdmin
+        .from('walk_in_tokens')
+        .update({ meta: { ...(existing.meta || {}), ...meta } })
+        .eq('id', existing.id)
+        .eq('restaurant_id', restaurantId)
+        .select()
+        .single();
+      if (error) {
+        console.warn(`[tokens] meta refresh for ${existing.id} failed:`, error.message);
+        return { token: existing, deduplicated: true };
+      }
+      console.log(
+        `[tokens] Refreshed pending token ${existing.id} for booking ${incomingBid} (retry)`,
+      );
+      return { token: updated, deduplicated: true };
+    }
+
+    // New booking or approved-but-unpaid prior order → retire old token
+    await supersedeWalkInToken(existing, restaurantId, 'replaced_by_new_scheduled_order');
+    return null;
+  }
+
+  // Immediate dine-in / takeaway / large_party: reuse same type only
+  if (existing.type === type) {
+    console.log(
+      `[tokens] Reusing active token ${existing.id} for ${phone} ` +
+      `(status=${existing.status}, deduplicated)`,
+    );
+    return { token: existing, deduplicated: true };
+  }
+
+  return null;
+}
+
 /** Approve scheduled_delivery only while status is pending_approval (single winner). */
 async function approveScheduledDeliveryToken(tokenId, restaurantId, token) {
   const meta = token.meta || {};
@@ -366,13 +455,13 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
 
     const cleanPhone = phone ? String(phone).replace(/\D/g, '') : null;
     if (cleanPhone && ['dinein', 'large_party', 'takeaway', 'scheduled_delivery', 'scheduled_takeaway'].includes(type)) {
-      const existing = await findActiveTokenForPhone(restaurant_id, cleanPhone);
-      if (existing) {
-        console.log(
-          `[tokens] Reusing active token ${existing.id} for ${cleanPhone} ` +
-          `(status=${existing.status}, deduplicated)`,
-        );
-        return res.status(200).json({ success: true, token: existing, deduplicated: true });
+      const reuse = await findReusableTokenForPhone(restaurant_id, cleanPhone, type, meta || {});
+      if (reuse) {
+        return res.status(200).json({
+          success: true,
+          token: reuse.token,
+          deduplicated: true,
+        });
       }
     }
 

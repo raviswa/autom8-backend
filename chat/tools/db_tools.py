@@ -2039,6 +2039,93 @@ async def _next_portal_token_id(session, restaurant_id: str) -> str:
     return f"T-{str(int(time.time()) % 1_000_000).zfill(6)}"
 
 
+async def supersede_walk_in_token(
+    restaurant_id: str,
+    token_id: str,
+    *,
+    reason: str = "replaced_by_new_scheduled_order",
+) -> bool:
+    """Mark a stale scheduled token completed and cancel its booking/jobs."""
+    if AsyncSessionLocal is None:
+        return False
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    SELECT meta FROM walk_in_tokens
+                    WHERE id = :tid AND restaurant_id = CAST(:rid AS uuid)
+                    LIMIT 1
+                """),
+                {"tid": token_id, "rid": restaurant_id},
+            )
+            row = result.mappings().first()
+            if not row:
+                return False
+            meta = row.get("meta") or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            booking_id = meta.get("booking_id")
+            meta = {
+                **meta,
+                "superseded_at": datetime.utcnow().isoformat() + "Z",
+                "supersede_reason": reason,
+            }
+            await session.execute(
+                text("""
+                    UPDATE walk_in_tokens
+                    SET status = 'completed',
+                        completed_at = NOW(),
+                        meta = CAST(:meta AS jsonb)
+                    WHERE id = :tid AND restaurant_id = CAST(:rid AS uuid)
+                """),
+                {"tid": token_id, "rid": restaurant_id, "meta": json.dumps(meta)},
+            )
+            if booking_id:
+                await session.execute(
+                    text("""
+                        UPDATE bookings SET status = 'cancelled'
+                        WHERE id = CAST(:bid AS uuid)
+                    """),
+                    {"bid": str(booking_id)},
+                )
+            await session.commit()
+        logger.info(f"[walk-in-token] Superseded {token_id} ({reason})")
+        return True
+    except Exception as e:
+        logger.error(f"[walk-in-token] supersede failed for {token_id}: {e}")
+        return False
+
+
+def _should_reuse_walk_in_token(
+    existing: dict,
+    token_type: str,
+    meta: dict | None,
+) -> bool:
+    """True only for idempotent retries — not new orders on the same phone."""
+    scheduled = {"scheduled_delivery", "scheduled_takeaway"}
+    if token_type in scheduled:
+        if existing.get("type") not in scheduled:
+            return False
+        incoming_bid = (meta or {}).get("booking_id")
+        existing_meta = existing.get("meta") or {}
+        if isinstance(existing_meta, str):
+            try:
+                existing_meta = json.loads(existing_meta)
+            except Exception:
+                existing_meta = {}
+        existing_bid = existing_meta.get("booking_id")
+        return bool(
+            incoming_bid
+            and incoming_bid == existing_bid
+            and existing.get("status") == "pending_approval"
+            and existing.get("type") == token_type
+        )
+    return existing.get("type") == token_type
+
+
 async def create_walk_in_token_direct(
     restaurant_id: str,
     name: str,
@@ -2068,12 +2155,50 @@ async def create_walk_in_token_direct(
     actual_pax = 1 if token_type in ("takeaway", "scheduled_delivery", "scheduled_takeaway") else max(1, int(pax or 1))
 
     existing = await get_active_walk_in_token(restaurant_id, phone)
-    if existing and existing.get("type") == token_type:
-        logger.info(
-            f"[walk-in-token] Reusing active {existing['id']} for {phone} "
-            f"(status={existing.get('status')})"
-        )
-        return existing["id"]
+    if existing:
+        if _should_reuse_walk_in_token(existing, token_type, meta):
+            logger.info(
+                f"[walk-in-token] Reusing pending token {existing['id']} for {phone} "
+                f"(booking retry)"
+            )
+            if meta and AsyncSessionLocal is not None:
+                try:
+                    async with AsyncSessionLocal() as session:
+                        prev_meta = existing.get("meta") or {}
+                        if isinstance(prev_meta, str):
+                            try:
+                                prev_meta = json.loads(prev_meta)
+                            except Exception:
+                                prev_meta = {}
+                        merged = {**prev_meta, **meta}
+                        await session.execute(
+                            text("""
+                                UPDATE walk_in_tokens
+                                SET meta = CAST(:meta AS jsonb)
+                                WHERE id = :tid AND restaurant_id = CAST(:rid AS uuid)
+                            """),
+                            {
+                                "tid": existing["id"],
+                                "rid": restaurant_id,
+                                "meta": json.dumps(merged),
+                            },
+                        )
+                        await session.commit()
+                except Exception as e:
+                    logger.warning(f"[walk-in-token] meta refresh failed: {e}")
+            return existing["id"]
+        scheduled = {"scheduled_delivery", "scheduled_takeaway"}
+        if token_type in scheduled and existing.get("type") in scheduled:
+            await supersede_walk_in_token(
+                restaurant_id, existing["id"],
+                reason="replaced_by_new_scheduled_order",
+            )
+        elif existing.get("type") == token_type:
+            logger.info(
+                f"[walk-in-token] Reusing active {existing['id']} for {phone} "
+                f"(status={existing.get('status')})"
+            )
+            return existing["id"]
 
     try:
         async with AsyncSessionLocal() as session:
@@ -2532,6 +2657,7 @@ async def get_scheduled_takeaway_token(restaurant_id: str, customer_phone: str) 
                 WHERE restaurant_id = CAST(:rid AS uuid)
                   AND type = 'scheduled_takeaway'
                   AND phone = ANY(:phones)
+                  AND status IN ('pending_approval', 'takeaway')
                 ORDER BY arrived_at DESC
                 LIMIT 1
             """),
