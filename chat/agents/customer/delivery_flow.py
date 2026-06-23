@@ -22,6 +22,8 @@ from tools.db_tools import (
     create_booking,
     update_booking_status,
     get_scheduled_delivery_token,
+    update_booking_schedule,
+    fetch_menu_timing_map,
 )
 from tools.payment_tools import build_payment_line
 from tools.prepay_fulfillment import (
@@ -77,6 +79,11 @@ from tools.delivery_slots import (
     build_flow_calendar_data,
     format_schedule_window_hint,
 )
+from tools.kitchen_scheduler import (
+    compute_kitchen_start_at,
+    cart_lines_from_snapshot,
+    format_ist_label,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +105,74 @@ _RESCHEDULE_KEYWORDS = frozenset({
 def _requires_scheduled_delivery_approval(session_state: Dict[str, Any]) -> bool:
     """Calendar-scheduled deliveries need manager approval before payment."""
     return bool(session_state.get("scheduled_at"))
+
+
+async def _compute_and_persist_delivery_schedule(
+    restaurant_id: str,
+    booking_id: str,
+    session_state: Dict[str, Any],
+    cart_snapshot: dict,
+    order_text: str,
+) -> dict[str, Any]:
+    sched_raw = session_state.get("scheduled_at")
+    if not sched_raw:
+        raise ValueError("scheduled_at missing")
+
+    rest = await fetch_restaurant_info(restaurant_id)
+    menu_map = await fetch_menu_timing_map(restaurant_id)
+    slot_dt = datetime.fromisoformat(str(sched_raw).replace("Z", "+00:00"))
+    cart_lines = cart_lines_from_snapshot(cart_snapshot)
+    transit = int(
+        session_state.get("delivery_travel_minutes")
+        or hints_transit_minutes(session_state)
+        or 20
+    )
+
+    schedule = compute_kitchen_start_at(
+        slot_dt,
+        service_type="delivery",
+        cart_lines=cart_lines,
+        menu_by_retailer_id=menu_map,
+        buffer_minutes=int(rest.get("schedule_buffer_minutes") or 15),
+        rounding_minutes=int(rest.get("schedule_rounding_minutes") or 15),
+        transit_minutes=transit,
+    )
+
+    kitchen_start = schedule["kitchen_start_at"]
+    slot_at = schedule["scheduled_slot_at"]
+    schedule_meta = {
+        "order_text": order_text,
+        "cart": cart_snapshot,
+        "kitchen_start_label": format_ist_label(kitchen_start),
+        "scheduled_at_label": _scheduled_delivery_label(session_state),
+        "station_breakdown": schedule.get("station_breakdown") or {},
+        "service_type": "delivery",
+    }
+
+    await update_booking_schedule(
+        booking_id,
+        kitchen_start_at=kitchen_start.isoformat(),
+        scheduled_slot_at=slot_at.isoformat(),
+        total_cook_minutes=schedule["total_cook_minutes"],
+        total_packing_minutes=schedule["total_packing_minutes"],
+        schedule_meta=schedule_meta,
+    )
+
+    session_state["kitchen_start_at"] = kitchen_start.isoformat()
+    session_state["scheduled_slot_at"] = slot_at.isoformat()
+    session_state["total_cook_minutes"] = schedule["total_cook_minutes"]
+    return schedule
+
+
+def hints_transit_minutes(session_state: Dict[str, Any]) -> int | None:
+    """Rough travel time from distance when explicit minutes are absent."""
+    km = session_state.get("delivery_distance_km")
+    if km is None:
+        return None
+    try:
+        return max(10, min(45, int(float(km) * 4)))
+    except (TypeError, ValueError):
+        return None
 
 
 def _wants_reschedule_calendar(message: str) -> bool:
@@ -475,8 +550,10 @@ async def _complete_scheduled_delivery_after_approval(
     clear_cart(session_state)
 
     hints = {k: session_state.get(k) for k in (
-        "scheduled_at", "order_mode", "scheduled_kds_lead_minutes",
+        "scheduled_at", "scheduled_at_label", "order_mode", "service_type",
+        "scheduled_kds_lead_minutes", "kitchen_start_at", "kitchen_start_at_label",
         "delivery_address", "delivery_distance_km", "delivery_distance_method",
+        "delivery_travel_minutes",
     )}
     dispatched_now = await _finalize_kds_for_scheduled_order(
         booking_id=booking_id,
@@ -575,11 +652,24 @@ async def _submit_scheduled_delivery_for_approval(
         except (ValueError, TypeError):
             pass
 
+    try:
+        schedule = await _compute_and_persist_delivery_schedule(
+            restaurant_id, booking_id, session_state, cart_snapshot, order_text,
+        )
+        kitchen_label = format_ist_label(schedule["kitchen_start_at"])
+        session_state["kitchen_start_at_label"] = kitchen_label
+    except Exception as exc:
+        logger.error(f"[delivery] schedule compute failed for {booking_id}: {exc}")
+
     sched_label = _scheduled_delivery_label(session_state)
+    session_state["scheduled_at_label"] = sched_label
     portal_meta = {
         "booking_id": booking_id,
         "scheduled_at": session_state.get("scheduled_at"),
         "scheduled_at_label": sched_label,
+        "kitchen_start_at": session_state.get("kitchen_start_at"),
+        "kitchen_start_at_label": session_state.get("kitchen_start_at_label"),
+        "total_cook_minutes": session_state.get("total_cook_minutes"),
         "delivery_address": session_state.get("delivery_address"),
         "order_text": order_text,
         "total": total,

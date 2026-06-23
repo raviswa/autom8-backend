@@ -292,6 +292,57 @@ router.get('/kds/feed', authenticateToken, getRestaurantId, async (req, res) => 
   }
 });
 
+function istDateRangeBounds(fromDate, toDate) {
+  const isoDay = /^\d{4}-\d{2}-\d{2}$/;
+  if (!isoDay.test(fromDate) || !isoDay.test(toDate)) {
+    throw new Error('from and to must be YYYY-MM-DD (IST calendar dates)');
+  }
+  if (fromDate > toDate) {
+    throw new Error('from must be on or before to');
+  }
+  return {
+    start: new Date(`${fromDate}T00:00:00+05:30`).toISOString(),
+    end: new Date(`${toDate}T23:59:59.999+05:30`).toISOString(),
+  };
+}
+
+router.get('/kds/history', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (!req.restaurant_id) {
+      return res.status(403).json({
+        error: 'No outlet linked to this account. Select an outlet or log in with an outlet-specific profile.',
+      });
+    }
+
+    const todayIst = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date());
+
+    const fromDate = String(req.query.from || todayIst).slice(0, 10);
+    const toDate = String(req.query.to || fromDate).slice(0, 10);
+    const { start, end } = istDateRangeBounds(fromDate, toDate);
+
+    const { data, error } = await supabaseAdmin.from('kds_items')
+      .select(`*, order_item:order_item_id!left(*, menu_item:menu_item_id!left(name, description, prep_time_minutes), order:order_id!left(table:table_id!left(table_number, section), order_number))`)
+      .eq('restaurant_id', req.restaurant_id)
+      .in('status', ['ready', 'cancelled'])
+      .gte('updated_at', start)
+      .lte('updated_at', end)
+      .order('updated_at', { ascending: false });
+
+    if (error) throw error;
+    res.json({
+      success: true,
+      items: data ?? [],
+      from: fromDate,
+      to: toDate,
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     if (!req.restaurant_id) {
@@ -309,7 +360,7 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
         customer:customer_id(name, phone)
       `)
       .eq('restaurant_id', req.restaurant_id)
-      .eq('service_type', 'takeaway')
+      .in('service_type', ['takeaway', 'delivery'])
       .not('kitchen_start_at', 'is', null)
       .in('status', ['pending', 'confirmed'])
       .gte('scheduled_slot_at', now.toISOString())

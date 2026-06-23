@@ -515,7 +515,7 @@ async def _send_receipt(
         logger.warning(f"[prepay-fulfill] receipt failed (non-fatal): {exc}")
 
 
-async def _enqueue_scheduled_takeaway_jobs(payload: dict[str, Any]) -> bool:
+async def _enqueue_scheduled_kds_jobs(payload: dict[str, Any]) -> bool:
     """Persist KDS + prep-start WhatsApp jobs when kitchen_start_at is in the future."""
     from datetime import datetime
     from tools.db_tools import enqueue_scheduled_jobs
@@ -546,11 +546,16 @@ async def _enqueue_scheduled_takeaway_jobs(payload: dict[str, Any]) -> bool:
             "unit_price": float(line.get("unit_price") or 0),
         })
 
+    service_type = (
+        hints.get("service_type")
+        or payload.get("service_type")
+        or "takeaway"
+    )
     job_payload = {
         "customer_name": payload.get("customer_name"),
         "customer_phone": payload.get("customer_phone"),
         "token_number": token,
-        "service_type": "takeaway",
+        "service_type": service_type,
         "items": items,
         "special_notes": None,
         "slot_label": hints.get("scheduled_at_label") or hints.get("scheduled_at") or "",
@@ -565,10 +570,15 @@ async def _enqueue_scheduled_takeaway_jobs(payload: dict[str, Any]) -> bool:
         job_payload,
     )
     logger.info(
-        f"[prepay-fulfill] Enqueued scheduled jobs for takeaway booking {booking_id} "
+        f"[prepay-fulfill] Enqueued scheduled jobs for {service_type} booking {booking_id} "
         f"at {ks.isoformat()}"
     )
     return True
+
+
+async def _enqueue_scheduled_takeaway_jobs(payload: dict[str, Any]) -> bool:
+    """Backward-compatible alias."""
+    return await _enqueue_scheduled_kds_jobs(payload)
 
 
 async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
@@ -748,9 +758,49 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
     delivery_address = payload.get("delivery_address") or ""
     hints = payload.get("session_hints") or {}
     delivery_address = delivery_address or hints.get("delivery_address") or ""
+    scheduled_flow = bool(hints.get("kitchen_start_at") or hints.get("scheduled_at"))
+    jobs_enqueued = await _enqueue_scheduled_kds_jobs(payload) if scheduled_flow else False
     defer, defer_note = await _should_defer_kds_for_scheduled(
         hints, restaurant_id=restaurant_id,
     )
+
+    if jobs_enqueued or defer:
+        sched_label = hints.get("scheduled_at_label") or hints.get("scheduled_at") or "your slot"
+        confirm_body = (
+            f"Payment received! ✅\n────────────────────\n"
+            f"Token: {token}\n"
+            f"Your scheduled delivery is confirmed for *{sched_label}*."
+        )
+        if defer_note:
+            confirm_body += f"\n\n{defer_note}"
+        await send_whatsapp_message(customer_phone, confirm_body, restaurant_id)
+        if manager_phone:
+            try:
+                await send_whatsapp_message(
+                    manager_phone,
+                    f"📅 *Scheduled delivery — paid* ✅\n"
+                    f"Token: {token}\nCustomer: {customer_name}\n"
+                    f"Kitchen dispatch is queued for closer to the delivery slot.\n"
+                    f"{defer_note or ''}",
+                    restaurant_id,
+                )
+            except Exception as exc:
+                logger.warning(f"[prepay-fulfill] delivery manager defer notify failed: {exc}")
+        await _send_receipt(
+            restaurant_id=restaurant_id,
+            customer_phone=customer_phone,
+            customer_name=customer_name,
+            token=token,
+            service_type="delivery",
+            cart_snapshot=cart_snapshot,
+            totals=totals,
+            delivery_address=delivery_address,
+            delivery_charge=float(totals.get("delivery_charge") or payload.get("delivery_fee") or 0),
+            parcel_charge=float(totals.get("parcel_charge") or 0),
+        )
+        await update_booking_status(booking_id, "confirmed")
+        logger.info(f"[prepay-fulfill] Scheduled delivery {booking_id} confirmed — jobs queued")
+        return True
 
     dispatched_now = await _finalize_kds_for_scheduled_order(
         booking_id=booking_id,
