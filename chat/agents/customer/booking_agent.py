@@ -129,6 +129,26 @@ async def handle_booking_flow(
         current_step = session_state.get("booking_step", "ask_service")
 
     msg_lower = message.strip().lower()
+    msg_token = message.strip().upper()
+
+    # ── Typed shortcuts (expand to canonical ids / global actions) ────────────
+    from tools.shortcuts import (
+        expand_shortcut_message,
+        handle_global_shortcut,
+        is_remind_shortcut,
+    )
+    shortcut_result = await handle_global_shortcut(
+        msg_token,
+        restaurant_id=restaurant_id,
+        customer_phone=customer_phone,
+        customer_name=customer_name,
+        session_state=session_state,
+    )
+    if shortcut_result is not None:
+        return shortcut_result
+    message = expand_shortcut_message(message, current_step)
+    msg_lower = message.strip().lower()
+    msg_token = message.strip().upper()
 
     if message.strip() == "FLOW_PARSE_FAILED":
         step = session_state.get("booking_step", "")
@@ -156,6 +176,38 @@ async def handle_booking_flow(
         touch_session_activity(session_state)
         return await handle_awaiting_prepay(
             customer_phone, restaurant_id, customer_name, message, session_state,
+        )
+
+    # ── PAY keyword — scheduled approval payment or prepay resend ─────────────
+    from tools.scheduled_payment import try_trigger_scheduled_payment_on_pay
+    from tools.shortcuts import is_pay_keyword
+    if is_pay_keyword(message):
+        pay_result = await try_trigger_scheduled_payment_on_pay(
+            restaurant_id, customer_phone, customer_id, customer_name,
+            session_state, manager_phone,
+        )
+        if pay_result is not None:
+            touch_session_activity(session_state)
+            return pay_result
+
+    # ── Scheduled payment steps — route before visit_complete reset ───────────
+    if current_step in (
+        "awaiting_scheduled_takeaway_payment",
+        "awaiting_scheduled_takeaway_approval",
+    ):
+        touch_session_activity(session_state)
+        return await handle_takeaway_flow(
+            restaurant_id, customer_id, customer_name, customer_phone,
+            manager_phone, message, session_state,
+        )
+    if current_step in (
+        "awaiting_scheduled_delivery_payment",
+        "awaiting_scheduled_delivery_approval",
+    ):
+        touch_session_activity(session_state)
+        return await handle_delivery_flow(
+            restaurant_id, customer_id, customer_name, customer_phone,
+            manager_phone, message, session_state,
         )
 
     # ── visit_complete / awaiting_payment: treat new message as fresh visit ───
@@ -233,7 +285,7 @@ async def handle_booking_flow(
                 )
 
     # ── Closed kitchen: REMIND opt-in ─────────────────────────────────────────
-    if message.strip().upper() == "REMIND":
+    if is_remind_shortcut(message) or message.strip().upper() == "REMIND":
         from tools.kitchen_hours import (
             build_blanket_closed_message,
             kitchen_accepting_orders,

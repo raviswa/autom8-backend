@@ -31,6 +31,32 @@ const { releaseTablesForToken } = require('../helpers/tableRelease');
 const { writeAuditLog } = require('../helpers/auditLog');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { requireKdsSecretOrJwt, requireKdsSecret } = require('../middleware/internalAuth');
+const { getKdsSecret } = require('../config/internalSecret');
+
+const CHAT_SERVICE_URL = process.env.CHAT_SERVICE_URL || 'http://localhost:8001';
+
+/** Ask Python chat service to send Razorpay link after scheduled order approval. */
+async function triggerChatScheduledPayment(restaurantId, token) {
+  if (!token?.phone || !token?.id) return;
+  try {
+    const resp = await fetch(`${CHAT_SERVICE_URL}/internal/scheduled-approval-payment`, {
+      method:  'POST',
+      headers: {
+        'Content-Type':      'application/json',
+        'x-internal-secret': getKdsSecret(),
+      },
+      body: JSON.stringify({ restaurant_id: restaurantId, token }),
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      console.warn(`[scheduled-payment] chat trigger ${resp.status}: ${text.slice(0, 200)}`);
+    } else {
+      console.log(`[scheduled-payment] chat payment triggered for ${token.id}`);
+    }
+  } catch (err) {
+    console.warn('[scheduled-payment] chat trigger failed (non-fatal):', err.message);
+  }
+}
 
 /** Same outlet resolution as /api/tables (getRestaurantId + single-restaurant fallback). */
 function requireOutlet(req, res, next) {
@@ -145,6 +171,8 @@ async function approveScheduledDeliveryToken(tokenId, restaurantId, token) {
     meta,
   });
 
+  await triggerChatScheduledPayment(restaurantId, updatedToken);
+
   broadcastToRestaurant(restaurantId, {
     type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString(),
   });
@@ -247,6 +275,8 @@ async function approveScheduledTakeawayToken(tokenId, restaurantId, token) {
     tokenId:       token.id,
     meta,
   });
+
+  await triggerChatScheduledPayment(restaurantId, updatedToken);
 
   broadcastToRestaurant(restaurantId, {
     type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString(),

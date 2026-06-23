@@ -139,6 +139,7 @@ async function syncConversationForScheduledDeliveryApproval({
       order_totals:                meta.totals ?? prev.order_totals,
       pending_order_text:          meta.order_text ?? prev.pending_order_text,
       pending_cart:                meta.cart ?? prev.pending_cart,
+      _last_activity_at:           new Date().toISOString(),
     };
 
     await supabaseAdmin.from('conversation_states').upsert({
@@ -191,6 +192,8 @@ async function syncConversationForScheduledTakeawayApproval({
       order_totals:                meta.totals ?? prev.order_totals,
       pending_order_text:          meta.order_text ?? prev.pending_order_text,
       pending_cart:                meta.cart ?? prev.pending_cart,
+      scheduled_at_label:          meta.scheduled_at_label ?? prev.scheduled_at_label,
+      _last_activity_at:           new Date().toISOString(),
     };
 
     await supabaseAdmin.from('conversation_states').upsert({

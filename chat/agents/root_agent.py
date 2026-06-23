@@ -101,6 +101,22 @@ def _make_message_dict(message: str | Dict[str, Any]) -> dict[str, Any]:
             },
         }
 
+    # Typed shortcuts → canonical handler ids (booking_agent expands most; belt-and-braces here)
+    _SHORTCUT_BUTTONS = {
+        "CFM": "CART:CONFIRM", "ADD": "CART:ADD_MORE", "CLR": "CART:CLEAR",
+        "SUM": "CART:SHOW_SUMMARY", "SKP": "SKIP", "NVG": "NON_VEG", "ANY": "BOTH",
+        "NEW": "NEW ORDER",
+    }
+    if text in _SHORTCUT_BUTTONS:
+        canon = _SHORTCUT_BUTTONS[text]
+        return {
+            "type": "interactive",
+            "interactive": {
+                "type": "button_reply",
+                "button_reply": {"id": canon, "title": canon},
+            },
+        }
+
     # Plain text — quantity reply, "DONE", numbered order, etc.
     return {"type": "text", "text": {"body": text}}
 

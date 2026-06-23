@@ -445,6 +445,47 @@ async def health_razorpay():
     return JSONResponse(payload)
 
 
+def _verify_internal_secret(request: Request) -> bool:
+    from tools.booking_mechanisms import KDS_SECRET
+    if not KDS_SECRET:
+        return False
+    auth = request.headers.get("authorization") or ""
+    bearer = auth.split(" ", 1)[1] if auth.lower().startswith("bearer ") else ""
+    candidate = (
+        bearer
+        or request.headers.get("x-internal-secret")
+        or ""
+    )
+    return candidate == KDS_SECRET
+
+
+@app.post("/internal/scheduled-approval-payment")
+async def internal_scheduled_approval_payment(request: Request):
+    """Node API calls this after manager approves a scheduled order."""
+    if not _verify_internal_secret(request):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    restaurant_id = body.get("restaurant_id")
+    token = body.get("token")
+    if not restaurant_id or not token:
+        raise HTTPException(status_code=400, detail="restaurant_id and token required")
+
+    from tools.scheduled_payment import trigger_scheduled_payment_after_approval
+
+    result = await trigger_scheduled_payment_after_approval(
+        str(restaurant_id),
+        token,
+        manager_phone=body.get("manager_phone"),
+    )
+    status_code = 200 if result.get("ok") else 500
+    return JSONResponse(status_code=status_code, content=result)
+
+
 @app.get("/payment/complete")
 async def payment_complete(request: Request):
     """Customer redirect after Razorpay payment link checkout."""

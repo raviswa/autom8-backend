@@ -51,15 +51,23 @@ logger = logging.getLogger(__name__)
 
 MANAGER_PORTAL_URL            = "https://app.autom8.works/dashboard/manager"
 LARGE_PARTY_THRESHOLD         = 8
-_HOME_HINT                    = "\n\n💡 Type *Home* to start a fresh booking anytime."
+_HOME_HINT                    = "\n\n💡 Type *HOM* to start a fresh booking anytime."
 _PAYMENT_PLACEHOLDER_SENTINEL = "placeholder"
 _GENERIC_GREETINGS: set[str]  = {"welcome!", "welcome", "hi!", "hi", "hello!", "hello", ""}
 
 # Session idle timeout — after this, mid-flow state is cleared (B2B spec: 30 min).
 SESSION_IDLE_SECONDS = 30 * 60
 
+# Do not expire while waiting for manager approval or Razorpay prepay on scheduled orders.
+_SCHEDULED_PAYMENT_IDLE_EXEMPT: frozenset[str] = frozenset({
+    "awaiting_scheduled_takeaway_approval",
+    "awaiting_scheduled_takeaway_payment",
+    "awaiting_scheduled_delivery_approval",
+    "awaiting_scheduled_delivery_payment",
+})
+
 # Home / menu always start fresh; no continue/start-over prompt.
-_DIRECT_RESET_KEYWORDS: set[str] = {"home", "menu", "main menu", "mainmenu"}
+_DIRECT_RESET_KEYWORDS: set[str] = {"home", "menu", "main menu", "mainmenu", "hom", "mnu"}
 
 # Full identity restart without continue/start-over prompt.
 _FULL_RESET_KEYWORDS: set[str] = {
@@ -73,10 +81,12 @@ def touch_session_activity(session_state: Dict[str, Any]) -> None:
 
 
 def is_session_stale(session_state: Dict[str, Any]) -> bool:
+    step = session_state.get("booking_step", "") or ""
+    if step in _SCHEDULED_PAYMENT_IDLE_EXEMPT:
+        return False
     raw = session_state.get("_last_activity_at")
     if not raw:
         # Legacy sessions without timestamp — any mid-flow step is treated as stale.
-        step = session_state.get("booking_step", "") or ""
         if step in ("visit_complete", "ask_service", "awaiting_service_selection"):
             return False
         return bool(step)
@@ -100,6 +110,9 @@ def expire_session_if_stale(
     if not is_session_stale(session_state):
         return False
     step = session_state.get("booking_step", "")
+    if step in _SCHEDULED_PAYMENT_IDLE_EXEMPT:
+        touch_session_activity(session_state)
+        return False
     if step in ("visit_complete", "ask_service", "awaiting_service_selection", None, ""):
         touch_session_activity(session_state)
         return False
@@ -682,6 +695,8 @@ async def send_service_menu(
 
     state.pop("_last_visit_abandoned", None)
     body_lines.append("What would you like to do today?")
+    from tools.shortcuts import SHORTCUT_FOOTER_SERVICE
+    body_lines.append(f"_{SHORTCUT_FOOTER_SERVICE}_")
     body_text = "\n\n".join(body_lines)
 
     footer = "Reply *Update name* or *I'm not [name]* to fix"
@@ -991,7 +1006,7 @@ async def handle_awaiting_prepay(
                     "_Your order will be sent to the kitchen after payment._"
                 ),
             },
-            "footer": {"text": "Reply pay to resend link · Home for new order"},
+            "footer": {"text": "PAY resend · HOM new order"},
             "action": {"buttons": [
                 {"type": "reply", "reply": {"id": "PAY", "title": "💳 Resend link"}},
                 {"type": "reply", "reply": {"id": "NEW ORDER", "title": "🆕 New order"}},

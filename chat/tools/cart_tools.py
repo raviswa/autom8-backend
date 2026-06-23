@@ -597,7 +597,7 @@ async def send_cart_summary_buttons(
             "type": "button",
             "header": {"type": "text", "text": header},
             "body":   {"text": body_text},
-            "footer": {"text": "What would you like to do?"},
+            "footer": {"text": "CFM confirm · ADD more · CLR clear · CAT menu"},
             "action": {
                 "buttons": [
                     {"type": "reply", "reply": {"id": "CART:CONFIRM",  "title": "🎯 Confirm order"}},
