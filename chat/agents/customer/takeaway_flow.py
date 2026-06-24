@@ -186,7 +186,7 @@ async def _compute_and_persist_takeaway_schedule(
         cart_lines=cart_lines,
         menu_by_retailer_id=menu_map,
         buffer_minutes=int(rest.get("schedule_buffer_minutes") or 15),
-        rounding_minutes=int(rest.get("schedule_rounding_minutes") or 15),
+        rounding_minutes=int(rest.get("schedule_rounding_minutes") or 30),
         transit_minutes=0,
     )
 

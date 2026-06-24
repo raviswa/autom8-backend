@@ -544,6 +544,23 @@ async def reconcile_paid_orders_without_kds():
                     f"({row.get('service_type')} token {row.get('token_number')})"
                 )
             else:
+                from tools.scheduled_kds import is_booking_on_kds_future_tab
+
+                if is_booking_on_kds_future_tab(
+                    kitchen_start_at=row.get("kitchen_start_at"),
+                    scheduled_slot_at=row.get("scheduled_slot_at"),
+                    booking_datetime=row.get("booking_datetime"),
+                    kds_sent_at=row.get("kds_sent_at"),
+                    service_type=row.get("service_type"),
+                    schedule_meta=row.get("schedule_meta"),
+                ):
+                    await mark_kds_alert_sent(booking_id)
+                    logger.info(
+                        f"[reconcile] Skipped alert — booking {booking_id} is scheduled "
+                        f"(KDS Future tab)"
+                    )
+                    continue
+
                 # Retry failed — alert manager once, then never again
                 manager = row.get("manager_phone")
                 if manager:

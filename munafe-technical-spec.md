@@ -1,7 +1,7 @@
 # Munafe Platform — Technical Specification
-**Version:** 1.3  
+**Version:** 1.4  
 **Maintained by:** Autom8 Works  
-**Last updated:** 12 June 2026  
+**Last updated:** 23 June 2026  
 **Purpose:** Authoritative reference for engineers, technical support, and the AI chatbot. All feature specs, API contracts, data models, agent flow states, and scheduler ownership documented here are derived directly from the production codebase (`autom8-backend` + `autom8-frontend` on GitHub).
 
 **Chatbot usage:** When answering questions about Munafe, prefer this document over assumptions. If code and this doc disagree, the deployed code wins — file a doc update. Key rule: **Node.js owns staff API, feedback scheduler, marketing scheduler, and the primary WhatsApp webhook ingress; Python owns conversational booking flows and session state.**
@@ -541,6 +541,30 @@ Walk-in customers arrive at the restaurant and are issued a token via a tablet/P
 | `PUT` | `/api/tokens/:id/reject` | `authenticateToken` | Reject request with reason |
 | `PUT` | `/api/tokens/:id/complete` | `authenticateToken` | Mark visit complete; queue feedback |
 | `DELETE` | `/api/tokens/:id` | `authenticateToken` | Remove token from queue |
+| `PUT` | `/api/tokens/:id/approve-scheduled` | Manager WA / API | Approve `scheduled_takeaway` while `pending_approval` |
+| `PUT` | `/api/tokens/:id/reject-scheduled` | Manager WA / API | Reject scheduled takeaway request |
+
+### Monotonic portal token IDs (`T-001`, `T-002`, …)
+
+Token numbers are **never reused** once allocated, even if payment fails or the booking is cancelled.
+
+| Mechanism | Location |
+|---|---|
+| `restaurants.portal_token_seq` | Integer counter per outlet |
+| `allocate_portal_token_seq(restaurant_id)` | Supabase RPC — atomic `UPDATE … RETURNING` |
+| `generateTokenId()` | `src/routes/tokens.js` — calls RPC, falls back to legacy `MAX(T-xxx)+1` |
+| `_next_portal_token_id()` | `chat/tools/db_tools.py` — same RPC from Python |
+
+**Migration:** `migrations/add_portal_token_sequence.sql` — seeds counter from existing `walk_in_tokens.id` values.
+
+### Scheduled portal token types
+
+| `type` | Flow | KDS bucket |
+|---|---|---|
+| `scheduled_takeaway` | Customer picks future slot → manager approves → Razorpay prepay → `walk_in_tokens` + `bookings` | KDS **Future** tab until `kitchen_start_at` |
+| `scheduled_delivery` | Same + delivery address / transit time in `schedule_meta` | KDS **Future** tab; kitchen starts earlier than takeaway (transit included) |
+
+Token `meta` stores `booking_id`, `order_text`, `cart`, `scheduled_at`, and schedule fields when `bookings.schedule_meta` is empty.
 
 ### Token States
 ```
@@ -548,6 +572,7 @@ waiting → (seated | takeaway | pending_approval) → completed
                      ↓
               pending_approval → seated (manager approves)
                               → (rejected)
+scheduled_* → pending_approval → (paid booking confirmed) → completed
 ```
 
 ### WhatsApp Notifications Sent
@@ -565,7 +590,7 @@ id              text PK           -- human-readable token e.g. "T-042"
 restaurant_id   uuid NOT NULL
 name            text NOT NULL
 phone           text
-type            enum: dinein|takeaway|large_party
+type            enum: dinein|takeaway|large_party|scheduled_takeaway|scheduled_delivery
 pax             integer DEFAULT 1
 status          enum: waiting|seated|takeaway|completed|pending_approval
 table_id        uuid FK→tables
@@ -611,7 +636,39 @@ updated_at    timestamptz
 
 ### Kitchen Display System (KDS)
 
-**Overview:** Real-time display of active orders for kitchen staff. Items grouped by KOT ticket. Staff mark items in-progress → ready → served.
+**Overview:** Real-time display of active orders for kitchen staff. Items grouped by KOT ticket. Staff mark items in-progress → ready → served. **Scheduled** prepaid takeaway/delivery appear in a separate **Future** tab until kitchen start time.
+
+**Scheduled orders API (`GET /api/kds/scheduled`, `pos.js`)**
+
+Returns future `bookings` where `service_type ∈ {takeaway, delivery}`, slot is >1 hour away, and payment is `paid` or `pending`. Buckets per order:
+
+| Bucket | Condition |
+|---|---|
+| `future` | `kitchen_start_at` more than 4 h away |
+| `todays_future` | Start within 4 h, not yet sent to live KDS |
+| `present` | Start time passed, not yet `kds_sent_at` |
+| `live` | `kds_sent_at` set — also on Live tab |
+
+**Kitchen start calculation** (`chat/tools/kitchen_scheduler.py`, `estimateKitchenStartFromTotals()` in `src/helpers/kitchenScheduler.js`):
+
+- **Takeaway:** `kitchen_start_at = slot − (cook + packing + buffer)`, rounded to the **nearest 30 minutes** (IST).
+- **Delivery:** `kitchen_start_at = slot − (takeaway lead + transit)`, rounded to the **nearest 15 minutes** (IST). Delivery always starts earlier than takeaway for the same slot.
+
+`schedule_rounding_minutes` on `restaurants` overrides the takeaway boundary (default **30**). Delivery boundary is fixed at **15**.
+
+Enrichment: if `bookings.schedule_meta` lacks `order_text`, API backfills from matching `walk_in_tokens.meta` (`scheduled_takeaway` / `scheduled_delivery`).
+
+**Booking schedule columns** (Python ORM + `bookings` table):
+
+```sql
+kitchen_start_at      timestamptz
+scheduled_slot_at     timestamptz
+total_cook_minutes    integer
+total_packing_minutes integer
+schedule_meta         jsonb DEFAULT '{}'
+kds_sent_at           timestamptz
+kds_alert_sent        boolean
+```
 
 **Database (`kds_items`)**
 ```sql
@@ -651,6 +708,7 @@ updated_at    timestamptz
 | Method | Path | File | Description |
 |---|---|---|---|
 | `GET` | `/api/kds/feed` | pos.js | Fetch active KDS items for restaurant |
+| `GET` | `/api/kds/scheduled` | pos.js | Future/present scheduled takeaway & delivery for KDS Future tab |
 | `PUT` | `/api/kds/:id/status` | pos.js | Update item status (pending→in_progress→ready→served) |
 | `POST` | `/api/kds/notify` | kds.js | Internal: create KDS items from new order |
 
@@ -670,9 +728,11 @@ updated_at    timestamptz
 ```
 
 **Frontend (`KDSScreen.jsx`)**
+- Tabs: **Live orders**, **Future** (scheduled prepaid), **History**.
 - Subscribes to Supabase Realtime on `kds_items` table for restaurant.
 - Plays audio beep on new items (Web Audio API).
 - Columns: Pending → In Progress → Ready → Served.
+- Future cards show token, items, **Start time**, **Slot time**, cook estimate; delivery starts earlier than takeaway for same slot.
 - KOT print: `KOTPrint.jsx` triggers browser print dialog with styled KOT ticket HTML.
 - Auto-refresh every 30 seconds as fallback.
 
@@ -1473,6 +1533,14 @@ synced_at               timestamptz
 
 ## 20. Registration & Onboarding
 
+### FAQ page (`autom8.works/faqs/`)
+
+Static FAQ content in repo root: **`faq-munafe.html`**.
+
+**WordPress embed:** Paste only the `<div id="munafe-faq-embed">…</div>` block into a Custom HTML widget on the FAQs page. Do **not** include the in-file nav — the Astra theme header already provides site navigation. Styles are scoped under `#munafe-faq-embed` with `!important` button resets so Astra/WP theme button colours do not override accordion questions.
+
+Sections: Getting Started, WhatsApp & Meta, Ordering & Menu, Kitchen & Operations (includes scheduled KDS Future tab), Tables & Reservations, Multi-Outlet, Pricing, Meta Ban & Compliance.
+
 ### Registration Form (`autom8.works/register/`)
 5-step React form embedded in WordPress via Vite build (`src-register/RegistrationForm.jsx`).
 
@@ -2027,7 +2095,7 @@ CREATE TABLE upsell_rules (
 
 ---
 
-*End of Munafe Technical Specification v1.1*
+*End of Munafe Technical Specification v1.4*
 
 ---
 
@@ -2047,12 +2115,25 @@ CREATE TABLE upsell_rules (
 | `add_restaurant_tenant_config.sql` | `meta_catalog_id` per restaurant |
 | `add_restaurant_kitchen_settings.sql` | Kitchen workflow settings |
 | `add_kot_printer_columns.sql` | KOT printer config columns |
+| `add_scheduled_takeaway_engine.sql` | Scheduled takeaway/delivery bookings, KDS columns, portal token types |
+| `add_scheduled_delivery_portal_and_kds.sql` | Scheduled delivery portal + KDS integration |
+| `add_prepay_fulfillment_payload.sql` | Prepay webhook schedule persistence |
+| `add_kds_alert_sent.sql` | KDS alert dedup flag on bookings |
+| `add_walk_in_wait_estimate.sql` | Walk-in queue wait estimate |
+| `add_portal_token_sequence.sql` | Monotonic `T-xxx` via `allocate_portal_token_seq` RPC |
+| `fix_walk_in_tokens_scheduled_delivery_check.sql` | Constraint fix for scheduled delivery tokens |
 
 **Known open items:**
 - `PUT /api/menu-items/bulk-section` — SettingsPanel Kitchen tab references this; route may not be fully implemented
 - Python APScheduler stubs (`send_feedback_requests`, `dispatch_scheduled_campaigns`, etc.) — Node owns these jobs; stubs log only
 - Zoho sync requires `ZOHO_CLIENT_ID` + related credentials or exits early
 - Dual data model: `bookings` (Python) vs `walk_in_tokens`/`orders` (Node POS) — both active
+
+**v1.4 changelog (June 2026):**
+- Scheduled takeaway & delivery engine: kitchen scheduler, transit time, KDS Future tab (`GET /api/kds/scheduled`)
+- Monotonic portal token sequence (`allocate_portal_token_seq`, `add_portal_token_sequence.sql`)
+- FAQ page embed docs (`faq-munafe.html` — no duplicate nav, WP theme isolation)
+- Booking schedule columns: `kitchen_start_at`, `scheduled_slot_at`, `schedule_meta`, prepay recovery
 
 **v1.1 changelog (June 2026):**
 - Documented Node-first WhatsApp webhook ingress + Python proxy path

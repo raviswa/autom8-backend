@@ -139,3 +139,65 @@ def format_kds_defer_customer_note(scheduled_at: datetime, release_at: datetime)
         f"The kitchen will start preparing around *{release_label}* "
         f"so your food is fresh for delivery."
     )
+
+
+def is_booking_on_kds_future_tab(
+    *,
+    kitchen_start_at: Any = None,
+    scheduled_slot_at: Any = None,
+    booking_datetime: Any = None,
+    kds_sent_at: Any = None,
+    service_type: str | None = None,
+    schedule_meta: Any = None,
+    now: datetime | None = None,
+) -> bool:
+    """
+  True when a paid booking legitimately has no live kds_items yet.
+
+  Scheduled takeaway/delivery appear on the KDS *Future* tab until kitchen_start_at.
+  The reconcile job must not treat these as missing tickets.
+    """
+    if kds_sent_at:
+        return False
+
+    st = (service_type or "").replace("-", "_").lower()
+    if st not in ("takeaway", "delivery"):
+        return False
+
+    import json
+
+    from tools.kitchen_scheduler import parse_slot_datetime
+
+    now = now or datetime.now(IST)
+
+    ks = parse_slot_datetime(kitchen_start_at)
+    if ks and ks > now.astimezone(ks.tzinfo):
+        return True
+
+    meta: dict[str, Any] = {}
+    if isinstance(schedule_meta, dict):
+        meta = schedule_meta
+    elif isinstance(schedule_meta, str) and schedule_meta.strip():
+        try:
+            meta = json.loads(schedule_meta)
+        except Exception:
+            meta = {}
+
+    slot_raw = scheduled_slot_at or booking_datetime or meta.get("scheduled_at")
+    slot = parse_slot_datetime(slot_raw)
+    if slot and slot > now.astimezone(slot.tzinfo) + timedelta(hours=1):
+        return True
+
+    hints = {
+        "order_mode": meta.get("order_mode") or ORDER_MODE_SCHEDULED,
+        "scheduled_at": slot_raw,
+        "kitchen_start_at": kitchen_start_at,
+        "service_type": st,
+    }
+    defer, _, _ = is_deferred_scheduled_order(
+        slot_raw,
+        session_state=hints,
+        service_type=st,
+        now=now,
+    )
+    return defer

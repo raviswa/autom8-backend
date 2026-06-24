@@ -14,6 +14,9 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 
+TAKEAWAY_ROUNDING_MINUTES = 30
+DELIVERY_ROUNDING_MINUTES = 15
+
 KITCHEN_STATIONS = frozenset({
     "tawa", "steamer", "kadai", "beverages", "assembly", "cold",
 })
@@ -102,6 +105,18 @@ def round_down_to_boundary(dt: datetime, boundary_minutes: int) -> datetime:
     return dt - timedelta(minutes=rem)
 
 
+def round_to_nearest_boundary(dt: datetime, boundary_minutes: int) -> datetime:
+    """Round IST wall-clock time to the nearest N-minute boundary."""
+    if boundary_minutes <= 1:
+        return dt.astimezone(IST).replace(second=0, microsecond=0)
+    dt = dt.astimezone(IST).replace(second=0, microsecond=0)
+    total_min = dt.hour * 60 + dt.minute
+    rounded = int(round(total_min / boundary_minutes) * boundary_minutes)
+    day_minutes = 24 * 60
+    rounded %= day_minutes
+    return dt.replace(hour=rounded // 60, minute=rounded % 60)
+
+
 def parse_slot_datetime(value: Any) -> datetime | None:
     if value is None:
         return None
@@ -151,10 +166,16 @@ def compute_kitchen_start_at(
     cart_lines: list[dict[str, Any]],
     menu_by_retailer_id: dict[str, dict[str, Any]],
     buffer_minutes: int = 15,
-    rounding_minutes: int = 15,
+    rounding_minutes: int = TAKEAWAY_ROUNDING_MINUTES,
+    delivery_rounding_minutes: int = DELIVERY_ROUNDING_MINUTES,
     transit_minutes: int = 0,
 ) -> dict[str, Any]:
-    """Backward from customer slot → kitchen_start_at (rounded down)."""
+    """
+    Backward from customer slot → kitchen_start_at.
+
+    Takeaway: (cook + packing + buffer), kitchen start rounded to nearest 30 min.
+    Delivery: takeaway lead + transit, kitchen start rounded to nearest 15 min.
+    """
     timing = compute_order_timing(cart_lines, menu_by_retailer_id)
     cook = timing["total_cook_minutes"]
     st = (service_type or "").replace("-", "_").lower()
@@ -164,17 +185,26 @@ def compute_kitchen_start_at(
     if slot is None:
         raise ValueError("invalid slot_at")
 
-    total_lead = transit_minutes + cook + float(packing) + int(buffer_minutes)
-    raw_start = slot - timedelta(minutes=total_lead)
-    kitchen_start = round_down_to_boundary(raw_start, max(1, int(rounding_minutes)))
+    takeaway_lead = cook + float(packing) + int(buffer_minutes)
+    if st == "delivery":
+        total_lead = takeaway_lead + int(transit_minutes)
+        raw_start = slot - timedelta(minutes=total_lead)
+        kitchen_start = round_to_nearest_boundary(raw_start, max(1, int(delivery_rounding_minutes)))
+        rounding_used = delivery_rounding_minutes
+    else:
+        raw_start = slot - timedelta(minutes=takeaway_lead)
+        kitchen_start = round_to_nearest_boundary(raw_start, max(1, int(rounding_minutes)))
+        rounding_used = rounding_minutes
 
     return {
         "kitchen_start_at": kitchen_start,
         "scheduled_slot_at": slot,
         "total_cook_minutes": cook,
         "total_packing_minutes": packing,
-        "transit_minutes": transit_minutes,
+        "transit_minutes": transit_minutes if st == "delivery" else 0,
+        "takeaway_lead_minutes": takeaway_lead,
         "buffer_minutes": buffer_minutes,
+        "rounding_minutes": rounding_used,
         "all_hold_well": timing["all_hold_well"],
         "station_breakdown": timing["station_breakdown"],
     }

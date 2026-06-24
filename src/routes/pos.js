@@ -12,6 +12,7 @@ const {
   getRestaurantId,
   canManageRestaurantSettings,
 } = require('../middleware/auth');
+const { estimateKitchenStartFromTotals } = require('../helpers/kitchenScheduler');
 
 function requireSettingsAccess(req, res, next) {
   if (!canManageRestaurantSettings(req.user_role))
@@ -60,18 +61,30 @@ function resolveScheduledOrderText(scheduleMeta, portalMeta) {
   return cartSnapshotToOrderText(cart);
 }
 
-function estimateKitchenStart(slotAt, serviceType, totalCookMinutes, scheduleMeta) {
-  if (!slotAt) return null;
-  const slot = new Date(slotAt);
-  const meta = scheduleMeta && typeof scheduleMeta === 'object' ? scheduleMeta : {};
-  const cook = Number(totalCookMinutes ?? meta.total_cook_minutes ?? 90);
-  const packing = Number(meta.total_packing_minutes ?? 4);
-  const buffer = 15;
-  const st = String(serviceType || meta.service_type || 'takeaway').toLowerCase();
-  let transit = Number(meta.transit_minutes ?? meta.delivery_travel_minutes ?? 0);
-  if (st === 'delivery' && !transit) transit = 20;
-  const leadMs = (transit + cook + packing + buffer) * 60 * 1000;
-  return new Date(slot.getTime() - leadMs);
+function estimateKitchenStart(slotAt, serviceType, totalCookMinutes, scheduleMeta, totalPackingMinutes) {
+  return estimateKitchenStartFromTotals(slotAt, {
+    serviceType,
+    totalCookMinutes,
+    totalPackingMinutes,
+    scheduleMeta,
+  });
+}
+
+function resolveScheduledKitchenStart(order) {
+  const meta = {
+    ...(order.schedule_meta || {}),
+    cart: order.cart,
+    service_type: order.service_type,
+    transit_minutes: order.transit_minutes ?? order.schedule_meta?.transit_minutes,
+    delivery_travel_minutes: order.schedule_meta?.delivery_travel_minutes,
+  };
+  return estimateKitchenStart(
+    order.scheduled_slot_at,
+    order.service_type,
+    order.total_cook_minutes,
+    meta,
+    order.total_packing_minutes,
+  );
 }
 
 /** Fill order_text / T-xxx token from walk_in_tokens when schedule_meta was never persisted. */
@@ -86,7 +99,7 @@ async function enrichScheduledOrdersFromPortal(restaurantId, orders) {
   const bookingIds = new Set(needsEnrich.map((o) => o.booking_id));
   const { data: tokens, error } = await supabaseAdmin
     .from('walk_in_tokens')
-    .select('id, meta')
+    .select('id, meta, type')
     .eq('restaurant_id', restaurantId)
     .in('type', ['scheduled_takeaway', 'scheduled_delivery']);
 
@@ -119,12 +132,33 @@ async function enrichScheduledOrdersFromPortal(restaurantId, orders) {
     const tokenNumber = String(order.token_number || '').startsWith('T-')
       ? order.token_number
       : (portal.id || order.token_number);
-    return {
+    const portalType = String(portal.type || '').toLowerCase();
+    const serviceType = portalType === 'scheduled_delivery'
+      ? 'delivery'
+      : portalType === 'scheduled_takeaway'
+        ? 'takeaway'
+        : order.service_type;
+    const scheduleMeta = {
+      ...(order.schedule_meta || {}),
+      ...portalMeta,
+      cart,
+      service_type: serviceType,
+    };
+    const enriched = {
       ...order,
       token_number: tokenNumber,
       order_text: orderText,
       cart,
-      total_cook_minutes: order.total_cook_minutes ?? portalMeta.total_cook_minutes ?? null,
+      service_type: serviceType,
+      schedule_meta: scheduleMeta,
+      total_cook_minutes: order.total_cook_minutes ?? portalMeta.total_cook_minutes ?? scheduleMeta.total_cook_minutes ?? null,
+      total_packing_minutes: order.total_packing_minutes ?? portalMeta.total_packing_minutes ?? scheduleMeta.total_packing_minutes ?? null,
+      transit_minutes: scheduleMeta.transit_minutes ?? scheduleMeta.delivery_travel_minutes ?? null,
+    };
+    const kitchenStart = resolveScheduledKitchenStart(enriched);
+    return {
+      ...enriched,
+      kitchen_start_at: kitchenStart ? kitchenStart.toISOString() : order.kitchen_start_at,
     };
   });
 }
@@ -471,9 +505,24 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
       .map((b) => {
       const meta = b.schedule_meta || {};
       const slotAt = b.scheduled_slot_at || b.booking_datetime;
-      const kitchenStart = b.kitchen_start_at
-        ? new Date(b.kitchen_start_at)
-        : estimateKitchenStart(slotAt, b.service_type, b.total_cook_minutes, meta);
+      const baseOrder = {
+        booking_id: b.id,
+        token_number: b.token_number,
+        customer_name: b.customer?.name,
+        customer_phone: b.customer?.phone,
+        scheduled_slot_at: slotAt,
+        total_cook_minutes: b.total_cook_minutes,
+        total_packing_minutes: b.total_packing_minutes,
+        order_text: resolveScheduledOrderText(meta, null),
+        cart: meta.cart || {},
+        service_type: b.service_type,
+        schedule_meta: meta,
+        transit_minutes: meta.transit_minutes ?? meta.delivery_travel_minutes ?? null,
+        kds_sent_at: b.kds_sent_at,
+        status: b.status,
+        payment_status: b.payment_status,
+      };
+      const kitchenStart = resolveScheduledKitchenStart(baseOrder);
       const msToStart = kitchenStart ? kitchenStart.getTime() - now.getTime() : null;
       let bucket = 'future';
       if (kitchenStart && msToStart <= fourHoursMs && msToStart > 0 && !b.kds_sent_at) {
@@ -483,22 +532,10 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
       } else if (b.kds_sent_at) {
         bucket = 'live';
       }
-      const cart = meta.cart || {};
       return {
-        booking_id: b.id,
-        token_number: b.token_number,
-        customer_name: b.customer?.name,
-        customer_phone: b.customer?.phone,
-        scheduled_slot_at: slotAt,
+        ...baseOrder,
         kitchen_start_at: kitchenStart ? kitchenStart.toISOString() : b.kitchen_start_at,
-        total_cook_minutes: b.total_cook_minutes,
-        order_text: resolveScheduledOrderText(meta, null),
-        cart,
-        service_type: b.service_type,
         bucket,
-        kds_sent_at: b.kds_sent_at,
-        status: b.status,
-        payment_status: b.payment_status,
       };
     });
 

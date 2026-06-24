@@ -6,6 +6,9 @@
 
 const IST = 'Asia/Kolkata';
 
+const TAKEAWAY_ROUNDING_MINUTES = 30;
+const DELIVERY_ROUNDING_MINUTES = 15;
+
 const KITCHEN_STATIONS = new Set(['tawa', 'steamer', 'kadai', 'beverages', 'assembly', 'cold']);
 const MENU_DEFAULTS = {
   prep_time_fixed: 5,
@@ -75,12 +78,58 @@ function istParts(d) {
   return { year: get('year'), month: get('month'), day: get('day'), hour, minute: get('minute') };
 }
 
+function instantFromIstParts(p, minute, hour = p.hour) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return new Date(`${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(hour)}:${pad(minute)}:00+05:30`);
+}
+
+function roundToNearestBoundary(instant, boundaryMinutes) {
+  const boundary = Math.max(1, Number(boundaryMinutes) || 15);
+  const p = istParts(instant);
+  const totalMin = p.hour * 60 + p.minute;
+  const rounded = Math.round(totalMin / boundary) * boundary;
+  const dayMinutes = 24 * 60;
+  const normalized = ((rounded % dayMinutes) + dayMinutes) % dayMinutes;
+  return instantFromIstParts(p, normalized % 60, Math.floor(normalized / 60));
+}
+
 function roundDownToBoundary(instant, boundaryMinutes) {
   const p = istParts(instant);
   const rem = p.minute % boundaryMinutes;
   const minute = p.minute - rem;
-  const pad = (n) => String(n).padStart(2, '0');
-  return new Date(`${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(minute)}:00+05:30`);
+  return instantFromIstParts(p, minute);
+}
+
+function resolveTransitMinutes(serviceType, scheduleMeta = {}) {
+  const st = String(serviceType || scheduleMeta.service_type || 'takeaway').toLowerCase();
+  if (st !== 'delivery') return 0;
+  let transit = Number(scheduleMeta.transit_minutes ?? scheduleMeta.delivery_travel_minutes ?? 0);
+  if (!transit) transit = 20;
+  return transit;
+}
+
+function estimateKitchenStartFromTotals(slotAt, {
+  serviceType,
+  totalCookMinutes,
+  totalPackingMinutes,
+  scheduleMeta = {},
+  bufferMinutes = 15,
+  takeawayRoundingMinutes = TAKEAWAY_ROUNDING_MINUTES,
+}) {
+  if (!slotAt) return null;
+  const meta = scheduleMeta && typeof scheduleMeta === 'object' ? scheduleMeta : {};
+  const cook = Number(totalCookMinutes ?? meta.total_cook_minutes ?? 90);
+  const packing = Number(totalPackingMinutes ?? meta.total_packing_minutes ?? 4);
+  const buffer = Number(meta.buffer_minutes ?? bufferMinutes ?? 15);
+  const takeawayRounding = Number(meta.takeaway_rounding_minutes ?? takeawayRoundingMinutes ?? TAKEAWAY_ROUNDING_MINUTES);
+  const st = String(serviceType || meta.service_type || 'takeaway').toLowerCase();
+  const transit = resolveTransitMinutes(st, meta);
+  const takeawayLead = cook + packing + buffer;
+  const isDelivery = st === 'delivery';
+  const totalLead = isDelivery ? takeawayLead + transit : takeawayLead;
+  const rawStart = new Date(new Date(slotAt).getTime() - totalLead * 60 * 1000);
+  const boundary = isDelivery ? DELIVERY_ROUNDING_MINUTES : takeawayRounding;
+  return roundToNearestBoundary(rawStart, boundary);
 }
 
 function computeKitchenStartAt(slotAt, {
@@ -88,22 +137,30 @@ function computeKitchenStartAt(slotAt, {
   cartLines,
   menuByRetailerId,
   bufferMinutes = 15,
-  roundingMinutes = 15,
+  roundingMinutes = TAKEAWAY_ROUNDING_MINUTES,
+  deliveryRoundingMinutes = DELIVERY_ROUNDING_MINUTES,
   transitMinutes = 0,
 }) {
   const timing = computeOrderTiming(cartLines, menuByRetailerId);
   const st = String(serviceType || '').replace(/-/g, '_').toLowerCase();
   const packing = ['takeaway', 'delivery'].includes(st) ? timing.total_packing_minutes : 0;
-  const totalLead = transitMinutes + timing.total_cook_minutes + packing + bufferMinutes;
+  const takeawayLead = timing.total_cook_minutes + packing + bufferMinutes;
+  const isDelivery = st === 'delivery';
+  const totalLead = isDelivery ? takeawayLead + transitMinutes : takeawayLead;
   const rawStart = new Date(new Date(slotAt).getTime() - totalLead * 60 * 1000);
-  const kitchenStart = roundDownToBoundary(rawStart, Math.max(1, roundingMinutes));
+  const boundary = isDelivery
+    ? Math.max(1, deliveryRoundingMinutes)
+    : Math.max(1, roundingMinutes);
+  const kitchenStart = roundToNearestBoundary(rawStart, boundary);
   return {
     kitchen_start_at: kitchenStart.toISOString(),
     scheduled_slot_at: new Date(slotAt).toISOString(),
     total_cook_minutes: timing.total_cook_minutes,
     total_packing_minutes: packing,
-    transit_minutes: transitMinutes,
+    transit_minutes: isDelivery ? transitMinutes : 0,
+    takeaway_lead_minutes: takeawayLead,
     buffer_minutes: bufferMinutes,
+    rounding_minutes: boundary,
     all_hold_well: timing.all_hold_well,
     station_breakdown: timing.station_breakdown,
   };
@@ -119,10 +176,16 @@ function cartLinesFromItems(items = []) {
 }
 
 module.exports = {
+  TAKEAWAY_ROUNDING_MINUTES,
+  DELIVERY_ROUNDING_MINUTES,
   computeKitchenStartAt,
   computeOrderTiming,
   effectiveCookTime,
   cartLinesFromItems,
+  estimateKitchenStartFromTotals,
+  roundToNearestBoundary,
+  roundDownToBoundary,
+  resolveTransitMinutes,
   MENU_DEFAULTS,
   KITCHEN_STATIONS,
 };

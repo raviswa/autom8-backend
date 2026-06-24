@@ -332,6 +332,21 @@ async def _retry_kds_for_confirmed_booking(
     booking: dict[str, Any],
 ) -> bool:
     """Re-dispatch KDS when payment confirmed but kitchen board never received items."""
+    from tools.scheduled_kds import is_booking_on_kds_future_tab
+
+    if is_booking_on_kds_future_tab(
+        kitchen_start_at=booking.get("kitchen_start_at"),
+        scheduled_slot_at=booking.get("scheduled_slot_at"),
+        booking_datetime=booking.get("booking_datetime"),
+        kds_sent_at=booking.get("kds_sent_at"),
+        service_type=booking.get("service_type"),
+        schedule_meta=booking.get("schedule_meta"),
+    ):
+        logger.info(
+            f"[prepay-kds] Booking {booking_id} on KDS Future tab — no live ticket needed yet"
+        )
+        return True
+
     payload = await load_prepay_payload(
         booking["restaurant_id"],
         booking["customer_phone"],
@@ -563,7 +578,7 @@ async def _ensure_scheduled_schedule_persisted(payload: dict[str, Any]) -> dict[
             cart_lines=cart_lines_from_snapshot(cart_snapshot),
             menu_by_retailer_id=menu_map,
             buffer_minutes=int(rest.get("schedule_buffer_minutes") or 15),
-            rounding_minutes=int(rest.get("schedule_rounding_minutes") or 15),
+            rounding_minutes=int(rest.get("schedule_rounding_minutes") or 30),
             transit_minutes=transit,
         )
 

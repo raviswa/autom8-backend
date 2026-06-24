@@ -1071,6 +1071,7 @@ async def get_paid_bookings_missing_kds() -> List[Dict[str, Any]]:
       - payment_status = 'paid'
       - kds_alert_sent IS NOT TRUE   ← never re-process an alerted booking
       - created_at > now() - 24h     ← ignore stale historical records
+      - excludes future scheduled orders on KDS Future tab (no live ticket yet)
     """
     base = _a8_base()
     if not base:
@@ -1080,13 +1081,19 @@ async def get_paid_bookings_missing_kds() -> List[Dict[str, Any]]:
     cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
 
     try:
+        from tools.scheduled_kds import is_booking_on_kds_future_tab
+
         async with _httpx.AsyncClient(timeout=10) as client:
 
             # ── Step 1: Fetch paid, un-alerted, recent bookings ───────────────
             b_resp = await client.get(
                 f"{base}/rest/v1/bookings",
                 params={
-                    "select":          "id,restaurant_id,token_number,service_type,created_at",
+                    "select": (
+                        "id,restaurant_id,token_number,service_type,created_at,"
+                        "customer_id,kitchen_start_at,scheduled_slot_at,booking_datetime,"
+                        "kds_sent_at,schedule_meta"
+                    ),
                     "payment_status":  "eq.paid",
                     "kds_alert_sent":  "is.false",
                     "created_at":      f"gte.{cutoff}",
@@ -1164,6 +1171,14 @@ async def get_paid_bookings_missing_kds() -> List[Dict[str, Any]]:
             missing_ids = [
                 b["id"] for b in bookings
                 if b["id"] not in kds_covered_bookings
+                and not is_booking_on_kds_future_tab(
+                    kitchen_start_at=b.get("kitchen_start_at"),
+                    scheduled_slot_at=b.get("scheduled_slot_at"),
+                    booking_datetime=b.get("booking_datetime"),
+                    kds_sent_at=b.get("kds_sent_at"),
+                    service_type=b.get("service_type"),
+                    schedule_meta=b.get("schedule_meta"),
+                )
             ]
             if not missing_ids:
                 return []
@@ -1174,27 +1189,24 @@ async def get_paid_bookings_missing_kds() -> List[Dict[str, Any]]:
 
             for b in missing_bookings:
                 restaurant_id = b["restaurant_id"]
+                customer_id = b.get("customer_id")
 
-                # Customer phone + name via customers table
-                cust_resp = await client.get(
-                    f"{base}/rest/v1/customers",
-                    params={
-                        "select":        "name,phone",
-                        "restaurant_id": f"eq.{restaurant_id}",
-                        # customers are linked via bookings.customer_id;
-                        # fetch separately since bookings select is kept minimal
-                        "limit":         "1",
-                    },
-                    headers=_a8_headers(),
-                )
-                # Better: fetch booking with customer_id then look up customer
-                # For now fall back to restaurant manager lookup
-                cust_name  = "Guest"
+                cust_name = "Guest"
                 cust_phone = ""
-                if cust_resp.status_code == 200 and cust_resp.json():
-                    c = cust_resp.json()[0]
-                    cust_name  = c.get("name")  or "Guest"
-                    cust_phone = c.get("phone") or ""
+                if customer_id:
+                    cust_resp = await client.get(
+                        f"{base}/rest/v1/customers",
+                        params={
+                            "select": "name,phone",
+                            "id":     f"eq.{customer_id}",
+                            "limit":  "1",
+                        },
+                        headers=_a8_headers(),
+                    )
+                    if cust_resp.status_code == 200 and cust_resp.json():
+                        c = cust_resp.json()[0]
+                        cust_name = c.get("name") or "Guest"
+                        cust_phone = c.get("phone") or ""
 
                 # Manager phone via restaurants table
                 r_resp = await client.get(
@@ -1218,6 +1230,11 @@ async def get_paid_bookings_missing_kds() -> List[Dict[str, Any]]:
                     "customer_name": cust_name,
                     "customer_phone": cust_phone,
                     "manager_phone": manager_phone,
+                    "kitchen_start_at": b.get("kitchen_start_at"),
+                    "scheduled_slot_at": b.get("scheduled_slot_at"),
+                    "booking_datetime": b.get("booking_datetime"),
+                    "kds_sent_at": b.get("kds_sent_at"),
+                    "schedule_meta": b.get("schedule_meta"),
                 })
 
         logger.info(
@@ -1447,6 +1464,15 @@ async def get_booking_with_customer(booking_id: str) -> Dict[str, Any] | None:
         if not booking:
             return None
         customer = booking.customer
+        schedule_row = await session.execute(
+            text("""
+                SELECT kitchen_start_at, scheduled_slot_at, booking_datetime,
+                       schedule_meta, kds_sent_at
+                FROM bookings WHERE id = CAST(:bid AS uuid)
+            """),
+            {"bid": booking_id},
+        )
+        sched = schedule_row.mappings().first() or {}
         return {
             "id": str(booking.id),
             "restaurant_id": str(booking.restaurant_id),
@@ -1457,7 +1483,11 @@ async def get_booking_with_customer(booking_id: str) -> Dict[str, Any] | None:
             "status": booking.status,
             "payment_status": booking.payment_status,
             "token_number": booking.token_number,
-            "kds_sent_at": await _fetch_booking_kds_sent_at(str(booking.id)),
+            "kds_sent_at": sched.get("kds_sent_at") or await _fetch_booking_kds_sent_at(str(booking.id)),
+            "kitchen_start_at": sched.get("kitchen_start_at"),
+            "scheduled_slot_at": sched.get("scheduled_slot_at"),
+            "booking_datetime": sched.get("booking_datetime"),
+            "schedule_meta": sched.get("schedule_meta") or {},
         }
 
 
@@ -2719,24 +2749,19 @@ async def backfill_missing_booking_schedules(limit: int = 20) -> int:
                     or portal_meta.get("delivery_distance_km")
                 ),
             )
-            needs_recompute = (
-                not kitchen_start
-                or (svc == "delivery" and not meta.get("transit_minutes"))
+            schedule = compute_kitchen_start_at(
+                slot_dt,
+                service_type=svc,
+                cart_lines=cart_lines_from_snapshot(cart) if cart else [],
+                menu_by_retailer_id=menu_map,
+                buffer_minutes=int(rest.get("schedule_buffer_minutes") or 15),
+                rounding_minutes=int(rest.get("schedule_rounding_minutes") or 30),
+                transit_minutes=transit,
             )
-            if needs_recompute:
-                schedule = compute_kitchen_start_at(
-                    slot_dt,
-                    service_type=svc,
-                    cart_lines=cart_lines_from_snapshot(cart) if cart else [],
-                    menu_by_retailer_id=menu_map,
-                    buffer_minutes=int(rest.get("schedule_buffer_minutes") or 15),
-                    rounding_minutes=int(rest.get("schedule_rounding_minutes") or 15),
-                    transit_minutes=transit,
-                )
-                kitchen_start = schedule["kitchen_start_at"]
-                slot_at = schedule["scheduled_slot_at"]
-                total_cook = schedule["total_cook_minutes"]
-                total_pack = schedule["total_packing_minutes"]
+            kitchen_start = schedule["kitchen_start_at"]
+            slot_at = schedule["scheduled_slot_at"]
+            total_cook = schedule["total_cook_minutes"]
+            total_pack = schedule["total_packing_minutes"]
 
             schedule_meta = {
                 **meta,
