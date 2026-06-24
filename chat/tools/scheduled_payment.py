@@ -112,6 +112,7 @@ async def trigger_scheduled_payment_after_approval(
     token: dict[str, Any],
     *,
     manager_phone: str | None = None,
+    caller_session: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     After manager approves a scheduled takeaway/delivery token, send the Razorpay
@@ -183,6 +184,9 @@ async def trigger_scheduled_payment_after_approval(
     touch_session_activity(session_state)
     session_state["current_state"] = "booking"
     await save_session_state(restaurant_id, stored_phone, session_state)
+    if caller_session is not None:
+        caller_session.clear()
+        caller_session.update(session_state)
     logger.info(
         f"[scheduled-payment] sent payment for {token.get('id')} → {stored_phone} "
         f"status={result.get('status')}"
@@ -226,14 +230,18 @@ async def try_trigger_scheduled_payment_on_pay(
 
     takeaway = await get_scheduled_takeaway_token(restaurant_id, customer_phone)
     if takeaway and takeaway.get("status") == "takeaway":
-        return await trigger_scheduled_payment_after_approval(
+        result = await trigger_scheduled_payment_after_approval(
             restaurant_id, takeaway, manager_phone=manager_phone,
+            caller_session=session_state,
         )
+        return result.get("result") or result
 
     delivery = await get_scheduled_delivery_token(restaurant_id, customer_phone)
     if delivery and delivery.get("status") == "takeaway":
-        return await trigger_scheduled_payment_after_approval(
+        result = await trigger_scheduled_payment_after_approval(
             restaurant_id, delivery, manager_phone=manager_phone,
+            caller_session=session_state,
         )
+        return result.get("result") or result
 
     return None

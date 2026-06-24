@@ -897,6 +897,7 @@ async def handle_awaiting_prepay(
         is_placeholder_payment_link,
         build_payment_line,
         format_razorpay_payment_line,
+        format_payment_link_failure_message,
         recover_prepay_if_already_paid,
         resolve_payment_link_status,
     )
@@ -991,10 +992,7 @@ async def handle_awaiting_prepay(
             str(payment_link), label="💳 Pay here to confirm:",
         )
     else:
-        pay_line = await build_payment_line(
-            str(booking_id or ""), total, customer_name, customer_phone,
-            f"{service_type} order", session_state, service_type=service_type,
-        )
+        pay_line = format_payment_link_failure_message()
 
     await _send_interactive(customer_phone, {
         "interactive": {

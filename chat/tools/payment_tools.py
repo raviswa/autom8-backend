@@ -191,6 +191,42 @@ def _cache_payment_link_in_session(session_state: dict[str, Any] | None, plink: 
         session_state["payment_link"] = short_url
 
 
+_OPEN_PAYMENT_LINK_STATUSES = frozenset({"created", "issued", "partially_paid"})
+
+
+def _is_payment_link_quota_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "payment_link" in msg and "limit" in msg
+
+
+def format_payment_link_failure_message() -> str:
+    """Customer-facing text when Razorpay link creation fails."""
+    if str(settings.razorpay_key_id or "").startswith("rzp_test_"):
+        return (
+            "⚠️ *Payment link unavailable*\n"
+            "Razorpay test mode only allows 30 active payment links — the limit is reached.\n\n"
+            "Please ask the restaurant to either:\n"
+            "• delete old test links in the Razorpay dashboard, or\n"
+            "• switch to *live* Razorpay keys for production.\n\n"
+            "Reply *PAY* to retry once this is fixed."
+        )
+    return (
+        "We couldn't generate your payment link just now. "
+        "Please reply *PAY* in a moment to receive it."
+    )
+
+
+def _plink_matches_booking(plink: dict[str, Any], booking_id: str) -> bool:
+    notes = plink.get("notes") or {}
+    ref = str(plink.get("reference_id") or "")
+    bid = str(booking_id)
+    if str(notes.get("booking_id")) == bid:
+        return True
+    if ref == bid or ref.startswith(f"{bid}-"):
+        return True
+    return False
+
+
 async def resolve_payment_link_status(
     booking_id: str,
     session_state: dict[str, Any] | None = None,
@@ -210,22 +246,22 @@ async def resolve_payment_link_status(
             logger.warning(f"[razorpay] fetch link {link_id} failed: {exc}")
 
     try:
-        by_ref = client.payment_link.all({"reference_id": str(booking_id), "count": 10})
+        by_ref = client.payment_link.all({"reference_id": str(booking_id)[:40], "count": 20})
         for plink in by_ref.get("items") or []:
-            notes = plink.get("notes") or {}
-            if str(notes.get("booking_id")) == str(booking_id):
-                _cache_payment_link_in_session(session_state, plink)
-                return plink.get("status")
+            if not _plink_matches_booking(plink, str(booking_id)):
+                continue
+            _cache_payment_link_in_session(session_state, plink)
+            return plink.get("status")
     except Exception as exc:
         logger.warning(f"[razorpay] reference_id lookup failed for {booking_id}: {exc}")
 
     try:
         recent = client.payment_link.all({"count": 100})
         for plink in recent.get("items") or []:
-            notes = plink.get("notes") or {}
-            if str(notes.get("booking_id")) == str(booking_id):
-                _cache_payment_link_in_session(session_state, plink)
-                return plink.get("status")
+            if not _plink_matches_booking(plink, str(booking_id)):
+                continue
+            _cache_payment_link_in_session(session_state, plink)
+            return plink.get("status")
     except Exception as exc:
         logger.warning(f"[razorpay] recent-link scan failed for {booking_id}: {exc}")
 
@@ -316,7 +352,7 @@ async def ensure_prepay_payment_link(
     link_status = await resolve_payment_link_status(str(booking_id), session_state)
     if link_status == "paid":
         return _reusable_payment_link(session_state)
-    if link_status in ("created", "issued", "partially_paid"):
+    if link_status in _OPEN_PAYMENT_LINK_STATUSES:
         existing = _reusable_payment_link(session_state)
         if existing:
             logger.info(f"[razorpay] Reusing open link for booking {booking_id}")
@@ -336,6 +372,17 @@ async def ensure_prepay_payment_link(
         existing = _reusable_payment_link(session_state)
         if existing:
             return existing
+        await resolve_payment_link_status(str(booking_id), session_state)
+        existing = _reusable_payment_link(session_state)
+        if existing:
+            logger.info(f"[razorpay] Recovered open link after create failure for {booking_id}")
+            return existing
+        if _is_payment_link_quota_error(exc):
+            logger.error(
+                f"[razorpay] payment_link quota exhausted for {booking_id} "
+                f"(status={razorpay_status_message()})"
+            )
+            return None
         suffix = str(int(time.time()))[-6:]
         ref_id = f"{booking_id}-{suffix}"[:40]
         try:
@@ -352,6 +399,9 @@ async def ensure_prepay_payment_link(
             logger.error(
                 f"[razorpay] ensure_prepay_payment_link retry failed for {booking_id}: {retry_exc}"
             )
+            if not _is_payment_link_quota_error(retry_exc):
+                await resolve_payment_link_status(str(booking_id), session_state)
+                return _reusable_payment_link(session_state)
             return None
 
 

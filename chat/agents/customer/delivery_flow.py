@@ -30,6 +30,7 @@ from tools.payment_tools import (
     build_payment_line,
     build_scheduled_payment_line,
     scheduled_payment_already_delivered,
+    format_payment_link_failure_message,
 )
 from tools.prepay_fulfillment import (
     prepay_fulfillment_required,
@@ -486,10 +487,7 @@ async def _complete_scheduled_delivery_after_approval(
         sched_note = format_scheduled_note(session_state.get("scheduled_at"))
         if sched_note:
             retry_body += f"\n\n{sched_note}"
-        retry_body += (
-            "\n\nWe couldn't generate your payment link just now. "
-            "Please reply *PAY* in a moment to receive it."
-        )
+        retry_body += f"\n\n{format_payment_link_failure_message()}"
         await send_whatsapp_message(customer_phone, retry_body, restaurant_id)
         session_state["scheduled_delivery_approved"] = True
         session_state["booking_step"] = "awaiting_scheduled_delivery_payment"
