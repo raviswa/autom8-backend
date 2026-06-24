@@ -9,6 +9,104 @@ const { broadcastToRestaurant } = require('../websocket');
 const { sendWhatsAppMessage } = require('./whatsapp');
 const { notifyKdsFromPayload } = require('./kdsNotifyClient');
 
+function buildItemsFromCart(cart) {
+  if (!cart || typeof cart !== 'object') return [];
+  return Object.entries(cart).map(([id, line]) => ({
+    retailer_id: id,
+    name: line?.title || line?.name || 'Item',
+    qty: Number(line?.qty ?? 1),
+    unit_price: Number(line?.unit_price ?? 0),
+  }));
+}
+
+function resolvePortalToken(tokens, booking) {
+  const byBooking = (tokens ?? []).find((t) => t.meta?.booking_id === booking.id);
+  if (byBooking) return byBooking;
+  const raw = String(booking.token_number || '').trim().toUpperCase();
+  if (!raw) return null;
+  return (tokens ?? []).find((t) => {
+    const id = String(t.id || '').toUpperCase();
+    return id === raw || id === `T-${raw}` || raw === id.replace(/^T-/, '');
+  }) || null;
+}
+
+/** Upsert scheduled_jobs from paid bookings so kitchen_start_at dispatch is reliable. */
+async function syncScheduledJobsFromBookings() {
+  const { data: bookings, error } = await supabaseAdmin
+    .from('bookings')
+    .select(`
+      id, restaurant_id, kitchen_start_at, token_number, service_type, schedule_meta,
+      customer:customer_id(name, phone)
+    `)
+    .in('service_type', ['takeaway', 'delivery'])
+    .in('status', ['confirmed', 'pending'])
+    .eq('payment_status', 'paid')
+    .is('kds_sent_at', null)
+    .not('kitchen_start_at', 'is', null)
+    .limit(100);
+
+  if (error) {
+    console.warn('[scheduled-jobs] sync query failed:', error.message);
+    return 0;
+  }
+  if (!bookings?.length) return 0;
+
+  const byRestaurant = new Map();
+  for (const b of bookings) {
+    if (!byRestaurant.has(b.restaurant_id)) byRestaurant.set(b.restaurant_id, []);
+    byRestaurant.get(b.restaurant_id).push(b);
+  }
+
+  let synced = 0;
+  for (const [restaurantId, rows] of byRestaurant) {
+    const { data: tokens } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .select('id, meta, type')
+      .eq('restaurant_id', restaurantId)
+      .in('type', ['scheduled_takeaway', 'scheduled_delivery']);
+
+    for (const b of rows) {
+      const portal = resolvePortalToken(tokens, b);
+      const meta = b.schedule_meta || {};
+      const portalMeta = portal?.meta || {};
+      const cart = (meta.cart && Object.keys(meta.cart).length) ? meta.cart : (portalMeta.cart || {});
+      const items = buildItemsFromCart(cart);
+      if (!items.length) continue;
+
+      const portalType = String(portal?.type || '').toLowerCase();
+      const serviceType = portalType === 'scheduled_delivery'
+        ? 'delivery'
+        : portalType === 'scheduled_takeaway'
+          ? 'takeaway'
+          : (b.service_type || 'takeaway');
+      const tokenId = portal?.id || b.token_number;
+      const customer = b.customer || {};
+
+      try {
+        await enqueueScheduledJobs({
+          restaurantId,
+          bookingId: b.id,
+          tokenId,
+          kitchenStartAt: b.kitchen_start_at,
+          payload: {
+            customer_name: customer.name || 'Guest',
+            customer_phone: customer.phone || '',
+            token_number: tokenId,
+            service_type: serviceType,
+            items,
+            slot_label: meta.scheduled_at_label || portalMeta.scheduled_at_label || '',
+            kitchen_start_label: meta.kitchen_start_label || portalMeta.kitchen_start_label || '',
+          },
+        });
+        synced += 1;
+      } catch (err) {
+        console.warn(`[scheduled-jobs] sync failed for ${b.id}:`, err.message);
+      }
+    }
+  }
+  return synced;
+}
+
 async function enqueueScheduledJobs({
   restaurantId,
   bookingId,
@@ -145,6 +243,7 @@ async function executePrepStartWhatsappJob(job) {
 }
 
 async function runDueScheduledJobs() {
+  await syncScheduledJobsFromBookings();
   const due = await claimDueJobs();
   let executed = 0;
 
@@ -180,5 +279,6 @@ module.exports = {
   enqueueScheduledJobs,
   cancelScheduledJobsForBooking,
   cancelScheduledJobsForToken,
+  syncScheduledJobsFromBookings,
   runDueScheduledJobs,
 };

@@ -1318,18 +1318,24 @@ async def get_bookings_due_for_kds() -> list[dict]:
                 JOIN restaurants r ON r.id = b.restaurant_id
                 LEFT JOIN walk_in_tokens wt
                   ON wt.meta->>'booking_id' = b.id::text
-                WHERE b.status = 'confirmed'
+                WHERE b.status IN ('confirmed', 'pending')
                   AND b.kds_sent_at IS NULL
-                  AND b.booking_datetime IS NOT NULL
                   AND b.service_type IN ('delivery', 'takeaway')
-                  AND b.booking_datetime - (
-                        COALESCE(r.scheduled_kds_lead_minutes, 150) * INTERVAL '1 minute'
-                      ) <= NOW()
+                  AND (
+                    (b.kitchen_start_at IS NOT NULL AND b.kitchen_start_at <= NOW())
+                    OR (
+                      b.kitchen_start_at IS NULL
+                      AND b.booking_datetime IS NOT NULL
+                      AND b.booking_datetime - (
+                            COALESCE(r.scheduled_kds_lead_minutes, 150) * INTERVAL '1 minute'
+                          ) <= NOW()
+                    )
+                  )
                   AND (
                     COALESCE(r.payment_mode, 'prepay') <> 'prepay'
                     OR b.payment_status = 'paid'
                   )
-                ORDER BY b.booking_datetime ASC
+                ORDER BY COALESCE(b.kitchen_start_at, b.booking_datetime) ASC
                 LIMIT 50
             """),
         )

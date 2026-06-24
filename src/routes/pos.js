@@ -534,7 +534,7 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
       .in('service_type', ['takeaway', 'delivery'])
       .in('status', ['pending', 'confirmed'])
       .in('payment_status', ['paid', 'pending'])
-      .gte('booking_datetime', now.toISOString())
+      .is('kds_sent_at', null)
       .order('booking_datetime', { ascending: true });
 
     if (error) throw error;
@@ -545,8 +545,12 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
       .filter((b) => {
         const slotRaw = b.scheduled_slot_at || b.booking_datetime;
         if (!slotRaw) return false;
+        const meta = b.schedule_meta || {};
+        const isScheduledPrepay = Boolean(
+          b.kitchen_start_at || meta.kitchen_start_at || meta.scheduled_at,
+        );
+        if (isScheduledPrepay) return true;
         const slotMs = new Date(slotRaw).getTime() - now.getTime();
-        // Future scheduled slot (>1h out) — excludes immediate walk-in takeaway
         return slotMs > oneHourMs;
       })
       .map((b) => {
@@ -573,7 +577,8 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
       return finalizeScheduledOrder(baseOrder, kitchenStart, now);
     });
 
-    const enrichedOrders = await enrichScheduledOrdersFromPortal(req.restaurant_id, orders);
+    const enrichedOrders = (await enrichScheduledOrdersFromPortal(req.restaurant_id, orders))
+      .filter((o) => o.bucket !== 'live');
 
     const summary = {};
     for (const o of enrichedOrders.filter((x) => x.bucket === 'future' || x.bucket === 'todays_future')) {
