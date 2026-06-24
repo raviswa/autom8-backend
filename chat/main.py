@@ -35,6 +35,9 @@ from tools.payment_tools import (
     handle_payment_webhook,
     razorpay_status_message,
     handle_payment_link_callback,
+    prepare_checkout_page,
+    render_checkout_html,
+    verify_checkout_payment,
 )
 from tools.auto_reply_filter import is_whatsapp_auto_reply
 from tools.booking_mechanisms import (
@@ -488,17 +491,21 @@ async def internal_scheduled_approval_payment(request: Request):
 
 @app.get("/payment/complete")
 async def payment_complete(request: Request):
-    """Customer redirect after Razorpay payment link checkout."""
+    """Customer redirect after Razorpay checkout (Orders API or legacy payment links)."""
     params = dict(request.query_params)
-    status = params.get("razorpay_payment_link_status", "")
+    simple_status = params.get("status", "")
+    status = params.get("razorpay_payment_link_status", "") or simple_status
     result: dict = {}
 
-    if status == "paid":
-        result = await handle_payment_link_callback(params)
-        if not result.get("ok"):
-            logger.warning(f"[razorpay] Callback not fulfilled: {result}")
-    elif status in ("cancelled", "failed", "expired"):
-        result = await handle_payment_link_callback(params)
+    if params.get("razorpay_payment_link_id"):
+        if status == "paid":
+            result = await handle_payment_link_callback(params)
+            if not result.get("ok"):
+                logger.warning(f"[razorpay] Callback not fulfilled: {result}")
+        elif status in ("cancelled", "failed", "expired"):
+            result = await handle_payment_link_callback(params)
+    elif simple_status == "paid":
+        result = {"ok": True, "fulfilled": True}
 
     if status == "paid" and result.get("fulfilled") is not False and result.get("ok") is not False:
         html = (
@@ -528,12 +535,43 @@ async def payment_complete(request: Request):
     return HTMLResponse(html, status_code=200)
 
 
+@app.get("/pay/{booking_id}")
+async def pay_checkout(booking_id: str, request: Request):
+    """Hosted Razorpay Checkout page (Orders API — unlimited test checkouts)."""
+    token = request.query_params.get("t", "")
+    ctx = await prepare_checkout_page(booking_id, token)
+    if ctx.get("error") == "invalid_token":
+        return HTMLResponse("<h1>Invalid or expired payment link</h1>", status_code=403)
+    if ctx.get("error") == "booking_not_found":
+        return HTMLResponse("<h1>Order not found</h1>", status_code=404)
+    if ctx.get("already_paid"):
+        return HTMLResponse(
+            "<h1>Already paid ✅</h1><p>Return to WhatsApp for your confirmation.</p>",
+            status_code=200,
+        )
+    if ctx.get("error"):
+        return HTMLResponse(f"<h1>Payment unavailable</h1><p>{ctx['error']}</p>", status_code=400)
+    return HTMLResponse(render_checkout_html(ctx), status_code=200)
+
+
+@app.post("/pay/verify")
+async def pay_verify(request: Request):
+    """Verify Razorpay Checkout payment signature after customer pays."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    result = await verify_checkout_payment(body)
+    status_code = 200 if result.get("ok") else 400
+    return JSONResponse(status_code=status_code, content=result)
+
+
 @app.get("/webhook/razorpay")
 async def razorpay_webhook_probe():
     """Browser/Razorpay URL check — real events must use POST."""
     return JSONResponse({
         "status": "ok",
-        "message": "Razorpay webhook endpoint is live. Configure POST payment_link.paid events here.",
+        "message": "Razorpay webhook endpoint is live. Configure payment.captured and order.paid events here.",
     })
 
 

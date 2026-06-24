@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import logging
 import re
 import time
 from typing import Any
+from urllib.parse import quote
 
 from config.settings import settings
 
@@ -22,7 +26,7 @@ RAZORPAY_NON_REFUND_NOTICE = (
 def format_razorpay_payment_line(
     link: str,
     *,
-    label: str = "💳 Pay here to confirm your order:",
+    label: str = "💳 Tap to pay and confirm your order:",
 ) -> str:
     """Payment link block with non-refundable disclaimer shown before the link."""
     return f"{RAZORPAY_NON_REFUND_NOTICE}\n\n{label}\n{link}"
@@ -62,7 +66,58 @@ def razorpay_status_message() -> str:
 def is_placeholder_payment_link(link: str) -> bool:
     if not link:
         return True
+    if "/pay/" in str(link):
+        return False
     return "placeholder" in link.lower() or link == _PLACEHOLDER_URL
+
+
+def _checkout_signing_secret() -> str:
+    secret = (settings.razorpay_key_secret or "").strip()
+    if secret:
+        return secret
+    from tools.booking_mechanisms import KDS_SECRET
+    return (KDS_SECRET or "autom8-checkout-dev").strip()
+
+
+def sign_checkout_token(booking_id: str, *, ttl_seconds: int = 86_400) -> str:
+    """Signed token authorising /pay/{booking_id} for a limited time."""
+    exp = int(time.time()) + ttl_seconds
+    payload = f"{booking_id}:{exp}"
+    sig = hmac.new(
+        _checkout_signing_secret().encode(),
+        payload.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    raw = f"{payload}:{sig}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def verify_checkout_token(booking_id: str, token: str) -> bool:
+    if not token:
+        return False
+    try:
+        padded = token + "=" * (-len(token) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode()).decode()
+        bid, exp_str, sig = raw.rsplit(":", 2)
+        if bid != str(booking_id):
+            return False
+        if int(exp_str) < int(time.time()):
+            return False
+        payload = f"{bid}:{exp_str}"
+        expected = hmac.new(
+            _checkout_signing_secret().encode(),
+            payload.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(expected, sig)
+    except Exception:
+        return False
+
+
+def build_checkout_page_url(booking_id: str) -> str:
+    token = sign_checkout_token(str(booking_id))
+    base = settings.chat_public_url.rstrip("/")
+    return f"{base}/pay/{booking_id}?t={quote(token)}"
 
 
 def _get_client():
@@ -118,6 +173,93 @@ def scheduled_payment_already_delivered(session_state: dict[str, Any] | None) ->
     return bool(link and not is_placeholder_payment_link(str(link)))
 
 
+async def create_razorpay_order(
+    booking_id: str,
+    amount: float,
+    customer_name: str,
+    description: str,
+    *,
+    customer_phone: str | None = None,
+    session_state: dict[str, Any] | None = None,
+) -> str:
+    """Create Razorpay Order (Orders API) — unlimited checkouts in test mode."""
+    client = _get_client()
+    if not client:
+        reason = razorpay_status_message()
+        logger.error(f"[razorpay] Cannot create order — status={reason}")
+        if settings.environment == "production":
+            raise RuntimeError(f"Razorpay not configured ({reason})")
+        raise RuntimeError(f"Razorpay not configured ({reason})")
+
+    amount_paise = int(round(amount * 100))
+    if amount_paise < 100:
+        raise ValueError(f"Amount too small for Razorpay: ₹{amount}")
+
+    receipt = f"bk_{str(booking_id).replace('-', '')[:12]}_{int(time.time())}"[:40]
+    notes: dict[str, str] = {
+        "booking_id": str(booking_id),
+        "customer_name": (customer_name or "Guest")[:120],
+    }
+    if customer_phone:
+        notes["customer_phone"] = re.sub(r"\D", "", str(customer_phone))[-12:]
+
+    payload: dict[str, Any] = {
+        "amount": amount_paise,
+        "currency": "INR",
+        "receipt": receipt,
+        "notes": notes,
+    }
+
+    response = client.order.create(data=payload)
+    order_id = response.get("id", "")
+    if not order_id:
+        raise RuntimeError(f"Razorpay returned no order id: {response}")
+
+    if session_state is not None:
+        session_state["razorpay_order_id"] = order_id
+        session_state["payment_link"] = build_checkout_page_url(str(booking_id))
+        session_state.pop("razorpay_payment_link_id", None)
+
+    logger.info(f"[razorpay] Order created: {order_id} for booking {booking_id}")
+    return str(order_id)
+
+
+def _cache_order_in_session(
+    session_state: dict[str, Any] | None,
+    order: dict[str, Any],
+    booking_id: str,
+) -> None:
+    if session_state is None:
+        return
+    order_id = order.get("id")
+    if order_id:
+        session_state["razorpay_order_id"] = order_id
+    session_state["payment_link"] = build_checkout_page_url(str(booking_id))
+
+
+async def resolve_order_payment_status(
+    booking_id: str,
+    session_state: dict[str, Any] | None = None,
+) -> str | None:
+    """Return Razorpay order status: paid, created, attempted, or None."""
+    client = _get_client()
+    if not client:
+        return None
+
+    order_id = (session_state or {}).get("razorpay_order_id")
+    if order_id:
+        try:
+            order = client.order.fetch(order_id)
+            notes = order.get("notes") or {}
+            if str(notes.get("booking_id")) == str(booking_id):
+                _cache_order_in_session(session_state, order, booking_id)
+                return order.get("status")
+        except Exception as exc:
+            logger.warning(f"[razorpay] fetch order {order_id} failed: {exc}")
+
+    return None
+
+
 async def create_payment_link(
     booking_id: str,
     amount: float,
@@ -128,56 +270,16 @@ async def create_payment_link(
     session_state: dict[str, Any] | None = None,
     reference_id: str | None = None,
 ) -> str:
-    """Create Razorpay payment link and return the short URL."""
-    client = _get_client()
-    if not client:
-        reason = razorpay_status_message()
-        logger.error(f"[razorpay] Cannot create link — status={reason}")
-        if settings.environment == "production":
-            raise RuntimeError(f"Razorpay not configured ({reason})")
-        return _PLACEHOLDER_URL
-
-    try:
-        amount_paise = int(round(amount * 100))
-        if amount_paise < 100:
-            raise ValueError(f"Amount too small for Razorpay: ₹{amount}")
-
-        contact = _format_contact(customer_phone)
-        customer: dict[str, str] = {"name": (customer_name or "Guest")[:120]}
-        if contact:
-            customer["contact"] = contact
-
-        payload: dict[str, Any] = {
-            "amount": amount_paise,
-            "currency": "INR",
-            "accept_partial": False,
-            "description": description[:255],
-            "reference_id": str(reference_id or booking_id)[:40],
-            "customer": customer,
-            "notify": {"sms": False, "email": False},
-            "reminder_enable": True,
-            "notes": {
-                "booking_id": str(booking_id),
-                "customer_name": customer_name[:120],
-            },
-            "callback_url": _callback_url(),
-            "callback_method": "get",
-        }
-
-        response = client.payment_link.create(data=payload)
-        link_id = response.get("id", "")
-        short_url = response.get("short_url") or response.get("url", "")
-        if not short_url:
-            raise RuntimeError(f"Razorpay returned no URL: {response}")
-        if session_state is not None:
-            session_state["payment_link"] = short_url
-            session_state["razorpay_payment_link_id"] = link_id
-        logger.info(f"[razorpay] Payment link created: {link_id} for booking {booking_id}")
-        return short_url
-
-    except Exception as e:
-        logger.error(f"[razorpay] Failed to create payment link: {e}")
-        raise
+    """Return hosted checkout URL (Orders API — no payment-link quota)."""
+    del reference_id  # legacy param from payment-link era
+    url = await ensure_prepay_payment_link(
+        str(booking_id), amount, customer_name, description,
+        customer_phone=customer_phone,
+        session_state=session_state,
+    )
+    if not url:
+        raise RuntimeError(f"Could not create checkout for booking {booking_id}")
+    return url
 
 
 def _cache_payment_link_in_session(session_state: dict[str, Any] | None, plink: dict[str, Any]) -> None:
@@ -200,19 +302,10 @@ def _is_payment_link_quota_error(exc: BaseException) -> bool:
 
 
 def format_payment_link_failure_message() -> str:
-    """Customer-facing text when Razorpay link creation fails."""
-    if str(settings.razorpay_key_id or "").startswith("rzp_test_"):
-        return (
-            "⚠️ *Payment link unavailable*\n"
-            "Razorpay test mode only allows 30 active payment links — the limit is reached.\n\n"
-            "Please ask the restaurant to either:\n"
-            "• delete old test links in the Razorpay dashboard, or\n"
-            "• switch to *live* Razorpay keys for production.\n\n"
-            "Reply *PAY* to retry once this is fixed."
-        )
+    """Customer-facing text when Razorpay checkout cannot be prepared."""
     return (
-        "We couldn't generate your payment link just now. "
-        "Please reply *PAY* in a moment to receive it."
+        "We couldn't open the payment page just now. "
+        "Please reply *PAY* in a moment to try again."
     )
 
 
@@ -227,7 +320,18 @@ def _plink_matches_booking(plink: dict[str, Any], booking_id: str) -> bool:
     return False
 
 
-async def resolve_payment_link_status(
+async def resolve_prepay_payment_status(
+    booking_id: str,
+    session_state: dict[str, Any] | None = None,
+) -> str | None:
+    """Order status first, then legacy payment-link status for old sessions."""
+    order_status = await resolve_order_payment_status(booking_id, session_state)
+    if order_status:
+        return order_status
+    return await _resolve_legacy_payment_link_status(booking_id, session_state)
+
+
+async def _resolve_legacy_payment_link_status(
     booking_id: str,
     session_state: dict[str, Any] | None = None,
 ) -> str | None:
@@ -268,6 +372,14 @@ async def resolve_payment_link_status(
     return None
 
 
+async def resolve_payment_link_status(
+    booking_id: str,
+    session_state: dict[str, Any] | None = None,
+) -> str | None:
+    """Backward-compatible — prefers Orders API, falls back to payment links."""
+    return await resolve_prepay_payment_status(booking_id, session_state)
+
+
 async def recover_prepay_if_already_paid(
     booking_id: str,
     session_state: dict[str, Any] | None = None,
@@ -299,7 +411,7 @@ async def recover_prepay_if_already_paid(
                 return {"state": "kds_retry_failed", "booking": booking}
         return {"state": "already_confirmed", "booking": booking}
 
-    link_status = await resolve_payment_link_status(booking_id, session_state)
+    link_status = await resolve_prepay_payment_status(booking_id, session_state)
     paid_on_razorpay = link_status == "paid"
     paid_in_db = booking.get("payment_status") == "paid"
 
@@ -323,6 +435,9 @@ def _reusable_payment_link(session_state: dict[str, Any] | None) -> str | None:
     return None
 
 
+_OPEN_ORDER_STATUSES = frozenset({"created", "attempted"})
+
+
 async def ensure_prepay_payment_link(
     booking_id: str,
     amount: float,
@@ -333,8 +448,8 @@ async def ensure_prepay_payment_link(
     session_state: dict[str, Any] | None = None,
 ) -> str | None:
     """
-    Return a Razorpay short URL for prepay, reusing an open link when possible.
-    Returns None when Razorpay is unavailable or link creation fails.
+    Return hosted checkout URL (/pay/{booking_id}) backed by Razorpay Orders API.
+    Unlimited checkouts in test mode — no payment-link quota.
     """
     if not booking_id:
         return None
@@ -349,60 +464,25 @@ async def ensure_prepay_payment_link(
     if existing:
         return existing
 
-    link_status = await resolve_payment_link_status(str(booking_id), session_state)
-    if link_status == "paid":
+    pay_status = await resolve_prepay_payment_status(str(booking_id), session_state)
+    if pay_status == "paid":
         return _reusable_payment_link(session_state)
-    if link_status in _OPEN_PAYMENT_LINK_STATUSES:
+    if pay_status in _OPEN_ORDER_STATUSES or pay_status in _OPEN_PAYMENT_LINK_STATUSES:
         existing = _reusable_payment_link(session_state)
         if existing:
-            logger.info(f"[razorpay] Reusing open link for booking {booking_id}")
+            logger.info(f"[razorpay] Reusing open checkout for booking {booking_id}")
             return existing
 
     try:
-        link = await create_payment_link(
+        await create_razorpay_order(
             str(booking_id), amount, customer_name, description,
             customer_phone=customer_phone,
             session_state=session_state,
         )
-        if is_placeholder_payment_link(link):
-            return None
-        return link
+        return _reusable_payment_link(session_state)
     except Exception as exc:
-        logger.warning(f"[razorpay] ensure_prepay_payment_link failed for {booking_id}: {exc}")
-        existing = _reusable_payment_link(session_state)
-        if existing:
-            return existing
-        await resolve_payment_link_status(str(booking_id), session_state)
-        existing = _reusable_payment_link(session_state)
-        if existing:
-            logger.info(f"[razorpay] Recovered open link after create failure for {booking_id}")
-            return existing
-        if _is_payment_link_quota_error(exc):
-            logger.error(
-                f"[razorpay] payment_link quota exhausted for {booking_id} "
-                f"(status={razorpay_status_message()})"
-            )
-            return None
-        suffix = str(int(time.time()))[-6:]
-        ref_id = f"{booking_id}-{suffix}"[:40]
-        try:
-            link = await create_payment_link(
-                str(booking_id), amount, customer_name, description,
-                customer_phone=customer_phone,
-                session_state=session_state,
-                reference_id=ref_id,
-            )
-            if is_placeholder_payment_link(link):
-                return None
-            return link
-        except Exception as retry_exc:
-            logger.error(
-                f"[razorpay] ensure_prepay_payment_link retry failed for {booking_id}: {retry_exc}"
-            )
-            if not _is_payment_link_quota_error(retry_exc):
-                await resolve_payment_link_status(str(booking_id), session_state)
-                return _reusable_payment_link(session_state)
-            return None
+        logger.error(f"[razorpay] ensure_prepay_payment_link failed for {booking_id}: {exc}")
+        return None
 
 
 async def build_scheduled_payment_line(
@@ -668,6 +748,177 @@ async def notify_customer_payment_failure(
     return True
 
 
+async def prepare_checkout_page(booking_id: str, token: str) -> dict[str, Any]:
+    """Load or create Razorpay order for the hosted /pay checkout page."""
+    if not verify_checkout_token(booking_id, token):
+        return {"error": "invalid_token"}
+
+    from tools.db_tools import get_booking_with_customer, get_session_state, save_session_state
+
+    booking = await get_booking_with_customer(booking_id)
+    if not booking:
+        return {"error": "booking_not_found"}
+    if booking.get("payment_status") == "paid" or booking.get("status") == "confirmed":
+        return {"already_paid": True}
+
+    restaurant_id = str(booking["restaurant_id"])
+    phone = booking.get("customer_phone") or ""
+    session: dict[str, Any] = {}
+    if phone:
+        session = dict(await get_session_state(restaurant_id, phone) or {})
+
+    amount = float(session.get("order_total") or 0)
+    customer_name = booking.get("customer_name") or session.get("customer_name") or "Guest"
+    token_label = booking.get("token_number") or ""
+
+    if amount < 1:
+        from tools.prepay_fulfillment import load_prepay_payload
+        payload = await load_prepay_payload(restaurant_id, phone, booking_id)
+        amount = float((payload or {}).get("total") or 0)
+
+    if amount < 1:
+        return {"error": "amount_missing"}
+
+    order_status = await resolve_order_payment_status(booking_id, session)
+    order_id = session.get("razorpay_order_id")
+    description = f"Order {token_label}".strip() or f"Booking {booking_id[:8]}"
+
+    if order_status not in _OPEN_ORDER_STATUSES:
+        order_id = await create_razorpay_order(
+            booking_id, amount, customer_name, description,
+            customer_phone=phone, session_state=session,
+        )
+    elif not order_id:
+        order_id = await create_razorpay_order(
+            booking_id, amount, customer_name, description,
+            customer_phone=phone, session_state=session,
+        )
+
+    if phone and session:
+        await save_session_state(restaurant_id, phone, session)
+
+    restaurant_name = "Restaurant"
+    try:
+        from tools.booking_mechanisms import fetch_restaurant_info
+        info = await fetch_restaurant_info(restaurant_id)
+        restaurant_name = (info.get("display_name") or info.get("name") or restaurant_name)
+    except Exception:
+        pass
+
+    contact = _format_contact(phone) or ""
+    return {
+        "key_id": settings.razorpay_key_id,
+        "order_id": order_id,
+        "amount_paise": int(round(amount * 100)),
+        "restaurant_name": restaurant_name[:120],
+        "description": description[:255],
+        "customer_name": customer_name[:120],
+        "contact": contact.lstrip("+"),
+        "booking_id": booking_id,
+    }
+
+
+def render_checkout_html(ctx: dict[str, Any]) -> str:
+    """Minimal mobile page that auto-opens Razorpay Standard Checkout."""
+    import json
+
+    key_id = json.dumps(ctx["key_id"])
+    order_id = json.dumps(ctx["order_id"])
+    name = json.dumps(ctx["restaurant_name"])
+    description = json.dumps(ctx["description"])
+    customer_name = json.dumps(ctx["customer_name"])
+    contact = json.dumps(ctx.get("contact") or "")
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Secure payment</title>
+  <style>
+    body {{ font-family: system-ui, sans-serif; text-align: center; padding: 2rem; }}
+    .muted {{ color: #666; font-size: 0.95rem; }}
+  </style>
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+</head>
+<body>
+  <h2>Opening secure payment…</h2>
+  <p class="muted">Complete payment to confirm your order.<br/>You can return to WhatsApp after paying.</p>
+  <script>
+    var options = {{
+      key: {key_id},
+      order_id: {order_id},
+      name: {name},
+      description: {description},
+      prefill: {{ name: {customer_name}, contact: {contact} }},
+      theme: {{ color: "#2563eb" }},
+      handler: function (response) {{
+        fetch("/pay/verify", {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify(response)
+        }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+          window.location.href = data.redirect || "/payment/complete?status=paid";
+        }}).catch(function() {{
+          window.location.href = "/payment/complete?status=paid";
+        }});
+      }},
+      modal: {{
+        ondismiss: function() {{
+          window.location.href = "/payment/complete?status=cancelled";
+        }}
+      }}
+    }};
+    var rzp = new Razorpay(options);
+    rzp.on("payment.failed", function() {{
+      window.location.href = "/payment/complete?status=failed";
+    }});
+    rzp.open();
+  </script>
+</body>
+</html>"""
+
+
+async def verify_checkout_payment(body: dict[str, Any]) -> dict[str, Any]:
+    """Verify Razorpay Checkout signature and fulfill the booking."""
+    client = _get_client()
+    if not client:
+        return {"ok": False, "reason": "not_configured"}
+
+    order_id = body.get("razorpay_order_id") or ""
+    payment_id = body.get("razorpay_payment_id") or ""
+    signature = body.get("razorpay_signature") or ""
+    if not (order_id and payment_id and signature):
+        return {"ok": False, "reason": "missing_fields"}
+
+    try:
+        client.utility.verify_payment_signature({
+            "razorpay_order_id": order_id,
+            "razorpay_payment_id": payment_id,
+            "razorpay_signature": signature,
+        })
+    except Exception as exc:
+        logger.error(f"[razorpay] checkout signature verify failed: {exc}")
+        return {"ok": False, "reason": "invalid_signature"}
+
+    booking_id = None
+    try:
+        order = client.order.fetch(order_id)
+        booking_id = (order.get("notes") or {}).get("booking_id")
+    except Exception as exc:
+        logger.error(f"[razorpay] fetch order {order_id} after checkout: {exc}")
+        return {"ok": False, "reason": "order_fetch_failed"}
+
+    if not booking_id:
+        return {"ok": False, "reason": "booking_id_missing"}
+
+    try:
+        result = await _mark_paid_and_fulfill(str(booking_id), source="checkout")
+        return {**result, "redirect": f"{settings.chat_public_url.rstrip('/')}/payment/complete?status=paid"}
+    except Exception as exc:
+        logger.error(f"[razorpay] checkout fulfillment failed for {booking_id}: {exc}")
+        return {"ok": False, "error": str(exc)}
+
+
 async def handle_payment_link_callback(query_params: dict[str, str]) -> dict[str, Any]:
     """Process customer redirect to /payment/complete after Razorpay checkout."""
     status = query_params.get("razorpay_payment_link_status", "")
@@ -717,19 +968,34 @@ async def handle_payment_link_callback(query_params: dict[str, str]) -> dict[str
 
 
 async def handle_payment_webhook(payload: dict[str, Any]) -> dict[str, Any]:
-    """Process Razorpay payment_link and payment events."""
+    """Process Razorpay payment_link, payment.captured, and order.paid events."""
     event = payload.get("event", "")
     entity = payload.get("payload", {}).get("payment_link", {}).get("entity", {})
-    if not entity and payload.get("payload", {}).get("payment", {}):
-        entity = payload["payload"]["payment"].get("entity", {})
+    payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
+    order_entity = payload.get("payload", {}).get("order", {}).get("entity", {})
+    if not entity and payment_entity:
+        entity = payment_entity
+    if not entity and order_entity:
+        entity = order_entity
 
     notes = entity.get("notes") or {}
     booking_id = notes.get("booking_id")
     status = entity.get("status", "")
 
+    client = _get_client()
+    if not booking_id and client and payment_entity.get("order_id"):
+        try:
+            order = client.order.fetch(payment_entity["order_id"])
+            booking_id = (order.get("notes") or {}).get("booking_id")
+        except Exception as exc:
+            logger.warning(f"[razorpay] webhook order lookup failed: {exc}")
+
     logger.info(f"[razorpay] Webhook event={event} status={status} booking_id={booking_id}")
 
-    if event == "payment_link.paid" and booking_id:
+    paid_events = {"payment_link.paid", "payment.captured", "order.paid"}
+    if event in paid_events and booking_id:
+        if event == "payment.captured" and status not in ("captured", "authorized", ""):
+            return {"ok": True, "event": event, "handled": False, "reason": "not_captured"}
         try:
             result = await _mark_paid_and_fulfill(str(booking_id), source="webhook")
             if not result.get("fulfilled"):

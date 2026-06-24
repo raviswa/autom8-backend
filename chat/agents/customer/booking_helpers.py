@@ -127,6 +127,7 @@ def expire_session_if_stale(
     _booking_id = session_state.get("booking_id")
     _payment_link = session_state.get("payment_link")
     _razorpay_link_id = session_state.get("razorpay_payment_link_id")
+    _razorpay_order_id = session_state.get("razorpay_order_id")
     _order_summary = session_state.get("order_confirmed_summary")
     _order_total = session_state.get("order_total")
     session_state.clear()
@@ -151,6 +152,8 @@ def expire_session_if_stale(
         session_state["payment_link"] = _payment_link
     if _razorpay_link_id:
         session_state["razorpay_payment_link_id"] = _razorpay_link_id
+    if _razorpay_order_id:
+        session_state["razorpay_order_id"] = _razorpay_order_id
     if _order_summary:
         session_state["order_confirmed_summary"] = _order_summary
     if _order_total is not None:
@@ -428,6 +431,7 @@ def mark_session_visit_complete(session_state: Dict[str, Any]) -> None:
     for key in (
         "payment_link",
         "razorpay_payment_link_id",
+        "razorpay_order_id",
         "order_confirmed_summary",
         "order_total",
     ):
