@@ -503,6 +503,24 @@ function exportCategoryLabel(category) {
   return c && c !== 'General' ? c : '';
 }
 
+function exportTimeSlotLabel(timeSlot) {
+  if (!timeSlot || timeSlot === 'all') return '';
+  return SLOT_DISPLAY_LABELS[timeSlot] || String(timeSlot).replace(/_/g, ' ');
+}
+
+function parseBoolCell(raw, defaultVal = false) {
+  if (raw === undefined || raw === null || raw === '') return defaultVal;
+  const s = String(raw).toLowerCase().trim();
+  return s === 'true' || s === '1' || s === 'yes';
+}
+
+const KITCHEN_STATIONS = new Set(['tawa', 'steamer', 'kadai', 'beverages', 'assembly', 'cold']);
+
+function parseKitchenStation(raw) {
+  const s = String(raw || 'assembly').toLowerCase().trim();
+  return KITCHEN_STATIONS.has(s) ? s : 'assembly';
+}
+
 // ── GET /api/catalog/feed/template — JSON for Excel download (manager portal) ─
 
 router.get('/feed/template', authenticateToken, getRestaurantId, async (req, res) => {
@@ -512,7 +530,11 @@ router.get('/feed/template', authenticateToken, getRestaurantId, async (req, res
 
     const { data: rawItems, error } = await supabaseAdmin
       .from('menu_items')
-      .select('retailer_id, name, description, price, image_url, is_stocked, is_available, category')
+      .select(`
+        retailer_id, name, description, price, image_url, is_stocked, is_available, category,
+        time_slot, prep_time_fixed, batch_size, time_per_batch, kitchen_station, packing_time,
+        holds_well, fulfillment_section
+      `)
       .eq('restaurant_id', restaurantId).not('retailer_id', 'is', null)
       .eq('is_stocked', true)
       .order('category', { ascending: true }).order('name', { ascending: true });
@@ -527,13 +549,21 @@ router.get('/feed/template', authenticateToken, getRestaurantId, async (req, res
     });
 
     const rows = items.map(item => ({
-      id:            item.retailer_id,
-      title:         item.name || '',
-      description:   item.description || '',
-      price:         Number(item.price) || 0,
-      category:      exportCategoryLabel(item.category),
-      image_link:    item.image_url || '',
-      is_available:  (item.is_stocked !== false && item.is_available !== false) ? 'TRUE' : 'FALSE',
+      id:                 item.retailer_id,
+      title:              item.name || '',
+      description:        item.description || '',
+      price:              Number(item.price) || 0,
+      category:           exportCategoryLabel(item.category),
+      custom_label_0:     exportTimeSlotLabel(item.time_slot),
+      image_link:         item.image_url || '',
+      is_available:       (item.is_stocked !== false && item.is_available !== false) ? 'TRUE' : 'FALSE',
+      prep_time_fixed:    item.prep_time_fixed ?? 5,
+      batch_size:         item.batch_size ?? 1,
+      time_per_batch:     item.time_per_batch ?? 10,
+      kitchen_station:    item.kitchen_station || 'assembly',
+      packing_time:       item.packing_time ?? 1,
+      holds_well:         item.holds_well ? 'TRUE' : 'FALSE',
+      fulfillment_section: item.fulfillment_section || 'main',
     }));
 
     res.json({ success: true, items: rows, total: rows.length });
@@ -619,29 +649,53 @@ async function handleMenuUpload(req, res) {
 
       payloadIds.push(String(retailerId).trim());
       const now = new Date().toISOString();
+      const timeSlotRaw = item.time_slot ?? item.custom_label_0 ?? item['custom_label_0'] ?? '';
       validRows.push({
-        restaurant_id: restaurantId,
-        retailer_id:   String(retailerId).trim(),
-        name:          String(itemName).trim(),
-        description:   String(item.description || '').trim(),
+        restaurant_id:       restaurantId,
+        retailer_id:         String(retailerId).trim(),
+        name:                String(itemName).trim(),
+        description:         String(item.description || '').trim(),
         price,
-        image_url:     item.image_url || item.image_link || null,
-        time_slot:     'all',
-        category:      String(item.category || '').trim() || 'General',
-        is_stocked:    isStocked,
-        is_available:  isStocked,
-        created_at:    now,
-        updated_at:    now,
+        image_url:           item.image_url || item.image_link || null,
+        time_slot:           mapTimeSlot(timeSlotRaw),
+        category:            String(item.category || '').trim() || 'General',
+        is_stocked:          isStocked,
+        is_available:        isStocked,
+        prep_time_fixed:     Math.max(0, parseInt(item.prep_time_fixed, 10) || 5),
+        batch_size:          Math.max(1, parseInt(item.batch_size, 10) || 1),
+        time_per_batch:      Math.max(1, parseInt(item.time_per_batch, 10) || 10),
+        kitchen_station:     parseKitchenStation(item.kitchen_station),
+        packing_time:        Math.max(0, parseFloat(item.packing_time) || 1),
+        holds_well:          parseBoolCell(item.holds_well, false),
+        fulfillment_section: String(item.fulfillment_section || 'main').trim() || 'main',
+        created_at:          now,
+        updated_at:          now,
       });
     }
 
     if (!validRows.length) return res.status(400).json({ error: 'No valid rows found', skipped, errors });
 
-    // Phase 2: upsert
+    // Phase 2: full catalog replace — remove every existing item for this outlet
+    try {
+      const { data: existing } = await supabaseAdmin.from('menu_items')
+        .select('id').eq('restaurant_id', restaurantId);
+      const existingIds = (existing ?? []).map((r) => r.id);
+      if (existingIds.length > 0) {
+        const { error: wipeErr } = await supabaseAdmin.from('menu_items')
+          .delete().in('id', existingIds);
+        if (wipeErr) throw wipeErr;
+        purged = existingIds.length;
+        console.log(`[menu/upload] 🗑️ Replaced catalog — removed ${purged} previous items`);
+      }
+    } catch (wipeErr) {
+      console.error('[menu/upload] Full catalog replace failed:', wipeErr.message);
+      return res.status(500).json({ error: `Could not replace existing catalog: ${wipeErr.message}` });
+    }
+
+    // Phase 3: insert fresh rows
     for (const row of validRows) {
       try {
-        const { error: dbErr } = await supabaseAdmin.from('menu_items')
-          .upsert(row, { onConflict: 'restaurant_id,retailer_id', ignoreDuplicates: false });
+        const { error: dbErr } = await supabaseAdmin.from('menu_items').insert(row);
         if (dbErr) {
           errors.push({ row_id: row.retailer_id, error: dbErr.message });
           skipped++;
@@ -651,23 +705,6 @@ async function handleMenuUpload(req, res) {
       } catch (itemErr) {
         errors.push({ row_id: row.retailer_id, error: itemErr.message });
         skipped++;
-      }
-    }
-
-    // Phase 3: purge orphans (items no longer in the uploaded payload)
-    if (payloadIds.length > 0) {
-      try {
-        const { data: existing } = await supabaseAdmin.from('menu_items')
-          .select('id, retailer_id, name').eq('restaurant_id', restaurantId).not('retailer_id', 'is', null);
-        const payloadSet = new Set(payloadIds);
-        const toDelete   = (existing ?? []).filter(r => !payloadSet.has(r.retailer_id));
-        if (toDelete.length > 0) {
-          await supabaseAdmin.from('menu_items').delete().in('id', toDelete.map(r => r.id));
-          purged = toDelete.length;
-          console.log(`[menu/upload] 🗑️ Purged ${purged} stale items`);
-        }
-      } catch (purgeErr) {
-        console.warn('[menu/upload] Purge failed (non-fatal):', purgeErr.message);
       }
     }
 

@@ -892,6 +892,93 @@ router.get('/lookup', requireKdsSecret, async (req, res) => {
   }
 });
 
+// ── GET /api/tokens/approvals/history — past approval decisions ───────────────
+
+router.get('/approvals/history', outletAuth, async (req, res) => {
+  try {
+    if (!['owner', 'manager', 'brand_owner', 'brand_manager'].includes(req.user_role)) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    const restaurantId = req.restaurant_id;
+    const fromStr = String(req.query.from || '').slice(0, 10);
+    const toStr = String(req.query.to || '').slice(0, 10);
+    if (!fromStr || !toStr) {
+      return res.status(400).json({ error: 'from and to query params required (YYYY-MM-DD)' });
+    }
+
+    const fromMs = new Date(`${fromStr}T00:00:00+05:30`).getTime();
+    const toMs = new Date(`${toStr}T23:59:59.999+05:30`).getTime();
+    if (Number.isNaN(fromMs) || Number.isNaN(toMs)) {
+      return res.status(400).json({ error: 'Invalid from/to date' });
+    }
+
+    const lookbackStart = new Date(fromMs - 90 * 24 * 60 * 60 * 1000).toISOString();
+    const { data, error } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .select('*')
+      .eq('restaurant_id', restaurantId)
+      .in('type', ['large_party', 'scheduled_takeaway', 'scheduled_delivery'])
+      .gte('arrived_at', lookbackStart)
+      .order('arrived_at', { ascending: false })
+      .limit(500);
+
+    if (error) throw error;
+
+    const decisionAt = (token) => {
+      const meta = token.meta || {};
+      return meta.approved_at || meta.rejected_at || token.completed_at || null;
+    };
+
+    const history = (data ?? [])
+      .map((token) => {
+        const meta = token.meta || {};
+        const decidedAt = decisionAt(token);
+        const approved = Boolean(meta.approved_at) || (token.type === 'large_party' && token.status === 'seated');
+        const rejected = Boolean(meta.rejected_at) || (token.status === 'completed' && !meta.approved_at);
+        let decision = 'pending';
+        if (approved && !rejected) decision = 'approved';
+        else if (rejected) decision = 'rejected';
+        else if (token.status === 'pending_approval') decision = 'pending';
+
+        return {
+          token_id: token.id,
+          type: token.type,
+          name: token.name,
+          phone: token.phone,
+          pax: token.pax,
+          status: token.status,
+          decision,
+          decided_at: decidedAt,
+          arrived_at: token.arrived_at,
+          scheduled_at_label: meta.scheduled_at_label || meta.scheduled_at || null,
+          kitchen_start_label: meta.kitchen_start_at_label || null,
+          delivery_address: meta.delivery_address || null,
+          order_preview: (meta.order_text || '').slice(0, 200),
+          total: meta.total ?? null,
+          rejection_reason: meta.rejection_reason || null,
+          table_split: meta.combo || null,
+        };
+      })
+      .filter((row) => {
+        if (row.decision === 'pending') return false;
+        if (!row.decided_at) return false;
+        const t = new Date(row.decided_at).getTime();
+        return t >= fromMs && t <= toMs;
+      })
+      .sort((a, b) => new Date(b.decided_at) - new Date(a.decided_at));
+
+    res.json({
+      success: true,
+      from: fromStr,
+      to: toStr,
+      count: history.length,
+      history,
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // ── GET /api/tokens/:id ───────────────────────────────────────────────────────
 
 router.get('/:id', async (req, res) => {
@@ -989,6 +1076,11 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
       if (!result.ok) {
         return res.status(result.statusCode || 400).json({ error: result.error });
       }
+      await writeAuditLog({
+        user_id: req.user.sub, restaurant_id: restaurantId,
+        action: 'Scheduled delivery approved',
+        details: { token_id: req.params.id, customer: token.name },
+      });
       return res.json({ success: true, token: result.token });
     }
 
@@ -997,6 +1089,11 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
       if (!result.ok) {
         return res.status(result.statusCode || 400).json({ error: result.error });
       }
+      await writeAuditLog({
+        user_id: req.user.sub, restaurant_id: restaurantId,
+        action: 'Scheduled takeaway approved',
+        details: { token_id: req.params.id, customer: token.name },
+      });
       return res.json({ success: true, token: result.token });
     }
 
@@ -1018,6 +1115,7 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
         seated_at: new Date().toISOString(),
         meta: {
           ...(token.meta || {}),
+          approved_at: new Date().toISOString(),
           table_ids: tableIds,
           table_numbers: tableNumbers,
         },
@@ -1055,6 +1153,11 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
     });
 
     broadcastToRestaurant(restaurantId, { type: 'TOKEN_APPROVED', token: updatedToken, timestamp: new Date().toISOString() });
+    await writeAuditLog({
+      user_id: req.user.sub, restaurant_id: restaurantId,
+      action: 'Large party approved',
+      details: { token_id: req.params.id, customer: token.name, pax: token.pax, tables: tableNumbers },
+    });
     res.json({ success: true, token: updatedToken });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1080,6 +1183,11 @@ router.put('/:id/reject', outletAuth, async (req, res) => {
       if (!result.ok) {
         return res.status(result.statusCode || 400).json({ error: result.error });
       }
+      await writeAuditLog({
+        user_id: req.user.sub, restaurant_id: restaurantId,
+        action: 'Scheduled delivery rejected',
+        details: { token_id: req.params.id, reason: req.body.reason || null },
+      });
       return res.json({ success: true, token: result.token });
     }
 
@@ -1090,6 +1198,11 @@ router.put('/:id/reject', outletAuth, async (req, res) => {
       if (!result.ok) {
         return res.status(result.statusCode || 400).json({ error: result.error });
       }
+      await writeAuditLog({
+        user_id: req.user.sub, restaurant_id: restaurantId,
+        action: 'Scheduled takeaway rejected',
+        details: { token_id: req.params.id, reason: req.body.reason || null },
+      });
       return res.json({ success: true, token: result.token });
     }
 
@@ -1099,7 +1212,15 @@ router.put('/:id/reject', outletAuth, async (req, res) => {
 
     const { data: updatedToken } = await supabaseAdmin
       .from('walk_in_tokens')
-      .update({ status: 'completed', completed_at: new Date().toISOString() })
+      .update({
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        meta: {
+          ...(token.meta || {}),
+          rejected_at: new Date().toISOString(),
+          ...(req.body.reason ? { rejection_reason: req.body.reason } : {}),
+        },
+      })
       .eq('id', req.params.id)
       .eq('status', 'pending_approval')
       .select()
@@ -1119,6 +1240,11 @@ router.put('/:id/reject', outletAuth, async (req, res) => {
     }
 
     broadcastToRestaurant(restaurantId, { type: 'TOKEN_REJECTED', token: updatedToken, timestamp: new Date().toISOString() });
+    await writeAuditLog({
+      user_id: req.user.sub, restaurant_id: restaurantId,
+      action: 'Large party rejected',
+      details: { token_id: req.params.id, reason: req.body.reason || null },
+    });
     res.json({ success: true, token: updatedToken });
   } catch (err) {
     res.status(500).json({ error: err.message });
