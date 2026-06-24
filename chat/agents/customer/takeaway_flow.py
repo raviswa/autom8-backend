@@ -28,8 +28,13 @@ from tools.db_tools import (
     get_scheduled_takeaway_token,
     fetch_menu_timing_map,
     update_booking_schedule,
+    parse_walk_in_meta,
 )
-from tools.payment_tools import build_payment_line
+from tools.payment_tools import (
+    build_payment_line,
+    build_scheduled_payment_line,
+    scheduled_payment_already_delivered,
+)
 from tools.prepay_fulfillment import (
     prepay_fulfillment_required,
     build_prepay_payload,
@@ -346,6 +351,8 @@ async def _complete_scheduled_takeaway_after_approval(
     session_state: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Send payment link after manager approves a scheduled takeaway."""
+    await cache_restaurant_pricing(session_state, restaurant_id)
+
     cart = session_state.get("pending_cart") or session_state.get("cart") or {}
     order_text = (
         session_state.get("pending_order_text")
@@ -366,10 +373,30 @@ async def _complete_scheduled_takeaway_after_approval(
     cart_snapshot = dict(cart)
     booking_time = session_state.get("booking_time", now_display())
 
-    payment_line = await build_payment_line(
-        booking_id or "", total, customer_name, customer_phone,
+    payment_line, payment_ok = await build_scheduled_payment_line(
+        str(booking_id or ""), total, customer_name, customer_phone,
         f"Scheduled take-away {token}", session_state, service_type="takeaway",
-    ) if booking_id else "💳 Payment can be made at pickup."
+    )
+    if not payment_ok:
+        sched_label = _scheduled_takeaway_label(session_state)
+        retry_body = (
+            f"Your scheduled take-away slot is approved! 🎉\n"
+            f"────────────────────\n"
+            f"Token: *{token}*\n"
+            f"Order: {order_text}\n"
+            f"────────────────────\n"
+            f"{format_order_total_lines(totals)}"
+        )
+        if sched_label:
+            retry_body += f"\n\n🕐 Pickup at: *{sched_label}*"
+        retry_body += (
+            "\n\nWe couldn't generate your payment link just now. "
+            "Please reply *PAY* in a moment to receive it."
+        )
+        await send_whatsapp_message(customer_phone, retry_body, restaurant_id)
+        session_state["scheduled_takeaway_approved"] = True
+        session_state["booking_step"] = "awaiting_scheduled_takeaway_payment"
+        return {"status": "awaiting_prepay", "booking_id": booking_id}
 
     confirmation = (
         f"Your scheduled take-away is confirmed! 🎉\n────────────────────\n"
@@ -389,7 +416,9 @@ async def _complete_scheduled_takeaway_after_approval(
         confirmation += f"\n\n{PREPAY_PENDING_FOOTER}"
 
     await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
-    session_state["_scheduled_payment_sent"] = True
+
+    if prepay_pending:
+        session_state["_scheduled_payment_sent"] = True
 
     if prepay_pending and booking_id:
         await stash_and_persist_prepay_payload(
@@ -579,9 +608,21 @@ async def handle_takeaway_flow(
     elif booking_step == "awaiting_scheduled_takeaway_approval":
         token = await get_scheduled_takeaway_token(restaurant_id, customer_phone)
         if token and token.get("status") == "takeaway":
+            meta = parse_walk_in_meta(token.get("meta"))
             session_state["scheduled_takeaway_approved"] = True
             session_state["display_token"] = token.get("id") or session_state.get("display_token")
             session_state["token_number"] = session_state["display_token"]
+            session_state["booking_id"] = meta.get("booking_id") or session_state.get("booking_id")
+            session_state["pending_order_text"] = (
+                meta.get("order_text") or session_state.get("pending_order_text")
+            )
+            session_state["pending_cart"] = meta.get("cart") or session_state.get("pending_cart")
+            session_state["order_totals"] = meta.get("totals") or session_state.get("order_totals")
+            session_state["order_total"] = meta.get("total") or session_state.get("order_total")
+            session_state["scheduled_at"] = meta.get("scheduled_at") or session_state.get("scheduled_at")
+            session_state["scheduled_at_label"] = (
+                meta.get("scheduled_at_label") or session_state.get("scheduled_at_label")
+            )
             session_state["booking_step"] = "awaiting_scheduled_takeaway_payment"
             return await _complete_scheduled_takeaway_after_approval(
                 restaurant_id, customer_id, customer_name, customer_phone, session_state,
@@ -600,7 +641,23 @@ async def handle_takeaway_flow(
 
     # ── awaiting_scheduled_takeaway_payment ───────────────────────────────────
     elif booking_step == "awaiting_scheduled_takeaway_payment":
-        if session_state.get("scheduled_takeaway_approved") or session_state.get("_scheduled_payment_sent"):
+        from tools.shortcuts import is_pay_keyword
+
+        if scheduled_payment_already_delivered(session_state):
+            if is_pay_keyword(message):
+                from agents.customer.booking_helpers import handle_awaiting_prepay
+                if session_state.get("booking_step") == "awaiting_prepay":
+                    return await handle_awaiting_prepay(
+                        customer_phone, restaurant_id, customer_name, message, session_state,
+                    )
+            await send_whatsapp_message(
+                customer_phone,
+                "Your payment link was sent above. Reply *PAY* to resend it, or *HOM* for the main menu.",
+                restaurant_id,
+            )
+            return {"status": session_state.get("booking_step", "awaiting_scheduled_takeaway_payment")}
+
+        if session_state.get("scheduled_takeaway_approved"):
             return await _complete_scheduled_takeaway_after_approval(
                 restaurant_id, customer_id, customer_name, customer_phone, session_state,
             )

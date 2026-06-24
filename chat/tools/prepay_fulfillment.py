@@ -24,7 +24,11 @@ from tools.scheduled_kds import (
     is_deferred_scheduled_order,
     format_kds_defer_customer_note,
 )
-from tools.payment_tools import wants_online_payment, is_placeholder_payment_link
+from tools.payment_tools import (
+    wants_online_payment,
+    is_placeholder_payment_link,
+    is_scheduled_order_session,
+)
 from tools.whatsapp_tools import send_whatsapp_message
 from agents.customer.booking_helpers import format_captain_pickup_line, _HOME_HINT
 from tools.booking_mechanisms import (
@@ -81,11 +85,11 @@ _SESSION_HINT_KEYS = (
 
 def prepay_fulfillment_required(session_state: dict[str, Any]) -> bool:
     link = session_state.get("payment_link")
-    return bool(
-        wants_online_payment(session_state)
-        and link
-        and not is_placeholder_payment_link(str(link))
-    )
+    if not link or is_placeholder_payment_link(str(link)):
+        return False
+    if is_scheduled_order_session(session_state):
+        return True
+    return wants_online_payment(session_state)
 
 
 def restore_dine_in_kitchen_from_prepay(

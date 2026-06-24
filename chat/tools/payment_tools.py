@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
 
 from config.settings import settings
@@ -98,6 +99,25 @@ def wants_online_payment(session_state: dict[str, Any] | None) -> bool:
     return str(mode).strip().lower() != "postpay"
 
 
+def is_scheduled_order_session(session_state: dict[str, Any] | None) -> bool:
+    """True when the customer booked a future scheduled slot."""
+    state = session_state or {}
+    return bool(state.get("scheduled_at") or state.get("kitchen_start_at"))
+
+
+def scheduled_payment_already_delivered(session_state: dict[str, Any] | None) -> bool:
+    """True when scheduled approval payment was sent with a real Razorpay link."""
+    state = session_state or {}
+    if not state.get("_scheduled_payment_sent"):
+        return False
+    link = state.get("payment_link")
+    if is_scheduled_order_session(state):
+        return bool(link and not is_placeholder_payment_link(str(link)))
+    if not wants_online_payment(state):
+        return True
+    return bool(link and not is_placeholder_payment_link(str(link)))
+
+
 async def create_payment_link(
     booking_id: str,
     amount: float,
@@ -106,6 +126,7 @@ async def create_payment_link(
     *,
     customer_phone: str | None = None,
     session_state: dict[str, Any] | None = None,
+    reference_id: str | None = None,
 ) -> str:
     """Create Razorpay payment link and return the short URL."""
     client = _get_client()
@@ -131,7 +152,7 @@ async def create_payment_link(
             "currency": "INR",
             "accept_partial": False,
             "description": description[:255],
-            "reference_id": str(booking_id)[:40],
+            "reference_id": str(reference_id or booking_id)[:40],
             "customer": customer,
             "notify": {"sms": False, "email": False},
             "reminder_enable": True,
@@ -259,6 +280,113 @@ async def recover_prepay_if_already_paid(
     return {"state": "fulfill_failed", "booking": booking, "result": result}
 
 
+def _reusable_payment_link(session_state: dict[str, Any] | None) -> str | None:
+    link = (session_state or {}).get("payment_link")
+    if link and not is_placeholder_payment_link(str(link)):
+        return str(link)
+    return None
+
+
+async def ensure_prepay_payment_link(
+    booking_id: str,
+    amount: float,
+    customer_name: str,
+    description: str,
+    *,
+    customer_phone: str | None = None,
+    session_state: dict[str, Any] | None = None,
+) -> str | None:
+    """
+    Return a Razorpay short URL for prepay, reusing an open link when possible.
+    Returns None when Razorpay is unavailable or link creation fails.
+    """
+    if not booking_id:
+        return None
+    if not razorpay_configured():
+        logger.error(
+            f"[razorpay] ensure_prepay_payment_link unavailable for {booking_id} "
+            f"(status={razorpay_status_message()})"
+        )
+        return None
+
+    existing = _reusable_payment_link(session_state)
+    if existing:
+        return existing
+
+    link_status = await resolve_payment_link_status(str(booking_id), session_state)
+    if link_status == "paid":
+        return _reusable_payment_link(session_state)
+    if link_status in ("created", "issued", "partially_paid"):
+        existing = _reusable_payment_link(session_state)
+        if existing:
+            logger.info(f"[razorpay] Reusing open link for booking {booking_id}")
+            return existing
+
+    try:
+        link = await create_payment_link(
+            str(booking_id), amount, customer_name, description,
+            customer_phone=customer_phone,
+            session_state=session_state,
+        )
+        if is_placeholder_payment_link(link):
+            return None
+        return link
+    except Exception as exc:
+        logger.warning(f"[razorpay] ensure_prepay_payment_link failed for {booking_id}: {exc}")
+        existing = _reusable_payment_link(session_state)
+        if existing:
+            return existing
+        suffix = str(int(time.time()))[-6:]
+        ref_id = f"{booking_id}-{suffix}"[:40]
+        try:
+            link = await create_payment_link(
+                str(booking_id), amount, customer_name, description,
+                customer_phone=customer_phone,
+                session_state=session_state,
+                reference_id=ref_id,
+            )
+            if is_placeholder_payment_link(link):
+                return None
+            return link
+        except Exception as retry_exc:
+            logger.error(
+                f"[razorpay] ensure_prepay_payment_link retry failed for {booking_id}: {retry_exc}"
+            )
+            return None
+
+
+async def build_scheduled_payment_line(
+    booking_id: str,
+    amount: float,
+    customer_name: str,
+    customer_phone: str,
+    description: str,
+    session_state: dict[str, Any],
+    *,
+    service_type: str = "takeaway",
+) -> tuple[str, bool]:
+    """
+    Scheduled slots always require online prepay before kitchen fulfillment.
+    Never falls back to counter/delivery cash messaging.
+    """
+    session_state["payment_mode"] = "prepay"
+    if not booking_id:
+        return "", False
+
+    link = await ensure_prepay_payment_link(
+        str(booking_id), amount, customer_name, description,
+        customer_phone=customer_phone,
+        session_state=session_state,
+    )
+    if not link:
+        logger.error(
+            f"[payment] build_scheduled_payment_line failed for {booking_id} "
+            f"({service_type}, status={razorpay_status_message()})"
+        )
+        return "", False
+    return format_razorpay_payment_line(link), True
+
+
 async def build_payment_line(
     booking_id: str,
     amount: float,
@@ -275,22 +403,18 @@ async def build_payment_line(
     if not wants_online_payment(session_state):
         return counter_fallback if service_type != "delivery" else delivery_fallback
 
-    try:
-        link = await create_payment_link(
-            booking_id, amount, customer_name, description,
-            customer_phone=customer_phone,
-            session_state=session_state,
+    link = await ensure_prepay_payment_link(
+        booking_id, amount, customer_name, description,
+        customer_phone=customer_phone,
+        session_state=session_state,
+    )
+    if not link:
+        logger.warning(
+            f"[payment] build_payment_line failed for {booking_id} "
+            f"(status={razorpay_status_message()})"
         )
-        if is_placeholder_payment_link(link):
-            logger.warning(
-                f"[razorpay] Placeholder link for booking {booking_id} "
-                f"(status={razorpay_status_message()})"
-            )
-            return counter_fallback if service_type != "delivery" else delivery_fallback
-        return format_razorpay_payment_line(link)
-    except Exception as e:
-        logger.warning(f"[payment] build_payment_line failed for {booking_id}: {e}")
         return counter_fallback if service_type != "delivery" else delivery_fallback
+    return format_razorpay_payment_line(link)
 
 
 async def verify_payment(razorpay_order_id: str) -> bool:

@@ -2099,6 +2099,63 @@ async def supersede_walk_in_token(
         return False
 
 
+def parse_walk_in_meta(meta: object) -> dict:
+    """Normalize walk_in_tokens.meta from DB (dict or JSON string)."""
+    if meta is None:
+        return {}
+    if isinstance(meta, dict):
+        return meta
+    if isinstance(meta, str):
+        if not meta.strip():
+            return {}
+        try:
+            parsed = json.loads(meta)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+async def supersede_active_scheduled_tokens_for_phone(
+    restaurant_id: str,
+    customer_phone: str,
+    *,
+    reason: str = "session_abandoned",
+) -> int:
+    """Retire pending/approved-unpaid scheduled tokens when customer starts over."""
+    if AsyncSessionLocal is None:
+        return 0
+    phones = _phone_variants(customer_phone)
+    if not phones:
+        return 0
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    SELECT id FROM walk_in_tokens
+                    WHERE restaurant_id = CAST(:rid AS uuid)
+                      AND phone = ANY(:phones)
+                      AND type IN ('scheduled_takeaway', 'scheduled_delivery')
+                      AND status IN ('pending_approval', 'takeaway')
+                      AND arrived_at >= CURRENT_DATE
+                """),
+                {"rid": restaurant_id, "phones": phones},
+            )
+            token_ids = [row[0] for row in result.fetchall()]
+        count = 0
+        for tid in token_ids:
+            if await supersede_walk_in_token(restaurant_id, tid, reason=reason):
+                count += 1
+        if count:
+            logger.info(
+                f"[walk-in-token] Superseded {count} scheduled token(s) for {customer_phone} ({reason})"
+            )
+        return count
+    except Exception as e:
+        logger.error(f"[walk-in-token] supersede scheduled for {customer_phone} failed: {e}")
+        return 0
+
+
 def _should_reuse_walk_in_token(
     existing: dict,
     token_type: str,

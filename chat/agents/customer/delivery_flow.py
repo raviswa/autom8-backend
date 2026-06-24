@@ -24,8 +24,13 @@ from tools.db_tools import (
     get_scheduled_delivery_token,
     update_booking_schedule,
     fetch_menu_timing_map,
+    parse_walk_in_meta,
 )
-from tools.payment_tools import build_payment_line
+from tools.payment_tools import (
+    build_payment_line,
+    build_scheduled_payment_line,
+    scheduled_payment_already_delivered,
+)
 from tools.prepay_fulfillment import (
     prepay_fulfillment_required,
     build_prepay_payload,
@@ -443,6 +448,8 @@ async def _complete_scheduled_delivery_after_approval(
     session_state: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Send payment link and push an approved scheduled delivery to KDS."""
+    await cache_restaurant_pricing(session_state, restaurant_id)
+
     cart = session_state.get("pending_cart") or session_state.get("cart") or {}
     order_text = (
         session_state.get("pending_order_text")
@@ -463,10 +470,30 @@ async def _complete_scheduled_delivery_after_approval(
     booking_id = session_state.get("booking_id")
     cart_snapshot = dict(cart)
 
-    payment_line = await build_payment_line(
-        booking_id or "", total, customer_name, customer_phone,
+    payment_line, payment_ok = await build_scheduled_payment_line(
+        str(booking_id or ""), total, customer_name, customer_phone,
         f"Scheduled delivery {token}", session_state, service_type="delivery",
-    ) if booking_id else "💳 Payment can be made on delivery."
+    )
+    if not payment_ok:
+        retry_body = (
+            f"Your scheduled delivery slot is approved! 🎉\n"
+            f"────────────────────\n"
+            f"Token: *{token}*\n"
+            f"Order: {order_text}\n"
+            f"────────────────────\n"
+            f"{format_order_total_lines(totals, session_state=session_state)}"
+        )
+        sched_note = format_scheduled_note(session_state.get("scheduled_at"))
+        if sched_note:
+            retry_body += f"\n\n{sched_note}"
+        retry_body += (
+            "\n\nWe couldn't generate your payment link just now. "
+            "Please reply *PAY* in a moment to receive it."
+        )
+        await send_whatsapp_message(customer_phone, retry_body, restaurant_id)
+        session_state["scheduled_delivery_approved"] = True
+        session_state["booking_step"] = "awaiting_scheduled_delivery_payment"
+        return {"status": "awaiting_prepay", "booking_id": booking_id}
 
     confirmation = (
         f"Your scheduled delivery is confirmed! 🎉\n────────────────────\n"
@@ -486,7 +513,9 @@ async def _complete_scheduled_delivery_after_approval(
         confirmation += f"\n\n{PREPAY_PENDING_FOOTER}"
 
     await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
-    session_state["_scheduled_payment_sent"] = True
+
+    if prepay_pending:
+        session_state["_scheduled_payment_sent"] = True
 
     if prepay_pending and booking_id:
         await stash_and_persist_prepay_payload(
@@ -880,7 +909,7 @@ async def handle_delivery_flow(
     elif booking_step == "awaiting_scheduled_delivery_approval":
         token = await get_scheduled_delivery_token(restaurant_id, customer_phone)
         if token and token.get("status") == "takeaway":
-            meta = token.get("meta") or {}
+            meta = parse_walk_in_meta(token.get("meta"))
             session_state["display_token"] = token.get("id") or session_state.get("token_number")
             session_state["token_number"] = session_state["display_token"]
             session_state["booking_id"] = meta.get("booking_id") or session_state.get("booking_id")
@@ -919,14 +948,23 @@ async def handle_delivery_flow(
 
     # ── awaiting_scheduled_delivery_payment ───────────────────────────────────
     elif booking_step == "awaiting_scheduled_delivery_payment":
-        if session_state.get("scheduled_delivery_approved") or session_state.get("_scheduled_payment_sent"):
-            if session_state.get("_scheduled_payment_sent"):
-                await send_whatsapp_message(
-                    customer_phone,
-                    "Your payment link was sent above. Reply *Home* anytime for other options.",
-                    restaurant_id,
-                )
-                return {"status": "visit_complete"}
+        from tools.shortcuts import is_pay_keyword
+
+        if scheduled_payment_already_delivered(session_state):
+            if is_pay_keyword(message):
+                from agents.customer.booking_helpers import handle_awaiting_prepay
+                if session_state.get("booking_step") == "awaiting_prepay":
+                    return await handle_awaiting_prepay(
+                        customer_phone, restaurant_id, customer_name, message, session_state,
+                    )
+            await send_whatsapp_message(
+                customer_phone,
+                "Your payment link was sent above. Reply *PAY* to resend it, or *HOM* for the main menu.",
+                restaurant_id,
+            )
+            return {"status": session_state.get("booking_step", "awaiting_scheduled_delivery_payment")}
+
+        if session_state.get("scheduled_delivery_approved"):
             return await _complete_scheduled_delivery_after_approval(
                 restaurant_id, customer_id, customer_name, customer_phone,
                 manager_phone, session_state,

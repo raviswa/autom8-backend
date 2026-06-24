@@ -474,6 +474,11 @@ async def abandon_incomplete_session(
     clear_session_feedback(session_state)
     clear_cart(session_state)
 
+    from tools.db_tools import supersede_active_scheduled_tokens_for_phone
+    await supersede_active_scheduled_tokens_for_phone(
+        restaurant_id, customer_phone, reason="session_abandoned",
+    )
+
     for key in _ABANDON_FLOW_KEYS:
         session_state.pop(key, None)
 
@@ -695,11 +700,9 @@ async def send_service_menu(
 
     state.pop("_last_visit_abandoned", None)
     body_lines.append("What would you like to do today?")
-    from tools.shortcuts import SHORTCUT_FOOTER_SERVICE
-    body_lines.append(f"_{SHORTCUT_FOOTER_SERVICE}_")
     body_text = "\n\n".join(body_lines)
 
-    footer = "Reply *Update name* or *I'm not [name]* to fix"
+    footer = "HOM · PAY · Update name"
 
     ok = await _send_interactive(customer_phone, {
         "interactive": {
@@ -890,7 +893,7 @@ async def handle_awaiting_prepay(
 ) -> Dict[str, Any]:
     """Keep prepay session alive — resend payment link instead of resetting."""
     from tools.payment_tools import (
-        create_payment_link,
+        ensure_prepay_payment_link,
         is_placeholder_payment_link,
         build_payment_line,
         format_razorpay_payment_line,
@@ -976,15 +979,12 @@ async def handle_awaiting_prepay(
         return {"status": "awaiting_prepay"}
 
     if (not payment_link or is_placeholder_payment_link(str(payment_link))) and booking_id and total >= 1:
-        try:
-            description = f"{str(service_type).replace('_', ' ').title()} order"
-            payment_link = await create_payment_link(
-                str(booking_id), total, customer_name, description,
-                customer_phone=customer_phone,
-                session_state=session_state,
-            )
-        except Exception as e:
-            logger.warning(f"[awaiting_prepay] link regen failed for {booking_id}: {e}")
+        payment_link = await ensure_prepay_payment_link(
+            str(booking_id), total, customer_name,
+            f"{str(service_type).replace('_', ' ').title()} order",
+            customer_phone=customer_phone,
+            session_state=session_state,
+        )
 
     if payment_link and not is_placeholder_payment_link(str(payment_link)):
         pay_line = format_razorpay_payment_line(

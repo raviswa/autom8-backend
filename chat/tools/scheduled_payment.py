@@ -14,7 +14,9 @@ from tools.db_tools import (
     get_scheduled_delivery_token,
 )
 from tools.booking_mechanisms import cache_restaurant_pricing
+from tools.payment_tools import scheduled_payment_already_delivered
 from tools.restaurant_config import get_manager_phone
+from tools.db_tools import parse_walk_in_meta
 from agents.customer.booking_helpers import touch_session_activity
 
 logger = logging.getLogger(__name__)
@@ -66,9 +68,7 @@ def _merge_token_meta_into_session(
     *,
     service_type: str,
 ) -> None:
-    meta = token.get("meta") or {}
-    if isinstance(meta, str):
-        meta = {}
+    meta = parse_walk_in_meta(token.get("meta"))
     token_id = token.get("id") or ""
 
     session_state["restaurant_id"] = session_state.get("restaurant_id")
@@ -125,7 +125,7 @@ async def trigger_scheduled_payment_after_approval(
         return {"ok": False, "error": "token missing customer phone"}
 
     session_state, stored_phone = await _load_session_for_phone(restaurant_id, customer_phone)
-    if session_state.get("_scheduled_payment_sent"):
+    if scheduled_payment_already_delivered(session_state):
         logger.info(
             f"[scheduled-payment] skip {token.get('id')} — payment already sent"
         )
