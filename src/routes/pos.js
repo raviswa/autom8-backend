@@ -12,7 +12,7 @@ const {
   getRestaurantId,
   canManageRestaurantSettings,
 } = require('../middleware/auth');
-const { estimateKitchenStartFromTotals } = require('../helpers/kitchenScheduler');
+const { estimateKitchenStartFromTotals, assignScheduledBucket } = require('../helpers/kitchenScheduler');
 
 function requireSettingsAccess(req, res, next) {
   if (!canManageRestaurantSettings(req.user_role))
@@ -87,6 +87,17 @@ function resolveScheduledKitchenStart(order) {
   );
 }
 
+function finalizeScheduledOrder(order, kitchenStart, now = new Date()) {
+  const withKitchen = {
+    ...order,
+    kitchen_start_at: kitchenStart ? kitchenStart.toISOString() : order.kitchen_start_at,
+  };
+  return {
+    ...withKitchen,
+    bucket: assignScheduledBucket(withKitchen, now),
+  };
+}
+
 /** Merge portal token meta + recompute kitchen start for every scheduled order. */
 async function enrichScheduledOrdersFromPortal(restaurantId, orders) {
   if (!orders?.length) return orders;
@@ -100,33 +111,41 @@ async function enrichScheduledOrdersFromPortal(restaurantId, orders) {
 
   if (error) {
     console.warn('[kds/scheduled] portal token enrich failed:', error.message);
-    return orders.map((order) => {
-      const kitchenStart = resolveScheduledKitchenStart(order);
-      return {
-        ...order,
-        kitchen_start_at: kitchenStart ? kitchenStart.toISOString() : order.kitchen_start_at,
-      };
-    });
+    return orders.map((order) => finalizeScheduledOrder(
+      order,
+      resolveScheduledKitchenStart(order),
+    ));
   }
 
   const portalByBooking = new Map();
+  const portalByTokenId = new Map();
   for (const token of tokens ?? []) {
     const bid = token.meta?.booking_id;
-    if (!bid || !bookingIds.has(bid)) continue;
-    const prev = portalByBooking.get(bid);
-    if (!prev || String(token.id).localeCompare(String(prev.id)) > 0) {
-      portalByBooking.set(bid, token);
+    if (bid && bookingIds.has(bid)) {
+      const prev = portalByBooking.get(bid);
+      if (!prev || String(token.id).localeCompare(String(prev.id)) > 0) {
+        portalByBooking.set(bid, token);
+      }
+    }
+    if (token.id) {
+      portalByTokenId.set(String(token.id).toUpperCase(), token);
     }
   }
 
+  const resolvePortalToken = (order) => {
+    const byBooking = portalByBooking.get(order.booking_id);
+    if (byBooking) return byBooking;
+    const raw = String(order.token_number || '').trim().toUpperCase();
+    if (!raw) return null;
+    return portalByTokenId.get(raw)
+      || portalByTokenId.get(raw.startsWith('T-') ? raw : `T-${raw}`)
+      || null;
+  };
+
   return orders.map((order) => {
-    const portal = portalByBooking.get(order.booking_id);
+    const portal = resolvePortalToken(order);
     if (!portal) {
-      const kitchenStart = resolveScheduledKitchenStart(order);
-      return {
-        ...order,
-        kitchen_start_at: kitchenStart ? kitchenStart.toISOString() : order.kitchen_start_at,
-      };
+      return finalizeScheduledOrder(order, resolveScheduledKitchenStart(order));
     }
     const portalMeta = portal.meta || {};
     const cart = (order.cart && Object.keys(order.cart).length)
@@ -157,7 +176,7 @@ async function enrichScheduledOrdersFromPortal(restaurantId, orders) {
     const packingMinutes = portalMeta.total_packing_minutes
       ?? scheduleMeta.total_packing_minutes
       ?? order.total_packing_minutes;
-    const enriched = {
+    return {
       ...order,
       token_number: tokenNumber,
       order_text: orderText || order.order_text,
@@ -168,11 +187,26 @@ async function enrichScheduledOrdersFromPortal(restaurantId, orders) {
       total_packing_minutes: packingMinutes,
       transit_minutes: scheduleMeta.transit_minutes ?? scheduleMeta.delivery_travel_minutes ?? null,
     };
-    const kitchenStart = resolveScheduledKitchenStart(enriched);
-    return {
-      ...enriched,
-      kitchen_start_at: kitchenStart ? kitchenStart.toISOString() : order.kitchen_start_at,
+  }).map((order, _idx, list) => {
+    const cartKey = (cart) => {
+      if (!cart || !Object.keys(cart).length) return '';
+      return Object.keys(cart).sort().map((k) => `${k}:${cart[k]?.qty || 1}`).join('|');
     };
+    const maxCookByCart = new Map();
+    for (const o of list) {
+      const key = cartKey(o.cart);
+      if (!key) continue;
+      const cook = Number(o.total_cook_minutes) || 0;
+      maxCookByCart.set(key, Math.max(maxCookByCart.get(key) || 0, cook));
+    }
+    const key = cartKey(order.cart);
+    const alignedCook = key ? (maxCookByCart.get(key) || order.total_cook_minutes) : order.total_cook_minutes;
+    const aligned = {
+      ...order,
+      total_cook_minutes: alignedCook,
+    };
+    const kitchenStart = resolveScheduledKitchenStart(aligned);
+    return finalizeScheduledOrder(aligned, kitchenStart);
   });
 }
 
@@ -487,8 +521,6 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
       return res.status(403).json({ error: 'No outlet linked to this account.' });
     }
     const now = new Date();
-    const fourHoursMs = 4 * 60 * 60 * 1000;
-    const oneHourMs = 60 * 60 * 1000;
 
     const { data: bookings, error } = await supabaseAdmin
       .from('bookings')
@@ -506,6 +538,8 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
       .order('booking_datetime', { ascending: true });
 
     if (error) throw error;
+
+    const oneHourMs = 60 * 60 * 1000;
 
     const orders = (bookings ?? [])
       .filter((b) => {
@@ -536,26 +570,13 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
         payment_status: b.payment_status,
       };
       const kitchenStart = resolveScheduledKitchenStart(baseOrder);
-      const msToStart = kitchenStart ? kitchenStart.getTime() - now.getTime() : null;
-      let bucket = 'future';
-      if (kitchenStart && msToStart <= fourHoursMs && msToStart > 0 && !b.kds_sent_at) {
-        bucket = 'todays_future';
-      } else if (kitchenStart && msToStart <= 0 && !b.kds_sent_at) {
-        bucket = 'present';
-      } else if (b.kds_sent_at) {
-        bucket = 'live';
-      }
-      return {
-        ...baseOrder,
-        kitchen_start_at: kitchenStart ? kitchenStart.toISOString() : b.kitchen_start_at,
-        bucket,
-      };
+      return finalizeScheduledOrder(baseOrder, kitchenStart, now);
     });
 
     const enrichedOrders = await enrichScheduledOrdersFromPortal(req.restaurant_id, orders);
 
     const summary = {};
-    for (const o of enrichedOrders.filter((x) => x.bucket === 'future')) {
+    for (const o of enrichedOrders.filter((x) => x.bucket === 'future' || x.bucket === 'todays_future')) {
       const day = o.scheduled_slot_at?.slice(0, 10) || 'unknown';
       if (!summary[day]) summary[day] = { orders: 0, covers: 0 };
       summary[day].orders += 1;

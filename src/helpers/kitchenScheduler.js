@@ -108,6 +108,38 @@ function resolveTransitMinutes(serviceType, scheduleMeta = {}) {
   return transit;
 }
 
+/** IST calendar date YYYY-MM-DD for bucket comparisons. */
+function istDateKey(value) {
+  if (!value) return null;
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: IST,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(value));
+}
+
+/**
+ * Bucket scheduled KDS orders:
+ * - future: pickup/delivery slot is on a later calendar day (IST)
+ * - todays_future: slot is today, kitchen has not started, not yet on live board
+ * - present: kitchen start time has passed, not yet dispatched to live KDS
+ * - live: already sent to live KDS (kds_sent_at)
+ */
+function assignScheduledBucket(order, now = new Date()) {
+  if (order.kds_sent_at) return 'live';
+
+  const kitchenStart = order.kitchen_start_at ? new Date(order.kitchen_start_at) : null;
+  const msToStart = kitchenStart ? kitchenStart.getTime() - now.getTime() : null;
+  if (kitchenStart && msToStart <= 0) return 'present';
+
+  const todayKey = istDateKey(now);
+  const slotKey = istDateKey(order.scheduled_slot_at || order.booking_datetime);
+  if (slotKey && todayKey && slotKey > todayKey) return 'future';
+
+  return 'todays_future';
+}
+
 function estimateKitchenStartFromTotals(slotAt, {
   serviceType,
   totalCookMinutes,
@@ -195,6 +227,8 @@ module.exports = {
   roundToNearestBoundary,
   roundDownToBoundary,
   resolveTransitMinutes,
+  istDateKey,
+  assignScheduledBucket,
   MENU_DEFAULTS,
   KITCHEN_STATIONS,
 };
