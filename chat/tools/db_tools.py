@@ -2581,8 +2581,37 @@ async def count_orders_for_slot(restaurant_id: str, slot_at: datetime | str) -> 
         return int(row["cnt"]) if row else 0
 
 
+async def _portal_meta_for_booking(restaurant_id: str, booking_id: str) -> dict:
+    """Load order_text/cart from walk_in_tokens.meta when schedule_meta is empty."""
+    if AsyncSessionLocal is None:
+        return {}
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    SELECT id, meta FROM walk_in_tokens
+                    WHERE restaurant_id = CAST(:rid AS uuid)
+                      AND meta->>'booking_id' = :bid
+                      AND type IN ('scheduled_takeaway', 'scheduled_delivery')
+                    ORDER BY arrived_at DESC
+                    LIMIT 1
+                """),
+                {"rid": restaurant_id, "bid": str(booking_id)},
+            )
+            row = result.mappings().first()
+            if not row:
+                return {}
+            meta = parse_walk_in_meta(row.get("meta"))
+            if row.get("id"):
+                meta["_portal_token_id"] = row["id"]
+            return meta
+    except Exception as exc:
+        logger.warning(f"[schedule-backfill] portal meta lookup failed for {booking_id}: {exc}")
+        return {}
+
+
 async def backfill_missing_booking_schedules(limit: int = 20) -> int:
-    """Persist kitchen_start_at for paid future bookings that missed schedule at submit."""
+    """Persist kitchen_start_at and schedule_meta for paid future scheduled bookings."""
     if AsyncSessionLocal is None:
         return 0
     try:
@@ -2590,14 +2619,17 @@ async def backfill_missing_booking_schedules(limit: int = 20) -> int:
             result = await session.execute(
                 text("""
                     SELECT b.id, b.restaurant_id, b.booking_datetime, b.scheduled_slot_at,
-                           b.schedule_meta, b.service_type
+                           b.schedule_meta, b.service_type, b.token_number, b.kitchen_start_at
                     FROM bookings b
-                    WHERE b.kitchen_start_at IS NULL
-                      AND b.payment_status = 'paid'
+                    WHERE b.payment_status = 'paid'
                       AND b.status IN ('pending', 'confirmed')
                       AND COALESCE(b.scheduled_slot_at, b.booking_datetime) > NOW()
                       AND COALESCE(b.scheduled_slot_at, b.booking_datetime)
                           > NOW() + INTERVAL '1 hour'
+                      AND (
+                        b.kitchen_start_at IS NULL
+                        OR COALESCE(b.schedule_meta->>'order_text', '') = ''
+                      )
                     ORDER BY b.created_at DESC
                     LIMIT :lim
                 """),
@@ -2613,6 +2645,7 @@ async def backfill_missing_booking_schedules(limit: int = 20) -> int:
 
     from tools.booking_mechanisms import fetch_restaurant_info
     from tools.kitchen_scheduler import compute_kitchen_start_at, format_ist_label
+    from tools.cart_tools import cart_lines_from_snapshot, cart_to_order_text
 
     filled = 0
     for row in rows:
@@ -2627,42 +2660,70 @@ async def backfill_missing_booking_schedules(limit: int = 20) -> int:
                 meta = json.loads(meta)
             except Exception:
                 meta = {}
-        cart = meta.get("cart") or {}
-        order_text = meta.get("order_text") or ""
+        portal_meta = await _portal_meta_for_booking(restaurant_id, booking_id)
+        cart = meta.get("cart") or portal_meta.get("cart") or {}
+        order_text = (
+            meta.get("order_text")
+            or portal_meta.get("order_text")
+            or (cart_to_order_text(cart) if cart else "")
+        )
+        portal_token = portal_meta.get("_portal_token_id")
         try:
             rest = await fetch_restaurant_info(restaurant_id)
             menu_map = await fetch_menu_timing_map(restaurant_id)
-            from tools.cart_tools import cart_lines_from_snapshot
 
             if isinstance(sched_raw, str):
                 slot_dt = datetime.fromisoformat(sched_raw.replace("Z", "+00:00"))
             else:
                 slot_dt = sched_raw
-            schedule = compute_kitchen_start_at(
-                slot_dt,
-                service_type=row.get("service_type") or "takeaway",
-                cart_lines=cart_lines_from_snapshot(cart) if cart else [],
-                menu_by_retailer_id=menu_map,
-                buffer_minutes=int(rest.get("schedule_buffer_minutes") or 15),
-                rounding_minutes=int(rest.get("schedule_rounding_minutes") or 15),
-                transit_minutes=0,
-            )
-            kitchen_start = schedule["kitchen_start_at"]
-            slot_at = schedule["scheduled_slot_at"]
+
+            kitchen_start = row.get("kitchen_start_at")
+            slot_at = row.get("scheduled_slot_at") or slot_dt
+            total_cook = meta.get("total_cook_minutes")
+            total_pack = meta.get("total_packing_minutes")
+
+            if not kitchen_start:
+                schedule = compute_kitchen_start_at(
+                    slot_dt,
+                    service_type=row.get("service_type") or "takeaway",
+                    cart_lines=cart_lines_from_snapshot(cart) if cart else [],
+                    menu_by_retailer_id=menu_map,
+                    buffer_minutes=int(rest.get("schedule_buffer_minutes") or 15),
+                    rounding_minutes=int(rest.get("schedule_rounding_minutes") or 15),
+                    transit_minutes=0,
+                )
+                kitchen_start = schedule["kitchen_start_at"]
+                slot_at = schedule["scheduled_slot_at"]
+                total_cook = schedule["total_cook_minutes"]
+                total_pack = schedule["total_packing_minutes"]
+
             schedule_meta = {
                 **meta,
-                "order_text": order_text or meta.get("order_text") or "",
-                "cart": cart or meta.get("cart") or {},
+                **{k: v for k, v in portal_meta.items() if not k.startswith("_")},
+                "order_text": order_text,
+                "cart": cart,
                 "kitchen_start_label": format_ist_label(kitchen_start),
             }
+            ks_iso = (
+                kitchen_start.isoformat()
+                if hasattr(kitchen_start, "isoformat")
+                else str(kitchen_start)
+            )
+            slot_iso = (
+                slot_at.isoformat()
+                if hasattr(slot_at, "isoformat")
+                else str(slot_at)
+            )
             ok = await update_booking_schedule(
                 booking_id,
-                kitchen_start_at=kitchen_start.isoformat(),
-                scheduled_slot_at=slot_at.isoformat(),
-                total_cook_minutes=schedule["total_cook_minutes"],
-                total_packing_minutes=schedule["total_packing_minutes"],
+                kitchen_start_at=ks_iso,
+                scheduled_slot_at=slot_iso,
+                total_cook_minutes=total_cook,
+                total_packing_minutes=total_pack,
                 schedule_meta=schedule_meta,
             )
+            if ok and portal_token and not str(row.get("token_number") or "").startswith("T-"):
+                await update_booking_token_number(booking_id, str(portal_token))
             if ok:
                 filled += 1
                 logger.info(f"[schedule-backfill] Updated booking {booking_id}")

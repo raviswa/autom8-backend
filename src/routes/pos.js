@@ -38,6 +38,83 @@ const {
   enabledOrderServices,
 } = require('../helpers/subscriptionFeatures');
 
+function cartSnapshotToOrderText(cart) {
+  if (!cart || typeof cart !== 'object') return '';
+  return Object.values(cart)
+    .filter((line) => line && typeof line === 'object')
+    .map((line) => {
+      const qty = line.qty ?? line.quantity ?? 1;
+      const name = line.title || line.name || 'Item';
+      return `${qty}x ${name}`;
+    })
+    .filter(Boolean)
+    .join(', ');
+}
+
+function resolveScheduledOrderText(scheduleMeta, portalMeta) {
+  const meta = scheduleMeta && typeof scheduleMeta === 'object' ? scheduleMeta : {};
+  const portal = portalMeta && typeof portalMeta === 'object' ? portalMeta : {};
+  if (meta.order_text) return meta.order_text;
+  if (portal.order_text) return portal.order_text;
+  const cart = (meta.cart && Object.keys(meta.cart).length ? meta.cart : portal.cart) || {};
+  return cartSnapshotToOrderText(cart);
+}
+
+/** Fill order_text / T-xxx token from walk_in_tokens when schedule_meta was never persisted. */
+async function enrichScheduledOrdersFromPortal(restaurantId, orders) {
+  if (!orders?.length) return orders;
+
+  const needsEnrich = orders.filter(
+    (o) => !o.order_text || !String(o.token_number || '').startsWith('T-'),
+  );
+  if (!needsEnrich.length) return orders;
+
+  const bookingIds = new Set(needsEnrich.map((o) => o.booking_id));
+  const { data: tokens, error } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .select('id, meta')
+    .eq('restaurant_id', restaurantId)
+    .in('type', ['scheduled_takeaway', 'scheduled_delivery']);
+
+  if (error) {
+    console.warn('[kds/scheduled] portal token enrich failed:', error.message);
+    return orders;
+  }
+
+  const portalByBooking = new Map();
+  for (const token of tokens ?? []) {
+    const bid = token.meta?.booking_id;
+    if (!bid || !bookingIds.has(bid)) continue;
+    const prev = portalByBooking.get(bid);
+    if (!prev || String(token.id).localeCompare(String(prev.id)) > 0) {
+      portalByBooking.set(bid, token);
+    }
+  }
+
+  return orders.map((order) => {
+    const portal = portalByBooking.get(order.booking_id);
+    if (!portal) return order;
+    const portalMeta = portal.meta || {};
+    const cart = (order.cart && Object.keys(order.cart).length)
+      ? order.cart
+      : (portalMeta.cart || {});
+    const orderText = resolveScheduledOrderText(
+      { order_text: order.order_text, cart: order.cart },
+      portalMeta,
+    );
+    const tokenNumber = String(order.token_number || '').startsWith('T-')
+      ? order.token_number
+      : (portal.id || order.token_number);
+    return {
+      ...order,
+      token_number: tokenNumber,
+      order_text: orderText,
+      cart,
+      total_cook_minutes: order.total_cook_minutes ?? portalMeta.total_cook_minutes ?? null,
+    };
+  });
+}
+
 // ── Menu items ───────────────────────────────────────────────────────────────
 
 router.get('/menu-items', authenticateToken, getRestaurantId, async (req, res) => {
@@ -393,6 +470,7 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
       } else if (b.kds_sent_at) {
         bucket = 'live';
       }
+      const cart = meta.cart || {};
       return {
         booking_id: b.id,
         token_number: b.token_number,
@@ -401,8 +479,8 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
         scheduled_slot_at: slotAt,
         kitchen_start_at: kitchenStart ? kitchenStart.toISOString() : b.kitchen_start_at,
         total_cook_minutes: b.total_cook_minutes,
-        order_text: meta.order_text || '',
-        cart: meta.cart || {},
+        order_text: resolveScheduledOrderText(meta, null),
+        cart,
         bucket,
         kds_sent_at: b.kds_sent_at,
         status: b.status,
@@ -410,15 +488,17 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
       };
     });
 
+    const enrichedOrders = await enrichScheduledOrdersFromPortal(req.restaurant_id, orders);
+
     const summary = {};
-    for (const o of orders.filter((x) => x.bucket === 'future')) {
+    for (const o of enrichedOrders.filter((x) => x.bucket === 'future')) {
       const day = o.scheduled_slot_at?.slice(0, 10) || 'unknown';
       if (!summary[day]) summary[day] = { orders: 0, covers: 0 };
       summary[day].orders += 1;
       summary[day].covers += 1;
     }
 
-    res.json({ success: true, orders, summary, now: now.toISOString() });
+    res.json({ success: true, orders: enrichedOrders, summary, now: now.toISOString() });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
