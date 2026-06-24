@@ -515,7 +515,12 @@ async def reconcile_paid_orders_without_kds():
     """
     logger.info("Running reconcile_paid_orders_without_kds job")
     try:
+        from tools.db_tools import backfill_missing_booking_schedules
         from tools.prepay_fulfillment import retry_kds_for_confirmed_booking
+
+        backfilled = await backfill_missing_booking_schedules()
+        if backfilled:
+            logger.info(f"[reconcile] Backfilled schedule for {backfilled} booking(s)")
 
         # get_paid_bookings_missing_kds must filter:
         #   WHERE kds_alert_sent IS NOT TRUE

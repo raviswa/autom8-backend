@@ -582,7 +582,7 @@ async def approve_scheduled_delivery_token(restaurant_id: str, token_id: str) ->
             return {"ok": True, "token": data.get("token")}
         if resp.status == 409:
             logger.info(f"[scheduled-delivery] approve skipped — already handled ({token_id})")
-            return {"ok": False, "error": "already_handled"}
+            return {"ok": True, "already_handled": True}
         body = (await resp.text())[:300]
         logger.error(f"[scheduled-delivery] approve failed {resp.status}: {body}")
         return {"ok": False, "error": body}
@@ -1109,7 +1109,7 @@ async def approve_scheduled_takeaway_token(restaurant_id: str, token_id: str) ->
             return {"ok": True, "token": data.get("token")}
         if resp.status == 409:
             logger.info(f"[scheduled-takeaway] approve skipped — already handled ({token_id})")
-            return {"ok": False, "error": "already_handled"}
+            return {"ok": True, "already_handled": True}
         body = (await resp.text())[:300]
         logger.error(f"[scheduled-takeaway] approve failed {resp.status}: {body}")
         return {"ok": False, "error": body}

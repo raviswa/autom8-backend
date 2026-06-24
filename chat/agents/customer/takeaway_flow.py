@@ -494,6 +494,12 @@ async def _submit_scheduled_takeaway_for_approval(
 
     sched_label = _scheduled_takeaway_label(session_state)
     session_state["scheduled_at_label"] = sched_label
+
+    from tools.db_tools import supersede_active_scheduled_tokens_for_phone
+    await supersede_active_scheduled_tokens_for_phone(
+        restaurant_id, customer_phone, reason="replaced_by_new_scheduled_order",
+    )
+
     portal_meta = {
         "booking_id": booking_id,
         "scheduled_at": session_state.get("scheduled_at"),
@@ -513,6 +519,8 @@ async def _submit_scheduled_takeaway_for_approval(
     if portal_token:
         session_state["display_token"] = portal_token
         session_state["token_number"] = portal_token
+        from tools.db_tools import update_booking_token_number
+        await update_booking_token_number(booking_id, portal_token)
         await _notify_manager_scheduled_takeaway(
             restaurant_id, portal_token, customer_name, customer_phone,
             portal_meta, manager_phone=manager_phone,

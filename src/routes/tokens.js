@@ -100,6 +100,19 @@ function phoneLookupVariants(phone) {
   return [...variants];
 }
 
+const SCHEDULED_TOKEN_TYPES = new Set(['scheduled_delivery', 'scheduled_takeaway']);
+
+async function isLinkedBookingPaid(bookingId) {
+  if (!bookingId) return false;
+  const { data, error } = await supabaseAdmin
+    .from('bookings')
+    .select('payment_status, status')
+    .eq('id', bookingId)
+    .maybeSingle();
+  if (error || !data) return false;
+  return data.payment_status === 'paid' || data.status === 'confirmed';
+}
+
 async function findActiveTokenForPhone(restaurantId, phone) {
   const variants = phoneLookupVariants(phone);
   if (!variants.length) return null;
@@ -122,10 +135,17 @@ async function findActiveTokenForPhone(restaurantId, phone) {
     console.warn('[tokens] findActiveTokenForPhone failed:', error.message);
     return null;
   }
+  if (!data) return null;
+
+  const meta = data.meta || {};
+  const bookingId = meta.booking_id;
+  if (bookingId && SCHEDULED_TOKEN_TYPES.has(data.type)) {
+    if (await isLinkedBookingPaid(bookingId)) {
+      return null;
+    }
+  }
   return data;
 }
-
-const SCHEDULED_TOKEN_TYPES = new Set(['scheduled_delivery', 'scheduled_takeaway']);
 
 /** Cancel jobs and mark booking cancelled when a scheduled order is superseded. */
 async function supersedeWalkInToken(token, restaurantId, reason) {
@@ -197,6 +217,11 @@ async function findReusableTokenForPhone(restaurantId, phone, type, meta = {}) {
       return { token: updated, deduplicated: true };
     }
 
+    if (existingBid && await isLinkedBookingPaid(existingBid)) {
+      // Paid scheduled order — keep it; allocate a fresh token for the new booking
+      return null;
+    }
+
     // New booking or approved-but-unpaid prior order → retire old token
     await supersedeWalkInToken(existing, restaurantId, 'replaced_by_new_scheduled_order');
     return null;
@@ -232,6 +257,9 @@ async function approveScheduledDeliveryToken(tokenId, restaurantId, token) {
 
   if (error) throw error;
   if (!updatedToken) {
+    if (token.status === 'takeaway') {
+      return { ok: true, token, alreadyApproved: true };
+    }
     return { ok: false, statusCode: 409, error: 'Token already approved or rejected' };
   }
 
@@ -291,6 +319,9 @@ async function rejectScheduledDeliveryToken(tokenId, restaurantId, token, reason
 
   if (error) throw error;
   if (!updatedToken) {
+    if (token.status === 'completed') {
+      return { ok: true, token, alreadyRejected: true };
+    }
     return { ok: false, statusCode: 409, error: 'Token already approved or rejected' };
   }
 
@@ -335,6 +366,9 @@ async function approveScheduledTakeawayToken(tokenId, restaurantId, token) {
 
   if (error) throw error;
   if (!updatedToken) {
+    if (token.status === 'takeaway') {
+      return { ok: true, token, alreadyApproved: true };
+    }
     return { ok: false, statusCode: 409, error: 'Token already approved or rejected' };
   }
 
@@ -396,6 +430,9 @@ async function rejectScheduledTakeawayToken(tokenId, restaurantId, token, reason
 
   if (error) throw error;
   if (!updatedToken) {
+    if (token.status === 'completed') {
+      return { ok: true, token, alreadyRejected: true };
+    }
     return { ok: false, statusCode: 409, error: 'Token already approved or rejected' };
   }
 

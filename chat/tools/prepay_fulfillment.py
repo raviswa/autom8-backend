@@ -519,6 +519,74 @@ async def _send_receipt(
         logger.warning(f"[prepay-fulfill] receipt failed (non-fatal): {exc}")
 
 
+async def _ensure_scheduled_schedule_persisted(payload: dict[str, Any]) -> dict[str, Any]:
+    """Recompute kitchen_start_at when schedule fields failed to persist at submit time."""
+    hints = dict(payload.get("session_hints") or {})
+    if hints.get("kitchen_start_at"):
+        return hints
+
+    sched_raw = hints.get("scheduled_at")
+    booking_id = payload.get("booking_id")
+    restaurant_id = payload.get("restaurant_id")
+    if not sched_raw or not booking_id or not restaurant_id:
+        return hints
+
+    try:
+        from datetime import datetime
+        from tools.booking_mechanisms import fetch_restaurant_info
+        from tools.db_tools import fetch_menu_timing_map, update_booking_schedule
+        from tools.kitchen_scheduler import compute_kitchen_start_at, format_ist_label, parse_slot_datetime
+        from tools.cart_tools import cart_lines_from_snapshot
+
+        rest = await fetch_restaurant_info(restaurant_id)
+        menu_map = await fetch_menu_timing_map(restaurant_id)
+        slot_dt = parse_slot_datetime(sched_raw)
+        if not slot_dt:
+            slot_dt = datetime.fromisoformat(str(sched_raw).replace("Z", "+00:00"))
+        cart_snapshot = payload.get("cart_snapshot") or {}
+        order_text = payload.get("order_text_display") or ""
+
+        schedule = compute_kitchen_start_at(
+            slot_dt,
+            service_type=hints.get("service_type") or payload.get("service_type") or "takeaway",
+            cart_lines=cart_lines_from_snapshot(cart_snapshot),
+            menu_by_retailer_id=menu_map,
+            buffer_minutes=int(rest.get("schedule_buffer_minutes") or 15),
+            rounding_minutes=int(rest.get("schedule_rounding_minutes") or 15),
+            transit_minutes=0,
+        )
+
+        kitchen_start = schedule["kitchen_start_at"]
+        slot_at = schedule["scheduled_slot_at"]
+        schedule_meta = {
+            "order_text": order_text,
+            "cart": cart_snapshot,
+            "kitchen_start_label": format_ist_label(kitchen_start),
+            "scheduled_at_label": hints.get("scheduled_at_label") or "",
+            "station_breakdown": schedule.get("station_breakdown") or {},
+        }
+
+        await update_booking_schedule(
+            booking_id,
+            kitchen_start_at=kitchen_start.isoformat(),
+            scheduled_slot_at=slot_at.isoformat(),
+            total_cook_minutes=schedule["total_cook_minutes"],
+            total_packing_minutes=schedule["total_packing_minutes"],
+            schedule_meta=schedule_meta,
+        )
+
+        hints["kitchen_start_at"] = kitchen_start.isoformat()
+        hints["scheduled_slot_at"] = slot_at.isoformat()
+        hints["kitchen_start_at_label"] = format_ist_label(kitchen_start)
+        hints["total_cook_minutes"] = schedule["total_cook_minutes"]
+        payload["session_hints"] = hints
+        logger.info(f"[prepay-fulfill] Recovered schedule for booking {booking_id}")
+    except Exception as exc:
+        logger.error(f"[prepay-fulfill] schedule recovery failed for {booking_id}: {exc}")
+
+    return hints
+
+
 async def _enqueue_scheduled_kds_jobs(payload: dict[str, Any]) -> bool:
     """Persist KDS + prep-start WhatsApp jobs when kitchen_start_at is in the future."""
     from datetime import datetime
@@ -598,6 +666,10 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
     token = payload.get("token") or payload.get("display_token")
     hints = payload.get("session_hints") or {}
     scheduled_flow = bool(hints.get("kitchen_start_at") or hints.get("scheduled_at"))
+
+    if scheduled_flow:
+        hints = await _ensure_scheduled_schedule_persisted(payload)
+        payload["session_hints"] = hints
 
     portal_token_id = None
     if not scheduled_flow:

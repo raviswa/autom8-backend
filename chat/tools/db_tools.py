@@ -866,6 +866,18 @@ async def create_booking(
         }
 
 
+async def update_booking_token_number(booking_id: str, token_number: str) -> bool:
+    """Set portal token id (T-xxx) on the booking row for KDS / receipts."""
+    if not booking_id or not token_number:
+        return False
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            update(Booking).where(Booking.id == UUID(booking_id)).values(token_number=token_number)
+        )
+        await session.commit()
+        return (result.rowcount or 0) > 0
+
+
 async def update_booking_status(booking_id: str, status: str) -> Dict[str, Any]:
     """Update booking status."""
     async with AsyncSessionLocal() as session:
@@ -2132,12 +2144,18 @@ async def supersede_active_scheduled_tokens_for_phone(
         async with AsyncSessionLocal() as session:
             result = await session.execute(
                 text("""
-                    SELECT id FROM walk_in_tokens
-                    WHERE restaurant_id = CAST(:rid AS uuid)
-                      AND phone = ANY(:phones)
-                      AND type IN ('scheduled_takeaway', 'scheduled_delivery')
-                      AND status IN ('pending_approval', 'takeaway')
-                      AND arrived_at >= CURRENT_DATE
+                    SELECT wt.id, wt.meta
+                    FROM walk_in_tokens wt
+                    WHERE wt.restaurant_id = CAST(:rid AS uuid)
+                      AND wt.phone = ANY(:phones)
+                      AND wt.type IN ('scheduled_takeaway', 'scheduled_delivery')
+                      AND wt.status IN ('pending_approval', 'takeaway')
+                      AND wt.arrived_at >= CURRENT_DATE
+                      AND NOT EXISTS (
+                        SELECT 1 FROM bookings b
+                        WHERE b.id = CAST(wt.meta->>'booking_id' AS uuid)
+                          AND (b.payment_status = 'paid' OR b.status = 'confirmed')
+                      )
                 """),
                 {"rid": restaurant_id, "phones": phones},
             )
@@ -2183,6 +2201,32 @@ def _should_reuse_walk_in_token(
     return existing.get("type") == token_type
 
 
+async def _walk_in_token_is_paid_scheduled(existing: dict) -> bool:
+    """True when an active scheduled token belongs to a paid/confirmed booking."""
+    if existing.get("type") not in ("scheduled_delivery", "scheduled_takeaway"):
+        return False
+    meta = parse_walk_in_meta(existing.get("meta"))
+    booking_id = meta.get("booking_id")
+    if not booking_id or AsyncSessionLocal is None:
+        return False
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    SELECT payment_status, status FROM bookings
+                    WHERE id = CAST(:bid AS uuid)
+                    LIMIT 1
+                """),
+                {"bid": str(booking_id)},
+            )
+            row = result.mappings().first()
+            if not row:
+                return False
+            return row["payment_status"] == "paid" or row["status"] == "confirmed"
+    except Exception:
+        return False
+
+
 async def create_walk_in_token_direct(
     restaurant_id: str,
     name: str,
@@ -2212,6 +2256,8 @@ async def create_walk_in_token_direct(
     actual_pax = 1 if token_type in ("takeaway", "scheduled_delivery", "scheduled_takeaway") else max(1, int(pax or 1))
 
     existing = await get_active_walk_in_token(restaurant_id, phone)
+    if existing and await _walk_in_token_is_paid_scheduled(existing):
+        existing = None
     if existing:
         if _should_reuse_walk_in_token(existing, token_type, meta):
             logger.info(
@@ -2533,6 +2579,96 @@ async def count_orders_for_slot(restaurant_id: str, slot_at: datetime | str) -> 
         )
         row = result.mappings().first()
         return int(row["cnt"]) if row else 0
+
+
+async def backfill_missing_booking_schedules(limit: int = 20) -> int:
+    """Persist kitchen_start_at for paid future bookings that missed schedule at submit."""
+    if AsyncSessionLocal is None:
+        return 0
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    SELECT b.id, b.restaurant_id, b.booking_datetime, b.scheduled_slot_at,
+                           b.schedule_meta, b.service_type
+                    FROM bookings b
+                    WHERE b.kitchen_start_at IS NULL
+                      AND b.payment_status = 'paid'
+                      AND b.status IN ('pending', 'confirmed')
+                      AND COALESCE(b.scheduled_slot_at, b.booking_datetime) > NOW()
+                      AND COALESCE(b.scheduled_slot_at, b.booking_datetime)
+                          > NOW() + INTERVAL '1 hour'
+                    ORDER BY b.created_at DESC
+                    LIMIT :lim
+                """),
+                {"lim": limit},
+            )
+            rows = result.mappings().all()
+    except Exception as exc:
+        logger.error(f"[schedule-backfill] query failed: {exc}")
+        return 0
+
+    if not rows:
+        return 0
+
+    from tools.booking_mechanisms import fetch_restaurant_info
+    from tools.kitchen_scheduler import compute_kitchen_start_at, format_ist_label
+
+    filled = 0
+    for row in rows:
+        booking_id = str(row["id"])
+        restaurant_id = str(row["restaurant_id"])
+        sched_raw = row["scheduled_slot_at"] or row["booking_datetime"]
+        if not sched_raw:
+            continue
+        meta = row["schedule_meta"] or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        cart = meta.get("cart") or {}
+        order_text = meta.get("order_text") or ""
+        try:
+            rest = await fetch_restaurant_info(restaurant_id)
+            menu_map = await fetch_menu_timing_map(restaurant_id)
+            from tools.cart_tools import cart_lines_from_snapshot
+
+            if isinstance(sched_raw, str):
+                slot_dt = datetime.fromisoformat(sched_raw.replace("Z", "+00:00"))
+            else:
+                slot_dt = sched_raw
+            schedule = compute_kitchen_start_at(
+                slot_dt,
+                service_type=row.get("service_type") or "takeaway",
+                cart_lines=cart_lines_from_snapshot(cart) if cart else [],
+                menu_by_retailer_id=menu_map,
+                buffer_minutes=int(rest.get("schedule_buffer_minutes") or 15),
+                rounding_minutes=int(rest.get("schedule_rounding_minutes") or 15),
+                transit_minutes=0,
+            )
+            kitchen_start = schedule["kitchen_start_at"]
+            slot_at = schedule["scheduled_slot_at"]
+            schedule_meta = {
+                **meta,
+                "order_text": order_text or meta.get("order_text") or "",
+                "cart": cart or meta.get("cart") or {},
+                "kitchen_start_label": format_ist_label(kitchen_start),
+            }
+            ok = await update_booking_schedule(
+                booking_id,
+                kitchen_start_at=kitchen_start.isoformat(),
+                scheduled_slot_at=slot_at.isoformat(),
+                total_cook_minutes=schedule["total_cook_minutes"],
+                total_packing_minutes=schedule["total_packing_minutes"],
+                schedule_meta=schedule_meta,
+            )
+            if ok:
+                filled += 1
+                logger.info(f"[schedule-backfill] Updated booking {booking_id}")
+        except Exception as exc:
+            logger.warning(f"[schedule-backfill] Failed for {booking_id}: {exc}")
+    return filled
 
 
 async def update_booking_schedule(

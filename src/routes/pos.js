@@ -350,6 +350,8 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
     }
     const now = new Date();
     const fourHoursMs = 4 * 60 * 60 * 1000;
+    const oneHourMs = 60 * 60 * 1000;
+    const defaultPrepLeadMs = 2.5 * 60 * 60 * 1000;
 
     const { data: bookings, error } = await supabaseAdmin
       .from('bookings')
@@ -361,17 +363,27 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
       `)
       .eq('restaurant_id', req.restaurant_id)
       .in('service_type', ['takeaway', 'delivery'])
-      .not('kitchen_start_at', 'is', null)
       .in('status', ['pending', 'confirmed'])
-      .gte('scheduled_slot_at', now.toISOString())
-      .order('kitchen_start_at', { ascending: true });
+      .in('payment_status', ['paid', 'pending'])
+      .gte('booking_datetime', now.toISOString())
+      .order('booking_datetime', { ascending: true });
 
     if (error) throw error;
 
-    const orders = (bookings ?? []).map((b) => {
+    const orders = (bookings ?? [])
+      .filter((b) => {
+        const slotRaw = b.scheduled_slot_at || b.booking_datetime;
+        if (!slotRaw) return false;
+        const slotMs = new Date(slotRaw).getTime() - now.getTime();
+        // Future scheduled slot (>1h out) — excludes immediate walk-in takeaway
+        return slotMs > oneHourMs;
+      })
+      .map((b) => {
       const meta = b.schedule_meta || {};
-      const kitchenStart = b.kitchen_start_at ? new Date(b.kitchen_start_at) : null;
       const slotAt = b.scheduled_slot_at || b.booking_datetime;
+      const kitchenStart = b.kitchen_start_at
+        ? new Date(b.kitchen_start_at)
+        : (slotAt ? new Date(new Date(slotAt).getTime() - defaultPrepLeadMs) : null);
       const msToStart = kitchenStart ? kitchenStart.getTime() - now.getTime() : null;
       let bucket = 'future';
       if (kitchenStart && msToStart <= fourHoursMs && msToStart > 0 && !b.kds_sent_at) {
@@ -387,7 +399,7 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
         customer_name: b.customer?.name,
         customer_phone: b.customer?.phone,
         scheduled_slot_at: slotAt,
-        kitchen_start_at: b.kitchen_start_at,
+        kitchen_start_at: kitchenStart ? kitchenStart.toISOString() : b.kitchen_start_at,
         total_cook_minutes: b.total_cook_minutes,
         order_text: meta.order_text || '',
         cart: meta.cart || {},
