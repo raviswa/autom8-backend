@@ -522,7 +522,8 @@ async def _send_receipt(
 async def _ensure_scheduled_schedule_persisted(payload: dict[str, Any]) -> dict[str, Any]:
     """Recompute kitchen_start_at when schedule fields failed to persist at submit time."""
     hints = dict(payload.get("session_hints") or {})
-    if hints.get("kitchen_start_at"):
+    svc = hints.get("service_type") or payload.get("service_type") or "takeaway"
+    if hints.get("kitchen_start_at") and (svc != "delivery" or hints.get("transit_minutes")):
         return hints
 
     sched_raw = hints.get("scheduled_at")
@@ -535,7 +536,12 @@ async def _ensure_scheduled_schedule_persisted(payload: dict[str, Any]) -> dict[
         from datetime import datetime
         from tools.booking_mechanisms import fetch_restaurant_info
         from tools.db_tools import fetch_menu_timing_map, update_booking_schedule
-        from tools.kitchen_scheduler import compute_kitchen_start_at, format_ist_label, parse_slot_datetime
+        from tools.kitchen_scheduler import (
+            compute_kitchen_start_at,
+            format_ist_label,
+            parse_slot_datetime,
+            resolve_transit_minutes,
+        )
         from tools.cart_tools import cart_lines_from_snapshot
 
         rest = await fetch_restaurant_info(restaurant_id)
@@ -545,15 +551,20 @@ async def _ensure_scheduled_schedule_persisted(payload: dict[str, Any]) -> dict[
             slot_dt = datetime.fromisoformat(str(sched_raw).replace("Z", "+00:00"))
         cart_snapshot = payload.get("cart_snapshot") or {}
         order_text = payload.get("order_text_display") or ""
+        transit = resolve_transit_minutes(
+            svc,
+            explicit_minutes=hints.get("delivery_travel_minutes"),
+            distance_km=hints.get("delivery_distance_km"),
+        )
 
         schedule = compute_kitchen_start_at(
             slot_dt,
-            service_type=hints.get("service_type") or payload.get("service_type") or "takeaway",
+            service_type=svc,
             cart_lines=cart_lines_from_snapshot(cart_snapshot),
             menu_by_retailer_id=menu_map,
             buffer_minutes=int(rest.get("schedule_buffer_minutes") or 15),
             rounding_minutes=int(rest.get("schedule_rounding_minutes") or 15),
-            transit_minutes=0,
+            transit_minutes=transit,
         )
 
         kitchen_start = schedule["kitchen_start_at"]
@@ -564,6 +575,8 @@ async def _ensure_scheduled_schedule_persisted(payload: dict[str, Any]) -> dict[
             "kitchen_start_label": format_ist_label(kitchen_start),
             "scheduled_at_label": hints.get("scheduled_at_label") or "",
             "station_breakdown": schedule.get("station_breakdown") or {},
+            "service_type": svc,
+            "transit_minutes": transit,
         }
 
         await update_booking_schedule(
@@ -579,6 +592,7 @@ async def _ensure_scheduled_schedule_persisted(payload: dict[str, Any]) -> dict[
         hints["scheduled_slot_at"] = slot_at.isoformat()
         hints["kitchen_start_at_label"] = format_ist_label(kitchen_start)
         hints["total_cook_minutes"] = schedule["total_cook_minutes"]
+        hints["transit_minutes"] = transit
         payload["session_hints"] = hints
         logger.info(f"[prepay-fulfill] Recovered schedule for booking {booking_id}")
     except Exception as exc:

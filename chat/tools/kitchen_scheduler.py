@@ -120,6 +120,30 @@ def parse_slot_datetime(value: Any) -> datetime | None:
     return dt.astimezone(IST)
 
 
+def resolve_transit_minutes(
+    service_type: str,
+    *,
+    explicit_minutes: int | None = None,
+    distance_km: float | None = None,
+    default_delivery: int = 20,
+) -> int:
+    """Delivery needs earlier kitchen start; takeaway has no transit leg."""
+    st = (service_type or "").replace("-", "_").lower()
+    if st != "delivery":
+        return 0
+    if explicit_minutes is not None:
+        try:
+            return max(0, int(explicit_minutes))
+        except (TypeError, ValueError):
+            pass
+    if distance_km is not None:
+        try:
+            return max(10, min(45, int(float(distance_km) * 4)))
+        except (TypeError, ValueError):
+            pass
+    return default_delivery
+
+
 def compute_kitchen_start_at(
     slot_at: datetime,
     *,

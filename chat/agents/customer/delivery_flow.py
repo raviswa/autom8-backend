@@ -153,6 +153,8 @@ async def _compute_and_persist_delivery_schedule(
         "scheduled_at_label": _scheduled_delivery_label(session_state),
         "station_breakdown": schedule.get("station_breakdown") or {},
         "service_type": "delivery",
+        "transit_minutes": transit,
+        "delivery_travel_minutes": transit,
     }
 
     await update_booking_schedule(

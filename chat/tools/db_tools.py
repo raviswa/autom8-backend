@@ -2030,7 +2030,18 @@ def _phone_variants(phone: str) -> list[str]:
 
 
 async def _next_portal_token_id(session, restaurant_id: str) -> str:
-    """Sequential T-001 style ID — mirrors Node generateTokenId()."""
+    """Sequential T-001 style ID — monotonic via allocate_portal_token_seq when available."""
+    try:
+        result = await session.execute(
+            text("SELECT allocate_portal_token_seq(CAST(:rid AS uuid))"),
+            {"rid": restaurant_id},
+        )
+        seq = result.scalar_one()
+        if seq is not None:
+            return f"T-{str(int(seq)).zfill(3)}"
+    except Exception:
+        pass
+
     result = await session.execute(
         text("SELECT id FROM walk_in_tokens WHERE restaurant_id = CAST(:rid AS uuid)"),
         {"rid": restaurant_id},
@@ -2629,6 +2640,10 @@ async def backfill_missing_booking_schedules(limit: int = 20) -> int:
                       AND (
                         b.kitchen_start_at IS NULL
                         OR COALESCE(b.schedule_meta->>'order_text', '') = ''
+                        OR (
+                          b.service_type = 'delivery'
+                          AND COALESCE((b.schedule_meta->>'transit_minutes')::int, 0) = 0
+                        )
                       )
                     ORDER BY b.created_at DESC
                     LIMIT :lim
@@ -2644,7 +2659,11 @@ async def backfill_missing_booking_schedules(limit: int = 20) -> int:
         return 0
 
     from tools.booking_mechanisms import fetch_restaurant_info
-    from tools.kitchen_scheduler import compute_kitchen_start_at, format_ist_label
+    from tools.kitchen_scheduler import (
+        compute_kitchen_start_at,
+        format_ist_label,
+        resolve_transit_minutes,
+    )
     from tools.cart_tools import cart_lines_from_snapshot, cart_to_order_text
 
     filled = 0
@@ -2682,15 +2701,37 @@ async def backfill_missing_booking_schedules(limit: int = 20) -> int:
             total_cook = meta.get("total_cook_minutes")
             total_pack = meta.get("total_packing_minutes")
 
-            if not kitchen_start:
+            svc = str(
+                row.get("service_type")
+                or portal_meta.get("service_type")
+                or meta.get("service_type")
+                or "takeaway"
+            )
+            transit = resolve_transit_minutes(
+                svc,
+                explicit_minutes=(
+                    meta.get("transit_minutes")
+                    or meta.get("delivery_travel_minutes")
+                    or portal_meta.get("delivery_travel_minutes")
+                ),
+                distance_km=(
+                    meta.get("delivery_distance_km")
+                    or portal_meta.get("delivery_distance_km")
+                ),
+            )
+            needs_recompute = (
+                not kitchen_start
+                or (svc == "delivery" and not meta.get("transit_minutes"))
+            )
+            if needs_recompute:
                 schedule = compute_kitchen_start_at(
                     slot_dt,
-                    service_type=row.get("service_type") or "takeaway",
+                    service_type=svc,
                     cart_lines=cart_lines_from_snapshot(cart) if cart else [],
                     menu_by_retailer_id=menu_map,
                     buffer_minutes=int(rest.get("schedule_buffer_minutes") or 15),
                     rounding_minutes=int(rest.get("schedule_rounding_minutes") or 15),
-                    transit_minutes=0,
+                    transit_minutes=transit,
                 )
                 kitchen_start = schedule["kitchen_start_at"]
                 slot_at = schedule["scheduled_slot_at"]
@@ -2702,6 +2743,8 @@ async def backfill_missing_booking_schedules(limit: int = 20) -> int:
                 **{k: v for k, v in portal_meta.items() if not k.startswith("_")},
                 "order_text": order_text,
                 "cart": cart,
+                "service_type": svc,
+                "transit_minutes": transit,
                 "kitchen_start_label": format_ist_label(kitchen_start),
             }
             ks_iso = (

@@ -72,6 +72,20 @@ const outletAuth = [authenticateToken, getRestaurantId, requireOutlet];
 // Returns the next T-001 style sequential ID (collision-safe).
 
 async function generateTokenId(restaurantId) {
+  try {
+    const { data: seq, error } = await supabaseAdmin.rpc('allocate_portal_token_seq', {
+      p_restaurant_id: restaurantId,
+    });
+    if (!error && seq != null) {
+      return `T-${String(seq).padStart(3, '0')}`;
+    }
+    if (error) {
+      console.warn('[tokens] allocate_portal_token_seq RPC failed, using legacy max+1:', error.message);
+    }
+  } catch (err) {
+    console.warn('[tokens] allocate_portal_token_seq unavailable, using legacy max+1:', err.message);
+  }
+
   const { data: allTokens } = await supabaseAdmin
     .from('walk_in_tokens').select('id').eq('restaurant_id', restaurantId);
 

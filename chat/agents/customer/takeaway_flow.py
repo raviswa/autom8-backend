@@ -198,6 +198,8 @@ async def _compute_and_persist_takeaway_schedule(
         "kitchen_start_label": format_ist_label(kitchen_start),
         "scheduled_at_label": _scheduled_takeaway_label(session_state),
         "station_breakdown": schedule.get("station_breakdown") or {},
+        "service_type": "takeaway",
+        "transit_minutes": 0,
     }
 
     await update_booking_schedule(

@@ -60,6 +60,20 @@ function resolveScheduledOrderText(scheduleMeta, portalMeta) {
   return cartSnapshotToOrderText(cart);
 }
 
+function estimateKitchenStart(slotAt, serviceType, totalCookMinutes, scheduleMeta) {
+  if (!slotAt) return null;
+  const slot = new Date(slotAt);
+  const meta = scheduleMeta && typeof scheduleMeta === 'object' ? scheduleMeta : {};
+  const cook = Number(totalCookMinutes ?? meta.total_cook_minutes ?? 90);
+  const packing = Number(meta.total_packing_minutes ?? 4);
+  const buffer = 15;
+  const st = String(serviceType || meta.service_type || 'takeaway').toLowerCase();
+  let transit = Number(meta.transit_minutes ?? meta.delivery_travel_minutes ?? 0);
+  if (st === 'delivery' && !transit) transit = 20;
+  const leadMs = (transit + cook + packing + buffer) * 60 * 1000;
+  return new Date(slot.getTime() - leadMs);
+}
+
 /** Fill order_text / T-xxx token from walk_in_tokens when schedule_meta was never persisted. */
 async function enrichScheduledOrdersFromPortal(restaurantId, orders) {
   if (!orders?.length) return orders;
@@ -428,7 +442,6 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
     const now = new Date();
     const fourHoursMs = 4 * 60 * 60 * 1000;
     const oneHourMs = 60 * 60 * 1000;
-    const defaultPrepLeadMs = 2.5 * 60 * 60 * 1000;
 
     const { data: bookings, error } = await supabaseAdmin
       .from('bookings')
@@ -460,7 +473,7 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
       const slotAt = b.scheduled_slot_at || b.booking_datetime;
       const kitchenStart = b.kitchen_start_at
         ? new Date(b.kitchen_start_at)
-        : (slotAt ? new Date(new Date(slotAt).getTime() - defaultPrepLeadMs) : null);
+        : estimateKitchenStart(slotAt, b.service_type, b.total_cook_minutes, meta);
       const msToStart = kitchenStart ? kitchenStart.getTime() - now.getTime() : null;
       let bucket = 'future';
       if (kitchenStart && msToStart <= fourHoursMs && msToStart > 0 && !b.kds_sent_at) {
@@ -481,6 +494,7 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
         total_cook_minutes: b.total_cook_minutes,
         order_text: resolveScheduledOrderText(meta, null),
         cart,
+        service_type: b.service_type,
         bucket,
         kds_sent_at: b.kds_sent_at,
         status: b.status,
