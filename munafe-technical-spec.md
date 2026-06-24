@@ -652,7 +652,7 @@ Returns future `bookings` where `service_type ∈ {takeaway, delivery}`, slot is
 **Kitchen start calculation** (`chat/tools/kitchen_scheduler.py`, `estimateKitchenStartFromTotals()` in `src/helpers/kitchenScheduler.js`):
 
 - **Takeaway:** `kitchen_start_at = slot − (cook + packing + buffer)`, rounded to the **nearest 30 minutes** (IST).
-- **Delivery:** `kitchen_start_at = slot − (takeaway lead + transit)`, rounded to the **nearest 15 minutes** (IST). Delivery always starts earlier than takeaway for the same slot.
+- **Delivery:** takeaway `kitchen_start_at` **minus transit**, rounded to the **nearest 15 minutes** (IST). Delivery always starts before takeaway for the same cart/slot.
 
 `schedule_rounding_minutes` on `restaurants` overrides the takeaway boundary (default **30**). Delivery boundary is fixed at **15**.
 

@@ -174,7 +174,7 @@ def compute_kitchen_start_at(
     Backward from customer slot → kitchen_start_at.
 
     Takeaway: (cook + packing + buffer), kitchen start rounded to nearest 30 min.
-    Delivery: takeaway lead + transit, kitchen start rounded to nearest 15 min.
+    Delivery: takeaway kitchen start minus transit, rounded to nearest 15 min.
     """
     timing = compute_order_timing(cart_lines, menu_by_retailer_id)
     cook = timing["total_cook_minutes"]
@@ -186,19 +186,24 @@ def compute_kitchen_start_at(
         raise ValueError("invalid slot_at")
 
     takeaway_lead = cook + float(packing) + int(buffer_minutes)
+    raw_takeaway = slot - timedelta(minutes=takeaway_lead)
+    takeaway_start = round_to_nearest_boundary(raw_takeaway, max(1, int(rounding_minutes)))
+
     if st == "delivery":
-        total_lead = takeaway_lead + int(transit_minutes)
-        raw_start = slot - timedelta(minutes=total_lead)
-        kitchen_start = round_to_nearest_boundary(raw_start, max(1, int(delivery_rounding_minutes)))
+        transit = int(transit_minutes)
+        raw_delivery = takeaway_start - timedelta(minutes=transit)
+        kitchen_start = round_to_nearest_boundary(
+            raw_delivery, max(1, int(delivery_rounding_minutes)),
+        )
         rounding_used = delivery_rounding_minutes
     else:
-        raw_start = slot - timedelta(minutes=takeaway_lead)
-        kitchen_start = round_to_nearest_boundary(raw_start, max(1, int(rounding_minutes)))
+        kitchen_start = takeaway_start
         rounding_used = rounding_minutes
 
     return {
         "kitchen_start_at": kitchen_start,
         "scheduled_slot_at": slot,
+        "takeaway_kitchen_start_at": takeaway_start,
         "total_cook_minutes": cook,
         "total_packing_minutes": packing,
         "transit_minutes": transit_minutes if st == "delivery" else 0,

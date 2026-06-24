@@ -125,11 +125,15 @@ function estimateKitchenStartFromTotals(slotAt, {
   const st = String(serviceType || meta.service_type || 'takeaway').toLowerCase();
   const transit = resolveTransitMinutes(st, meta);
   const takeawayLead = cook + packing + buffer;
-  const isDelivery = st === 'delivery';
-  const totalLead = isDelivery ? takeawayLead + transit : takeawayLead;
-  const rawStart = new Date(new Date(slotAt).getTime() - totalLead * 60 * 1000);
-  const boundary = isDelivery ? DELIVERY_ROUNDING_MINUTES : takeawayRounding;
-  return roundToNearestBoundary(rawStart, boundary);
+  const slot = new Date(slotAt);
+  const rawTakeaway = new Date(slot.getTime() - takeawayLead * 60 * 1000);
+  const takeawayStart = roundToNearestBoundary(rawTakeaway, takeawayRounding);
+
+  if (st === 'delivery') {
+    const rawDelivery = new Date(takeawayStart.getTime() - transit * 60 * 1000);
+    return roundToNearestBoundary(rawDelivery, DELIVERY_ROUNDING_MINUTES);
+  }
+  return takeawayStart;
 }
 
 function computeKitchenStartAt(slotAt, {
@@ -145,16 +149,21 @@ function computeKitchenStartAt(slotAt, {
   const st = String(serviceType || '').replace(/-/g, '_').toLowerCase();
   const packing = ['takeaway', 'delivery'].includes(st) ? timing.total_packing_minutes : 0;
   const takeawayLead = timing.total_cook_minutes + packing + bufferMinutes;
+  const slot = new Date(slotAt);
+  const rawTakeaway = new Date(slot.getTime() - takeawayLead * 60 * 1000);
+  const takeawayStart = roundToNearestBoundary(rawTakeaway, Math.max(1, roundingMinutes));
   const isDelivery = st === 'delivery';
-  const totalLead = isDelivery ? takeawayLead + transitMinutes : takeawayLead;
-  const rawStart = new Date(new Date(slotAt).getTime() - totalLead * 60 * 1000);
-  const boundary = isDelivery
-    ? Math.max(1, deliveryRoundingMinutes)
-    : Math.max(1, roundingMinutes);
-  const kitchenStart = roundToNearestBoundary(rawStart, boundary);
+  const kitchenStart = isDelivery
+    ? roundToNearestBoundary(
+      new Date(takeawayStart.getTime() - transitMinutes * 60 * 1000),
+      Math.max(1, deliveryRoundingMinutes),
+    )
+    : takeawayStart;
+  const boundary = isDelivery ? deliveryRoundingMinutes : roundingMinutes;
   return {
     kitchen_start_at: kitchenStart.toISOString(),
-    scheduled_slot_at: new Date(slotAt).toISOString(),
+    scheduled_slot_at: slot.toISOString(),
+    takeaway_kitchen_start_at: takeawayStart.toISOString(),
     total_cook_minutes: timing.total_cook_minutes,
     total_packing_minutes: packing,
     transit_minutes: isDelivery ? transitMinutes : 0,

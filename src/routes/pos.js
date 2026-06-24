@@ -87,16 +87,11 @@ function resolveScheduledKitchenStart(order) {
   );
 }
 
-/** Fill order_text / T-xxx token from walk_in_tokens when schedule_meta was never persisted. */
+/** Merge portal token meta + recompute kitchen start for every scheduled order. */
 async function enrichScheduledOrdersFromPortal(restaurantId, orders) {
   if (!orders?.length) return orders;
 
-  const needsEnrich = orders.filter(
-    (o) => !o.order_text || !String(o.token_number || '').startsWith('T-'),
-  );
-  if (!needsEnrich.length) return orders;
-
-  const bookingIds = new Set(needsEnrich.map((o) => o.booking_id));
+  const bookingIds = new Set(orders.map((o) => o.booking_id));
   const { data: tokens, error } = await supabaseAdmin
     .from('walk_in_tokens')
     .select('id, meta, type')
@@ -105,7 +100,13 @@ async function enrichScheduledOrdersFromPortal(restaurantId, orders) {
 
   if (error) {
     console.warn('[kds/scheduled] portal token enrich failed:', error.message);
-    return orders;
+    return orders.map((order) => {
+      const kitchenStart = resolveScheduledKitchenStart(order);
+      return {
+        ...order,
+        kitchen_start_at: kitchenStart ? kitchenStart.toISOString() : order.kitchen_start_at,
+      };
+    });
   }
 
   const portalByBooking = new Map();
@@ -120,13 +121,19 @@ async function enrichScheduledOrdersFromPortal(restaurantId, orders) {
 
   return orders.map((order) => {
     const portal = portalByBooking.get(order.booking_id);
-    if (!portal) return order;
+    if (!portal) {
+      const kitchenStart = resolveScheduledKitchenStart(order);
+      return {
+        ...order,
+        kitchen_start_at: kitchenStart ? kitchenStart.toISOString() : order.kitchen_start_at,
+      };
+    }
     const portalMeta = portal.meta || {};
     const cart = (order.cart && Object.keys(order.cart).length)
       ? order.cart
       : (portalMeta.cart || {});
     const orderText = resolveScheduledOrderText(
-      { order_text: order.order_text, cart: order.cart },
+      { order_text: order.order_text, cart },
       portalMeta,
     );
     const tokenNumber = String(order.token_number || '').startsWith('T-')
@@ -144,15 +151,21 @@ async function enrichScheduledOrdersFromPortal(restaurantId, orders) {
       cart,
       service_type: serviceType,
     };
+    const cookMinutes = portalMeta.total_cook_minutes
+      ?? scheduleMeta.total_cook_minutes
+      ?? order.total_cook_minutes;
+    const packingMinutes = portalMeta.total_packing_minutes
+      ?? scheduleMeta.total_packing_minutes
+      ?? order.total_packing_minutes;
     const enriched = {
       ...order,
       token_number: tokenNumber,
-      order_text: orderText,
+      order_text: orderText || order.order_text,
       cart,
       service_type: serviceType,
       schedule_meta: scheduleMeta,
-      total_cook_minutes: order.total_cook_minutes ?? portalMeta.total_cook_minutes ?? scheduleMeta.total_cook_minutes ?? null,
-      total_packing_minutes: order.total_packing_minutes ?? portalMeta.total_packing_minutes ?? scheduleMeta.total_packing_minutes ?? null,
+      total_cook_minutes: cookMinutes,
+      total_packing_minutes: packingMinutes,
       transit_minutes: scheduleMeta.transit_minutes ?? scheduleMeta.delivery_travel_minutes ?? null,
     };
     const kitchenStart = resolveScheduledKitchenStart(enriched);
