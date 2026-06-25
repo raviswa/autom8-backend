@@ -1097,7 +1097,7 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
       tableIds = (tableRows ?? []).map(t => t.id);
     }
 
-    const { data: updatedToken } = await supabaseAdmin
+    const { data: updatedToken, error: approveErr } = await supabaseAdmin
       .from('walk_in_tokens')
       .update({
         status: 'seated',
@@ -1112,6 +1112,13 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
         },
       })
       .eq('id', req.params.id).select().single();
+
+    if (approveErr) throw approveErr;
+    if (!updatedToken) {
+      return res.status(500).json({
+        error: 'Approval update did not persist. If RLS was recently enabled, verify SUPABASE_SERVICE_ROLE_KEY (not anon key) is set on the API service.',
+      });
+    }
 
     if (tableIds.length > 0) {
       const seatedAt = new Date().toISOString();

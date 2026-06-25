@@ -26,6 +26,7 @@ const {
 } = require('./src/routes/catalog');
 const { logKdsSecretStatus } = require('./src/config/internalSecret');
 const { verifyScheduledDeliveryTokenType } = require('./src/helpers/schemaChecks');
+const { supabaseAdmin } = require('./src/config/supabase');
 
 if (process.env.NODE_ENV === 'production' && !process.env.AUTOM8_KDS_SECRET) {
   throw new Error('AUTOM8_KDS_SECRET must be set in production');
@@ -94,14 +95,22 @@ app.use('/',                require('./src/routes/receipts'));     // /verify/:i
 //───────────────────────── Restaurant discovery tool─────────────────────────
 app.use('/api/discovery', require('./src/routes/discovery'));
 // ── Health check ─────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
+  let dbProbe = 'ok';
+  try {
+    const { error } = await supabaseAdmin.from('walk_in_tokens').select('id').limit(1);
+    if (error) dbProbe = error.message;
+  } catch (e) {
+    dbProbe = e.message;
+  }
   res.json({
-    status:    'ok',
+    status:    dbProbe === 'ok' ? 'ok' : 'degraded',
     timestamp: new Date().toISOString(),
     uptime:    process.uptime(),
     region:    process.env.REGION || 'IN',
     commit:    process.env.RAILWAY_GIT_COMMIT_SHA || null,
     kds:       'orders.notes',
+    db_probe:  dbProbe,
   });
 });
 

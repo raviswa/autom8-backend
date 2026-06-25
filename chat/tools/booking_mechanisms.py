@@ -916,6 +916,10 @@ async def sync_token_to_portal_large_party(
         return existing["id"]
 
     payload = {
+        "restaurant_id": restaurant_id,
+        "name":          customer_name,
+        "phone":         customer_phone,
+        "type":          "large_party",
         "pax":           pax,
         "meta":          {"combo": combo},
     }
