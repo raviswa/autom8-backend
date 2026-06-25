@@ -16,6 +16,9 @@
 //
 // Counter terminal calls POST /api/v1/takeaway/scan with:
 //   { order_id, staff_id, counter_id, section_id? }
+//   — or —
+//   { qr_token, staff_id, counter_id, section_id? }
+//     qr_token: receipt URL (/r/… or /verify/…), portal token (T-001, #097), or order UUID
 //
 // section_id only required in multi_counter mode.
 // Terminal must be pre-configured with its own section_id.
@@ -27,14 +30,23 @@ const express      = require('express');
 const router       = express.Router();
 const { supabaseAdmin }  = require('../config/supabase');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
+const { resolveOrderIdForTakeawayScan } = require('../helpers/takeawayScanResolve');
 
 
 // ── POST /api/v1/takeaway/scan ────────────────────────────────────────────────
 
 router.post('/scan', authenticateToken, getRestaurantId, async (req, res) => {
-  const { order_id, staff_id, counter_id, section_id } = req.body;
+  let { order_id, qr_token, staff_id, counter_id, section_id } = req.body;
 
-  if (!order_id)   return res.status(400).json({ error: 'order_id is required'   });
+  if (!order_id && qr_token) {
+    const resolved = await resolveOrderIdForTakeawayScan(req.restaurant_id, qr_token);
+    if (resolved.error) {
+      return res.status(400).json({ error: resolved.error });
+    }
+    order_id = resolved.order_id;
+  }
+
+  if (!order_id) return res.status(400).json({ error: 'order_id or qr_token is required' });
   if (!staff_id)   return res.status(400).json({ error: 'staff_id is required'   });
   if (!counter_id) return res.status(400).json({ error: 'counter_id is required' });
 
