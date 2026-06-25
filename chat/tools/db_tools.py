@@ -723,25 +723,40 @@ async def check_availability(restaurant_id: str, date: str, slot: str) -> bool:
 
 async def get_next_token_number(restaurant_id: str) -> str:
     """
-    Get the next sequential token number for today's bookings.
-    Tokens reset daily and are formatted as zero-padded 3-digit strings e.g. #001.
+    Monthly sequential booking counter (IST), includes cancelled rows.
+    Resets each calendar month. Format: #001, #002, …
     """
-    async with AsyncSessionLocal() as session:
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        today_end = today_start + timedelta(days=1)
+    if AsyncSessionLocal is None:
+        return "#001"
+    try:
+        from zoneinfo import ZoneInfo
+        now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+        month_start = now_ist.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if month_start.month == 12:
+            month_end = month_start.replace(year=month_start.year + 1, month=1)
+        else:
+            month_end = month_start.replace(month=month_start.month + 1)
 
-        result = await session.execute(
-            select(func.count(Booking.id)).where(
-                and_(
-                    Booking.restaurant_id == UUID(restaurant_id),
-                    Booking.created_at >= today_start,
-                    Booking.created_at < today_end,
-                    Booking.status != "cancelled",
-                )
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    SELECT COUNT(*)::int AS cnt
+                    FROM bookings
+                    WHERE restaurant_id = CAST(:rid AS uuid)
+                      AND created_at >= :start
+                      AND created_at < :end
+                """),
+                {
+                    "rid": restaurant_id,
+                    "start": month_start,
+                    "end": month_end,
+                },
             )
-        )
-        count = result.scalar() or 0
-        return f"#{str(count + 1).zfill(3)}"
+            count = result.scalar() or 0
+            return f"#{str(count + 1).zfill(3)}"
+    except Exception as e:
+        logger.warning(f"[token] get_next_token_number failed: {e}")
+        return "#001"
 
 
 # ─── Table availability tools ─────────────────────────────────────────────────
@@ -2065,8 +2080,17 @@ def _phone_variants(phone: str) -> list[str]:
     return list(variants)
 
 
+def _portal_token_month_key() -> str:
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y%m")
+
+
+def _build_portal_token_id(seq: int) -> str:
+    return f"T-{_portal_token_month_key()}-{str(int(seq)).zfill(3)}"
+
+
 async def _next_portal_token_id(session, restaurant_id: str) -> str:
-    """Sequential T-001 style ID — monotonic via allocate_portal_token_seq when available."""
+    """Sequential T-YYMM-001 style ID — monthly reset via allocate_portal_token_seq."""
     try:
         result = await session.execute(
             text("SELECT allocate_portal_token_seq(CAST(:rid AS uuid))"),
@@ -2074,28 +2098,36 @@ async def _next_portal_token_id(session, restaurant_id: str) -> str:
         )
         seq = result.scalar_one()
         if seq is not None:
-            return f"T-{str(int(seq)).zfill(3)}"
+            return _build_portal_token_id(int(seq))
     except Exception:
         pass
 
+    yymm = _portal_token_month_key()
     result = await session.execute(
         text("SELECT id FROM walk_in_tokens WHERE restaurant_id = CAST(:rid AS uuid)"),
         {"rid": restaurant_id},
     )
     max_seq = 0
+    monthly_re = re.compile(rf"^T-{re.escape(yymm)}-(\d+)$", re.I)
+    legacy_re = re.compile(r"^T-(\d+)$")
     for row in result:
-        match = re.match(r"^T-(\d+)$", str(row[0]))
-        if match:
-            max_seq = max(max_seq, int(match.group(1)))
+        tid = str(row[0])
+        m = monthly_re.match(tid)
+        if m:
+            max_seq = max(max_seq, int(m.group(1)))
+            continue
+        m = legacy_re.match(tid)
+        if m:
+            max_seq = max(max_seq, int(m.group(1)))
     for attempt in range(20):
-        candidate = f"T-{str(max_seq + 1 + attempt).zfill(3)}"
+        candidate = _build_portal_token_id(max_seq + 1 + attempt)
         exists = await session.execute(
             text("SELECT 1 FROM walk_in_tokens WHERE id = :tid"),
             {"tid": candidate},
         )
         if not exists.first():
             return candidate
-    return f"T-{str(int(time.time()) % 1_000_000).zfill(6)}"
+    return f"T-{yymm}-{str(int(time.time()) % 1_000_000).zfill(6)}"
 
 
 async def supersede_walk_in_token(
@@ -2143,13 +2175,30 @@ async def supersede_walk_in_token(
                 {"tid": token_id, "rid": restaurant_id, "meta": json.dumps(meta)},
             )
             if booking_id:
-                await session.execute(
+                paid_check = await session.execute(
                     text("""
-                        UPDATE bookings SET status = 'cancelled'
-                        WHERE id = CAST(:bid AS uuid)
+                        SELECT payment_status, status FROM bookings
+                        WHERE id = CAST(:bid AS uuid) LIMIT 1
                     """),
                     {"bid": str(booking_id)},
                 )
+                brow = paid_check.mappings().first()
+                is_paid = brow and (
+                    brow.get("payment_status") == "paid"
+                    or brow.get("status") == "confirmed"
+                )
+                if is_paid:
+                    logger.warning(
+                        f"[walk-in-token] supersede skipped booking cancel — {booking_id} is paid"
+                    )
+                else:
+                    await session.execute(
+                        text("""
+                            UPDATE bookings SET status = 'cancelled'
+                            WHERE id = CAST(:bid AS uuid)
+                        """),
+                        {"bid": str(booking_id)},
+                    )
             await session.commit()
         logger.info(f"[walk-in-token] Superseded {token_id} ({reason})")
         return True

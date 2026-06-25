@@ -41,7 +41,10 @@ const {
 const {
   dispatchBookingToKds,
   runDueScheduledJobsForRestaurant,
+  reconcileMissedKdsDispatches,
+  explainKdsVisibility,
 } = require('../helpers/scheduledJobs');
+const { formatTokenDisplay } = require('../helpers/portalTokens');
 
 function cartSnapshotToOrderText(cart) {
   if (!cart || typeof cart !== 'object') return '';
@@ -456,6 +459,17 @@ router.get('/kds/feed', authenticateToken, getRestaurantId, async (req, res) => 
         error: 'No outlet linked to this account. Select an outlet or log in with an outlet-specific profile.',
       });
     }
+    try {
+      await runDueScheduledJobsForRestaurant(req.restaurant_id);
+    } catch (dispatchErr) {
+      console.warn('[kds/feed] scheduled dispatch (non-fatal):', dispatchErr.message);
+    }
+    try {
+      await reconcileMissedKdsDispatches(req.restaurant_id);
+    } catch (reconcileErr) {
+      console.warn('[kds/feed] reconcile missed dispatch (non-fatal):', reconcileErr.message);
+    }
+
     const { status = 'pending' } = req.query;
     const statusFilter = status === 'all' ? ['pending', 'in_progress', 'ready'] : [status];
     const { data, error } = await supabaseAdmin.from('kds_items')
@@ -465,6 +479,92 @@ router.get('/kds/feed', authenticateToken, getRestaurantId, async (req, res) => 
       .order('created_at', { ascending: true });
     if (error) throw error;
     res.json({ success: true, items: data });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.get('/kds/dispatch-status', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (!req.restaurant_id) {
+      return res.status(403).json({ error: 'No outlet linked to this account.' });
+    }
+    const tokenQ = String(req.query.token || '').trim();
+    const bookingId = String(req.query.booking_id || '').trim();
+
+    if (!tokenQ && !bookingId) {
+      return res.status(400).json({ error: 'Provide token (e.g. T-125 or T-2506-125) or booking_id' });
+    }
+
+    let bookingQuery = supabaseAdmin
+      .from('bookings')
+      .select(`
+        id, token_number, kitchen_start_at, scheduled_slot_at, kds_sent_at,
+        status, payment_status, service_type, schedule_meta, created_at,
+        customer:customer_id(name, phone)
+      `)
+      .eq('restaurant_id', req.restaurant_id);
+
+    if (bookingId) {
+      bookingQuery = bookingQuery.eq('id', bookingId);
+    } else {
+      const digits = tokenQ.replace(/^T-/i, '');
+      const variants = [tokenQ, tokenQ.toUpperCase(), `T-${digits}`];
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Kolkata', year: '2-digit', month: '2-digit',
+      }).formatToParts(new Date());
+      const get = (t) => parts.find((p) => p.type === t)?.value || '';
+      const monthKey = `${get('year')}${get('month')}`;
+      variants.push(`T-${monthKey}-${digits.padStart(3, '0')}`);
+      bookingQuery = bookingQuery.in('token_number', [...new Set(variants)]);
+    }
+
+    const { data: bookings, error } = await bookingQuery.order('created_at', { ascending: false }).limit(5);
+    if (error) throw error;
+
+    const booking = bookings?.[0] ?? null;
+    let kdsItems = [];
+    if (booking) {
+      const tokenVariants = new Set([
+        booking.token_number,
+        formatTokenDisplay(booking.token_number),
+      ].filter(Boolean));
+      const { data: items } = await supabaseAdmin
+        .from('kds_items')
+        .select('id, status, item_name, created_at, updated_at, token_number')
+        .eq('restaurant_id', req.restaurant_id)
+        .in('token_number', [...tokenVariants])
+        .order('created_at', { ascending: true });
+      kdsItems = items ?? [];
+    }
+
+    const { data: jobs } = booking
+      ? await supabaseAdmin.from('scheduled_jobs')
+        .select('id, job_type, status, run_at, last_error')
+        .eq('booking_id', booking.id)
+        .order('run_at', { ascending: true })
+      : { data: [] };
+
+    res.json({
+      success: true,
+      token_query: tokenQ || null,
+      booking: booking ? {
+        id: booking.id,
+        token_number: booking.token_number,
+        token_display: formatTokenDisplay(booking.token_number),
+        status: booking.status,
+        payment_status: booking.payment_status,
+        service_type: booking.service_type,
+        kitchen_start_at: booking.kitchen_start_at,
+        scheduled_slot_at: booking.scheduled_slot_at,
+        kds_sent_at: booking.kds_sent_at,
+        order_preview: booking.schedule_meta?.order_text || null,
+      } : null,
+      related_bookings: (bookings ?? []).length,
+      scheduled_jobs: jobs ?? [],
+      kds_items: kdsItems,
+      visibility: explainKdsVisibility(booking, kdsItems),
+    });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

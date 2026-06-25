@@ -33,6 +33,7 @@ const { writeAuditLog } = require('../helpers/auditLog');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { requireKdsSecretOrJwt, requireKdsSecret } = require('../middleware/internalAuth');
 const { getKdsSecret } = require('../config/internalSecret');
+const { buildPortalTokenId, portalTokenMonthKey, parseMonthlyTokenId } = require('../helpers/portalTokens');
 
 const CHAT_SERVICE_URL = process.env.CHAT_SERVICE_URL || 'http://localhost:8001';
 
@@ -78,7 +79,7 @@ async function generateTokenId(restaurantId) {
       p_restaurant_id: restaurantId,
     });
     if (!error && seq != null) {
-      return `T-${String(seq).padStart(3, '0')}`;
+      return buildPortalTokenId(seq);
     }
     if (error) {
       console.warn('[tokens] allocate_portal_token_seq RPC failed, using legacy max+1:', error.message);
@@ -87,21 +88,27 @@ async function generateTokenId(restaurantId) {
     console.warn('[tokens] allocate_portal_token_seq unavailable, using legacy max+1:', err.message);
   }
 
+  const yymm = portalTokenMonthKey();
   const { data: allTokens } = await supabaseAdmin
     .from('walk_in_tokens').select('id').eq('restaurant_id', restaurantId);
 
   let maxSeq = 0;
   for (const row of allTokens ?? []) {
-    const match = String(row.id).match(/^T-(\d+)$/);
-    if (match) { const n = parseInt(match[1], 10); if (n > maxSeq) maxSeq = n; }
+    const monthly = parseMonthlyTokenId(row.id);
+    if (monthly && monthly.yymm === yymm) {
+      maxSeq = Math.max(maxSeq, monthly.seq);
+      continue;
+    }
+    const legacy = String(row.id).match(/^T-(\d+)$/);
+    if (legacy) maxSeq = Math.max(maxSeq, parseInt(legacy[1], 10));
   }
   for (let attempt = 0; attempt < 20; attempt++) {
-    const candidate = `T-${String(maxSeq + 1 + attempt).padStart(3, '0')}`;
+    const candidate = buildPortalTokenId(maxSeq + 1 + attempt);
     const { data: existing } = await supabaseAdmin
       .from('walk_in_tokens').select('id').eq('id', candidate).maybeSingle();
     if (!existing) return candidate;
   }
-  return `T-${Date.now().toString().slice(-6)}`;
+  return `T-${yymm}-${Date.now().toString().slice(-6)}`;
 }
 
 /** One non-terminal visit per phone per day — idempotency for chat retries. */
@@ -183,10 +190,14 @@ async function supersedeWalkInToken(token, restaurantId, reason) {
     return;
   }
   if (meta.booking_id) {
-    await cancelScheduledJobsForBooking(meta.booking_id);
-    await supabaseAdmin.from('bookings')
-      .update({ status: 'cancelled' })
-      .eq('id', meta.booking_id);
+    if (await isLinkedBookingPaid(meta.booking_id)) {
+      console.warn(`[tokens] supersede skipped booking cancel — ${meta.booking_id} is paid`);
+    } else {
+      await cancelScheduledJobsForBooking(meta.booking_id);
+      await supabaseAdmin.from('bookings')
+        .update({ status: 'cancelled' })
+        .eq('id', meta.booking_id);
+    }
   }
   console.log(`[tokens] Superseded ${token.id} (${reason})`);
 }

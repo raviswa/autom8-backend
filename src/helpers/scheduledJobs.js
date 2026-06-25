@@ -26,7 +26,11 @@ function resolvePortalToken(tokens, booking) {
   if (!raw) return null;
   return (tokens ?? []).find((t) => {
     const id = String(t.id || '').toUpperCase();
-    return id === raw || id === `T-${raw}` || raw === id.replace(/^T-/, '');
+    if (id === raw) return true;
+    if (id === `T-${raw}` || raw === id.replace(/^T-/, '')) return true;
+    const monthly = id.match(/^T-\d{4}-(\d+)$/);
+    if (monthly && (`T-${monthly[1]}` === raw || monthly[1] === raw.replace(/^T-/, ''))) return true;
+    return false;
   }) || null;
 }
 
@@ -342,12 +346,95 @@ async function runDueScheduledJobs() {
   return processDueJobs(due);
 }
 
+/** Paid bookings past kitchen_start_at but never dispatched — repair on KDS poll. */
+async function reconcileMissedKdsDispatches(restaurantId) {
+  const now = new Date().toISOString();
+  const { data: bookings, error } = await supabaseAdmin
+    .from('bookings')
+    .select(`
+      id, token_number, kitchen_start_at, schedule_meta, service_type, kds_sent_at,
+      status, payment_status,
+      customer:customer_id(name, phone)
+    `)
+    .eq('restaurant_id', restaurantId)
+    .in('service_type', ['takeaway', 'delivery'])
+    .eq('payment_status', 'paid')
+    .in('status', ['pending', 'confirmed'])
+    .is('kds_sent_at', null)
+    .not('kitchen_start_at', 'is', null)
+    .lte('kitchen_start_at', now)
+    .order('kitchen_start_at', { ascending: true })
+    .limit(15);
+
+  if (error) {
+    console.warn(`[scheduled-dispatch] reconcile query failed:`, error.message);
+    return 0;
+  }
+
+  let dispatched = 0;
+  for (const b of bookings ?? []) {
+    const meta = b.schedule_meta || {};
+    const order = {
+      booking_id: b.id,
+      token_number: b.token_number,
+      customer_name: b.customer?.name,
+      customer_phone: b.customer?.phone,
+      service_type: b.service_type,
+      cart: meta.cart || {},
+      schedule_meta: meta,
+    };
+    if (await dispatchBookingToKds(restaurantId, order)) dispatched += 1;
+  }
+  if (dispatched) {
+    console.log(`[scheduled-dispatch] reconciled ${dispatched} missed booking(s) for ${restaurantId}`);
+  }
+  return dispatched;
+}
+
+function explainKdsVisibility(booking, kdsItems = []) {
+  const reasons = [];
+  if (!booking) {
+    reasons.push('Booking not found.');
+    return reasons;
+  }
+  if (booking.status === 'cancelled') {
+    reasons.push('Booking was cancelled (often superseded when a new order replaced an unpaid token).');
+  }
+  if (booking.payment_status !== 'paid') {
+    reasons.push(`Payment status is "${booking.payment_status}" — KDS only receives paid scheduled orders.`);
+  }
+  if (!booking.kitchen_start_at) {
+    reasons.push('kitchen_start_at was never saved — dispatch job could not be scheduled.');
+  } else if (!booking.kds_sent_at && new Date(booking.kitchen_start_at) > new Date()) {
+    reasons.push(`Kitchen start is in the future (${booking.kitchen_start_at}). Check Future / scheduled strip.`);
+  } else if (!booking.kds_sent_at) {
+    reasons.push('Paid and past kitchen start, but kds_sent_at is still null — dispatch failed or not yet reconciled.');
+  }
+  if (booking.kds_sent_at && !kdsItems.length) {
+    reasons.push('Marked dispatched (kds_sent_at set) but no kds_items found — notify may have failed partially.');
+  }
+  const active = kdsItems.filter((i) => ['pending', 'in_progress', 'ready'].includes(i.status));
+  if (kdsItems.length && !active.length) {
+    reasons.push('All KDS lines are completed/cancelled — check History tab.');
+  }
+  const readyOnly = active.filter((i) => i.status === 'ready');
+  if (readyOnly.length === active.length && readyOnly.length) {
+    reasons.push('Items are ready — Live board drops ready lines after ~20 minutes.');
+  }
+  if (!reasons.length) {
+    reasons.push('Should be visible on Live orders if items are pending/cooking, or History if ready >20m.');
+  }
+  return reasons;
+}
+
 module.exports = {
   enqueueScheduledJobs,
   cancelScheduledJobsForBooking,
   cancelScheduledJobsForToken,
   syncScheduledJobsFromBookings,
   dispatchBookingToKds,
+  reconcileMissedKdsDispatches,
+  explainKdsVisibility,
   runDueScheduledJobs,
   runDueScheduledJobsForRestaurant,
 };
