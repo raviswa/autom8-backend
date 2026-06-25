@@ -38,6 +38,10 @@ const {
   validateEnabledFeatures,
   enabledOrderServices,
 } = require('../helpers/subscriptionFeatures');
+const {
+  dispatchBookingToKds,
+  runDueScheduledJobsForRestaurant,
+} = require('../helpers/scheduledJobs');
 
 function cartSnapshotToOrderText(cart) {
   if (!cart || typeof cart !== 'object') return '';
@@ -71,6 +75,8 @@ function estimateKitchenStart(slotAt, serviceType, totalCookMinutes, scheduleMet
 }
 
 function resolveScheduledKitchenStart(order) {
+  const stored = order.kitchen_start_at || order.schedule_meta?.kitchen_start_at;
+  if (stored) return new Date(stored);
   const meta = {
     ...(order.schedule_meta || {}),
     cart: order.cart,
@@ -520,65 +526,84 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
     if (!req.restaurant_id) {
       return res.status(403).json({ error: 'No outlet linked to this account.' });
     }
+    const restaurantId = req.restaurant_id;
     const now = new Date();
 
-    const { data: bookings, error } = await supabaseAdmin
-      .from('bookings')
-      .select(`
-        id, token_number, booking_datetime, scheduled_slot_at, kitchen_start_at,
-        total_cook_minutes, total_packing_minutes, schedule_meta, kds_sent_at,
-        status, payment_status, service_type,
-        customer:customer_id(name, phone)
-      `)
-      .eq('restaurant_id', req.restaurant_id)
-      .in('service_type', ['takeaway', 'delivery'])
-      .in('status', ['pending', 'confirmed'])
-      .in('payment_status', ['paid', 'pending'])
-      .is('kds_sent_at', null)
-      .order('booking_datetime', { ascending: true });
+    await runDueScheduledJobsForRestaurant(restaurantId);
 
-    if (error) throw error;
+    const buildEnrichedScheduled = async () => {
+      const { data: bookings, error } = await supabaseAdmin
+        .from('bookings')
+        .select(`
+          id, token_number, booking_datetime, scheduled_slot_at, kitchen_start_at,
+          total_cook_minutes, total_packing_minutes, schedule_meta, kds_sent_at,
+          status, payment_status, service_type,
+          customer:customer_id(name, phone)
+        `)
+        .eq('restaurant_id', restaurantId)
+        .in('service_type', ['takeaway', 'delivery'])
+        .in('status', ['pending', 'confirmed'])
+        .in('payment_status', ['paid', 'pending'])
+        .is('kds_sent_at', null)
+        .order('booking_datetime', { ascending: true });
 
-    const oneHourMs = 60 * 60 * 1000;
+      if (error) throw error;
 
-    const orders = (bookings ?? [])
-      .filter((b) => {
-        const slotRaw = b.scheduled_slot_at || b.booking_datetime;
-        if (!slotRaw) return false;
-        const meta = b.schedule_meta || {};
-        const isScheduledPrepay = Boolean(
-          b.kitchen_start_at || meta.kitchen_start_at || meta.scheduled_at,
-        );
-        if (isScheduledPrepay) return true;
-        const slotMs = new Date(slotRaw).getTime() - now.getTime();
-        return slotMs > oneHourMs;
-      })
-      .map((b) => {
-      const meta = b.schedule_meta || {};
-      const slotAt = b.scheduled_slot_at || b.booking_datetime;
-      const baseOrder = {
-        booking_id: b.id,
-        token_number: b.token_number,
-        customer_name: b.customer?.name,
-        customer_phone: b.customer?.phone,
-        scheduled_slot_at: slotAt,
-        total_cook_minutes: b.total_cook_minutes,
-        total_packing_minutes: b.total_packing_minutes,
-        order_text: resolveScheduledOrderText(meta, null),
-        cart: meta.cart || {},
-        service_type: b.service_type,
-        schedule_meta: meta,
-        transit_minutes: meta.transit_minutes ?? meta.delivery_travel_minutes ?? null,
-        kds_sent_at: b.kds_sent_at,
-        status: b.status,
-        payment_status: b.payment_status,
-      };
-      const kitchenStart = resolveScheduledKitchenStart(baseOrder);
-      return finalizeScheduledOrder(baseOrder, kitchenStart, now);
-    });
+      const oneHourMs = 60 * 60 * 1000;
 
-    const enrichedOrders = (await enrichScheduledOrdersFromPortal(req.restaurant_id, orders))
-      .filter((o) => o.bucket !== 'live');
+      const orders = (bookings ?? [])
+        .filter((b) => {
+          const slotRaw = b.scheduled_slot_at || b.booking_datetime;
+          if (!slotRaw) return false;
+          const meta = b.schedule_meta || {};
+          const isScheduledPrepay = Boolean(
+            b.kitchen_start_at || meta.kitchen_start_at || meta.scheduled_at,
+          );
+          if (isScheduledPrepay) return true;
+          const slotMs = new Date(slotRaw).getTime() - now.getTime();
+          return slotMs > oneHourMs;
+        })
+        .map((b) => {
+          const meta = b.schedule_meta || {};
+          const slotAt = b.scheduled_slot_at || b.booking_datetime;
+          const baseOrder = {
+            booking_id: b.id,
+            token_number: b.token_number,
+            customer_name: b.customer?.name,
+            customer_phone: b.customer?.phone,
+            scheduled_slot_at: slotAt,
+            kitchen_start_at: b.kitchen_start_at,
+            total_cook_minutes: b.total_cook_minutes,
+            total_packing_minutes: b.total_packing_minutes,
+            order_text: resolveScheduledOrderText(meta, null),
+            cart: meta.cart || {},
+            service_type: b.service_type,
+            schedule_meta: meta,
+            transit_minutes: meta.transit_minutes ?? meta.delivery_travel_minutes ?? null,
+            kds_sent_at: b.kds_sent_at,
+            status: b.status,
+            payment_status: b.payment_status,
+          };
+          const kitchenStart = resolveScheduledKitchenStart(baseOrder);
+          return finalizeScheduledOrder(baseOrder, kitchenStart, now);
+        });
+
+      return (await enrichScheduledOrdersFromPortal(restaurantId, orders))
+        .filter((o) => o.bucket !== 'live');
+    };
+
+    let enrichedOrders = await buildEnrichedScheduled();
+
+    const present = enrichedOrders.filter((o) => o.bucket === 'present');
+    if (present.length) {
+      let dispatched = false;
+      for (const order of present) {
+        if (await dispatchBookingToKds(restaurantId, order)) dispatched = true;
+      }
+      if (dispatched) {
+        enrichedOrders = await buildEnrichedScheduled();
+      }
+    }
 
     const summary = {};
     for (const o of enrichedOrders.filter((x) => x.bucket === 'future' || x.bucket === 'todays_future')) {

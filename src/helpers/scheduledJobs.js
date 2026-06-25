@@ -242,11 +242,41 @@ async function executePrepStartWhatsappJob(job) {
   );
 }
 
-async function runDueScheduledJobs() {
-  await syncScheduledJobsFromBookings();
-  const due = await claimDueJobs();
-  let executed = 0;
+/** Push one paid scheduled booking to KDS — one ribbon (kds_item) per cart line. */
+async function dispatchBookingToKds(restaurantId, order) {
+  const cart = order.cart || order.schedule_meta?.cart || {};
+  const items = buildItemsFromCart(cart);
+  if (!items.length) {
+    console.warn(`[scheduled-dispatch] booking ${order.booking_id} — empty cart, skip`);
+    return false;
+  }
 
+  const job = {
+    restaurant_id: restaurantId,
+    booking_id: order.booking_id,
+    token_id: order.token_number,
+    payload: {
+      customer_name: order.customer_name || 'Guest',
+      customer_phone: order.customer_phone || '',
+      token_number: order.token_number,
+      service_type: order.service_type || 'takeaway',
+      items,
+      special_notes: order.schedule_meta?.special_notes || null,
+    },
+  };
+
+  try {
+    await executeKdsDispatchJob(job);
+    console.log(`[scheduled-dispatch] ✅ ${order.token_number} → KDS (${items.length} ribbon(s))`);
+    return true;
+  } catch (err) {
+    console.error(`[scheduled-dispatch] ${order.booking_id} failed:`, err.message);
+    return false;
+  }
+}
+
+async function processDueJobs(due) {
+  let executed = 0;
   for (const job of due) {
     const { data: locked } = await supabaseAdmin
       .from('scheduled_jobs')
@@ -271,8 +301,45 @@ async function runDueScheduledJobs() {
       await markJob(job.id, 'failed', { last_error: err.message });
     }
   }
-
   return executed;
+}
+
+async function retryFailedDispatchJobs(restaurantId = null) {
+  let q = supabaseAdmin
+    .from('scheduled_jobs')
+    .update({ status: 'pending', last_error: null, updated_at: new Date().toISOString() })
+    .eq('job_type', 'kds_dispatch')
+    .eq('status', 'failed');
+  if (restaurantId) q = q.eq('restaurant_id', restaurantId);
+  const { error } = await q;
+  if (error) console.warn('[scheduled-jobs] retry failed jobs:', error.message);
+}
+
+/** Run due jobs for one outlet — used when KDS polls scheduled board. */
+async function runDueScheduledJobsForRestaurant(restaurantId) {
+  await syncScheduledJobsFromBookings();
+  await retryFailedDispatchJobs(restaurantId);
+  const now = new Date().toISOString();
+  const { data: due, error } = await supabaseAdmin
+    .from('scheduled_jobs')
+    .select('*')
+    .eq('restaurant_id', restaurantId)
+    .eq('status', 'pending')
+    .lte('run_at', now)
+    .order('run_at', { ascending: true })
+    .limit(25);
+  if (error) {
+    console.warn(`[scheduled-jobs] due query failed for ${restaurantId}:`, error.message);
+    return 0;
+  }
+  return processDueJobs(due ?? []);
+}
+
+async function runDueScheduledJobs() {
+  await syncScheduledJobsFromBookings();
+  await retryFailedDispatchJobs();
+  const due = await claimDueJobs();
+  return processDueJobs(due);
 }
 
 module.exports = {
@@ -280,5 +347,7 @@ module.exports = {
   cancelScheduledJobsForBooking,
   cancelScheduledJobsForToken,
   syncScheduledJobsFromBookings,
+  dispatchBookingToKds,
   runDueScheduledJobs,
+  runDueScheduledJobsForRestaurant,
 };
