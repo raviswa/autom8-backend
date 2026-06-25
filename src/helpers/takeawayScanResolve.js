@@ -130,6 +130,40 @@ function buildTokenVariants(token) {
   return [...variants].filter(Boolean);
 }
 
+async function findOrderViaWalkInToken(restaurantId, variants) {
+  const { data: witRows } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .select('id')
+    .eq('restaurant_id', restaurantId)
+    .in('token_number', variants)
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  const wit = witRows?.[0];
+  if (!wit?.id) return null;
+
+  // Try order_items first (same pattern as bookings)
+  const { data: orderItems } = await supabaseAdmin
+    .from('order_items')
+    .select('order_id')
+    .eq('walk_in_token_id', wit.id)   // ← adjust FK name if different
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  if (orderItems?.[0]?.order_id) return orderItems[0].order_id;
+
+  // Fallback: check orders table directly
+  const { data: directOrder } = await supabaseAdmin
+    .from('orders')
+    .select('id')
+    .eq('restaurant_id', restaurantId)
+    .eq('walk_in_token_id', wit.id)   // ← adjust FK name if different
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  return directOrder?.[0]?.id || null;
+}
+
 async function findOrderByNumberPatterns(restaurantId, suffixes) {
   for (const suffix of suffixes) {
     const { data: exact } = await supabaseAdmin
@@ -215,6 +249,7 @@ async function findOrderViaKdsToken(restaurantId, variants) {
  * @returns {{ order_id: string } | { error: string }}
  */
 async function resolveOrderIdForTakeawayScan(restaurantId, raw) {
+  
   const parsed = parseQrScanInput(raw);
   if (!parsed) return { error: 'Could not read QR code' };
 
@@ -241,6 +276,9 @@ async function resolveOrderIdForTakeawayScan(restaurantId, raw) {
 
   const byBooking = await findOrderViaBooking(restaurantId, variants, suffixes);
   if (byBooking) return { order_id: byBooking };
+
+  const byWalkIn = await findOrderViaWalkInToken(restaurantId, variants);
+  if (byWalkIn) return { order_id: byWalkIn };
 
   const byKds = await findOrderViaKdsToken(restaurantId, variants);
   if (byKds) return { order_id: byKds };
