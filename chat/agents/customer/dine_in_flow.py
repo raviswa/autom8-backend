@@ -194,15 +194,20 @@ async def _notify_manager_order_received(
 
 async def _ensure_pending_kitchen(session_state: Dict[str, Any]) -> bool:
     """Ensure _pending_kitchen has order payload; return True if ready for KDS."""
+    def _has_kitchen_payload(data: dict) -> bool:
+        cart = data.get("cart") or {}
+        order_text = (data.get("order_text") or "").strip()
+        return bool(cart) or bool(order_text)
+
     pending = session_state.get("_pending_kitchen") or {}
-    if pending.get("order_text") and pending.get("cart"):
+    if _has_kitchen_payload(pending):
         return True
 
     backup = session_state.get("_prepay_kitchen_snapshot") or {}
-    if backup.get("order_text") and backup.get("cart"):
+    if _has_kitchen_payload(backup):
         session_state["_pending_kitchen"] = {
-            "order_text": backup["order_text"],
-            "cart": dict(backup["cart"]),
+            "order_text": backup.get("order_text") or "",
+            "cart": dict(backup.get("cart") or {}),
         }
         return True
     return False

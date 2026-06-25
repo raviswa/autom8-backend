@@ -327,6 +327,55 @@ async def _dispatch_to_kds(
     return None
 
 
+async def _build_retry_payload_from_booking(
+    booking_id: str,
+    booking: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Rebuild KDS dispatch payload from persisted booking data when session stash is gone."""
+    import json
+
+    payload = await load_prepay_fulfillment_payload(booking_id)
+    if payload and (payload.get("cart_snapshot") or payload.get("order_text_display")):
+        return payload
+
+    meta = booking.get("schedule_meta") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            meta = {}
+
+    cart = dict(meta.get("cart") or {})
+    order_text = (meta.get("order_text") or "").strip()
+
+    if not cart and not order_text:
+        from tools.db_tools import _portal_meta_for_booking
+
+        portal_meta = await _portal_meta_for_booking(booking["restaurant_id"], booking_id)
+        cart = dict(portal_meta.get("cart") or {})
+        order_text = (portal_meta.get("order_text") or "").strip()
+
+    if not cart and not order_text:
+        return None
+
+    return {
+        "restaurant_id": booking["restaurant_id"],
+        "customer_phone": booking["customer_phone"],
+        "customer_name": booking.get("customer_name") or "Guest",
+        "booking_id": booking_id,
+        "token": booking.get("token_number"),
+        "cart_snapshot": cart,
+        "order_text_display": order_text,
+        "service_type": booking.get("service_type") or "takeaway",
+        "session_hints": {
+            "kitchen_start_at": booking.get("kitchen_start_at"),
+            "scheduled_at": booking.get("scheduled_slot_at") or booking.get("booking_datetime"),
+            "order_mode": meta.get("order_mode"),
+            "service_type": booking.get("service_type"),
+        },
+    }
+
+
 async def _retry_kds_for_confirmed_booking(
     booking_id: str,
     booking: dict[str, Any],
@@ -353,7 +402,7 @@ async def _retry_kds_for_confirmed_booking(
         booking_id,
     )
     if not payload:
-        payload = await load_prepay_fulfillment_payload(booking_id)
+        payload = await _build_retry_payload_from_booking(booking_id, booking)
     if not payload:
         logger.error(f"[prepay-kds] No payload to retry KDS for confirmed booking {booking_id}")
         return False
@@ -366,7 +415,13 @@ async def _retry_kds_for_confirmed_booking(
         logger.info(f"[prepay-kds] Booking {booking_id} KDS deferred (scheduled) — OK")
         return True
 
-    token = str(payload.get("token") or booking.get("token_number") or "—")
+    # Always use booking portal token for KDS — not walk-in queue #097.
+    token = str(
+        booking.get("token_number")
+        or payload.get("token")
+        or payload.get("display_token")
+        or "—"
+    )
     order_id = await _dispatch_to_kds(
         restaurant_id=payload["restaurant_id"],
         customer_name=payload.get("customer_name") or booking.get("customer_name") or "Guest",
@@ -710,6 +765,7 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
             restaurant_id=restaurant_id,
         )
     display_token = portal_token_id or token
+    kds_token = str(token or display_token)
 
     jobs_enqueued = await _enqueue_scheduled_takeaway_jobs(payload)
     defer, defer_note = await _should_defer_kds_for_scheduled(
@@ -779,7 +835,7 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
         restaurant_id=restaurant_id,
         customer_phone=customer_phone,
         customer_name=customer_name,
-        token=str(display_token),
+        token=kds_token,
         order_text=order_text_display,
         cart=cart_snapshot,
         service_type="takeaway",
@@ -824,8 +880,14 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
         logger.warning(f"[prepay-fulfill] manager alert failed (non-fatal): {exc}")
 
     if not defer and not dispatched_now:
+        from tools.db_tools import get_booking_with_customer
+
+        booking_row = await get_booking_with_customer(booking_id)
+        if booking_row:
+            dispatched_now = await retry_kds_for_confirmed_booking(booking_id, booking_row)
+    if not defer and not dispatched_now:
         logger.error(
-            f"[prepay-fulfill] Takeaway KDS failed for booking {booking_id} token {display_token}"
+            f"[prepay-fulfill] Takeaway KDS failed for booking {booking_id} token {kds_token}"
         )
         return False
 
@@ -922,6 +984,13 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
         booking_time=booking_time,
         total=total,
     )
+
+    if not dispatched_now and not defer:
+        from tools.db_tools import get_booking_with_customer
+
+        booking_row = await get_booking_with_customer(booking_id)
+        if booking_row:
+            dispatched_now = await retry_kds_for_confirmed_booking(booking_id, booking_row)
 
     if defer:
         kitchen_line = "Your delivery order is confirmed."
@@ -1046,6 +1115,13 @@ async def _fulfill_dine_in(payload: dict[str, Any]) -> bool:
         force_kitchen_send=True,
     )
     dispatched = bool(state.get("_kitchen_sent"))
+
+    if not dispatched:
+        from tools.db_tools import get_booking_with_customer
+
+        booking_row = await get_booking_with_customer(booking_id)
+        if booking_row:
+            dispatched = await retry_kds_for_confirmed_booking(booking_id, booking_row)
 
     if dispatched:
         await send_whatsapp_message(

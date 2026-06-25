@@ -1080,13 +1080,14 @@ async def mark_booking_kds_sent(booking_id: str) -> None:
 
 async def get_paid_bookings_missing_kds() -> List[Dict[str, Any]]:
     """
-    Return paid bookings that have no KDS ticket and have not yet been alerted.
+    Return paid bookings that have no KDS ticket.
 
     Filters:
       - payment_status = 'paid'
-      - kds_alert_sent IS NOT TRUE   ← never re-process an alerted booking
-      - created_at > now() - 24h     ← ignore stale historical records
+      - created_at > now() - 24h
       - excludes future scheduled orders on KDS Future tab (no live ticket yet)
+
+    kds_alert_sent only controls whether the manager gets WhatsApp — reconcile keeps retrying.
     """
     base = _a8_base()
     if not base:
@@ -1107,10 +1108,9 @@ async def get_paid_bookings_missing_kds() -> List[Dict[str, Any]]:
                     "select": (
                         "id,restaurant_id,token_number,service_type,created_at,"
                         "customer_id,kitchen_start_at,scheduled_slot_at,booking_datetime,"
-                        "kds_sent_at,schedule_meta"
+                        "kds_sent_at,schedule_meta,kds_alert_sent"
                     ),
                     "payment_status":  "eq.paid",
-                    "kds_alert_sent":  "is.false",
                     "created_at":      f"gte.{cutoff}",
                     "order":           "created_at.asc",
                     "limit":           "50",
@@ -1182,6 +1182,44 @@ async def get_paid_bookings_missing_kds() -> List[Dict[str, Any]]:
                                 if oi_id and oi_id in oi_id_map:
                                     kds_covered_bookings.add(oi_id_map[oi_id])
 
+            # ── Step 2b: kds_items linked by token_number (portal #097 vs T-YYMM-NNN) ─
+            for b in bookings:
+                if b["id"] in kds_covered_bookings:
+                    continue
+                rid = b["restaurant_id"]
+                tokens_to_check: list[str] = []
+                if b.get("token_number"):
+                    tokens_to_check.append(str(b["token_number"]))
+                cust_id = b.get("customer_id")
+                cust_phone = ""
+                if cust_id:
+                    cust_resp = await client.get(
+                        f"{base}/rest/v1/customers",
+                        params={"select": "phone", "id": f"eq.{cust_id}", "limit": "1"},
+                        headers=_a8_headers(),
+                    )
+                    if cust_resp.status_code == 200 and cust_resp.json():
+                        cust_phone = cust_resp.json()[0].get("phone") or ""
+                if cust_phone:
+                    wit = await get_active_walk_in_token(rid, cust_phone)
+                    if wit and wit.get("id"):
+                        tokens_to_check.append(str(wit["id"]))
+                for tok in tokens_to_check:
+                    kds_tok_resp = await client.get(
+                        f"{base}/rest/v1/kds_items",
+                        params={
+                            "select": "id",
+                            "restaurant_id": f"eq.{rid}",
+                            "token_number":  f"eq.{tok}",
+                            "status":        "in.(pending,in_progress,ready)",
+                            "limit":         "1",
+                        },
+                        headers=_a8_headers(),
+                    )
+                    if kds_tok_resp.status_code == 200 and kds_tok_resp.json():
+                        kds_covered_bookings.add(b["id"])
+                        break
+
             # ── Step 3: Keep only bookings with NO kds coverage ───────────────
             missing_ids = [
                 b["id"] for b in bookings
@@ -1250,6 +1288,7 @@ async def get_paid_bookings_missing_kds() -> List[Dict[str, Any]]:
                     "booking_datetime": b.get("booking_datetime"),
                     "kds_sent_at": b.get("kds_sent_at"),
                     "schedule_meta": b.get("schedule_meta"),
+                    "kds_alert_sent": b.get("kds_alert_sent"),
                 })
 
         logger.info(

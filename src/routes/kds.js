@@ -174,6 +174,58 @@ router.post('/notify', async (req, res) => {
       }
 
       const newItemsNeeded = items.filter((item) => !lineAlreadyOnOrder(item, existingOrderLines));
+
+      // Repair: order + order_items exist but KDS lines were never created (failed prior notify).
+      if (existingOrderLines.length > 0 && existingKdsCount === 0) {
+        const oiIds = existingOrderLines.map((r) => r.id);
+        const { data: oiDetail } = await supabaseAdmin
+          .from('order_items')
+          .select('id, quantity, menu_item:menu_item_id(name)')
+          .in('id', oiIds);
+        const repairInserts = (oiDetail ?? []).map((oi) => ({
+          restaurant_id,
+          order_item_id:        oi.id,
+          status:               'pending',
+          priority:             'normal',
+          item_name:            oi.menu_item?.name || 'Item',
+          token_number:         token_number  || null,
+          customer_phone:       cleanPhone,
+          service_type:         service_type  || null,
+          special_instructions: special_notes || null,
+        }));
+        if (repairInserts.length > 0) {
+          const { error: repairErr } = await supabaseAdmin.from('kds_items').insert(repairInserts);
+          if (!repairErr) {
+            console.log(
+              `[kds-notify] 🔧 repaired ${repairInserts.length} KDS line(s) for ${orderNumber}`
+            );
+            broadcastToRestaurant(restaurant_id, {
+              type:           'ORDER_NEW',
+              order_id:       existingOrder.id,
+              order_number:   existingOrder.order_number,
+              token_number:   token_number ?? null,
+              table_number:   table_number ?? null,
+              customer_name:  customer_name ?? null,
+              customer_phone: cleanPhone,
+              service_type:   service_type ?? null,
+              item_count:     repairInserts.length,
+              source:         'whatsapp_booking',
+              repaired:       true,
+              timestamp:      new Date().toISOString(),
+            });
+            return res.status(201).json({
+              success:           true,
+              order_id:          existingOrder.id,
+              order_number:      existingOrder.order_number,
+              kds_items_created: repairInserts.length,
+              kds_items_added:   repairInserts.length,
+              repaired:          true,
+            });
+          }
+          console.warn(`[kds-notify] KDS repair failed for ${orderNumber}:`, repairErr.message);
+        }
+      }
+
       if (newItemsNeeded.length === 0 && existingKdsCount > 0) {
         console.log(
           `[kds-notify] ♻️ deduped ${orderNumber} — all ${items.length} item(s) already on KDS`
@@ -301,14 +353,17 @@ router.post('/notify', async (req, res) => {
       const qty       = parseInt(item.qty || item.quantity || 1, 10);
       const unitPrice = parseFloat(item.unit_price || 0);
 
+      const oiRow = {
+        order_id:     orderRow.id,
+        menu_item_id: menuItemId,
+        quantity:     qty,
+        unit_price:   unitPrice,
+      };
+      if (booking_id) oiRow.booking_id = booking_id;
+
       const { data: orderItem, error: oiErr } = await supabaseAdmin
         .from('order_items')
-        .insert({
-          order_id:     orderRow.id,
-          menu_item_id: menuItemId,
-          quantity:     qty,
-          unit_price:   unitPrice,
-        })
+        .insert(oiRow)
         .select('id')
         .single();
 

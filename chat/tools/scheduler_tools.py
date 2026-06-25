@@ -533,35 +533,36 @@ async def reconcile_paid_orders_without_kds():
         alerted = 0
         for row in rows:
             booking_id = row["booking_id"]
+            already_alerted = bool(row.get("kds_alert_sent"))
 
             ok = await retry_kds_for_confirmed_booking(booking_id)
 
             if ok:
                 retried += 1
-                await mark_kds_alert_sent(booking_id)
                 logger.warning(
                     f"[reconcile] Auto-retried KDS for paid booking {booking_id} "
                     f"({row.get('service_type')} token {row.get('token_number')})"
                 )
-            else:
-                from tools.scheduled_kds import is_booking_on_kds_future_tab
+                continue
 
-                if is_booking_on_kds_future_tab(
-                    kitchen_start_at=row.get("kitchen_start_at"),
-                    scheduled_slot_at=row.get("scheduled_slot_at"),
-                    booking_datetime=row.get("booking_datetime"),
-                    kds_sent_at=row.get("kds_sent_at"),
-                    service_type=row.get("service_type"),
-                    schedule_meta=row.get("schedule_meta"),
-                ):
-                    await mark_kds_alert_sent(booking_id)
-                    logger.info(
-                        f"[reconcile] Skipped alert — booking {booking_id} is scheduled "
-                        f"(KDS Future tab)"
-                    )
-                    continue
+            from tools.scheduled_kds import is_booking_on_kds_future_tab
 
-                # Retry failed — alert manager once, then never again
+            if is_booking_on_kds_future_tab(
+                kitchen_start_at=row.get("kitchen_start_at"),
+                scheduled_slot_at=row.get("scheduled_slot_at"),
+                booking_datetime=row.get("booking_datetime"),
+                kds_sent_at=row.get("kds_sent_at"),
+                service_type=row.get("service_type"),
+                schedule_meta=row.get("schedule_meta"),
+            ):
+                logger.info(
+                    f"[reconcile] Skipped alert — booking {booking_id} is scheduled "
+                    f"(KDS Future tab)"
+                )
+                continue
+
+            # Retry failed — alert manager once; keep retrying on future cron runs
+            if not already_alerted:
                 manager = row.get("manager_phone")
                 if manager:
                     await send_whatsapp_message(
@@ -576,11 +577,11 @@ async def reconcile_paid_orders_without_kds():
                         row["restaurant_id"],
                     )
                     alerted += 1
+                    await mark_kds_alert_sent(booking_id)
 
-                await mark_kds_alert_sent(booking_id)
-                logger.error(
-                    f"[reconcile] Paid booking {booking_id} has no KDS — retry failed"
-                )
+            logger.error(
+                f"[reconcile] Paid booking {booking_id} has no KDS — retry failed"
+            )
 
         logger.info(
             f"[reconcile] Processed {len(rows)} paid-without-KDS booking(s): "
