@@ -98,11 +98,11 @@ async function assignCaptainToToken(restaurantId, tokenId, captain) {
   if (existingId) {
     const { data: existing } = await supabaseAdmin
       .from('employees')
-      .select('id, full_name, whatsapp_number, phone')
+      .select('id, full_name, whatsapp_number, phone, is_active')
       .eq('id', existingId)
       .eq('restaurant_id', restaurantId)
       .maybeSingle();
-    if (existing) {
+    if (existing?.is_active) {
       return {
         captain_id:   existing.id,
         captain_name: existing.full_name,
@@ -184,12 +184,12 @@ async function getCaptainContactForToken(restaurantId, tokenNumber) {
 
   const { data: emp } = await supabaseAdmin
     .from('employees')
-    .select('id, full_name, whatsapp_number, phone')
+    .select('id, full_name, whatsapp_number, phone, is_active')
     .eq('id', captainId)
     .eq('restaurant_id', restaurantId)
     .maybeSingle();
 
-  if (!emp) return null;
+  if (!emp || !emp.is_active) return null;
 
   const waResult = validateAndNormalizeWhatsApp(emp.whatsapp_number || emp.phone || '');
   if (!waResult.value) return null;

@@ -2,7 +2,8 @@
 
 'use strict';
 
-const NOTIFY_ROLES = ['manager', 'kitchen_staff', 'captain', 'waiter', 'owner'];
+// Roles that receive operational WhatsApp alerts (kitchen/waiter use KDS/portal only).
+const NOTIFY_ROLES = ['manager', 'captain', 'owner'];
 
 /**
  * Normalize and validate a WhatsApp number for storage / Cloud API.
@@ -43,6 +44,15 @@ function validateAndNormalizeWhatsApp(raw, { required = false } = {}) {
   return { value: digits };
 }
 
+function phoneDigitsMatch(a, b) {
+  const da = String(a || '').replace(/\D/g, '');
+  const db = String(b || '').replace(/\D/g, '');
+  if (!da || !db) return false;
+  if (da === db) return true;
+  if (da.length >= 10 && db.length >= 10) return da.slice(-10) === db.slice(-10);
+  return false;
+}
+
 function roleRequiresWhatsApp(role) {
   return NOTIFY_ROLES.includes(role);
 }
@@ -50,5 +60,6 @@ function roleRequiresWhatsApp(role) {
 module.exports = {
   NOTIFY_ROLES,
   validateAndNormalizeWhatsApp,
+  phoneDigitsMatch,
   roleRequiresWhatsApp,
 };

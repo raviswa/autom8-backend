@@ -21,7 +21,8 @@ const router  = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const { broadcastToRestaurant }   = require('../websocket');
 const { sendWhatsAppMessage, sendWhatsAppCatalogWithSpecials, sendWhatsAppInteractive, isWhatsAppConfigured } = require('../helpers/whatsapp');
-const { getManagerPhone } = require('../helpers/restaurantConfig');
+const { getOperationalAlertPhones } = require('../helpers/restaurantConfig');
+const { sendOperationalAlerts } = require('../helpers/operationalAlerts');
 const { validateScheduledDeliverySlot } = require('../helpers/deliverySlots');
 const { assignAndNotifyCaptainTakeaway } = require('../helpers/captainAssignment');
 const { syncConversationForTokenApproval, syncConversationForScheduledDeliveryApproval, syncConversationForScheduledTakeawayApproval } = require('../helpers/conversationState');
@@ -597,21 +598,19 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
     }).replace(',', ', ');
     const portalUrl = `${process.env.FRONTEND_URL || 'https://app.autom8.works'}/dashboard/manager`;
 
-    // Resolve manager phone (outlet row first, then global env)
-    let managerPhone = await getManagerPhone(restaurant_id);
-
     // notify=false skips the manager alert (e.g. duplicate guard). Default: send from API.
     const shouldNotify = req.query.notify !== 'false';
-    if (shouldNotify && managerPhone && await isWhatsAppConfigured(restaurant_id)) {
+    if (shouldNotify && await isWhatsAppConfigured(restaurant_id)) {
+      const alertPhones = await getOperationalAlertPhones(restaurant_id);
+      if (alertPhones.length > 0) {
       if (type === 'large_party') {
         const combo      = meta?.combo ?? [];
         const tableLines = combo.length > 0
           ? combo.map(t => `Table ${t[0]} (${t[2]}/${t[1]} seats)`).join(' + ')
           : `${token.pax} seats`;
-        sendWhatsAppMessage(
-          managerPhone,
+        sendOperationalAlerts(
+          restaurant_id,
           `🟣 *Large Party Request* — Token *${token.id}*\n👥 ${token.name} · *${token.pax} people*\n🕐 ${arrivalTime} IST\n\nProposed: ${tableLines}\n\n⚠️ *Action required:*\n${portalUrl}`,
-          restaurant_id
         );
       } else if (type === 'scheduled_delivery') {
         const schedAt = meta?.scheduled_at_label || meta?.scheduled_at || '—';
@@ -623,9 +622,9 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
           `🕐 Delivery at: *${schedAt}*\n📍 ${addr}\n💰 ${total}\n\n` +
           `Order: ${(meta?.order_text || '—').slice(0, 120)}\n\n` +
           `Approve before the customer pays.`;
-        const sent = await sendWhatsAppInteractive(
-          managerPhone,
-          {
+        const fallbackBody = `${body}\n\n⚠️ *Approve in portal before customer pays:*\n${portalUrl}`;
+        sendOperationalAlerts(restaurant_id, fallbackBody, {
+          interactive: {
             type: 'button',
             body: { text: body },
             footer: { text: 'Manager Portal — Pending approval' },
@@ -636,15 +635,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
               ],
             },
           },
-          restaurant_id,
-        );
-        if (!sent) {
-          sendWhatsAppMessage(
-            managerPhone,
-            `${body}\n\n⚠️ *Approve in portal before customer pays:*\n${portalUrl}`,
-            restaurant_id
-          );
-        }
+        });
       } else if (type === 'scheduled_takeaway') {
         const schedAt = meta?.scheduled_at_label || meta?.scheduled_at || '—';
         const kitchenAt = meta?.kitchen_start_at_label || meta?.kitchen_start_at || '—';
@@ -655,9 +646,9 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
           `🕐 Pickup at: *${schedAt}*\n👨‍🍳 Kitchen start: *${kitchenAt}*\n💰 ${total}\n\n` +
           `Order: ${(meta?.order_text || '—').slice(0, 120)}\n\n` +
           `Approve before the customer pays.`;
-        const sent = await sendWhatsAppInteractive(
-          managerPhone,
-          {
+        const fallbackBody = `${body}\n\n⚠️ *Approve in portal before customer pays:*\n${portalUrl}`;
+        sendOperationalAlerts(restaurant_id, fallbackBody, {
+          interactive: {
             type: 'button',
             body: { text: body },
             footer: { text: 'Manager Portal — Pending approval' },
@@ -668,30 +659,21 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
               ],
             },
           },
-          restaurant_id,
-        );
-        if (!sent) {
-          sendWhatsAppMessage(
-            managerPhone,
-            `${body}\n\n⚠️ *Approve in portal before customer pays:*\n${portalUrl}`,
-            restaurant_id
-          );
-        }
+        });
       } else if (type === 'dinein') {
-        sendWhatsAppMessage(
-          managerPhone,
+        sendOperationalAlerts(
+          restaurant_id,
           `🪑 *New Walk-in* — Token *${token.id}*\n` +
           `👤 ${token.name}, ${token.pax} ${token.pax === 1 ? 'person' : 'people'}\n` +
           `🍽️ Dine-in\n🕐 ${arrivalTime} IST\n\n` +
           `Open portal to assign table:\n${portalUrl}`,
-          restaurant_id
         );
       } else {
-        sendWhatsAppMessage(
-          managerPhone,
+        sendOperationalAlerts(
+          restaurant_id,
           `🪑 *New Walk-in* — Token *${token.id}*\n👤 ${token.name}\n📦 Takeaway\n🕐 ${arrivalTime} IST\n\n${portalUrl}`,
-          restaurant_id
         );
+      }
       }
     }
 
@@ -728,12 +710,6 @@ router.post('/manager-order-alert', requireKdsSecret, async (req, res) => {
       return res.status(400).json({ error: 'restaurant_id and token_number are required' });
     }
 
-    const managerPhone = await getManagerPhone(restaurant_id);
-    if (!managerPhone) {
-      console.warn(`[manager-order-alert] No manager phone for restaurant ${restaurant_id}`);
-      return res.status(400).json({ error: 'manager_phone not configured' });
-    }
-
     const isTakeaway = service_type === 'takeaway';
     const header = isTakeaway ? '📋 Order Received — Takeaway' : '📋 Order Received — Dine-in';
     const tablesLabel = isTakeaway ? 'Takeaway / Counter' : (table_number ?? 'Multi-table / TBD');
@@ -747,9 +723,13 @@ router.post('/manager-order-alert', requireKdsSecret, async (req, res) => {
       `Order: ${order_text || '—'}\nTotal: ₹${Number(total || 0).toFixed(0)}\n` +
       `────────────────────`;
 
-    await sendWhatsAppMessage(managerPhone, body, restaurant_id);
-    console.log(`[manager-order-alert] ✅ ${token_number} → ${managerPhone}`);
-    return res.json({ success: true, manager_phone: managerPhone });
+    const { sent, phones } = await sendOperationalAlerts(restaurant_id, body);
+    if (!sent) {
+      console.warn(`[manager-order-alert] No manager alert phones for restaurant ${restaurant_id}`);
+      return res.status(400).json({ error: 'No manager alert phones configured' });
+    }
+    console.log(`[manager-order-alert] ✅ ${token_number} → ${phones.join(', ')}`);
+    return res.json({ success: true, phones, sent });
   } catch (err) {
     console.error('[manager-order-alert]', err.message);
     return res.status(500).json({ error: err.message });

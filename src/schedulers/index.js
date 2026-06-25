@@ -17,7 +17,7 @@ const { supabaseAdmin }         = require('../config/supabase');
 const { sendWhatsAppMessage }   = require('../helpers/whatsapp');
 const { startFeedbackScheduler } = require('../routes/feedback');
 const { notifyKdsFromSessionContext } = require('../helpers/kdsNotifyClient');
-const { getManagerPhone } = require('../helpers/restaurantConfig');
+const { sendOperationalAlerts } = require('../helpers/operationalAlerts');
 const {
   releaseTablesForToken,
   releaseOrphanedOccupiedTables,
@@ -246,18 +246,12 @@ function startSpecialNotesTimeoutMonitor() {
             );
           }
 
-          const managerPhone = await getManagerPhone(session.restaurant_id);
-          if (managerPhone) {
-            try {
-              await sendWhatsAppMessage(
-                managerPhone,
-                `⏰ *Auto-Confirmed (Notes Timeout)*\nCustomer: ${customerName}\nToken: ${tokenNumber || '—'}\nBooking: ${bookingId || '—'}`,
-                session.restaurant_id,
-              );
-            } catch (waErr) {
-              console.warn(`[notes-timeout] Manager notify failed: ${waErr.message}`);
-            }
-          }
+          await sendOperationalAlerts(
+            session.restaurant_id,
+            `⏰ *Auto-Confirmed (Notes Timeout)*\nCustomer: ${customerName}\nToken: ${tokenNumber || '—'}\nBooking: ${bookingId || '—'}`,
+          ).catch(waErr => {
+            console.warn(`[notes-timeout] Manager notify failed: ${waErr.message}`);
+          });
 
           console.log(`[notes-timeout] ✅ Auto-confirmed session ${session.id}`);
         } catch (sessionErr) {

@@ -4,6 +4,9 @@
 'use strict';
 
 const { supabaseAdmin } = require('../config/supabase');
+const { validateAndNormalizeWhatsApp } = require('./phoneFormat');
+
+const OPERATIONAL_MANAGER_ROLES = ['manager', 'owner'];
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const _cache = new Map(); // restaurantId -> { data, expires_at }
@@ -34,7 +37,7 @@ function invalidateRestaurantConfigCache(restaurantId) {
   else _cache.clear();
 }
 
-/** Manager alert number — restaurants.manager_phone is canonical. */
+/** Manager alert number — restaurants.manager_phone is canonical (primary on-call). */
 async function getManagerPhone(restaurantId) {
   const row = await _loadRow(restaurantId);
   if (row?.manager_phone) return row.manager_phone;
@@ -44,6 +47,44 @@ async function getManagerPhone(restaurantId) {
     return process.env.MANAGER_WHATSAPP_NUMBER;
   }
   return null;
+}
+
+/**
+ * All numbers that receive outbound operational manager alerts:
+ * manager_phone + active manager/owner employees with WhatsApp (deduped).
+ */
+async function getOperationalAlertPhones(restaurantId) {
+  const seen = new Set();
+  const out = [];
+
+  const add = (raw) => {
+    const { value } = validateAndNormalizeWhatsApp(raw);
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    out.push(value);
+  };
+
+  const row = await _loadRow(restaurantId);
+  if (row?.manager_phone) add(row.manager_phone);
+
+  const { data: employees, error } = await supabaseAdmin
+    .from('employees')
+    .select('whatsapp_number, phone, role')
+    .eq('restaurant_id', restaurantId)
+    .eq('is_active', true)
+    .in('role', OPERATIONAL_MANAGER_ROLES);
+
+  if (error) {
+    console.warn(`[restaurantConfig] manager employees load failed: ${error.message}`);
+  } else {
+    for (const emp of employees ?? []) add(emp.whatsapp_number || emp.phone);
+  }
+
+  if (!out.length && process.env.MANAGER_WHATSAPP_NUMBER) {
+    add(process.env.MANAGER_WHATSAPP_NUMBER);
+  }
+
+  return out;
 }
 
 /** Meta Commerce catalog ID for this outlet. Never env-fallback when restaurantId is set. */
@@ -125,6 +166,7 @@ async function getWhatsAppIntegration(restaurantId) {
 
 module.exports = {
   getManagerPhone,
+  getOperationalAlertPhones,
   getMetaCatalogId,
   getWhatsAppIntegration,
   invalidateRestaurantConfigCache,

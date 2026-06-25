@@ -331,9 +331,10 @@ async function sendCommentPrompt(record) {
 }
 
 async function notifyManager(record, { rating, aspects, aspectLabelsList, comment, phone }) {
-  const { getManagerPhone } = require('./restaurantConfig');
-  const managerPhone = await getManagerPhone(record.restaurant_id);
-  if (!managerPhone) return;
+  const { sendOperationalAlerts } = require('./operationalAlerts');
+  const { getOperationalAlertPhones } = require('./restaurantConfig');
+  const phones = await getOperationalAlertPhones(record.restaurant_id);
+  if (!phones.length) return;
 
   const { contextLine, visitType } = await resolveVisitContext(record);
   const starBar = rating ? '⭐'.repeat(rating) + ` (${rating}/5)` : 'No rating';
@@ -343,8 +344,8 @@ async function notifyManager(record, { rating, aspects, aspectLabelsList, commen
     : '';
   const serviceLabel = visitType === 'takeaway' ? 'Takeaway' : visitType === 'dinein' ? 'Dine-in' : 'Visit';
 
-  await sendWhatsAppMessage(
-    managerPhone,
+  await sendOperationalAlerts(
+    record.restaurant_id,
     `📣 *Customer Feedback*\n────────────────────\n${urgency}` +
     `Customer: *${record.customer_name}*\nPhone:    +${phone}\n` +
     `Service:  ${serviceLabel}\n` +
@@ -353,7 +354,6 @@ async function notifyManager(record, { rating, aspects, aspectLabelsList, commen
     aspectBlock +
     (comment ? `*Comment:*\n${comment}\n────────────────────\n` : '') +
     `Received: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`,
-    record.restaurant_id,
   );
 }
 

@@ -285,7 +285,53 @@ router.post('/sync', authenticateToken, getRestaurantId, async (req, res) => {
     if (!['owner', 'manager', 'brand_owner'].includes(req.user_role))
       return res.status(403).json({ error: 'Unauthorized' });
     const result = await syncCatalogFromMeta(req.restaurant_id);
+    if (result.success) {
+      await writeAuditLog({
+        user_id: req.user.sub,
+        restaurant_id: req.restaurant_id,
+        action: 'Meta catalog sync',
+        details: { synced: result.synced, skipped: result.skipped, total: result.total },
+      });
+    }
     res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/catalog/status — last menu sync snapshot ─────────────────────────
+
+router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const restaurantId = req.restaurant_id;
+    const [{ data: latestItem }, { count: itemCount }, { data: auditRows }] = await Promise.all([
+      supabaseAdmin.from('menu_items')
+        .select('updated_at, meta_product_id')
+        .eq('restaurant_id', restaurantId)
+        .order('updated_at', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      supabaseAdmin.from('menu_items')
+        .select('id', { count: 'exact', head: true })
+        .eq('restaurant_id', restaurantId),
+      supabaseAdmin.from('audit_logs')
+        .select('created_at, details')
+        .eq('restaurant_id', restaurantId)
+        .eq('action', 'Meta catalog sync')
+        .order('created_at', { ascending: false })
+        .limit(1),
+    ]);
+
+    const lastMetaSync = auditRows?.[0]?.created_at || null;
+    const lastSync = lastMetaSync || latestItem?.updated_at || null;
+
+    res.json({
+      success: true,
+      lastSync,
+      lastMetaSync,
+      itemCount: itemCount ?? 0,
+      hasMetaLinkedItems: Boolean(latestItem?.meta_product_id),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

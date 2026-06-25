@@ -22,9 +22,11 @@ const {
   NOTIFY_ROLES,
   validateAndNormalizeWhatsApp,
   roleRequiresWhatsApp,
+  phoneDigitsMatch,
 } = require('../helpers/phoneFormat');
 const { writeAuditLog } = require('../helpers/auditLog');
 const { requestPasswordReset } = require('../helpers/passwordReset');
+const { invalidateRestaurantConfigCache } = require('../helpers/restaurantConfig');
 
 // Roles a manager is allowed to manage (cannot touch own level or above)
 const MANAGER_CAN_MANAGE = ['kitchen_staff', 'captain', 'waiter', 'marketing'];
@@ -359,6 +361,41 @@ router.put('/:id/terminate', authenticateToken, getRestaurantId, async (req, res
     if (req.params.id === req.user.sub)
       return res.status(400).json({ error: 'You cannot terminate your own account' });
 
+    const { data: restaurant } = await supabaseAdmin
+      .from('restaurants')
+      .select('manager_phone')
+      .eq('id', req.restaurant_id)
+      .maybeSingle();
+
+    let managerPhoneCleared = false;
+    const empWa = target.whatsapp_number || target.phone || '';
+    if (restaurant?.manager_phone && phoneDigitsMatch(empWa, restaurant.manager_phone)) {
+      await supabaseAdmin
+        .from('restaurants')
+        .update({ manager_phone: null, updated_at: new Date().toISOString() })
+        .eq('id', req.restaurant_id);
+      invalidateRestaurantConfigCache(req.restaurant_id);
+      managerPhoneCleared = true;
+      console.log(`[staff] Cleared manager_phone for ${req.restaurant_id} (terminated ${target.full_name})`);
+    }
+
+    if (target.role === 'captain') {
+      const { data: openTokens } = await supabaseAdmin
+        .from('walk_in_tokens')
+        .select('id, meta')
+        .eq('restaurant_id', req.restaurant_id)
+        .in('status', ['takeaway', 'waiting', 'pending_approval']);
+
+      for (const row of openTokens ?? []) {
+        if (row.meta?.captain_id !== target.id) continue;
+        const meta = { ...(row.meta || {}) };
+        delete meta.captain_id;
+        delete meta.captain_name;
+        delete meta.captain_assigned_at;
+        await supabaseAdmin.from('walk_in_tokens').update({ meta }).eq('id', row.id);
+      }
+    }
+
     // ── Deactivate in employees table ────────────────────────────────────────
     const { error: updateErr } = await supabaseAdmin
       .from('employees')
@@ -406,6 +443,8 @@ router.put('/:id/terminate', authenticateToken, getRestaurantId, async (req, res
     res.json({
       success: true,
       message: `${target.full_name}'s access has been revoked.`,
+      manager_phone_cleared: managerPhoneCleared,
+      requires_manager_phone_update: managerPhoneCleared,
     });
 
   } catch (err) {
@@ -431,9 +470,9 @@ router.get('/roles', authenticateToken, getRestaurantId, async (req, res) => {
   const ROLE_META = {
     owner:         { label: 'Owner',         description: 'Full access to all features and settings'     },
     manager:       { label: 'Manager',        description: 'Token management, KDS, reports, marketing'   },
-    kitchen_staff: { label: 'Kitchen Staff',  description: 'KDS only — marks orders in-progress/ready'  },
-    captain:       { label: 'Captain',        description: 'Takeaway fulfillment, delivers food to table'},
-    waiter:        { label: 'Waiter',         description: 'Sees ready orders, marks as served'          },
+    kitchen_staff: { label: 'Kitchen Staff',  description: 'KDS only — orders appear on kitchen display'  },
+    captain:       { label: 'Captain',        description: 'Takeaway fulfillment — WhatsApp pickup alerts' },
+    waiter:        { label: 'Waiter',         description: 'Table service via kitchen display (no WhatsApp ops alerts)' },
     marketing:     { label: 'Marketing',      description: 'Campaigns, broadcast messages, analytics'    },
   };
 

@@ -601,19 +601,15 @@ async function handleWhatsAppOrder(message, metadata, preResolvedRestaurantId = 
     }
 
     // ── Manager notification ──────────────────────────────────────────────────
-    const { getManagerPhone } = require('../helpers/restaurantConfig');
-    const managerPhone = await getManagerPhone(restaurantId);
-    if (managerPhone) {
-      const itemLines = productItems
-        .map(i => `• ${i.quantity ?? 1}x ${i.product_retailer_id}`)
-        .join('\n');
-      sendWhatsAppMessage(
-        managerPhone,
-        `🍽️ *New WhatsApp Order*\nOrder: *${orderNumber}*\nTable: *${token.table_number}*\n` +
-        `Customer: ${token.name}\n\n${itemLines}\n\nTotal: ₹${total.toFixed(2)}`,
-        restaurantId,
-      ).catch(e => console.error('[waHandlers:order] Manager notify failed:', e.message));
-    }
+    const itemLines = productItems
+      .map(i => `• ${i.quantity ?? 1}x ${i.product_retailer_id}`)
+      .join('\n');
+    const { sendOperationalAlerts } = require('../helpers/operationalAlerts');
+    sendOperationalAlerts(
+      restaurantId,
+      `🍽️ *New WhatsApp Order*\nOrder: *${orderNumber}*\nTable: *${token.table_number}*\n` +
+      `Customer: ${token.name}\n\n${itemLines}\n\nTotal: ₹${total.toFixed(2)}`,
+    ).catch(e => console.error('[waHandlers:order] Manager notify failed:', e.message));
 
     // ── Order confirmation to customer ────────────────────────────────────────
     const oosWarning = skippedOos.length > 0
