@@ -11,23 +11,29 @@ function parseQrScanInput(raw) {
   let s = String(raw || '').trim();
   if (!s) return null;
 
-  s = s.replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
+  s = s.replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
 
   const urlMatch = s.match(/https?:\/\/[^"]+/i);
   if (urlMatch) {
     const cleanedUrl = urlMatch[0].replace(/[),.!?]+$/g, '');
     try {
       const u = new URL(cleanedUrl);
+      const queryId = u.searchParams.get('id') || u.searchParams.get('order_id') || u.searchParams.get('verify') || u.searchParams.get('token');
+      if (queryId && UUID_RE.test(queryId)) {
+        return { type: 'order_id', value: queryId };
+      }
       s = `${u.pathname}${u.search || ''}`;
     } catch (_) {
       // keep original string
     }
   }
 
-  const verifyMatch = s.match(/\/verify\/([^/?#\s]+)/i) || String(raw).match(/\/verify\/([^/?#\s]+)/i);
+  const verifyMatch = s.match(/\/verify\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/i)
+    || String(raw).match(/\/verify\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/i);
   if (verifyMatch) return { type: 'order_id', value: verifyMatch[1] };
 
-  const receiptMatch = s.match(/\/r\/([^/?#\s]+)/i) || String(raw).match(/\/r\/([^/?#\s]+)/i);
+  const receiptMatch = s.match(/\/r\/([^\/?#\s]+)/i)
+    || String(raw).match(/\/r\/([^\/?#\s]+)/i);
   if (receiptMatch) return { type: 'token', value: decodeURIComponent(receiptMatch[1]) };
 
   const ordMatch = String(raw).match(/ORD-(\d+)/i);
@@ -36,8 +42,8 @@ function parseQrScanInput(raw) {
   const uuidMatch = String(raw).match(UUID_RE);
   if (uuidMatch) return { type: 'order_id', value: uuidMatch[0] };
 
-  const tokenMatch = String(raw).match(/(T-\d{1,4}(?:[-\s]*\(?\d{2}[\/\-]\d{2}\)?|-\d+)?|#\d{1,4})/i);
-  if (tokenMatch) return { type: 'token', value: tokenMatch[1].replace(/^#/, '').trim() };
+  const tokenMatch = String(raw).match(/(#T-\d{1,4}|T-\d{1,4}(?:[-\s]*\(?\d{2}[\/\-]\d{2}\)?|\-\d+)?|#\d{1,4})/i);
+  if (tokenMatch) return { type: 'token', value: tokenMatch[1].replace(/^#/, '').replace(/^t-/i, 'T-').trim() };
 
   const token = s.replace(/^(token|order|receipt|code)[:\s]+/i, '').replace(/^#/, '').trim();
   if (token) return { type: 'token', value: token };
@@ -68,25 +74,45 @@ function buildTokenVariants(token) {
   if (!raw) return [];
 
   const normalized = raw.replace(/\s+/g, ' ').trim();
-  const variants = new Set([normalized, normalized.toUpperCase()]);
+  const upper = normalized.toUpperCase();
+  const lower = normalized.toLowerCase();
+  const variants = new Set([normalized, upper, lower]);
   const noHash = normalized.replace(/^#/, '').trim();
   variants.add(noHash);
   variants.add(`#${noHash}`);
+  variants.add(noHash.toUpperCase());
+  variants.add(`#${noHash.toUpperCase()}`);
+  variants.add(noHash.toLowerCase());
+  variants.add(`#${noHash.toLowerCase()}`);
 
   const parsedLabel = parsePortalTokenLabel(normalized);
   if (parsedLabel) {
     const { digits, monthKey } = parsedLabel;
     const paddedDigits = String(digits).padStart(3, '0');
     variants.add(digits);
+    variants.add(digits.toUpperCase());
+    variants.add(digits.toLowerCase());
     variants.add(`T-${digits}`);
+    variants.add(`t-${digits}`);
     variants.add(`#${digits}`);
+    variants.add(`#${digits.toUpperCase()}`);
+    variants.add(`#${digits.toLowerCase()}`);
     variants.add(`T-${monthKey}-${paddedDigits}`);
+    variants.add(`t-${monthKey}-${paddedDigits}`);
     variants.add(`T-${paddedDigits}`);
+    variants.add(`t-${paddedDigits}`);
   } else {
     const digits = noHash.replace(/^T-/i, '').trim();
-    variants.add(digits);
-    variants.add(`T-${digits}`);
-    variants.add(`#${digits}`);
+    if (digits) {
+      variants.add(digits);
+      variants.add(digits.toUpperCase());
+      variants.add(digits.toLowerCase());
+      variants.add(`T-${digits}`);
+      variants.add(`t-${digits}`);
+      variants.add(`#${digits}`);
+      variants.add(`#${digits.toUpperCase()}`);
+      variants.add(`#${digits.toLowerCase()}`);
+    }
 
     if (/^\d+$/.test(digits)) {
       const parts = new Intl.DateTimeFormat('en-CA', {
@@ -97,6 +123,7 @@ function buildTokenVariants(token) {
       const get = (t) => parts.find((p) => p.type === t)?.value || '';
       const monthKey = `${get('year')}${get('month')}`;
       variants.add(`T-${monthKey}-${digits.padStart(3, '0')}`);
+      variants.add(`t-${monthKey}-${digits.padStart(3, '0')}`);
     }
   }
 
@@ -212,6 +239,14 @@ async function resolveOrderIdForTakeawayScan(restaurantId, raw) {
 
   const byKds = await findOrderViaKdsToken(restaurantId, variants);
   if (byKds) return { order_id: byKds };
+
+  console.warn('[takeawayScanResolve] Unresolved QR scan', {
+    restaurantId,
+    raw,
+    parsed,
+    variants,
+    suffixes,
+  });
 
   return {
     error: 'No order found for this QR. Ask the customer to show the receipt QR from WhatsApp.',
