@@ -11,25 +11,38 @@ function parseQrScanInput(raw) {
   let s = String(raw || '').trim();
   if (!s) return null;
 
-  const urlMatch = s.match(/https?:\/\/[\S]+/i);
+  s = s.replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
+
+  const urlMatch = s.match(/https?:\/\/[^"]+/i);
   if (urlMatch) {
+    const cleanedUrl = urlMatch[0].replace(/[),.!?]+$/g, '');
     try {
-      const u = new URL(urlMatch[0]);
+      const u = new URL(cleanedUrl);
       s = `${u.pathname}${u.search || ''}`;
     } catch (_) {
       // keep original string
     }
   }
 
-  const verifyMatch = s.match(/\/verify\/([^/?#]+)/i);
+  const verifyMatch = s.match(/\/verify\/([^/?#\s]+)/i) || String(raw).match(/\/verify\/([^/?#\s]+)/i);
   if (verifyMatch) return { type: 'order_id', value: verifyMatch[1] };
 
-  const receiptMatch = s.match(/\/r\/([^/?#]+)/i);
+  const receiptMatch = s.match(/\/r\/([^/?#\s]+)/i) || String(raw).match(/\/r\/([^/?#\s]+)/i);
   if (receiptMatch) return { type: 'token', value: decodeURIComponent(receiptMatch[1]) };
 
-  if (UUID_RE.test(s)) return { type: 'order_id', value: s };
+  const ordMatch = String(raw).match(/ORD-(\d+)/i);
+  if (ordMatch) return { type: 'token', value: ordMatch[1] };
 
-  return { type: 'token', value: s.replace(/^#/, '').trim() };
+  const uuidMatch = String(raw).match(UUID_RE);
+  if (uuidMatch) return { type: 'order_id', value: uuidMatch[0] };
+
+  const tokenMatch = String(raw).match(/(T-\d{1,4}(?:[-\s]*\(?\d{2}[\/\-]\d{2}\)?|-\d+)?|#\d{1,4})/i);
+  if (tokenMatch) return { type: 'token', value: tokenMatch[1].replace(/^#/, '').trim() };
+
+  const token = s.replace(/^(token|order|receipt|code)[:\s]+/i, '').replace(/^#/, '').trim();
+  if (token) return { type: 'token', value: token };
+
+  return null;
 }
 
 function tokenSuffix(token) {
