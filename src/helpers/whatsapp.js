@@ -526,6 +526,12 @@ function isTakeawayOrder(serviceType, orderSource) {
   return svc === 'takeaway' || src === 'takeaway' || src.includes('takeaway');
 }
 
+function isDeliveryOrder(serviceType, orderSource) {
+  const svc = String(serviceType || '').toLowerCase();
+  const src = String(orderSource || '').toLowerCase();
+  return svc === 'delivery' || src === 'delivery' || src.includes('delivery');
+}
+
 async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
   try {
     const { data: updated, error: updateErr } = await supabaseAdmin
@@ -541,6 +547,7 @@ async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
 
     const { notifyCaptainTakeawayReady, orderNumberToToken } = require('./captainAssignment');
     const isTakeaway = isTakeawayOrder(kdsItem?.service_type, updated.source);
+    const isDelivery = isDeliveryOrder(kdsItem?.service_type, updated.source);
     const tokenNumber = kdsItem?.token_number || orderNumberToToken(updated.order_number);
     const phone = updated.customer_phone ?? kdsItem?.customer_phone ?? null;
 
@@ -555,12 +562,24 @@ async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
           `Please pick up at the counter. Show your receipt QR when you collect. 🛍️`,
           restaurantId,
         );
+      } else if (isDelivery) {
+        const tokenLabel = tokenNumber || null;
+        await sendWhatsAppMessage(
+          phone,
+          `✅ *Your delivery order is ready!*\n\n` +
+          (tokenLabel ? `Token: *${tokenLabel}*\n` : '') +
+          `Order: *${updated.order_number}*\n\n` +
+          `Our kitchen has finished preparing your order. It will be packed and ` +
+          `sent out to your delivery address shortly.\n\n` +
+          `You'll receive another message when it's on the way. 🛵`,
+          restaurantId,
+        );
       } else {
         await sendWhatsAppMessage(
           phone,
           `✅ *Your order is ready!*\n\nOrder: *${updated.order_number}*\n` +
           (updated.table?.table_number ? `Table: *${updated.table.table_number}*\n` : '') +
-          `\nYour food will be served shortly. Enjoy! 🍽️`,
+          `\nYour food will be served at your table shortly. Enjoy! 🍽️`,
           restaurantId,
         );
       }
