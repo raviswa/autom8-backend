@@ -326,6 +326,7 @@ async function runDineInAutoAssignJob() {
 module.exports = {
   runDineInAutoAssignJob,
   autoAssignDelayMs,
+  fetchAvailableTables,
   pickSingleTable,
   pickTableCombo,
 };

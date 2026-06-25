@@ -34,8 +34,10 @@ const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { requireKdsSecretOrJwt, requireKdsSecret } = require('../middleware/internalAuth');
 const { getKdsSecret } = require('../config/internalSecret');
 const { buildPortalTokenId, portalTokenMonthKey, parseMonthlyTokenId } = require('../helpers/portalTokens');
+const { fetchAvailableTables, pickTableCombo } = require('../helpers/dineInAutoAssign');
 
 const CHAT_SERVICE_URL = process.env.CHAT_SERVICE_URL || 'http://localhost:8001';
+const LARGE_PARTY_THRESHOLD = 8;
 
 /** Ask Python chat service to send Razorpay link after scheduled order approval. */
 async function triggerChatScheduledPayment(restaurantId, token) {
@@ -528,9 +530,29 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
       }
     }
 
+    const partySize = (type === 'takeaway' || type === 'scheduled_delivery' || type === 'scheduled_takeaway')
+      ? 1
+      : (parseInt(pax, 10) || 1);
+
+    // Manager walk-in sends type=dinein; large parties need multi-table combo + approval flow.
+    let resolvedType = type;
+    let resolvedMeta = { ...(meta || {}) };
+    if (resolvedType === 'dinein' && partySize > LARGE_PARTY_THRESHOLD) {
+      resolvedType = 'large_party';
+    }
+    if (resolvedType === 'large_party' && !Array.isArray(resolvedMeta.combo)) {
+      try {
+        const availTables = await fetchAvailableTables(restaurant_id);
+        const combo = pickTableCombo(availTables, partySize);
+        if (combo) resolvedMeta.combo = combo;
+      } catch (comboErr) {
+        console.warn('[tokens] large-party combo lookup failed (non-fatal):', comboErr.message);
+      }
+    }
+
     const tokenId = await generateTokenId(restaurant_id);
-    const status  = (type === 'large_party' || type === 'scheduled_delivery' || type === 'scheduled_takeaway') ? 'pending_approval'
-                  : type === 'takeaway'    ? 'takeaway'
+    const status  = (resolvedType === 'large_party' || resolvedType === 'scheduled_delivery' || resolvedType === 'scheduled_takeaway') ? 'pending_approval'
+                  : resolvedType === 'takeaway'    ? 'takeaway'
                   : 'waiting';
 
     const tokenRecord = {
@@ -538,11 +560,11 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
       restaurant_id,
       name:        name.trim(),
       phone:       phone ? String(phone).replace(/\D/g, '') : null,
-      type,
-      pax:         (type === 'takeaway' || type === 'scheduled_delivery' || type === 'scheduled_takeaway') ? 1 : (parseInt(pax) || 1),
+      type:        resolvedType,
+      pax:         partySize,
       status,
       arrived_at:  new Date().toISOString(),
-      meta:        meta || {},
+      meta:        resolvedMeta,
     };
 
     const { data: token, error: insertError } = await supabaseAdmin
@@ -561,9 +583,8 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
     let finalToken = token;
 
     // Static wait estimate for dine-in queue tokens
-    if (type === 'dinein' && status === 'waiting') {
+    if (resolvedType === 'dinein' && status === 'waiting') {
       try {
-        const partySize = parseInt(pax, 10) || 1;
         const estimate = await calculateWaitEstimate(
           supabaseAdmin,
           restaurant_id,
@@ -610,12 +631,13 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
     const portalUrl = `${process.env.FRONTEND_URL || 'https://app.autom8.works'}/dashboard/manager`;
 
     // notify=false skips the manager alert (e.g. duplicate guard). Default: send from API.
-    const shouldNotify = req.query.notify !== 'false';
+    // Staff JWT walk-ins skip manager WA alerts — they are already in the portal.
+    const shouldNotify = req.query.notify !== 'false' && !req.user;
     if (shouldNotify && await isWhatsAppConfigured(restaurant_id)) {
       const alertPhones = await getOperationalAlertPhones(restaurant_id);
       if (alertPhones.length > 0) {
-      if (type === 'large_party') {
-        const combo      = meta?.combo ?? [];
+      if (resolvedType === 'large_party') {
+        const combo      = resolvedMeta?.combo ?? [];
         const tableLines = combo.length > 0
           ? combo.map(t => `Table ${t[0]} (${t[2]}/${t[1]} seats)`).join(' + ')
           : `${token.pax} seats`;
@@ -623,7 +645,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
           restaurant_id,
           `🟣 *Large Party Request* — Token *${token.id}*\n👥 ${token.name} · *${token.pax} people*\n🕐 ${arrivalTime} IST\n\nProposed: ${tableLines}\n\n⚠️ *Action required:*\n${portalUrl}`,
         );
-      } else if (type === 'scheduled_delivery') {
+      } else if (resolvedType === 'scheduled_delivery') {
         const schedAt = meta?.scheduled_at_label || meta?.scheduled_at || '—';
         const addr    = (meta?.delivery_address || '—').slice(0, 80);
         const total   = meta?.total != null ? `₹${Number(meta.total).toFixed(0)}` : '—';
@@ -647,7 +669,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
             },
           },
         });
-      } else if (type === 'scheduled_takeaway') {
+      } else if (resolvedType === 'scheduled_takeaway') {
         const schedAt = meta?.scheduled_at_label || meta?.scheduled_at || '—';
         const kitchenAt = meta?.kitchen_start_at_label || meta?.kitchen_start_at || '—';
         const total   = meta?.total != null ? `₹${Number(meta.total).toFixed(0)}` : '—';
@@ -671,7 +693,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
             },
           },
         });
-      } else if (type === 'dinein') {
+      } else if (resolvedType === 'dinein') {
         sendOperationalAlerts(
           restaurant_id,
           `🪑 *New Walk-in* — Token *${token.id}*\n` +
@@ -1048,6 +1070,58 @@ router.put('/:id/assign', outletAuth, async (req, res) => {
   }
 });
 
+// ── PUT /api/tokens/:id/promote-large-party — waiting dine-in → large party approval ─
+
+router.put('/:id/promote-large-party', outletAuth, async (req, res) => {
+  try {
+    if (!['owner', 'manager', 'brand_owner', 'brand_manager'].includes(req.user_role)) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    const restaurantId = req.restaurant_id;
+
+    const { data: token } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .select('*')
+      .eq('id', req.params.id)
+      .eq('restaurant_id', restaurantId)
+      .single();
+    if (!token) return res.status(404).json({ error: 'Token not found' });
+    if (token.status !== 'waiting' || token.type !== 'dinein') {
+      return res.status(400).json({ error: 'Only waiting dine-in tokens can be promoted' });
+    }
+    const partySize = parseInt(token.pax, 10) || 1;
+    if (partySize <= LARGE_PARTY_THRESHOLD) {
+      return res.status(400).json({ error: `Party size must be over ${LARGE_PARTY_THRESHOLD}` });
+    }
+
+    const availTables = await fetchAvailableTables(restaurantId);
+    const combo = pickTableCombo(availTables, partySize);
+    const nextMeta = { ...(token.meta || {}) };
+    if (combo) nextMeta.combo = combo;
+
+    const { data: updated, error } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .update({
+        type: 'large_party',
+        status: 'pending_approval',
+        meta: nextMeta,
+      })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (error) throw error;
+
+    broadcastToRestaurant(restaurantId, {
+      type: 'TOKEN_UPDATED',
+      token: updated,
+      timestamp: new Date().toISOString(),
+    });
+    res.json({ success: true, token: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── PUT /api/tokens/:id/approve ───────────────────────────────────────────────
 
 router.put('/:id/approve', outletAuth, async (req, res) => {
@@ -1089,7 +1163,19 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
     }
 
     const combo        = token.meta?.combo ?? [];
-    const tableNumbers = combo.map(t => String(t[0]));
+    let tableNumbers = combo.map(t => String(t[0]));
+    if (tableNumbers.length === 0 && (parseInt(token.pax, 10) || 1) > LARGE_PARTY_THRESHOLD) {
+      try {
+        const availTables = await fetchAvailableTables(restaurantId);
+        const computed = pickTableCombo(availTables, token.pax);
+        if (computed) tableNumbers = computed.map(t => String(t[0]));
+      } catch (comboErr) {
+        console.warn('[tokens] approve combo recompute failed:', comboErr.message);
+      }
+    }
+    if (tableNumbers.length === 0) {
+      return res.status(409).json({ error: 'No suitable table combination available for this party size' });
+    }
     let tableIds       = [];
     if (tableNumbers.length > 0) {
       const { data: tableRows } = await supabaseAdmin
