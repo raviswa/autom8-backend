@@ -34,8 +34,10 @@ function calculateGST(subtotal, ratePercent = 5) {
   const cgst      = parseFloat(((subtotal * halfRate) / 100).toFixed(2));
   const sgst      = parseFloat(((subtotal * halfRate) / 100).toFixed(2));
   const totalTax  = parseFloat((cgst + sgst).toFixed(2));
-  const grandTotal = parseFloat((subtotal + totalTax).toFixed(2));
-  return { cgst, sgst, totalTax, grandTotal };
+  const grandTotalUnrounded = parseFloat((subtotal + totalTax).toFixed(2));
+  const grandTotal = Math.round(grandTotalUnrounded);
+  const roundOff   = parseFloat((grandTotal - grandTotalUnrounded).toFixed(2));
+  return { cgst, sgst, totalTax, grandTotal, roundOff, grandTotalUnrounded };
 }
 
 // ── buildInvoicePayload ────────────────────────────────────────────────────────
@@ -43,7 +45,7 @@ function calculateGST(subtotal, ratePercent = 5) {
 function buildInvoicePayload(order, restaurant, gstRate = 5) {
   const subtotal       = parseFloat(order.subtotal ?? 0);
   const deliveryCharge = parseFloat(order.delivery_charge ?? 0);
-  const { cgst, sgst, grandTotal } = calculateGST(subtotal, gstRate);
+  const { cgst, sgst, grandTotal, roundOff } = calculateGST(subtotal, gstRate);
   const finalTotal = parseFloat((grandTotal + deliveryCharge).toFixed(2));
 
   return {
@@ -65,6 +67,7 @@ function buildInvoicePayload(order, restaurant, gstRate = 5) {
       sgst_rate_pct:                gstRate / 2,
       total_gst:                    parseFloat((cgst + sgst).toFixed(2)),
       packaging_or_delivery_charge: deliveryCharge,
+      round_off:                    roundOff,
       grand_total:                  finalTotal,
     },
     line_items: (order.order_items ?? []).map(oi => ({

@@ -87,6 +87,23 @@ def _font(paths: list[str], size: int):
 
 # ─── Data model ───────────────────────────────────────────────────────────────
 
+def default_footer_for_service(service_type: str) -> str:
+    st = (service_type or "").replace("-", "_").lower()
+    if st == "takeaway":
+        return "Thanks! Visit Again."
+    if st == "delivery":
+        return "Thank you! We hope to serve you again."
+    if st == "reserve_table":
+        return "We look forward to welcoming you!"
+    return "Thank you for dining with us!"
+
+
+# Item table column anchors (px from left)
+_COL_QTY   = 248
+_COL_PRICE = 308
+_COL_AMT   = RECEIPT_WIDTH - PADDING
+
+
 @dataclass
 class LineItem:
     """One line on the bill."""
@@ -119,6 +136,9 @@ class ReceiptData:
     restaurant_address: str = ""
     restaurant_phone: str = ""
     restaurant_gstin: str = ""
+    restaurant_fssai: str = ""
+    restaurant_sac: str = "996331"   # SAC 996331 — restaurant / catering services
+    restaurant_tagline: str = ""     # e.g. franchise line under the name
     restaurant_wa_number: str = ""
     restaurant_website: str = ""    # e.g. "https://munafe.in"
 
@@ -126,8 +146,12 @@ class ReceiptData:
     token_number: str = ""
     table_number: str = ""
     service_type: str = "dine_in"
-    order_datetime: str = ""
+    order_datetime: str = ""         # legacy display string
+    order_date: str = ""             # dd/mm/yy
+    order_time: str = ""             # HH:MM (24h)
     receipt_number: str = ""
+    bill_number: str = ""
+    cashier_name: str = ""
 
     # ── Customer ───────────────────────────────────────────────────────────
     customer_name: str = ""
@@ -145,17 +169,29 @@ class ReceiptData:
     discount: float = 0.0
     discount_label: str = "Discount"
     payment_mode: str = "Cash"
+    round_to_integer: bool = True    # Indian retail bills round grand total to ₹
 
     # ── Extras ─────────────────────────────────────────────────────────────
     special_notes: str = ""
-    footer_message: str = "Thank you for dining with us! 😊"
+    footer_message: str = ""
     receipt_url: str = ""              # if set, QR links here; else falls back to WA reorder
 
     def __post_init__(self):
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        if not self.order_date:
+            self.order_date = now.strftime("%d/%m/%y")
+        if not self.order_time:
+            self.order_time = now.strftime("%H:%M")
         if not self.order_datetime:
-            self.order_datetime = datetime.now(
-                ZoneInfo("Asia/Kolkata")
-            ).strftime("%d %b %Y, %I:%M %p")
+            self.order_datetime = now.strftime("%d %b %Y, %I:%M %p")
+        if not self.bill_number and self.receipt_number:
+            self.bill_number = self.receipt_number
+        if not self.footer_message:
+            self.footer_message = default_footer_for_service(self.service_type)
+
+    @property
+    def total_qty(self) -> int:
+        return sum(max(1, int(i.qty or 1)) for i in self.items)
 
     @property
     def items_subtotal(self) -> float:
@@ -183,16 +219,38 @@ class ReceiptData:
         return round(self.gst_amount / 2, 2)
 
     @property
-    def grand_total(self) -> float:
+    def pre_gst_total(self) -> float:
+        """Subtotal before GST (items + parcel + delivery)."""
+        return self.taxable_amount
+
+    @property
+    def grand_total_unrounded(self) -> float:
         base = self.taxable_amount + self.gst_amount
         return round(base - self.discount, 2)
+
+    @property
+    def grand_total(self) -> float:
+        raw = self.grand_total_unrounded
+        if self.round_to_integer:
+            return float(round(raw))
+        return raw
+
+    @property
+    def round_off(self) -> float:
+        if not self.round_to_integer:
+            return 0.0
+        return round(self.grand_total - self.grand_total_unrounded, 2)
 
     @classmethod
     def from_booking_session(cls, session_state: dict, cart: dict, restaurant: dict) -> "ReceiptData":
         service_type = session_state.get("service_type", "dine_in")
         return cls(
             restaurant_name=restaurant.get("name", ""),
+            restaurant_tagline=restaurant.get("receipt_tagline") or "",
+            restaurant_fssai=restaurant.get("fssai_license") or "",
+            restaurant_sac=restaurant.get("sac_code") or "996331",
             restaurant_wa_number=restaurant.get("whatsapp_number", ""),
+            restaurant_gstin=restaurant.get("gstin", ""),
             token_number=str(session_state.get("display_token") or
                              session_state.get("token_number") or ""),
             table_number=str(session_state.get("table_number") or ""),
@@ -256,6 +314,19 @@ class ReceiptRenderer:
         self.draw.text((RECEIPT_WIDTH - PADDING - tw, self.y), right, fill=color_r, font=fr)
         self.y += LINE_SPACING
 
+    def _item_row(self, name: str, qty: int, unit_price: float, amount: float):
+        """Four-column line: Item | Qty | Price | Amount."""
+        font = self.f_small
+        name_show = name if len(name) <= 22 else name[:20] + "…"
+        self.draw.text((PADDING, self.y), name_show, fill=COLOR_DARK, font=font)
+        self.draw.text((_COL_QTY, self.y), str(qty), fill=COLOR_DARK, font=font)
+        price_txt = f"{unit_price:.2f}" if unit_price > 0 else ""
+        amt_txt = f"{amount:.2f}" if amount > 0 else ""
+        self.draw.text((_COL_PRICE, self.y), price_txt, fill=COLOR_DARK, font=self.f_mono)
+        tw = self._tw(amt_txt, self.f_mono)
+        self.draw.text((_COL_AMT - tw, self.y), amt_txt, fill=COLOR_DARK, font=self.f_mono)
+        self.y += LINE_SPACING - 4
+
     def _divider(self, style: str = "solid", gap: int = 8):
         self.y += gap
         if style == "dashed":
@@ -277,14 +348,26 @@ class ReceiptRenderer:
     def _section_header(self):
         d = self.data
         self._gap(4)
-        self._center(d.restaurant_name, self.f_title, COLOR_DARK)
+        self._center(d.restaurant_name.upper(), self.f_title, COLOR_DARK)
+        if d.restaurant_tagline:
+            self._center(d.restaurant_tagline, self.f_small, COLOR_MID)
         if d.restaurant_address:
-            for line in d.restaurant_address.split("\n"):
-                self._center(line.strip(), self.f_small, COLOR_LIGHT)
+            for line in d.restaurant_address.replace(",", "\n").split("\n"):
+                line = line.strip()
+                if line:
+                    self._center(line, self.f_small, COLOR_LIGHT)
         if d.restaurant_phone:
-            self._center(f"Ph: {d.restaurant_phone}", self.f_small, COLOR_LIGHT)
+            phones = d.restaurant_phone.replace(",", " / ")
+            self._center(f"Phone: {phones}", self.f_small, COLOR_LIGHT)
         if d.restaurant_gstin:
-            self._center(f"GSTIN: {d.restaurant_gstin}", self.f_small, COLOR_LIGHT)
+            self._center(f"GSTNO-{d.restaurant_gstin}", self.f_small, COLOR_MID)
+        reg_parts = []
+        if d.restaurant_fssai:
+            reg_parts.append(f"FSSAI LICENSE NO:{d.restaurant_fssai}")
+        if d.restaurant_sac:
+            reg_parts.append(f"SAC {d.restaurant_sac}")
+        if reg_parts:
+            self._center(" | ".join(reg_parts), self.f_small, COLOR_LIGHT)
         if d.restaurant_website:
             self._center(d.restaurant_website, self.f_small, COLOR_GREEN)
         self._gap(4)
@@ -292,22 +375,33 @@ class ReceiptRenderer:
     def _section_order_meta(self):
         d = self.data
         self._divider("solid")
-        svc_label = {
-            "dine_in":       "Dine-in",
-            "takeaway":      "Takeaway",
+        svc_labels = {
+            "dine_in":       "Dine In",
+            "takeaway":      "Take Away",
             "delivery":      "Delivery",
             "reserve_table": "Reservation",
-        }.get(d.service_type, d.service_type.replace("_", " ").title())
+        }
+        svc_label = svc_labels.get(d.service_type, d.service_type.replace("_", " ").title())
+
+        if d.customer_name:
+            self._two_col("Name:", d.customer_name, font_r=self.f_bold)
+        self._two_col("Date:", d.order_date)
+        self._two_col("Time:", d.order_time, color_r=COLOR_MID)
+        # Service type on the right, like printed POS bills
+        self.draw.text((PADDING, self.y), "Order type:", fill=COLOR_MID, font=self.f_small)
+        tw = self._tw(svc_label, self.f_bold)
+        self.draw.text((RECEIPT_WIDTH - PADDING - tw, self.y), svc_label,
+                       fill=COLOR_DARK, font=self.f_bold)
+        self.y += LINE_SPACING
+        if d.cashier_name:
+            self._two_col("Cashier:", d.cashier_name)
+        if d.bill_number:
+            self._two_col("Bill No.:", str(d.bill_number), font_r=self.f_mono)
         if d.token_number:
-            self._two_col("Token", str(d.token_number), bold_right=True,
-                          color_r=COLOR_GREEN, font_r=self.f_bold)
+            self._two_col("Token No.:", str(d.token_number), bold_right=True,
+                          color_r=COLOR_DARK, font_r=self.f_bold)
         if d.table_number:
-            self._two_col("Table", str(d.table_number))
-        self._two_col("Service", svc_label)
-        self._two_col("Date & Time", d.order_datetime)
-        if d.receipt_number:
-            self._two_col("Receipt #", d.receipt_number,
-                          color_r=COLOR_LIGHT, font_r=self.f_small)
+            self._two_col("Table:", str(d.table_number))
 
     def _section_customer(self):
         d = self.data
@@ -330,18 +424,16 @@ class ReceiptRenderer:
         if not d.items:
             return
         self._divider("dashed")
-        self._two_col("ITEM", "AMOUNT", font_l=self.f_bold, font_r=self.f_bold,
-                      color_l=COLOR_MID, color_r=COLOR_MID)
-        self._gap(2)
+        # Column headers
+        self.draw.text((PADDING, self.y), "Item", fill=COLOR_MID, font=self.f_bold)
+        self.draw.text((_COL_QTY, self.y), "Qty.", fill=COLOR_MID, font=self.f_bold)
+        self.draw.text((_COL_PRICE, self.y), "Price", fill=COLOR_MID, font=self.f_bold)
+        tw = self._tw("Amount", self.f_bold)
+        self.draw.text((_COL_AMT - tw, self.y), "Amount", fill=COLOR_MID, font=self.f_bold)
+        self.y += LINE_SPACING - 2
+        self._divider("dashed", gap=4)
         for item in d.items:
-            name = item.name
-            if len(name) > 28:
-                name = name[:26] + "…"
-            qty_label = f"{name}"
-            if item.qty > 1:
-                qty_label += f"  x{item.qty}"
-            amt = f"Rs.{item.total:.2f}" if item.unit_price > 0 else ""
-            self._two_col(qty_label, amt, font_r=self.f_mono)
+            self._item_row(item.name, item.qty, item.unit_price, item.total)
         if d.special_notes:
             self._gap(4)
             self._left("Notes:", self.f_small, COLOR_LIGHT)
@@ -353,29 +445,36 @@ class ReceiptRenderer:
     def _section_totals(self):
         d = self.data
         self._divider("solid")
+        if d.items:
+            self._two_col("Total Qty:", str(d.total_qty), color_l=COLOR_MID, color_r=COLOR_MID)
         if d.items and any(i.unit_price > 0 for i in d.items):
-            self._two_col("Items subtotal", f"Rs.{d.items_subtotal:.2f}",
-                          color_l=COLOR_MID, color_r=COLOR_MID)
+            self._two_col("Sub Total:", f"{d.pre_gst_total:.2f}",
+                          color_l=COLOR_MID, color_r=COLOR_MID, font_r=self.f_mono)
         if d.parcel_charge > 0:
-            self._two_col("Parcel / packaging", f"Rs.{d.parcel_charge:.2f}",
-                          color_l=COLOR_MID, color_r=COLOR_MID)
+            self._two_col("Parcel / packaging:", f"{d.parcel_charge:.2f}",
+                          color_l=COLOR_MID, color_r=COLOR_MID, font_r=self.f_mono)
         if d.delivery_charge > 0:
-            self._two_col("Delivery charge", f"Rs.{d.delivery_charge:.2f}",
-                          color_l=COLOR_MID, color_r=COLOR_MID)
+            self._two_col("Delivery charge:", f"{d.delivery_charge:.2f}",
+                          color_l=COLOR_MID, color_r=COLOR_MID, font_r=self.f_mono)
         if d.gst_rate > 0 and d.gst_amount > 0:
             half = d.gst_rate / 2
-            self._two_col(f"CGST ({half:.1f}%)", f"Rs.{d.cgst:.2f}",
-                          color_l=COLOR_MID, color_r=COLOR_MID)
-            self._two_col(f"SGST ({half:.1f}%)", f"Rs.{d.sgst:.2f}",
-                          color_l=COLOR_MID, color_r=COLOR_MID)
+            self._two_col(f"CGST@{half:.1f}%:", f"{d.cgst:.2f}",
+                          color_l=COLOR_MID, color_r=COLOR_MID, font_r=self.f_mono)
+            self._two_col(f"SGST@{half:.1f}%:", f"{d.sgst:.2f}",
+                          color_l=COLOR_MID, color_r=COLOR_MID, font_r=self.f_mono)
         if d.discount > 0:
-            self._two_col(d.discount_label, f"- Rs.{d.discount:.2f}",
-                          color_l=COLOR_MID, color_r=COLOR_MID)
+            self._two_col(d.discount_label, f"- {d.discount:.2f}",
+                          color_l=COLOR_MID, color_r=COLOR_MID, font_r=self.f_mono)
+        if d.round_to_integer and abs(d.round_off) >= 0.01:
+            sign = "+" if d.round_off > 0 else ""
+            self._two_col("Round off:", f"{sign}{d.round_off:.2f}",
+                          color_l=COLOR_MID, color_r=COLOR_MID, font_r=self.f_mono)
         self._divider("solid", gap=4)
-        self._two_col("TOTAL", f"Rs.{d.grand_total:.2f}",
+        grand_txt = f"₹ {d.grand_total:.2f}" if not d.round_to_integer else f"₹ {d.grand_total:.0f}.00"
+        self._two_col("Grand Total:", grand_txt,
                       font_l=self.f_heading, font_r=self.f_heading,
-                      color_r=COLOR_GREEN, bold_right=True)
-        self._two_col("Payment mode", d.payment_mode,
+                      color_r=COLOR_DARK, bold_right=True)
+        self._two_col("Payment mode:", d.payment_mode,
                       color_l=COLOR_LIGHT, color_r=COLOR_MID,
                       font_l=self.f_small, font_r=self.f_small)
 
@@ -404,10 +503,10 @@ class ReceiptRenderer:
         self.y += qr_img.height + 8
 
     def _section_footer(self):
+        self._gap(8)
+        self._center(self.data.footer_message, self.f_body, COLOR_DARK)
         self._gap(6)
-        self._center(self.data.footer_message, self.f_small, COLOR_MID)
-        self._gap(4)
-        self._center("Powered by Munafe", self.f_small, COLOR_LIGHT)
+        self._center("Invoice", self.f_small, COLOR_LIGHT)
         self._gap(4)
 
     def render(self) -> Image.Image:
@@ -445,6 +544,23 @@ class ReceiptRenderer:
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 
+def restaurant_receipt_fields(restaurant: dict) -> dict:
+    """Map restaurants row → ReceiptData restaurant_* kwargs."""
+    if not restaurant:
+        return {}
+    return {
+        "restaurant_name":    restaurant.get("name") or restaurant.get("display_name") or "",
+        "restaurant_tagline": restaurant.get("receipt_tagline") or "",
+        "restaurant_address": restaurant.get("address") or "",
+        "restaurant_phone":   restaurant.get("phone") or "",
+        "restaurant_gstin":   restaurant.get("gstin") or "",
+        "restaurant_fssai":   restaurant.get("fssai_license") or "",
+        "restaurant_sac":     restaurant.get("sac_code") or "996331",
+        "restaurant_wa_number": restaurant.get("whatsapp_number") or "",
+        "restaurant_website": restaurant.get("website") or "",
+    }
+
+
 def generate_receipt(data: ReceiptData, output_path: Path | None = None) -> Path:
     OUTPUT_DIR.mkdir(exist_ok=True)
     if output_path is None:
@@ -459,29 +575,30 @@ def generate_receipt(data: ReceiptData, output_path: Path | None = None) -> Path
 # ─── Demo / CLI ───────────────────────────────────────────────────────────────
 
 DEMO_DATA = ReceiptData(
-    restaurant_name="Murugan Idli Shop",
-    restaurant_address="15, Gandhi Road, T. Nagar\nChennai - 600017",
-    restaurant_phone="919444109431",
-    restaurant_gstin="33AAAAA0000A1Z5",
+    restaurant_name="Sukabala Foods Veg",
+    restaurant_tagline="(Franchisee of Sangeetha's Desi Mane)",
+    restaurant_address="No. 93 Arcot Road, Virugambakkam, Chennai-92",
+    restaurant_phone="044 42697888, 7823958669",
+    restaurant_gstin="33ADVFS6781J1Z7",
+    restaurant_fssai="12419002004097",
+    restaurant_sac="996331",
     restaurant_wa_number="919500996033",
-    token_number="#007",
-    table_number="4",
-    service_type="dine_in",
-    order_datetime="06 Jun 2026, 08:30 PM",
-    receipt_number="INV-2026-007",
-    customer_name="Ravi Sharma",
-    customer_phone="919444109431",
+    token_number="1644",
+    service_type="takeaway",
+    order_date="25/06/26",
+    order_time="22:00",
+    bill_number="21256",
+    cashier_name="VENKADESAN",
+    customer_name="Guest",
     items=[
-        LineItem("Chicken Biryani",  qty=2, unit_price=180.0),
-        LineItem("Onion Parotta",    qty=4, unit_price=30.0),
-        LineItem("Chicken Salna",    qty=2, unit_price=60.0),
-        LineItem("Masala Chai",      qty=2, unit_price=30.0),
+        LineItem("Kal Dosa (2pcs)", qty=1, unit_price=135.0),
+        LineItem("Idly (1pc)",      qty=3, unit_price=30.0),
+        LineItem("Beeda",           qty=3, unit_price=14.28),
     ],
     gst_rate=5.0,
     gst_inclusive=False,
-    payment_mode="UPI",
-    special_notes="Extra spicy, no onion for biryani",
-    footer_message="Thank you for dining with us! 😊",
+    payment_mode="Cash",
+    footer_message="Thanks! Visit Again.",
 )
 
 

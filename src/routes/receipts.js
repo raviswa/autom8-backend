@@ -74,10 +74,20 @@ router.get('/verify/:orderId', async (req, res) => {
 
     const itemRows = lineItems.map(li => `
       <tr>
-        <td class="item-name">${escHtml(li.name)}${(li.quantity ?? 1) > 1 ? ` <span class="item-qty-inline">×${li.quantity}</span>` : ''}</td>
+        <td class="item-name">${escHtml(li.name)}</td>
+        <td class="item-qty">${li.quantity ?? 1}</td>
+        <td class="item-unit">₹${(li.unit_price ?? 0).toFixed(2)}</td>
         <td class="item-price">₹${(li.line_total ?? 0).toFixed(2)}</td>
       </tr>`
     ).join('');
+
+    const totalQty = lineItems.reduce((s, li) => s + (li.quantity ?? 1), 0);
+    const roundOffRow = Math.abs(fb.round_off ?? 0) >= 0.01
+      ? `<div class="total-row"><span>Round off</span><span>${fb.round_off > 0 ? '+' : ''}₹${(fb.round_off ?? 0).toFixed(2)}</span></div>`
+      : '';
+    const thanksFooter = (im.fulfillment_type ?? '').includes('takeaway')
+      ? 'Thanks! Visit Again.'
+      : 'Thank you for dining with us!';
 
     const deliveryRow = (fb.packaging_or_delivery_charge ?? 0) > 0
       ? `<div class="total-row"><span>Delivery charge</span><span>₹${fb.packaging_or_delivery_charge.toFixed(2)}</span></div>`
@@ -113,8 +123,8 @@ router.get('/verify/:orderId', async (req, res) => {
     .dv { border: none; border-top: 1px dashed #e0e0dc; margin: 14px 0; }
     .items { width: 100%; border-collapse: collapse; }
     .items td { padding: 7px 0; vertical-align: top; }
-    .item-name { font-size: 13px; color: #222; padding-right: 10px; }
-    .item-qty-inline { font-size: 11px; color: #aaa; }
+    .item-name { font-size: 13px; color: #222; padding-right: 6px; }
+    .item-qty, .item-unit { font-size: 12px; color: #555; text-align: right; padding-right: 8px; white-space: nowrap; }
     .item-price { font-size: 13px; color: #222; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
     .totals { margin-top: 4px; }
     .total-row { display: flex; justify-content: space-between; font-size: 12px; color: #888; margin-bottom: 6px; }
@@ -142,15 +152,27 @@ router.get('/verify/:orderId', async (req, res) => {
       <div class="meta"><span class="lbl">Order type</span><span class="val">${escHtml(fulfillmentLabel)}</span></div>
       ${im.gstin ? `<div class="meta"><span class="lbl">GSTIN</span><span class="val">${escHtml(im.gstin)}</span></div>` : ''}
       <hr class="dv" />
-      <table class="items"><tbody>${itemRows}</tbody></table>
+      <table class="items">
+        <thead><tr>
+          <th style="text-align:left;font-size:11px;color:#888">Item</th>
+          <th style="text-align:right;font-size:11px;color:#888">Qty</th>
+          <th style="text-align:right;font-size:11px;color:#888">Price</th>
+          <th style="text-align:right;font-size:11px;color:#888">Amount</th>
+        </tr></thead>
+        <tbody>${itemRows}</tbody>
+      </table>
       <hr class="dv" />
       <div class="totals">
-        <div class="total-row"><span>Subtotal</span><span>₹${(fb.subtotal_base_price ?? 0).toFixed(2)}</span></div>
-        <div class="total-row"><span>GST (CGST ${fb.cgst_rate_pct ?? 2.5}% + SGST ${fb.sgst_rate_pct ?? 2.5}%)</span><span>₹${(fb.total_gst ?? 0).toFixed(2)}</span></div>
+        <div class="total-row"><span>Total Qty</span><span>${totalQty}</span></div>
+        <div class="total-row"><span>Sub Total</span><span>₹${(fb.subtotal_base_price ?? 0).toFixed(2)}</span></div>
+        <div class="total-row"><span>CGST @${fb.cgst_rate_pct ?? 2.5}%</span><span>₹${(fb.cgst_amount ?? (fb.total_gst ?? 0) / 2).toFixed(2)}</span></div>
+        <div class="total-row"><span>SGST @${fb.sgst_rate_pct ?? 2.5}%</span><span>₹${(fb.sgst_amount ?? (fb.total_gst ?? 0) / 2).toFixed(2)}</span></div>
         ${deliveryRow}
-        <div class="total-row grand"><span>Total</span><span>₹${(fb.grand_total ?? 0).toFixed(2)}</span></div>
+        ${roundOffRow}
+        <div class="total-row grand"><span>Grand Total</span><span>₹${(fb.grand_total ?? 0).toFixed(0)}.00</span></div>
       </div>
       <div class="pay-note">💚 Payment can be made at the counter</div>
+      <p style="text-align:center;font-size:13px;color:#333;margin:12px 0 4px">${escHtml(thanksFooter)}</p>
       <div class="qr-section">
         <div class="qr-label">Scan to open this receipt</div>
         <div id="qrcode"></div>

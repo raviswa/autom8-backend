@@ -43,6 +43,7 @@ from tools.booking_mechanisms import (
     fetch_restaurant_info,
     upload_and_send_receipt,
     receipt_qr_url,
+    _restaurant_receipt_fields,
     notify_manager_order_alert,
     assign_and_notify_captain_takeaway,
 )
@@ -558,27 +559,25 @@ async def _send_receipt(
         return
     try:
         r_info = await fetch_restaurant_info(restaurant_id)
+        token_clean = str(token).lstrip("#").replace("T-", "")
         receipt_data = _ReceiptData(
-            restaurant_name=r_info.get("name", ""),
-            restaurant_address=r_info.get("address", ""),
-            restaurant_phone=r_info.get("phone", ""),
-            restaurant_gstin=r_info.get("gstin", ""),
-            restaurant_wa_number=r_info.get("whatsapp_number", ""),
-            restaurant_website=r_info.get("website", ""),
+            **(_restaurant_receipt_fields(r_info) if _restaurant_receipt_fields else {}),
             receipt_url=receipt_qr_url(token),
             token_number=token,
+            bill_number=token_clean[-6:] if token_clean else "",
             table_number=table_number,
             service_type=service_type,
             customer_name=customer_name,
             customer_phone=customer_phone,
             delivery_address=delivery_address,
             items=_LineItem.from_cart(cart_snapshot) if cart_snapshot else [],
-            gst_rate=gst_rate,
+            gst_rate=float(totals.get("gst_rate", gst_rate) if totals else gst_rate),
             gst_inclusive=False,
-            delivery_charge=delivery_charge,
-            parcel_charge=parcel_charge,
+            delivery_charge=float((totals or {}).get("delivery_charge", delivery_charge)),
+            parcel_charge=float((totals or {}).get("parcel_charge", parcel_charge)),
             payment_mode=payment_mode,
-            footer_message=footer_message,
+            footer_message=footer_message or None,
+            round_to_integer=True,
         )
         receipt_path = _generate_receipt(receipt_data)
         logger.info(f"[prepay-fulfill] Receipt saved: {receipt_path}")

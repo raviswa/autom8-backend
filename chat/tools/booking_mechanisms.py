@@ -116,11 +116,12 @@ try:
     from generate_receipt import generate_receipt as _generate_receipt
     from generate_receipt import ReceiptData as _ReceiptData
     from generate_receipt import LineItem as _LineItem
+    from generate_receipt import restaurant_receipt_fields as _restaurant_receipt_fields
     RECEIPT_AVAILABLE = True
     print("[receipt] ✅ generate_receipt loaded", flush=True)
 except ImportError as _e:
     RECEIPT_AVAILABLE = False
-    _generate_receipt = _ReceiptData = _LineItem = None
+    _generate_receipt = _ReceiptData = _LineItem = _restaurant_receipt_fields = None
     print(f"[receipt] ⚠️  generate_receipt not available: {_e}", flush=True)
 
 
@@ -165,7 +166,7 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict:
         resp = await get_http().get(
             f"{base}/rest/v1/restaurants",
             params={
-                "select": "name,display_name,cuisine_type,timezone,whatsapp_number,address,phone,gstin,website,city,state,parcel_charge_per_item,takeaway_ready_range,delivery_ready_range,kitchen_busy,restaurant_type,pickup_address,pickup_latitude,pickup_longitude,delivery_charge_default,delivery_charge_tiers,min_delivery_order_amount,min_takeaway_order_amount,scheduled_delivery_enabled,scheduled_takeaway_enabled,scheduled_kds_lead_minutes,max_delivery_radius_km,scheduled_slot_max_orders,schedule_buffer_minutes,schedule_rounding_minutes,payment_mode",
+                "select": "name,display_name,receipt_tagline,cuisine_type,timezone,whatsapp_number,address,phone,gstin,fssai_license,sac_code,website,city,state,parcel_charge_per_item,takeaway_ready_range,delivery_ready_range,kitchen_busy,restaurant_type,pickup_address,pickup_latitude,pickup_longitude,delivery_charge_default,delivery_charge_tiers,min_delivery_order_amount,min_takeaway_order_amount,scheduled_delivery_enabled,scheduled_takeaway_enabled,scheduled_kds_lead_minutes,max_delivery_radius_km,scheduled_slot_max_orders,schedule_buffer_minutes,schedule_rounding_minutes,payment_mode",
                 "id":     f"eq.{restaurant_id}",
                 "limit":  "1",
             },

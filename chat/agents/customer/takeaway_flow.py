@@ -65,6 +65,7 @@ from tools.booking_mechanisms import (
     fetch_restaurant_info,
     upload_and_send_receipt,
     receipt_qr_url,
+    _restaurant_receipt_fields,
     notify_manager_order_alert,
     assign_and_notify_captain_takeaway,
     cache_restaurant_pricing,
@@ -898,23 +899,21 @@ async def handle_takeaway_flow(
             if RECEIPT_AVAILABLE:
                 try:
                     r_info = await fetch_restaurant_info(restaurant_id)
+                    token_clean = str(display_token).lstrip("#").replace("T-", "")
                     receipt_data = _ReceiptData(
-                        restaurant_name=r_info.get("name", ""),
-                        restaurant_address=r_info.get("address", ""),
-                        restaurant_phone=r_info.get("phone", ""),
-                        restaurant_gstin=r_info.get("gstin", ""),
-                        restaurant_wa_number=r_info.get("whatsapp_number", ""),
-                        restaurant_website=r_info.get("website", ""),
+                        **(_restaurant_receipt_fields(r_info) if _restaurant_receipt_fields else {}),
                         receipt_url=receipt_qr_url(display_token),
                         token_number=display_token,
+                        bill_number=token_clean[-6:] if token_clean else "",
                         service_type="takeaway",
                         customer_name=customer_name,
                         customer_phone=customer_phone,
                         items=_LineItem.from_cart(cart_snapshot),
-                        gst_rate=5.0,
+                        gst_rate=float(totals.get("gst_rate", 5.0)),
                         gst_inclusive=False,
                         parcel_charge=totals.get("parcel_charge", 0),
                         payment_mode=session_state.get("payment_mode", "Cash"),
+                        round_to_integer=True,
                     )
                     receipt_path = _generate_receipt(receipt_data)
                     logger.info(f"[receipt] Takeaway receipt saved: {receipt_path}")
