@@ -164,6 +164,8 @@ async function findOrderViaBooking(restaurantId, variants, suffixes) {
     .order('created_at', { ascending: false })
     .limit(1);
 
+    console.log('[findOrderViaBooking]', { restaurantId, variants, bookings }); // ← ADD THIS
+
   const booking = bookings?.[0];
   if (!booking?.id) return null;
 
@@ -173,6 +175,9 @@ async function findOrderViaBooking(restaurantId, variants, suffixes) {
     .eq('booking_id', booking.id)
     .order('created_at', { ascending: false })
     .limit(1);
+
+    console.log('[findOrderViaBooking] orderItems for booking', booking.id, orderItems); // ← ADD THIS
+  
   if (orderItems?.[0]?.order_id) return orderItems[0].order_id;
 
   const bidShort = String(booking.id).replace(/-/g, '').slice(0, 8);
@@ -248,9 +253,18 @@ async function resolveOrderIdForTakeawayScan(restaurantId, raw) {
     suffixes,
   });
 
+  console.error('[takeawayScanResolve] Full debug', {
+  restaurantId,
+  raw,
+  parsed,
+  variants: variants.slice(0, 10), // first 10 for brevity
+  suffixes,
+});
+
   return {
     error: 'No order found for this QR. Ask the customer to show the receipt QR from WhatsApp.',
   };
+  
 }
 
 module.exports = {
