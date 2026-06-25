@@ -131,28 +131,33 @@ function buildTokenVariants(token) {
 }
 
 async function findOrderViaWalkInToken(restaurantId, variants) {
+   // Step 1: Find walk_in_token — id IS the token (e.g. 'T-2606-132')
   const { data: witRows } = await supabaseAdmin
     .from('walk_in_tokens')
-    .select('id')
+    .select('id, phone')
     .eq('restaurant_id', restaurantId)
-    .in('token_number', variants)
-    .order('created_at', { ascending: false })
+    .in('id', variants)
+    .order('arrived_at', { ascending: false })
     .limit(1);
 
   const wit = witRows?.[0];
-  if (!wit?.id) return null;
+  if (!wit?.id || !wit.phone) return null;
 
-  // Try order_items first (same pattern as bookings)
-  const { data: orderItems } = await supabaseAdmin
-    .from('order_items')
-    .select('order_id')
-    .eq('walk_in_token_id', wit.id)   // ← adjust FK name if different
+  // Step 2: Find most recent order by phone (within 6 hrs to avoid stale matches)
+  const since = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+
+  const { data: orders } = await supabaseAdmin
+    .from('orders')
+    .select('id')
+    .eq('restaurant_id', restaurantId)
+    .eq('customer_phone', wit.phone)
+    .gte('created_at', since)
     .order('created_at', { ascending: false })
     .limit(1);
 
-  if (orderItems?.[0]?.order_id) return orderItems[0].order_id;
-
-  // Fallback: check orders table directly
+  return orders?.[0]?.id || null;
+  
+   // Fallback: check orders table directly
   const { data: directOrder } = await supabaseAdmin
     .from('orders')
     .select('id')
@@ -277,7 +282,7 @@ async function resolveOrderIdForTakeawayScan(restaurantId, raw) {
   const byBooking = await findOrderViaBooking(restaurantId, variants, suffixes);
   if (byBooking) return { order_id: byBooking };
 
-  const byWalkIn = await findOrderViaWalkInToken(restaurantId, variants);
+  const byWalkIn = await findOrderViaWalkInToken(restaurantId, variants);  // ← ADD
   if (byWalkIn) return { order_id: byWalkIn };
 
   const byKds = await findOrderViaKdsToken(restaurantId, variants);
