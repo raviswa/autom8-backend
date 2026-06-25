@@ -11,9 +11,10 @@ function parseQrScanInput(raw) {
   let s = String(raw || '').trim();
   if (!s) return null;
 
-  if (/^https?:\/\//i.test(s)) {
+  const urlMatch = s.match(/https?:\/\/[\S]+/i);
+  if (urlMatch) {
     try {
-      const u = new URL(s);
+      const u = new URL(urlMatch[0]);
       s = `${u.pathname}${u.search || ''}`;
     } catch (_) {
       // keep original string
@@ -35,30 +36,55 @@ function tokenSuffix(token) {
   return String(token || '').replace(/^#/, '').replace(/^T-/i, '').trim();
 }
 
+function parsePortalTokenLabel(raw) {
+  const token = String(raw || '').trim().replace(/^#/, '');
+  const monthlyIdMatch = token.match(/^T-(\d{4})-(\d+)$/i);
+  if (monthlyIdMatch) {
+    return { digits: monthlyIdMatch[2], monthKey: monthlyIdMatch[1] };
+  }
+  const displayLabelMatch = token.match(/^T-(\d+)[-\s]*\(?([0-9]{2})[\/\-]([0-9]{2})\)?$/i);
+  if (displayLabelMatch) {
+    return { digits: displayLabelMatch[1], monthKey: `${displayLabelMatch[2]}${displayLabelMatch[3]}` };
+  }
+  return null;
+}
+
 /** Build walk-in / booking token variants (T-001, #097, T-2606-127, …). */
 function buildTokenVariants(token) {
   const raw = String(token || '').trim();
   if (!raw) return [];
 
-  const variants = new Set([raw, raw.toUpperCase()]);
-  const noHash = raw.replace(/^#/, '');
+  const normalized = raw.replace(/\s+/g, ' ').trim();
+  const variants = new Set([normalized, normalized.toUpperCase()]);
+  const noHash = normalized.replace(/^#/, '').trim();
   variants.add(noHash);
   variants.add(`#${noHash}`);
 
-  const digits = noHash.replace(/^T-/i, '');
-  variants.add(digits);
-  variants.add(`T-${digits}`);
-  variants.add(`#${digits}`);
+  const parsedLabel = parsePortalTokenLabel(normalized);
+  if (parsedLabel) {
+    const { digits, monthKey } = parsedLabel;
+    const paddedDigits = String(digits).padStart(3, '0');
+    variants.add(digits);
+    variants.add(`T-${digits}`);
+    variants.add(`#${digits}`);
+    variants.add(`T-${monthKey}-${paddedDigits}`);
+    variants.add(`T-${paddedDigits}`);
+  } else {
+    const digits = noHash.replace(/^T-/i, '').trim();
+    variants.add(digits);
+    variants.add(`T-${digits}`);
+    variants.add(`#${digits}`);
 
-  if (/^\d+$/.test(digits)) {
-    const parts = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'Asia/Kolkata',
-      year: '2-digit',
-      month: '2-digit',
-    }).formatToParts(new Date());
-    const get = (t) => parts.find((p) => p.type === t)?.value || '';
-    const monthKey = `${get('year')}${get('month')}`;
-    variants.add(`T-${monthKey}-${digits.padStart(3, '0')}`);
+    if (/^\d+$/.test(digits)) {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Kolkata',
+        year: '2-digit',
+        month: '2-digit',
+      }).formatToParts(new Date());
+      const get = (t) => parts.find((p) => p.type === t)?.value || '';
+      const monthKey = `${get('year')}${get('month')}`;
+      variants.add(`T-${monthKey}-${digits.padStart(3, '0')}`);
+    }
   }
 
   return [...variants].filter(Boolean);
