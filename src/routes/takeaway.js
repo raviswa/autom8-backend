@@ -31,6 +31,7 @@ const router       = express.Router();
 const { supabaseAdmin }  = require('../config/supabase');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { resolveOrderIdForTakeawayScan } = require('../helpers/takeawayScanResolve');
+const { runSingleCounterTakeawayScan } = require('../helpers/takeawaySingleCounterScan');
 
 
 // ── POST /api/v1/takeaway/scan ────────────────────────────────────────────────
@@ -80,19 +81,19 @@ router.post('/scan', authenticateToken, getRestaurantId, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleSingleCounterScan(req, res, { order_id, staff_id, counter_id }) {
-  const { data, error } = await supabaseAdmin.rpc('scan_takeaway_qr', {
-    p_order_id:   order_id,
-    p_staff_id:   String(staff_id).trim(),
-    p_counter_id: String(counter_id).trim(),
+  const result = await runSingleCounterTakeawayScan(req.restaurant_id, {
+    order_id,
+    staff_id,
+    counter_id,
   });
 
-  if (error) {
-    console.error('[takeaway/single] RPC error:', error.message);
-    return res.status(500).json({ error: 'Scan processing failed. Please retry.' });
+  const { body } = result;
+
+  if (body.error && !body.code) {
+    return res.status(result.status).json(body);
   }
 
-  switch (data.code) {
-
+  switch (body.code) {
     case 'COLLECTED':
       return res.status(200).json({
         success: true,
@@ -101,33 +102,50 @@ async function handleSingleCounterScan(req, res, { order_id, staff_id, counter_i
         display: {
           screen:       'SUCCESS',
           heading:      '✅ Order Collected',
-          subheading:   `Order #${data.order.order_number}`,
-          items:        data.order.items,
-          total:        `₹${Number(data.order.total_amount).toFixed(2)}`,
-          collected_at: data.order.collected_at,
-          staff_note:   `Staff ${data.order.collected_by} · Counter ${data.order.counter_id}`,
+          subheading:   `Order #${body.order.order_number}`,
+          items:        body.order.items,
+          total:        `₹${Number(body.order.total_amount).toFixed(2)}`,
+          collected_at: body.order.collected_at,
+          staff_note:   `Staff ${body.order.collected_by} · Counter ${body.order.counter_id}`,
         },
-        order: data.order,
+        order: body.order,
       });
 
     case 'ALREADY_COLLECTED':
-      logFraudAttempt(req.restaurant_id, { order_id, staff_id, counter_id, alert: data.alert });
+      logFraudAttempt(req.restaurant_id, {
+        order_id,
+        staff_id,
+        counter_id,
+        alert: body.alert,
+      });
       return res.status(409).json({
-        success: false, code: 'ALREADY_COLLECTED', mode: 'single_counter',
-        message: data.message, display: buildFraudDisplay(data.alert), alert: data.alert,
+        success: false,
+        code:    'ALREADY_COLLECTED',
+        mode:    'single_counter',
+        message: body.message,
+        display: buildFraudDisplay(body.alert),
+        alert:   body.alert,
       });
 
     case 'LOCK_CONTENTION':
       return res.status(503).json({
-        success: false, code: 'LOCK_CONTENTION', message: data.message,
-        retry_after_ms: 600,
-        display: { screen: 'RETRY', heading: '⚠️ Please Retry', subheading: data.message },
+        success: false,
+        code:    'LOCK_CONTENTION',
+        message: body.message,
+        retry_after_ms: body.retry_after_ms ?? 600,
+        display: body.display,
       });
 
     default:
-      return res.status(data.code === 'ORDER_NOT_FOUND' ? 404 : 400).json({
-        success: false, code: data.code, message: data.message,
-        display: { screen: 'INVALID', heading: '❓ Invalid QR', subheading: data.message },
+      return res.status(result.status).json({
+        success: false,
+        code:    body.code,
+        message: body.message,
+        display: body.display ?? {
+          screen: 'INVALID',
+          heading: '❓ Invalid QR',
+          subheading: body.message || 'Invalid scan',
+        },
       });
   }
 }
