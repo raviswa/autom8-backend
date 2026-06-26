@@ -1184,7 +1184,7 @@ router.get('/reports/sales', authenticateToken, getRestaurantId, async (req, res
 
     const [{ data: orders, error: ordersErr }, { data: bookings, error: bookingsErr }] = await Promise.all([
       supabaseAdmin.from('orders')
-        .select('id, total_amount, status, created_at, service_type, order_items(menu_item:menu_item_id(category))')
+        .select('id, total_amount, status, created_at, source, order_items(menu_item:menu_item_id(category))')
         .eq('restaurant_id', req.restaurant_id)
         .eq('status', 'completed')
         .gte('created_at', fromIso)
@@ -1221,7 +1221,7 @@ router.get('/reports/sales', authenticateToken, getRestaurantId, async (req, res
       other: { orders: 0, revenue: 0 },
     };
     (orders ?? []).forEach((order) => {
-      const st = String(order.service_type || 'dine_in').toLowerCase();
+      const st = String(order.service_type || order.source || 'dine_in').toLowerCase();
       const bucket = serviceBreakdown[st] ? st : 'other';
       serviceBreakdown[bucket].orders += 1;
       serviceBreakdown[bucket].revenue += Number(order.total_amount) || 0;
