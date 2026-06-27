@@ -54,4 +54,11 @@ class Settings(BaseSettings):
     log_level: str                   = "INFO"
     environment: str                 = "production"
 
+    supply_waba_phone_number_id: str      = ''
+    supply_waba_access_token:    str      = ''
+    supply_waba_api_endpoint:    str      = 'https://graph.facebook.com/v19.0'
+    supply_webhook_verify_token: str      = ''
+    supply_webhook_secret:       str      = ''
+
+
 settings = Settings()
