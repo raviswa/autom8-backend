@@ -80,6 +80,25 @@ app.use('/api/enterprise',  require('./src/routes/enterprise'));
 app.use('/api/invoices',    require('./src/routes/invoices'));
 app.use('/api/subscription',require('./src/routes/subscription')); // replaces hardcoded stub
 
+
+// ── Munafe Supply routes (must be before /api catch-all) ─────────────────────
+app.use('/api/supply/auth',           require('./src/routes/supply/auth'));
+app.use('/api/supply/clients',        require('./src/routes/supply/clients'));
+app.use('/api/supply/catalog',        require('./src/routes/supply/catalog'));
+app.use('/api/supply/ratecards',      require('./src/routes/supply/ratecards'));
+app.use('/api/supply/form',           require('./src/routes/supply/form'));
+app.use('/api/supply/orders',         require('./src/routes/supply/orders'));
+app.use('/api/supply/ledger',         require('./src/routes/supply/ledger'));
+app.use('/api/supply/payment-claims', require('./src/routes/supply/payment-claims'));
+app.use('/api/supply/invoices',       require('./src/routes/supply/invoices'));
+
+app.use('/api/supply/statements',     require('./src/routes/supply/statements'));
+app.use('/api/supply/notify',         require('./src/routes/supply/notify'));
+app.use('/api/supply/webhook',        require('./src/routes/supply/webhook'));
+app.use('/api/supply/scheduler',      require('./src/routes/supply/scheduler'));
+app.use('/api/supply/whatsapp',       require('./src/routes/supply/supplyWhatsapp'));
+
+
 // ── POS router (catch-all for /api/*) — must be last under /api ──────────────
 app.use('/api',             require('./src/routes/pos'));
 
