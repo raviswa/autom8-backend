@@ -32,7 +32,7 @@
 const express = require('express');
 const router  = express.Router();
 const { supabaseAdmin } = require('../../config/supabase');
-const { supplyAuthMiddleware: auth } = require('../../middleware/supplyAuth');
+const { getSupplierContext: auth } = require('../../middleware/supplyAuth');
 
 const META_API = 'https://graph.facebook.com/v19.0';
 
