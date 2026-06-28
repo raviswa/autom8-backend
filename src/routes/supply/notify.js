@@ -406,5 +406,4 @@ router.get('/log', auth, async (req, res) => {
   }
 });
 
-module.exports = router;
-module.exports.notifyClient = notifyClient;   // M10, M13 import this
+module.exports = Object.assign(router, { notifyClient });
