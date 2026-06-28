@@ -64,7 +64,6 @@ app.use('/api/supply/statements',     require('./src/routes/supply/statements'))
 app.use('/api/supply/notify',         require('./src/routes/supply/notify'));
 app.use('/api/supply/webhook',        require('./src/routes/supply/webhook'));
 app.use('/api/supply/scheduler',      require('./src/routes/supply/scheduler'));
-app.use('/api/supply/whatsapp',       require('./src/routes/supply/supplyWhatsapp'));
 
 // ── Health check ─────────────────────────────────────────────────────────────
 app.get('/health', async (req, res) => {
