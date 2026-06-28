@@ -286,5 +286,4 @@ async function resolvePrice(client_id, item_id, default_price) {
   return data ? Number(data.price) : Number(default_price);
 }
 
-module.exports = router;
-module.exports.resolvePrice = resolvePrice;
+module.exports = Object.assign(router, { resolvePrice });
