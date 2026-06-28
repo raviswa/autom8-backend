@@ -36,7 +36,7 @@ async function _resolveSupplyCredentials(supplierId) {
 
   if (supplierId) {
     try {
-      const { data: supplier } = await 
+      const { data: supplier } = await supabaseAdmin
         .from('suppliers')
         .select('waba_phone_number_id')
         .eq('id', supplierId)
