@@ -17,7 +17,7 @@
 
 'use strict';
 
-const { supabaseAdmin } = require('../config/supabase');
+const { supabaseAdmin } = require('../../config/supabase');
 
 const DEFAULT_API_URL = 'https://graph.facebook.com/v18.0';
 
@@ -36,7 +36,7 @@ async function _resolveSupplyCredentials(supplierId) {
 
   if (supplierId) {
     try {
-      const { data: supplier } = await supabaseAdmin
+      const { data: supplier } = await 
         .from('suppliers')
         .select('waba_phone_number_id')
         .eq('id', supplierId)
