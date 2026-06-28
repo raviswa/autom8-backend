@@ -588,5 +588,4 @@ router.post('/:id/resend', auth, async (req, res) => {
   }
 });
 
-module.exports = router;
-module.exports.generateStatement = generateStatement; // exported for Module 13 scheduler
+module.exports = Object.assign(router, { generateStatement });
