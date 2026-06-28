@@ -63,4 +63,8 @@ async function getSupplierContext(req, res, next) {
   }
 }
 
-module.exports = { getSupplierContext };
+module.exports = {
+  getSupplierContext,
+  supplyAuthMiddleware:     getSupplierContext,
+  authenticateSupplyToken:  getSupplierContext,
+};
