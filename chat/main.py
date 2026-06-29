@@ -13,9 +13,6 @@ from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse, PlainTextResponse
 
-
-
-
 from config.settings import settings
 from tools.db_tools import (
     init_db,
@@ -45,6 +42,7 @@ from tools.booking_mechanisms import (
     bridge_catalog_order_to_cart,
 )
 from agents.root_agent import route_message
+from agents.supply_agent import handle_supply_message  # Module 11
 
 import asyncio
 
@@ -66,6 +64,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Munafe bot...")
     from tools.whatsapp_tools import close_http_client
     await close_http_client()
+    from tools.supply_whatsapp import close_supply_http_client  # Module 11
+    await close_supply_http_client()
     logger.info("HTTP client closed.")
 
 logging.basicConfig(level=settings.log_level)
@@ -437,6 +437,75 @@ async def _process_meta_payload(payload: dict):
                 logger.exception("Failed to send webhook error fallback to customer")
 
 
+# ── Module 11: Supply payload processor ───────────────────────────────────────
+
+async def _process_supply_payload(payload: dict):
+    """
+    Process a supply WhatsApp webhook payload forwarded by autom8-backend-supply.
+
+    The Node.js webhook already resolved supplier_id and client_id and injected
+    them as _supply_context — no DB lookup needed here for routing.
+    """
+    try:
+        value = (
+            payload.get("entry", [{}])[0]
+                   .get("changes", [{}])[0]
+                   .get("value", {})
+        )
+
+        messages = value.get("messages")
+        if not messages:
+            return  # status-only update, nothing to process
+
+        message_obj = messages[0]
+        message_id  = message_obj.get("id", "")
+
+        # Dedup — share the restaurant dedup set (Meta message IDs are globally unique)
+        async with _processed_message_ids_lock:
+            if message_id in _processed_message_ids:
+                return
+            _processed_message_ids[message_id] = 1
+            if len(_processed_message_ids) > 1000:
+                _processed_message_ids.popitem(last=False)
+
+        # Context injected by Node.js resolveSupplier.js
+        supply_context = value.get("_supply_context", {})
+        supplier_id    = supply_context.get("supplier_id")
+        client_id      = supply_context.get("client_id")   # None if unregistered number
+        phone          = message_obj.get("from")
+
+        if not supplier_id or not phone:
+            logger.warning(
+                f"[supply-webhook] Missing supplier_id={supplier_id} or phone={phone}, dropping"
+            )
+            return
+
+        msg_type     = message_obj.get("type", "")
+        message_body = _extract_message_body(message_obj)
+
+        # Skip truly unhandleable types (stickers, reactions, etc.)
+        if not message_body and msg_type not in ("audio", "image", "document"):
+            logger.info(f"[supply-webhook] Skipping unhandled type={msg_type!r}")
+            return
+
+        logger.info(
+            f"[supply-webhook] supplier={supplier_id} client={client_id} "
+            f"phone={phone} type={msg_type!r}"
+        )
+
+        await handle_supply_message(
+            phone           = phone,
+            supplier_id     = supplier_id,
+            client_id       = client_id,
+            message         = message_body,
+            message_type    = msg_type,
+            raw_message_obj = message_obj,
+        )
+
+    except Exception as e:
+        logger.error(f"[supply-webhook] Processing failed: {e}", exc_info=True)
+
+
 @app.get("/health/razorpay")
 async def health_razorpay():
     """Diagnostic — confirms keys loaded (no secrets exposed)."""
@@ -610,6 +679,37 @@ async def webhook_post(request: Request, background_tasks: BackgroundTasks):
     return JSONResponse(status_code=200, content={"status": "ok"})
 
 
+# ── Module 11: Supply webhook routes ──────────────────────────────────────────
+
+@app.get("/webhook/supply")
+async def verify_supply_webhook(request: Request):
+    """Meta webhook verification for the supplier WABA number."""
+    params = request.query_params
+    if (
+        params.get("hub.mode") == "subscribe"
+        and params.get("hub.verify_token") == settings.supply_webhook_verify_token
+    ):
+        return PlainTextResponse(content=params.get("hub.challenge"), status_code=200)
+    return PlainTextResponse(content="Verification failed", status_code=403)
+
+
+@app.post("/webhook/supply")
+async def supply_webhook_post(request: Request, background_tasks: BackgroundTasks):
+    """
+    Receives WhatsApp messages forwarded by autom8-backend-supply.
+    Uses SUPPLY_WEBHOOK_SECRET for signature verification (separate from restaurant secret).
+    """
+    body      = await request.body()
+    signature = request.headers.get("x-hub-signature-256", "")
+
+    if not _verify_supply_signature(body, signature):
+        return JSONResponse(status_code=200, content={"status": "invalid signature"})
+
+    payload = await request.json()
+    background_tasks.add_task(_process_supply_payload, payload)
+    return JSONResponse(status_code=200, content={"status": "ok"})
+
+
 # ─────────────────────────────────────────────
 # Signature Verification
 # ─────────────────────────────────────────────
@@ -628,6 +728,27 @@ def _verify_meta_signature(body: bytes, signature: str) -> bool:
 
     expected = "sha256=" + hmac.new(
         settings.webhook_secret.encode(),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
+def _verify_supply_signature(body: bytes, signature: str) -> bool:
+    """Mirror of _verify_meta_signature but uses SUPPLY_WEBHOOK_SECRET."""
+    is_prod = settings.environment == "production"
+
+    if not settings.supply_webhook_secret:
+        if is_prod:
+            logger.error("[supply-webhook] SUPPLY_WEBHOOK_SECRET not set in production")
+            return False
+        return True  # local dev without secret configured
+
+    if not signature:
+        return not is_prod
+
+    expected = "sha256=" + hmac.new(
+        settings.supply_webhook_secret.encode(),
         body,
         hashlib.sha256,
     ).hexdigest()

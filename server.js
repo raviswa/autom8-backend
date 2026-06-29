@@ -8,6 +8,8 @@
 //   src/schedulers/   — Background jobs
 //   src/handlers/     — WhatsApp event handlers (waHandlers.js)
 //   src/middleware/   — Auth, region
+//
+// Supply routes are served by a separate Railway service (server-supply.js).
 // ============================================================================
 
 'use strict';
@@ -38,8 +40,8 @@ const app = express();
 app.use(cors({
   origin: [
     'https://app.autom8.works',
-    'http://127.0.0.1:5500',   // ← Live Server
-    'http://localhost:5500',    // ← Live Server alternate
+    'http://127.0.0.1:5500',
+    'http://localhost:5500',
     'http://localhost:5173',
     process.env.FRONTEND_URL,
   ].filter(Boolean),
@@ -66,19 +68,19 @@ app.use('/api/restaurants', require('./src/routes/marketing'));    // WABAStrip 
 app.use('/api/brands',      require('./src/routes/brands'));
 
 // ── Specific /api sub-paths (must come before the catch-all pos router) ──────
-app.use('/api/kds',         require('./src/routes/kds'));          // FULL kds/notify
-app.use('/api/catalog',     require('./src/routes/catalog'));      // catalog sync + feed + menu upload
-app.post('/api/menu/upload', ...menuUploadMiddleware);             // Manager portal Excel upload alias
+app.use('/api/kds',         require('./src/routes/kds'));
+app.use('/api/catalog',     require('./src/routes/catalog'));
+app.post('/api/menu/upload', ...menuUploadMiddleware);
 app.put('/api/menu-items/:id/availability', ...menuItemAvailabilityMiddleware);
 app.put('/api/menu-items/:id/special-today', ...menuItemSpecialTodayMiddleware);
-app.get('/api/internal/menu-items', handleInternalMenuItems);      // Python chat menu cache
+app.get('/api/internal/menu-items', handleInternalMenuItems);
 app.use('/api/tokens',      require('./src/routes/tokens'));
 app.use('/api/feedback',    require('./src/routes/feedback'));
 app.use('/api/referrals',   require('./src/routes/referrals'));
 app.use('/api/delivery',    require('./src/routes/delivery'));
 app.use('/api/enterprise',  require('./src/routes/enterprise'));
 app.use('/api/invoices',    require('./src/routes/invoices'));
-app.use('/api/subscription',require('./src/routes/subscription')); // replaces hardcoded stub
+app.use('/api/subscription',require('./src/routes/subscription'));
 
 // ── POS router (catch-all for /api/*) — must be last under /api ──────────────
 app.use('/api',             require('./src/routes/pos'));
@@ -89,11 +91,11 @@ app.use('/api/v1/takeaway', require('./src/routes/takeaway'));
 app.use('/api/staff',       require('./src/routes/staff'));
 
 // ── Receipt + order verification (public HTML pages) ─────────────────────────
-app.use('/',                require('./src/routes/receipts'));     // /verify/:id  + /r/:token
+app.use('/',                require('./src/routes/receipts'));
 
+// ── Restaurant discovery ──────────────────────────────────────────────────────
+app.use('/api/discovery',   require('./src/routes/discovery'));
 
-//───────────────────────── Restaurant discovery tool─────────────────────────
-app.use('/api/discovery', require('./src/routes/discovery'));
 // ── Health check ─────────────────────────────────────────────────────────────
 app.get('/health', async (req, res) => {
   let dbProbe = 'ok';
@@ -105,6 +107,7 @@ app.get('/health', async (req, res) => {
   }
   res.json({
     status:    dbProbe === 'ok' ? 'ok' : 'degraded',
+    service:   'autom8-backend',
     timestamp: new Date().toISOString(),
     uptime:    process.uptime(),
     region:    process.env.REGION || 'IN',
