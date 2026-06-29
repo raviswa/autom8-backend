@@ -237,5 +237,5 @@ router.get('/log', auth, async (req, res) => {
   }
 });
 
-module.exports = router;
-module.exports.runSchedulerJob = runSchedulerJob;  // ← ADD
+module.exports = Object.assign(router, { runSchedulerJob });
+
