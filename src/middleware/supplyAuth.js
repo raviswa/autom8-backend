@@ -4,9 +4,12 @@
 //
 // getSupplierContext:
 //   Must run AFTER authenticateToken (which populates req.user from the
-//   Supabase JWT). Looks up the suppliers row for req.user.id and attaches:
+//   Supabase JWT). Looks up the suppliers row for req.user.sub and attaches:
 //     req.supplier    — full supplier profile row
 //     req.supplier_id — suppliers.id (UUID, not auth user id)
+//
+// NOTE: authenticateToken sets req.user = { sub: user.id, email }
+//       Always use req.user.sub (NOT req.user.id) to get the Supabase auth UUID.
 //
 // Usage (in supply route handlers):
 //   router.get('/me', authenticateToken, getSupplierContext, handler)
@@ -18,7 +21,8 @@ const { supabaseAdmin } = require('../config/supabase');
 
 async function getSupplierContext(req, res, next) {
   try {
-    const authUserId = req.user?.id;
+    // FIX: authenticateToken sets req.user = { sub, email } — use .sub not .id
+    const authUserId = req.user?.sub;
 
     if (!authUserId) {
       return res.status(401).json({ error: 'Authenticated user not found on request' });
