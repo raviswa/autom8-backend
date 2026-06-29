@@ -1405,17 +1405,14 @@ async def handle_reserve_table_flow(
     booking_step = session_state.get("booking_step")
 
     if booking_step == "awaiting_party_size":
+        from agents.customer.booking_helpers import parse_party_size
         try:
-            party_size = int(message.strip())
+            party_size = parse_party_size(message)
             session_state["party_size"] = party_size
-            await send_whatsapp_message(
-                customer_phone,
-                "Please share your preferred date and time.\n"
-                "Example: 25-05-2026, 8:00 PM",
-                restaurant_id,
+            from agents.customer.reserve_table_flow import _offer_reserve_calendar
+            return await _offer_reserve_calendar(
+                customer_phone, restaurant_id, customer_id, customer_name, session_state,
             )
-            session_state["booking_step"] = "awaiting_datetime"
-            return {"status": "awaiting_datetime"}
 
         except ValueError:
             await send_whatsapp_message(

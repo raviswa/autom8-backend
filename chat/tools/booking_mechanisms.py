@@ -1476,25 +1476,7 @@ async def send_unified_booking_menu(
         session_state["booking_step"] = "kitchen_closed"
         return "none"
 
-    # ── Attempt 1: Option B category picker ───────────────────────────────────
-    if await send_catalog_option_b_picker(customer_phone, restaurant_id, session_state):
-        await asyncio.sleep(1.0)
-        await maybe_send_special_dishes_note(
-            customer_phone, restaurant_id, session_state, menu_items=items,
-        )
-        return "catalog_b"
-
-    # ── Attempt 2: Retry Option B picker ─────────────────────────────────────
-    logger.warning(f"[BOOKING] {customer_phone} → Option B attempt 1 failed, retrying in 2 s")
-    await asyncio.sleep(2)
-    if await send_catalog_option_b_picker(customer_phone, restaurant_id, session_state):
-        await asyncio.sleep(1.0)
-        await maybe_send_special_dishes_note(
-            customer_phone, restaurant_id, session_state, menu_items=items,
-        )
-        return "catalog_b"
-
-    # ── Attempt 3: Flat native catalog (grouped sections) ─────────────────────
+    # ── Attempt 1: Flat native catalog (grouped sections) ─────────────────────
     if await send_catalog_booking(customer_phone, restaurant_id, session_state):
         if session_state.get("service_type") in ("dine_in", "takeaway", "delivery"):
             session_state["booking_step"] = "awaiting_order"
@@ -1504,7 +1486,7 @@ async def send_unified_booking_menu(
         )
         return "catalog"
 
-    # ── Attempt 4: Retry flat catalog ─────────────────────────────────────────
+    # ── Attempt 2: Retry flat catalog ─────────────────────────────────────────
     logger.warning(f"[BOOKING] {customer_phone} → catalog attempt 1 failed, retrying in 2 s")
     await asyncio.sleep(2)
     if await send_catalog_booking(customer_phone, restaurant_id, session_state):
@@ -1515,6 +1497,24 @@ async def send_unified_booking_menu(
             customer_phone, restaurant_id, session_state, menu_items=items,
         )
         return "catalog"
+
+    # ── Attempt 3: Option B category picker ───────────────────────────────────
+    if await send_catalog_option_b_picker(customer_phone, restaurant_id, session_state):
+        await asyncio.sleep(1.0)
+        await maybe_send_special_dishes_note(
+            customer_phone, restaurant_id, session_state, menu_items=items,
+        )
+        return "catalog_b"
+
+    # ── Attempt 4: Retry Option B picker ─────────────────────────────────────
+    logger.warning(f"[BOOKING] {customer_phone} → Option B attempt 1 failed, retrying in 2 s")
+    await asyncio.sleep(2)
+    if await send_catalog_option_b_picker(customer_phone, restaurant_id, session_state):
+        await asyncio.sleep(1.0)
+        await maybe_send_special_dishes_note(
+            customer_phone, restaurant_id, session_state, menu_items=items,
+        )
+        return "catalog_b"
 
     # ── Attempt 5: Interactive cart (numbered list fallback) ──────────────────
     if await send_cart_booking(customer_phone, restaurant_id, session_state):

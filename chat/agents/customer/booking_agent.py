@@ -607,7 +607,8 @@ async def handle_booking_flow(
         elif service_type == "reserve_table":
             await send_whatsapp_message(
                 customer_phone,
-                "Great! You've selected Reserve a Table 📅\n\nHow many people will be dining?",
+                "Great! You've selected *Reserve a Table* (for future booking) 📅\n\n"
+                "How many people will be dining?",
                 restaurant_id,
             )
             session_state["booking_step"] = "awaiting_party_size"

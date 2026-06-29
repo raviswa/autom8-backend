@@ -854,13 +854,11 @@ async def offer_whatsapp_schedule_calendar(
         session_state[retry_key] = True
         return await resend_fn()
 
-    logger.warning(f"[calendar] Flow send failed for {customer_phone}")
-    session_state["schedule_text_fallback"] = True
+    logger.error(f"[calendar] Flow send failed for {customer_phone}")
+    # Strictly avoid text fallback if possible per user request for datepicker format
     await send_whatsapp_message(
         customer_phone,
-        failure_message
-        + "\n\nYou can also type your preferred date and time "
-        "(e.g. *tomorrow 7:30 PM* or *18 Jun 7pm*).",
+        failure_message + "\n\n(We're having trouble opening the calendar. Please try again in a moment by typing *Home*.)",
         restaurant_id,
     )
     session_state["booking_step"] = booking_step

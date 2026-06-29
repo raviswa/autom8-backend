@@ -883,14 +883,10 @@ async def handle_dine_in_flow(
 
         if reply == "RESERVE":
             session_state["service_type"] = "reserve_table"
-            session_state["booking_step"] = "awaiting_datetime"
-            await send_whatsapp_message(
-                customer_phone,
-                f"Great! Let's reserve a table for your party of *{session_state.get('party_size')}*.\n\n"
-                f"Please share your preferred date and time.\nExample: 25-05-2026, 8:00 PM",
-                restaurant_id,
+            from agents.customer.reserve_table_flow import _offer_reserve_calendar
+            return await _offer_reserve_calendar(
+                customer_phone, restaurant_id, customer_id, customer_name, session_state,
             )
-            return {"status": "awaiting_datetime"}
 
         elif reply in ("SMALLER", "CHANGE"):
             session_state.pop("party_size", None)

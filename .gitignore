@@ -1,0 +1,15 @@
+# Node modules
+node_modules/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local environment files
+.env
+migrations/.env
+
+# IDE / OS
+.DS_Store
+Thumbs.db
