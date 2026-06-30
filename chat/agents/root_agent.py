@@ -3,6 +3,7 @@
 from typing import Dict, Any
 import logging
 import time
+import re
 
 from agents.customer.identity_agent import handle_identity_flow
 from agents.customer.booking_agent import handle_booking_flow
@@ -15,6 +16,11 @@ logger = logging.getLogger(__name__)
 _SEEN: dict[str, float] = {}
 _DEDUP_TTL = 120  # seconds
 
+_HOME_WORDS = {"home", "start", "menu", "main menu"}
+_GREET_WORDS = {"hi", "hello", "hey", "hii", "helo"}
+
+def _norm(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 def _is_duplicate(wamid: str) -> bool:
     now = time.monotonic()
