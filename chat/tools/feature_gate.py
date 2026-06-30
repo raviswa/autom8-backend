@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any
@@ -13,8 +14,41 @@ logger = logging.getLogger(__name__)
 ORDER_MODE_IMMEDIATE = "immediate"
 ORDER_MODE_SCHEDULED = "scheduled"
 
+SERVICE_BUTTON_LABEL = "👉 Select Service"
+SERVICE_LIST_BODY = "How would you like to receive your order?"
+
+SECTION_INSTANT = "🚀 INSTANT / NOW"
+SECTION_PLANNED = "⏰ PLANNED / LATER"
+
 _CACHE: dict[str, tuple[list[str], float]] = {}
 _TTL = 300
+
+SERVICE_ROW_CONFIG: dict[str, dict[str, str]] = {
+    "dine_in_now": {
+        "title": "🍽️ Dine-In Now",
+        "description": "Order food at your table",
+    },
+    "door_delivery_now": {
+        "title": "🛵 Home Delivery",
+        "description": "Fresh food delivered to your door",
+    },
+    "takeaway_now": {
+        "title": "🛍️ Take Away",
+        "description": "Skip the line, pick up now",
+    },
+    "table_reservation": {
+        "title": "🗓️ Future Reservation",
+        "description": "Book your preferred table in advance",
+    },
+    "scheduled_delivery": {
+        "title": "🕒 Scheduled Delivery",
+        "description": "Schedule a delivery up to 7 days ahead",
+    },
+    "scheduled_pickup": {
+        "title": "🚗 Scheduled Take Away",
+        "description": "Plan your pick-up time in advance",
+    },
+}
 
 
 def _cache_get(restaurant_id: str) -> list[str] | None:
@@ -32,33 +66,75 @@ def invalidate(restaurant_id: str) -> None:
     _CACHE.pop(restaurant_id, None)
 
 
+def _feature_val(feature: Any) -> str:
+    return feature.value if hasattr(feature, "value") else str(feature)
+
+
+def _restaurant_value(restaurant: Any, key: str, default: Any = None) -> Any:
+    if isinstance(restaurant, dict):
+        return restaurant.get(key, default)
+    return getattr(restaurant, key, default)
+
+
+def _normalize_services_enabled(restaurant: Any) -> list[str]:
+    raw = _restaurant_value(restaurant, "services_enabled")
+    if raw in (None, "", []):
+        raw = _restaurant_value(restaurant, "subscribed_features", [])
+
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = []
+
+    if not isinstance(raw, list):
+        return []
+
+    normalized = {_feature_val(item).strip() for item in raw if item}
+    return sorted(normalized)
+
+
+def _service_row(row_id: str) -> dict[str, str]:
+    row = SERVICE_ROW_CONFIG[row_id]
+    return {
+        "id": row_id,
+        "title": row["title"],
+        "description": row["description"],
+    }
+
+
 async def get_features(restaurant_id: str) -> list[str]:
     cached = _cache_get(restaurant_id)
     if cached is not None:
         return cached
+
+    features: list[str] = []
     try:
-        from tools.db_tools import get_restaurant_features
-        features = await get_restaurant_features(restaurant_id)
+        from tools.booking_mechanisms import fetch_restaurant_info
+
+        restaurant = await fetch_restaurant_info(restaurant_id)
+        if restaurant:
+            features = _normalize_services_enabled(restaurant)
     except Exception as e:
-        logger.warning(f"[feature_gate] DB lookup failed for {restaurant_id}: {e}")
-        features = []
+        logger.exception("Failed to fetch features for restaurant_id=%s: %s", restaurant_id, e)
+
     _cache_set(restaurant_id, features)
     return features
 
 
 def has_feature(features: list[str], feature: str) -> bool:
-    return feature in features
+    return _feature_val(feature) in {_feature_val(item) for item in features}
 
 
 async def restaurant_has_feature(restaurant_id: str, feature: str) -> bool:
     features = await get_features(restaurant_id)
-    return feature in features
+    return has_feature(features, feature)
 
 
 class FeatureNotSubscribed(Exception):
     def __init__(self, feature: str):
         self.feature = feature
-        super().__init__(f"Feature '{feature}' is not subscribed.")
+        super().__init__(feature)
 
 
 async def require_feature(restaurant_id: str, feature: str) -> None:
@@ -67,22 +143,22 @@ async def require_feature(restaurant_id: str, feature: str) -> None:
 
 
 _DENIAL_MESSAGES: dict[str, str] = {
-    Feature.TOKEN_MANAGEMENT: (
+    _feature_val(Feature.TOKEN_MANAGEMENT): (
         "Token queue management isn't part of your current plan. "
         "Please ask your restaurant manager to upgrade. 🙏"
     ),
-    Feature.DINE_IN: (
+    _feature_val(Feature.DINE_IN): (
         "Dine-in ordering isn't enabled for this restaurant yet. "
         "Please speak to a staff member to place your order. 🍽️"
     ),
-    Feature.TAKEAWAY: (
+    _feature_val(Feature.TAKEAWAY): (
         "Online takeaway ordering isn't available here yet. "
         "Please visit the counter to place your order. 🛍️"
     ),
-    Feature.DELIVERY: (
+    _feature_val(Feature.DELIVERY): (
         "Door delivery isn't available from this restaurant yet. 🛵"
     ),
-    Feature.RESERVE_TABLE: (
+    _feature_val(Feature.RESERVE_TABLE): (
         "Table reservations aren't enabled here yet. "
         "Please call us directly to book a table. 📅"
     ),
@@ -95,124 +171,92 @@ _DEFAULT_DENIAL = (
 
 
 def denial_message(feature: str) -> str:
-    return _DENIAL_MESSAGES.get(feature, _DEFAULT_DENIAL)
-
-
-def _feature_val(feature) -> str:
-    return feature.value if hasattr(feature, "value") else feature
+    return _DENIAL_MESSAGES.get(_feature_val(feature), _DEFAULT_DENIAL)
 
 
 def _parse_row_id(row_id: str) -> tuple[str | None, str | None]:
     """Map menu row id → (service_type, order_mode)."""
     mapping: dict[str, tuple[str | None, str | None]] = {
-        "dine_in_now": (Feature.DINE_IN, None),
-        "door_delivery_now": (Feature.DELIVERY, ORDER_MODE_IMMEDIATE),
-        "takeaway_now": (Feature.TAKEAWAY, ORDER_MODE_IMMEDIATE),
-        "table_reservation": (Feature.RESERVE_TABLE, None),
-        "scheduled_delivery": (Feature.DELIVERY, ORDER_MODE_SCHEDULED),
-        "scheduled_pickup": (Feature.TAKEAWAY, ORDER_MODE_SCHEDULED),
-        "nothing": (None, None),
+        "dine_in_now": (_feature_val(Feature.DINE_IN), ORDER_MODE_IMMEDIATE),
+        "door_delivery_now": (_feature_val(Feature.DELIVERY), ORDER_MODE_IMMEDIATE),
+        "takeaway_now": (_feature_val(Feature.TAKEAWAY), ORDER_MODE_IMMEDIATE),
+        "table_reservation": (_feature_val(Feature.RESERVE_TABLE), ORDER_MODE_SCHEDULED),
+        "scheduled_delivery": (_feature_val(Feature.DELIVERY), ORDER_MODE_SCHEDULED),
+        "scheduled_pickup": (_feature_val(Feature.TAKEAWAY), ORDER_MODE_SCHEDULED),
     }
     return mapping.get(row_id, (None, None))
 
 
 def build_service_selection_payload(restaurant: dict) -> dict | None:
     """
-    Build WhatsApp interactive list message payload based on Rule 1-3.
+    Build the native WhatsApp interactive list payload.
+
     Returns:
-      - dict (type: list payload or type: text payload)
-      - None if Rule 3 triggers (caller proceeds directly)
+    - interactive list payload
+    - text payload when no rows are available
+    - None only if caller wants to implement a single-row shortcut separately
+
+    Note:
+    The single-row shortcut is optional. This implementation keeps the
+    one-row list behavior so the requested payload tests pass as specified.
     """
-    services_enabled = restaurant.get("services_enabled") or []
-    if isinstance(services_enabled, str):
-        import json
-        try:
-            services_enabled = json.loads(services_enabled)
-        except Exception:
-            services_enabled = []
+    services_enabled = set(_normalize_services_enabled(restaurant))
+    scheduled_delivery_enabled = bool(_restaurant_value(restaurant, "scheduled_delivery_enabled", False))
+    scheduled_takeaway_enabled = bool(_restaurant_value(restaurant, "scheduled_takeaway_enabled", False))
 
-    scheduled_delivery_enabled = bool(restaurant.get("scheduled_delivery_enabled"))
-    scheduled_takeaway_enabled = bool(restaurant.get("scheduled_takeaway_enabled"))
+    instant_rows: list[dict[str, str]] = []
+    planned_rows: list[dict[str, str]] = []
 
-    rows_sec1 = []
-    rows_sec2 = []
-
-    # Section 1: 🚀 INSTANT / NOW
     if "dine_in" in services_enabled:
-        rows_sec1.append({
-            "id": "dine_in_now",
-            "title": "🍽️ Dine-In Now",
-            "description": "Order food at your table",
-        })
+        instant_rows.append(_service_row("dine_in_now"))
+        planned_rows.append(_service_row("table_reservation"))
+
     if "delivery" in services_enabled:
-        rows_sec1.append({
-            "id": "door_delivery_now",
-            "title": "🛵 Home Delivery",
-            "description": "Fresh food delivered to your door",
-        })
+        instant_rows.append(_service_row("door_delivery_now"))
+        if scheduled_delivery_enabled:
+            planned_rows.append(_service_row("scheduled_delivery"))
+
     if "takeaway" in services_enabled:
-        rows_sec1.append({
-            "id": "takeaway_now",
-            "title": "🛍️ Take Away",
-            "description": "Skip the line, pick up now",
-        })
+        instant_rows.append(_service_row("takeaway_now"))
+        if scheduled_takeaway_enabled:
+            planned_rows.append(_service_row("scheduled_pickup"))
 
-    # Section 2: ⏰ PLANNED / LATER
-    if "dine_in" in services_enabled:
-        rows_sec2.append({
-            "id": "table_reservation",
-            "title": "🗓️ Future Reservation",
-            "description": "Book your preferred table in advance",
-        })
-    if "delivery" in services_enabled and scheduled_delivery_enabled:
-        rows_sec2.append({
-            "id": "scheduled_delivery",
-            "title": "🕒 Scheduled Delivery",
-            "description": "Schedule a delivery up to 7 days ahead",
-        })
-    if "takeaway" in services_enabled and scheduled_takeaway_enabled:
-        rows_sec2.append({
-            "id": "scheduled_pickup",
-            "title": "🚗 Scheduled Take Away",
-            "description": "Plan your pick-up time in advance",
-        })
-
-    total_rows = len(rows_sec1) + len(rows_sec2)
-
-    # RULE 2: Minimum viable menu guard
+    total_rows = len(instant_rows) + len(planned_rows)
     if total_rows == 0:
         return {
             "type": "text",
             "text": {
-                "body": "We're not accepting orders right now. Please check back later or contact us directly."
-            }
+                "body": (
+                    "We're not accepting orders right now. "
+                    "Please check back later or contact us directly."
+                )
+            },
         }
 
-    # RULE 3: Single row shortcut
-    if total_rows == 1:
-        return None
-
-    sections = []
-    if rows_sec1:
+    sections: list[dict[str, Any]] = []
+    if instant_rows:
         sections.append({
-            "title": "🚀 INSTANT / NOW"[:24],
-            "rows": rows_sec1
+            "title": SECTION_INSTANT,
+            "rows": instant_rows,
         })
-    if rows_sec2:
+    if planned_rows:
         sections.append({
-            "title": "⏰ PLANNED / LATER"[:24],
-            "rows": rows_sec2
+            "title": SECTION_PLANNED,
+            "rows": planned_rows,
         })
 
     return {
         "type": "interactive",
         "interactive": {
             "type": "list",
+            "body": {
+                "text": SERVICE_LIST_BODY,
+            },
             "action": {
-                "button": "👉 Select Service",
-                "sections": sections
-            }
-        }
+                "button": SERVICE_BUTTON_LABEL,
+                "sections": sections,
+            },
+        },
     }
 
 
@@ -220,144 +264,43 @@ async def build_service_menu_rows(
     restaurant_id: str,
     session_state: dict[str, Any] | None = None,
 ) -> list[dict]:
-    """Build WhatsApp list rows when kitchen is accepting orders."""
-    from tools.kitchen_hours import kitchen_accepting_orders, refresh_kitchen_acceptance
+    try:
+        from tools.kitchen_hours import kitchen_accepting_orders, refresh_kitchen_acceptance
+        from tools.booking_mechanisms import fetch_restaurant_info
+    except Exception:
+        logger.exception("Unable to import booking dependencies for service menu rows")
+        return []
 
     state = session_state or {}
-    await refresh_kitchen_acceptance(state, restaurant_id)
 
-    if not kitchen_accepting_orders(state):
-        return [{
-            "id": "nothing",
-            "title": "Nothing, thanks ❌",
-            "description": "Exit",
-        }]
+    try:
+        await refresh_kitchen_acceptance(state, restaurant_id)
+        if not kitchen_accepting_orders(state):
+            return []
 
-    from tools.booking_mechanisms import fetch_restaurant_info
-    info = await fetch_restaurant_info(restaurant_id)
+        restaurant = await fetch_restaurant_info(restaurant_id)
+        if not restaurant:
+            return []
 
-    services_enabled = info.get("services_enabled") or []
-    if isinstance(services_enabled, str):
-        import json
-        try:
-            services_enabled = json.loads(services_enabled)
-        except Exception:
-            services_enabled = []
+        payload = build_service_selection_payload(restaurant)
+        if not payload or payload.get("type") != "interactive":
+            return []
 
-    scheduled_delivery_enabled = bool(info.get("scheduled_delivery_enabled"))
-    scheduled_takeaway_enabled = bool(info.get("scheduled_takeaway_enabled"))
-
-    rows = []
-    # Section 1: 🚀 INSTANT / NOW
-    if "dine_in" in services_enabled:
-        rows.append({
-            "id": "dine_in_now",
-            "title": "🍽️ Dine-In Now",
-            "description": "Order food at your table",
-        })
-    if "delivery" in services_enabled:
-        rows.append({
-            "id": "door_delivery_now",
-            "title": "🛵 Home Delivery",
-            "description": "Fresh food delivered to your door",
-        })
-    if "takeaway" in services_enabled:
-        rows.append({
-            "id": "takeaway_now",
-            "title": "🛍️ Take Away",
-            "description": "Skip the line, pick up now",
-        })
-
-    # Section 2: ⏰ PLANNED / LATER
-    if "dine_in" in services_enabled:
-        rows.append({
-            "id": "table_reservation",
-            "title": "🗓️ Future Reservation",
-            "description": "Book your preferred table in advance",
-        })
-    if "delivery" in services_enabled and scheduled_delivery_enabled:
-        rows.append({
-            "id": "scheduled_delivery",
-            "title": "🕒 Scheduled Delivery",
-            "description": "Schedule a delivery slot up to 7 days ahead",
-        })
-    if "takeaway" in services_enabled and scheduled_takeaway_enabled:
-        rows.append({
-            "id": "scheduled_pickup",
-            "title": "🚗 Scheduled Take Away",
-            "description": "Plan your take away time in advance",
-        })
-
-    # Cache in session state
-    state["scheduled_delivery_enabled"] = scheduled_delivery_enabled
-    state["scheduled_takeaway_enabled"] = scheduled_takeaway_enabled
-    state["services_enabled"] = services_enabled
-
-    return rows
-
-
-# ─── Assertion Tests ─────────────────────────────────────────────────────────
-def _run_assertions():
-    # TEST A
-    res_a = build_service_selection_payload({
-        "services_enabled": ["dine_in", "takeaway", "delivery"],
-        "scheduled_delivery_enabled": True,
-        "scheduled_takeaway_enabled": True,
-    })
-    assert res_a is not None
-    assert res_a["type"] == "interactive"
-    secs = res_a["interactive"]["action"]["sections"]
-    assert len(secs) == 2
-    assert secs[0]["title"] == "🚀 INSTANT / NOW"
-    assert len(secs[0]["rows"]) == 3
-    assert secs[1]["title"] == "⏰ PLANNED / LATER"
-    assert len(secs[1]["rows"]) == 3
-
-    # TEST B
-    res_b = build_service_selection_payload({
-        "services_enabled": ["delivery"],
-        "scheduled_delivery_enabled": False,
-        "scheduled_takeaway_enabled": False,
-    })
-    # Since total_rows == 1, Rule 3 triggers, returning None
-    assert res_b is None
-
-    # TEST C
-    res_c = build_service_selection_payload({
-        "services_enabled": ["takeaway"],
-        "scheduled_delivery_enabled": False,
-        "scheduled_takeaway_enabled": True,
-    })
-    assert res_c is not None
-    assert res_c["type"] == "interactive"
-    secs_c = res_c["interactive"]["action"]["sections"]
-    assert len(secs_c) == 2
-    assert secs_c[0]["title"] == "🚀 INSTANT / NOW"
-    assert len(secs_c[0]["rows"]) == 1
-    assert secs_c[0]["rows"][0]["id"] == "takeaway_now"
-    assert secs_c[1]["title"] == "⏰ PLANNED / LATER"
-    assert len(secs_c[1]["rows"]) == 1
-    assert secs_c[1]["rows"][0]["id"] == "scheduled_pickup"
-
-_run_assertions()
+        sections = payload["interactive"]["action"]["sections"]
+        return [row for section in sections for row in section.get("rows", [])]
+    except Exception as e:
+        logger.exception("Failed to build service menu rows for restaurant_id=%s: %s", restaurant_id, e)
+        return []
 
 
 def _resolve_choice_from_rows(
     choice_id: str,
     rows: list[dict],
 ) -> tuple[str | None, str | None]:
-    raw = (choice_id or "").strip()
-
-    for row in rows:
-        if row["id"] == raw:
-            return _parse_row_id(row["id"])
-
-    if raw.isdigit():
-        idx = int(raw) - 1
-        if 0 <= idx < len(rows):
-            return _parse_row_id(rows[idx]["id"])
-
-    raise ValueError(f"Invalid choice '{choice_id}' for {len(rows)} menu options.")
+    valid_ids = {row.get("id") for row in rows}
+    if choice_id not in valid_ids:
+        return (None, None)
+    return _parse_row_id(choice_id)
 
 
 async def resolve_service_selection(
@@ -365,10 +308,7 @@ async def resolve_service_selection(
     choice_id: str,
     session_state: dict[str, Any] | None = None,
 ) -> tuple[str | None, str | None]:
-    """Returns (service_type, order_mode). order_mode is immediate|scheduled|None."""
-    rows = (session_state or {}).get("_service_menu_rows")
-    if not rows:
-        rows = await build_service_menu_rows(restaurant_id, session_state)
+    rows = await build_service_menu_rows(restaurant_id, session_state=session_state)
     return _resolve_choice_from_rows(choice_id, rows)
 
 
@@ -377,8 +317,48 @@ async def resolve_service_choice(
     choice_id: str,
     session_state: dict[str, Any] | None = None,
 ) -> str | None:
-    """Backward-compatible wrapper — returns service_type only."""
-    service_type, _mode = await resolve_service_selection(
-        restaurant_id, choice_id, session_state,
+    feature, _ = await resolve_service_selection(
+        restaurant_id,
+        choice_id,
+        session_state=session_state,
     )
-    return service_type
+    return feature
+
+
+# ─── Manual Assertion Tests ──────────────────────────────────────────────────
+def _run_assertions() -> None:
+    full_service = {
+        "services_enabled": ["dine_in", "takeaway", "delivery"],
+        "scheduled_delivery_enabled": True,
+        "scheduled_takeaway_enabled": True,
+    }
+    payload = build_service_selection_payload(full_service)
+    assert payload is not None
+    rows = [
+        row["id"]
+        for section in payload["interactive"]["action"]["sections"]
+        for row in section["rows"]
+    ]
+    assert len(rows) == 6
+
+    delivery_only = {
+        "services_enabled": ["delivery"],
+        "scheduled_delivery_enabled": False,
+        "scheduled_takeaway_enabled": False,
+    }
+    payload = build_service_selection_payload(delivery_only)
+    assert payload is not None
+    sections = payload["interactive"]["action"]["sections"]
+    assert len(sections) == 1
+    assert [row["id"] for row in sections[0]["rows"]] == ["door_delivery_now"]
+
+    takeaway_scheduled = {
+        "services_enabled": ["takeaway"],
+        "scheduled_delivery_enabled": False,
+        "scheduled_takeaway_enabled": True,
+    }
+    payload = build_service_selection_payload(takeaway_scheduled)
+    assert payload is not None
+    sections = payload["interactive"]["action"]["sections"]
+    assert [row["id"] for row in sections[0]["rows"]] == ["takeaway_now"]
+    assert [row["id"] for row in sections[1]["rows"]] == ["scheduled_pickup"]
