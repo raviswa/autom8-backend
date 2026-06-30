@@ -25,17 +25,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import re as _re_party
 import time
 from datetime import datetime
 from typing import Dict, Any
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from tools.whatsapp_tools import send_whatsapp_message
 from tools.cart_tools import clear_cart, _send_interactive, sanitize_list_rows
 from tools.feature_gate import build_service_menu_rows
-from tools.db_tools import update_booking_status
+from tools.db_tools import update_booking_status, get_active_walk_in_token, get_restaurant_by_id
 
 # send_catalog_with_fallback is the alias for send_unified_booking_menu
 from tools.booking_mechanisms import (  # noqa: F401 — re-exported
@@ -78,6 +80,64 @@ _FULL_RESET_KEYWORDS: set[str] = {
 
 def touch_session_activity(session_state: Dict[str, Any]) -> None:
     session_state["_last_activity_at"] = datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
+
+
+def _slugify_restaurant_name(name: str) -> str:
+    return re.sub(r"(^-|-$)", "", re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()))
+
+
+async def send_webcart_link_for_add_more(
+    customer_phone: str,
+    restaurant_id: str,
+    session_state: Dict[str, Any],
+) -> bool:
+    """
+    Send the branded web cart link so "Add more items" keeps customers in the
+    new web-cart flow instead of bouncing back to legacy category picker.
+    """
+    try:
+        token_id = session_state.get("token_number") or session_state.get("display_token")
+        if not token_id:
+            token = await get_active_walk_in_token(restaurant_id, customer_phone)
+            token_id = (token or {}).get("id")
+            if token_id:
+                session_state["token_number"] = token_id
+                session_state["display_token"] = token_id
+
+        phone_digits = re.sub(r"\D", "", customer_phone or "")
+        if phone_digits.startswith("91") and len(phone_digits) == 12:
+            phone_digits = phone_digits[2:]
+
+        if not token_id or not phone_digits:
+            logger.warning("[webcart-link] Missing token/phone for %s", customer_phone)
+            return False
+
+        restaurant = await get_restaurant_by_id(restaurant_id)
+        slug = _slugify_restaurant_name((restaurant or {}).get("name") or "")
+
+        base = os.getenv("AUTOM8_BACKEND_URL", "https://api.autom8.works").rstrip("/")
+        params = [
+            f"token={quote(str(token_id))}",
+            f"phone={quote(phone_digits)}",
+        ]
+        if slug:
+            params.append(f"slug={quote(slug)}")
+
+        url = f"{base}/cart?{'&'.join(params)}"
+        await send_whatsapp_message(
+            customer_phone,
+            "↩️ Continue adding items in your web cart:\n"
+            f"{url}\n\n"
+            "Your current cart is kept as-is. Add more, then tap Continue to WhatsApp.",
+            restaurant_id,
+        )
+        session_state["booking_step"] = "awaiting_order"
+        session_state["booking_mechanism"] = "web_cart"
+        session_state["booking_mechanism_order_source"] = "web_cart"
+        return True
+    except Exception as e:
+        logger.error("[webcart-link] Failed for %s: %s", customer_phone, e)
+        return False
 
 
 def is_session_stale(session_state: Dict[str, Any]) -> bool:

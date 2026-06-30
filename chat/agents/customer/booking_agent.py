@@ -88,6 +88,7 @@ from agents.customer.booking_helpers import (
     handle_awaiting_prepay,
     _DIRECT_RESET_KEYWORDS,
     _FULL_RESET_KEYWORDS,
+    send_webcart_link_for_add_more,
 )
 from agents.customer.message_templates import build_conversation_greeting
 from agents.customer.conversation_helpers import (
@@ -681,9 +682,13 @@ async def handle_booking_flow(
     # ── stale catalog sub-steps ───────────────────────────────────────────────
     if current_step in ("awaiting_category_selection", "awaiting_item_selection"):
         logger.info(f"[router] stale step {current_step} — re-sending category picker")
-        session_state["booking_step"] = "awaiting_category_selection"
-        await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
-        return {"status": session_state.get("booking_step", "awaiting_category_selection")}
+        session_state["booking_step"] = "awaiting_order"
+        sent = await send_webcart_link_for_add_more(customer_phone, restaurant_id, session_state)
+        if not sent:
+            session_state["booking_step"] = "awaiting_category_selection"
+            await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+            return {"status": session_state.get("booking_step", "awaiting_category_selection")}
+        return {"status": session_state.get("booking_step", "awaiting_order")}
 
     # ── awaiting_cart_action ──────────────────────────────────────────────────
     if current_step == "awaiting_cart_action":
@@ -709,7 +714,9 @@ async def handle_booking_flow(
             from tools.prepay_fulfillment import reset_kitchen_state_for_new_checkout
             reset_kitchen_state_for_new_checkout(session_state)
             session_state["booking_step"] = "awaiting_order"
-            await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+            sent = await send_webcart_link_for_add_more(customer_phone, restaurant_id, session_state)
+            if not sent:
+                await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
             return {"status": session_state.get("booking_step", "awaiting_order")}
         elif action in ("CART:CLEAR","CLEAR","RESET CART"):
             clear_cart(session_state)
