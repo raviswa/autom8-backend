@@ -54,11 +54,7 @@ class Restaurant(Base):
     # Array of Feature.* strings the restaurant has subscribed to.
     # Minimum 2 required at sign-up (enforced at application layer).
     # Example: ["token_management", "dine_in", "takeaway"]
-    subscribed_features = Column(
-        ARRAY(String), nullable=False,
-        default=list,
-        server_default="{}",
-    )
+    subscribed_features = Column(JSONB, default=list)
 
     # ── Merged from restaurant_details (migration: consolidate_restaurants) ────
     display_name    = Column(String(255))
@@ -80,8 +76,24 @@ class Restaurant(Base):
     # ── Dynamic service/booking columns ───────────────────────────────────────
     scheduled_delivery_enabled = Column(Boolean, default=False, nullable=False)
     scheduled_takeaway_enabled = Column(Boolean, default=False, nullable=False)
-    services_enabled           = Column(JSON, default=list, server_default="[]")
-    restaurant_type            = Column(String(50))
+
+    # Do not map services_enabled until the DB column exists in production.
+    # services_enabled = Column(JSONB, default=list)
+
+    restaurant_type = Column(String, nullable=True)
+
+    @property
+    def effective_services_enabled(self) -> list[str]:
+        raw = self.subscribed_features or []
+        if isinstance(raw, str):
+            try:
+                import json
+                raw = json.loads(raw)
+            except Exception:
+                raw = []
+        if not isinstance(raw, list):
+            return []
+        return [str(x) for x in raw]
 
     # Relationships (RestaurantDetails removed — table dropped in migration)
     integrations        = relationship("RestaurantIntegration", back_populates="restaurant", cascade="all, delete-orphan")
