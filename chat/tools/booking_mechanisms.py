@@ -1,18 +1,15 @@
 """
 tools/booking_mechanisms.py
 ─────────────────────────────────────────────────────────────────────────────
-Unified booking mechanism with primary (WhatsApp Catalog) and fallback (Cart).
+Unified booking mechanism with deterministic web-menu channel.
 
 MERGED: original catalog/cart strategy + backend helpers extracted from
         agents/customer/booking_agent.py.
 
 Strategy
 ────────
-  PRIMARY  : send_whatsapp_catalog_message()
-             Customer browses items with images/prices, native basket, sends order.
-
-  FALLBACK : send_category_list() → send_item_list() → send_quantity_buttons()
-             Interactive list/buttons when catalog is unavailable.
+    PRIMARY  : branded web menu link
+                         Customer browses full menu/search/cart on web and returns to WhatsApp.
 
   BRIDGE   : bridge_catalog_order_to_cart() converts catalog 'order' messages
              into cart state (session_state["cart"]) for unified downstream
@@ -46,13 +43,18 @@ import asyncio
 import logging
 import os as _os
 from typing import Any, Literal
+from uuid import uuid4
 
 import aiohttp
 
-from tools.catalog_tools import send_whatsapp_catalog_message, parse_whatsapp_order
-from tools.cart_tools import send_category_list, plain_text_menu
+from tools.catalog_tools import parse_whatsapp_order
 from tools.whatsapp_tools import send_whatsapp_message
-from tools.db_tools import get_available_tables
+from tools.db_tools import (
+    get_available_tables,
+    get_active_walk_in_token,
+    get_restaurant_by_id,
+    create_menu_link_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +64,12 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 
 BOOKING_MECHANISM_CONFIG: dict[str, Any] = {
-    "primary":         "catalog",   # WhatsApp Catalog (native shopping)
-    "fallback":        "cart",      # Interactive cart (fallback)
-    "timeout_seconds": 30,          # Fallback after timeout (future use)
-    "log_mechanism":   True,        # Track mechanism usage
+    "primary":         "web_menu",
+    "timeout_seconds": 30,
+    "log_mechanism":   True,
 }
 
-MechanismType = Literal["catalog", "catalog_b", "cart", "cart_text", "none"]
+MechanismType = Literal["web_menu", "none"]
 
 
 # ─────────────────────────────────────────────
@@ -1343,104 +1344,101 @@ async def update_kds_order_notes(
 
 
 # ─────────────────────────────────────────────
-# PRIMARY: WHATSAPP CATALOG BOOKING
+# PRIMARY: BRANDED WEB MENU BOOKING
 # ─────────────────────────────────────────────
 
-async def send_catalog_booking(
+def _slugify_subdomain(name: str) -> str:
+    raw = ''.join(ch.lower() if ch.isalnum() else '-' for ch in str(name or '').strip())
+    clean = '-'.join(part for part in raw.split('-') if part)
+    return clean or 'restaurant'
+
+
+def _service_label_and_icon(session_state: dict[str, Any]) -> tuple[str, str]:
+    service = str(session_state.get('service_type') or '').strip().lower()
+    mode = str(session_state.get('order_mode') or '').strip().lower()
+    if service == 'dine_in':
+        return 'Dine-in Now', '🍽️'
+    if service == 'takeaway':
+        return ('Scheduled Pickup', '📅') if mode == 'scheduled' else ('Takeaway Now', '🥡')
+    if service == 'delivery':
+        return ('Scheduled Delivery', '📅') if mode == 'scheduled' else ('Home Delivery', '🛵')
+    if service == 'reserve_table':
+        return 'Table Reservation', '🪑'
+    return 'Order Now', '🍽️'
+
+
+def _normalize_phone_digits(phone: str) -> str:
+    digits = ''.join(c for c in str(phone or '') if c.isdigit())
+    if digits.startswith('91') and len(digits) == 12:
+        return digits[2:]
+    return digits
+
+
+async def _send_web_menu_message(
     customer_phone: str,
     restaurant_id: str,
     session_state: dict[str, Any],
 ) -> bool:
-    """
-    Send WhatsApp Catalog as PRIMARY booking mechanism.
-    Returns True if successful, False on failure (triggers fallback).
-    """
-    try:
-        success = await send_whatsapp_catalog_message(customer_phone, restaurant_id)
-        if success:
-            session_state["booking_mechanism"] = "catalog"
-            logger.info(f"[BOOKING] {customer_phone} → PRIMARY: Catalog sent")
-            return True
-        logger.warning(f"[BOOKING] {customer_phone} → Catalog send failed")
-        return False
-    except Exception as e:
-        logger.error(f"[BOOKING] {customer_phone} → Catalog error: {e}")
-        return False
+    """Generate menu token + send branded web menu message; graceful no-link fallback on errors."""
+    restaurant = await get_restaurant_by_id(restaurant_id)
+    display_name = (restaurant or {}).get('name') or 'Munafe'
+    slug = _slugify_subdomain(display_name)
+    service_label, service_icon = _service_label_and_icon(session_state)
+    phone_digits = _normalize_phone_digits(customer_phone)
 
+    token_id = (
+        session_state.get('menu_session_token')
+        or session_state.get('token_number')
+        or session_state.get('display_token')
+    )
+    if not token_id:
+        walk = await get_active_walk_in_token(restaurant_id, customer_phone)
+        if walk and walk.get('id'):
+            token_id = str(walk.get('id'))
 
-async def send_catalog_option_b_picker(
-    customer_phone: str,
-    restaurant_id: str,
-    session_state: dict[str, Any],
-) -> bool:
-    """Option B — category List Message before native WABA catalog."""
+    if not token_id:
+        token_id = uuid4().hex
+
     try:
-        from tools.catalog_tools import send_catalog_category_picker
-        success = await send_catalog_category_picker(
-            customer_phone, restaurant_id, session_state,
+        walk_token_id = session_state.get('token_number') or session_state.get('display_token')
+        await create_menu_link_token(
+            restaurant_id=restaurant_id,
+            customer_phone=phone_digits or customer_phone,
+            session_token=str(token_id),
+            walk_in_token_id=str(walk_token_id) if walk_token_id else None,
+            expires_in_hours=24,
         )
-        if success:
-            logger.info(f"[BOOKING] {customer_phone} → Option B: category picker sent")
-            return True
-        logger.warning(f"[BOOKING] {customer_phone} → Option B picker failed")
-        return False
-    except Exception as e:
-        logger.error(f"[BOOKING] {customer_phone} → Option B picker error: {e}")
-        return False
+        session_state['menu_session_token'] = str(token_id)
 
-
-# ─────────────────────────────────────────────
-# FALLBACK: INTERACTIVE CART BOOKING
-# ─────────────────────────────────────────────
-
-async def send_cart_booking(
-    customer_phone: str,
-    restaurant_id: str,
-    session_state: dict[str, Any],
-) -> bool:
-    """
-    Send interactive cart as FALLBACK booking mechanism.
-    Returns True if successful, False if both mechanisms fail.
-    """
-    try:
-        success = await send_category_list(customer_phone, session_state, restaurant_id)
-        if success:
-            session_state["booking_mechanism"] = "cart"
-            logger.info(f"[BOOKING] {customer_phone} → FALLBACK: Cart (interactive list) sent")
-            return True
-        logger.warning(f"[BOOKING] {customer_phone} → Cart interactive list failed")
-        return False
-    except Exception as e:
-        logger.error(f"[BOOKING] {customer_phone} → Cart error: {e}")
-        return False
-
-
-async def send_cart_fallback_text(
-    customer_phone: str,
-    restaurant_id: str,
-    session_state: dict[str, Any],
-) -> bool:
-    """Last-resort plain-text menu when both catalog and interactive fail."""
-    try:
-        from tools.catalog_tools import fetch_menu_items
-        await fetch_menu_items(restaurant_id)
-        menu_text = plain_text_menu()
-        if menu_text and menu_text.strip():
-            await send_whatsapp_message(customer_phone, menu_text, restaurant_id)
-            session_state["booking_mechanism"] = "cart_text"
-            session_state["booking_step"] = "awaiting_numbered_order"
-            logger.info(f"[BOOKING] {customer_phone} → FALLBACK: Cart (plain text) sent")
-            return True
-        logger.error(f"[BOOKING] {customer_phone} → plain_text_menu() returned empty")
-        return False
-    except Exception as e:
-        logger.error(f"[BOOKING] {customer_phone} → Plain-text menu error: {e}")
+        url = f"https://{slug}.autom8.works/menu?token={token_id}&phone={phone_digits}"
+        message = (
+            "🍽️ Browse Our Menu\n"
+            f"📍 {display_name}\n"
+            f"{service_icon} {service_label}\n\n"
+            "Tap the button below to browse our full menu with search "
+            "and easy selection. Add items to your cart and submit when ready!\n"
+            f"[View Menu] {url}"
+        )
+        await send_whatsapp_message(customer_phone, message, restaurant_id)
+        logger.info(f"[BOOKING] {customer_phone} → Web menu sent ({url})")
+        return True
+    except Exception:
+        logger.exception("[BOOKING] %s → Web menu token generation failed", customer_phone)
+        fallback = (
+            "🍽️ Browse Our Menu\n"
+            f"📍 {display_name}\n"
+            f"{service_icon} {service_label}\n\n"
+            "Tap the button below to browse our full menu with search "
+            "and easy selection. Add items to your cart and submit when ready!\n"
+            "Reply Hi in a moment and we'll get your menu ready."
+        )
+        await send_whatsapp_message(customer_phone, fallback, restaurant_id)
         return False
 
 
 # ─────────────────────────────────────────────
 # UNIFIED BOOKING MENU
-# Primary + Fallback + Fix 40 last resort
+# Deterministic web-menu channel
 # Used by flow modules as send_catalog_with_fallback
 # ─────────────────────────────────────────────
 
@@ -1449,143 +1447,17 @@ async def send_unified_booking_menu(
     restaurant_id: str,
     session_state: dict[str, Any],
 ) -> MechanismType:
-    """
-    Send booking menu with layered fallback strategy:
-
-      1. Option B picker  (category List → WABA catalog per category)
-      2. Picker retry
-      3. Flat / grouped native catalog
-      4. Catalog retry
-      5. Interactive cart   (send_category_list)
-      6. Plain-text menu
-      7. Last resort        (Fix 40: direct to 🛍️ Shop icon — never silent)
-
-    Returns which mechanism was used: "catalog_b", "catalog", "cart", "cart_text", or "none".
-    Sets session_state["booking_mechanism"] accordingly.
-    """
+    """Send deterministic web-menu message for all booking entry points."""
     logger.info(f"[BOOKING] send_unified_booking_menu called for {customer_phone}")
 
     session_state["restaurant_id"] = restaurant_id
-    from tools.catalog_tools import invalidate_menu_cache, fetch_menu_items
-    invalidate_menu_cache(restaurant_id)
-    items = await fetch_menu_items(restaurant_id)
-    await cache_restaurant_pricing(session_state, restaurant_id)
 
-    # Dine-in: never send menu until a table is assigned (portal or chat poll).
-    if session_state.get("service_type") == "dine_in":
-        step = session_state.get("booking_step")
-        if step in ("awaiting_table_assignment", "awaiting_party_size", "awaiting_manager_approval"):
-            logger.info(f"[BOOKING] Skipping menu for dine-in step={step} (await table)")
-            return "none"
-        if step == "awaiting_order" and not session_state.get("table_number"):
-            logger.info(f"[BOOKING] Skipping menu for dine-in — no table_number yet")
-            return "none"
-
-    from tools.kitchen_hours import kitchen_accepting_orders, build_blanket_closed_message
-    if not kitchen_accepting_orders(session_state):
-        logger.info(f"[BOOKING] Kitchen closed — blanket message for {customer_phone}")
-        await send_whatsapp_message(
-            customer_phone,
-            build_blanket_closed_message(),
-            restaurant_id,
-        )
-        session_state["booking_step"] = "kitchen_closed"
-        return "none"
-
-    # ── Attempt 1: Flat native catalog (grouped sections) ─────────────────────
-    if await send_catalog_booking(customer_phone, restaurant_id, session_state):
-        if session_state.get("service_type") in ("dine_in", "takeaway", "delivery"):
-            session_state["booking_step"] = "awaiting_order"
-        await asyncio.sleep(1.5)
-        await maybe_send_special_dishes_note(
-            customer_phone, restaurant_id, session_state, menu_items=items,
-        )
-        return "catalog"
-
-    # ── Attempt 2: Retry flat catalog ─────────────────────────────────────────
-    logger.warning(f"[BOOKING] {customer_phone} → catalog attempt 1 failed, retrying in 2 s")
-    await asyncio.sleep(2)
-    if await send_catalog_booking(customer_phone, restaurant_id, session_state):
-        if session_state.get("service_type") in ("dine_in", "takeaway", "delivery"):
-            session_state["booking_step"] = "awaiting_order"
-        await asyncio.sleep(1.5)
-        await maybe_send_special_dishes_note(
-            customer_phone, restaurant_id, session_state, menu_items=items,
-        )
-        return "catalog"
-
-    # ── Attempt 3: Option B category picker ───────────────────────────────────
-    if await send_catalog_option_b_picker(customer_phone, restaurant_id, session_state):
-        await asyncio.sleep(1.0)
-        await maybe_send_special_dishes_note(
-            customer_phone, restaurant_id, session_state, menu_items=items,
-        )
-        return "catalog_b"
-
-    # ── Attempt 4: Retry Option B picker ─────────────────────────────────────
-    logger.warning(f"[BOOKING] {customer_phone} → Option B attempt 1 failed, retrying in 2 s")
-    await asyncio.sleep(2)
-    if await send_catalog_option_b_picker(customer_phone, restaurant_id, session_state):
-        await asyncio.sleep(1.0)
-        await maybe_send_special_dishes_note(
-            customer_phone, restaurant_id, session_state, menu_items=items,
-        )
-        return "catalog_b"
-
-    # ── Attempt 5: Interactive cart (numbered list fallback) ──────────────────
-    if await send_cart_booking(customer_phone, restaurant_id, session_state):
-        await asyncio.sleep(1.0)
-        await maybe_send_special_dishes_note(
-            customer_phone, restaurant_id, session_state, menu_items=items,
-        )
-        return "cart"
-
-    # ── Attempt 3b: Menu empty (e.g. kitchen closed / slot gap) ───────────────
-    available = [i for i in items if i.get("is_available", True)] if items else []
-    if not available:
-        logger.error(
-            f"[BOOKING] {customer_phone} → no available menu items for {restaurant_id}"
-        )
-        try:
-            from tools.kitchen_hours import build_menu_closed_message
-            await send_whatsapp_message(
-                customer_phone,
-                build_menu_closed_message(session_state.get("service_type")),
-                restaurant_id,
-            )
-        except Exception as e:
-            logger.warning(f"[BOOKING] closed-hours message failed: {e}")
-        return "none"
-
-    # ── Attempt 4: Plain-text menu ────────────────────────────────────────────
-    if await send_cart_fallback_text(customer_phone, restaurant_id, session_state):
-        await maybe_send_special_dishes_note(
-            customer_phone, restaurant_id, session_state, menu_items=items,
-        )
-        return "cart_text"
-
-    # ── Last resort: Fix 40 — direct to Shop icon, never leave silence ────────
-    logger.error(f"[BOOKING] {customer_phone} → ALL mechanisms failed, using Shop-icon prompt")
-    try:
-        await send_whatsapp_message(
-            customer_phone,
-            (
-                "🍽️ Our menu is ready for you!\n\n"
-                "👆 Tap the *🛍️ Shop* icon at the top of this chat to browse "
-                "and add items to your basket — then come back here to confirm.\n\n"
-                "Or type *MENU* if you'd prefer a text list of today's items."
-            ),
-            restaurant_id,
-        )
-        session_state["booking_mechanism"] = "none"
+    sent = await _send_web_menu_message(customer_phone, restaurant_id, session_state)
+    session_state["booking_mechanism"] = "web_menu"
+    session_state["booking_mechanism_order_source"] = "web_menu"
+    if session_state.get("service_type") in ("dine_in", "takeaway", "delivery", "reserve_table"):
         session_state["booking_step"] = "awaiting_order"
-        await maybe_send_special_dishes_note(
-            customer_phone, restaurant_id, session_state, menu_items=items,
-        )
-    except Exception as e:
-        logger.critical(f"[BOOKING] {customer_phone} → even last-resort message failed: {e}")
-
-    return "none"
+    return "web_menu" if sent else "none"
 
 
 def status_after_booking_menu(session_state: dict[str, Any]) -> str:

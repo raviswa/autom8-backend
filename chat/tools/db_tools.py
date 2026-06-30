@@ -2119,6 +2119,77 @@ def _phone_variants(phone: str) -> list[str]:
     return list(variants)
 
 
+async def create_menu_link_token(
+    restaurant_id: str,
+    customer_phone: str,
+    session_token: str,
+    walk_in_token_id: str | None = None,
+    expires_in_hours: int = 24,
+) -> dict[str, Any]:
+    """
+    Persist (or rotate) web-menu token for a restaurant+phone pair.
+    Token is valid for 24h by default and tied to restaurant_id + phone + session_token.
+    """
+    if AsyncSessionLocal is None:
+        raise Exception("Database not initialized")
+
+    phones = _phone_variants(customer_phone)
+    phone = phones[0] if phones else "".join(c for c in str(customer_phone) if c.isdigit())
+    if not phone:
+        raise ValueError("customer_phone is required")
+
+    token = str(session_token or "").strip()
+    if not token:
+        raise ValueError("session_token is required")
+
+    expires_at = datetime.utcnow() + timedelta(hours=max(1, int(expires_in_hours or 24)))
+
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            text("""
+                INSERT INTO menu_tokens (
+                    restaurant_id,
+                    phone,
+                    session_token,
+                    walk_in_token_id,
+                    expires_at,
+                    is_active
+                )
+                VALUES (
+                    CAST(:rid AS uuid),
+                    :phone,
+                    :session_token,
+                    :walk_in_token_id,
+                    :expires_at,
+                    TRUE
+                )
+                ON CONFLICT (restaurant_id, phone)
+                DO UPDATE SET
+                    session_token = EXCLUDED.session_token,
+                    walk_in_token_id = COALESCE(EXCLUDED.walk_in_token_id, menu_tokens.walk_in_token_id),
+                    expires_at = EXCLUDED.expires_at,
+                    is_active = TRUE,
+                    updated_at = NOW()
+            """),
+            {
+                "rid": restaurant_id,
+                "phone": phone,
+                "session_token": token,
+                "walk_in_token_id": walk_in_token_id,
+                "expires_at": expires_at,
+            },
+        )
+        await session.commit()
+
+    return {
+        "restaurant_id": restaurant_id,
+        "phone": phone,
+        "session_token": token,
+        "walk_in_token_id": walk_in_token_id,
+        "expires_at": expires_at.isoformat(),
+    }
+
+
 def _portal_token_month_key() -> str:
     from zoneinfo import ZoneInfo
     return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y%m")

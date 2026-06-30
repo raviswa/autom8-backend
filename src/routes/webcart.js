@@ -165,16 +165,69 @@ async function resolveSession({ restaurantId, token, phone }) {
   const variants = phoneVariants(phone);
   if (!restaurantId || !token || !variants.length) return null;
 
-  const { data, error } = await supabaseAdmin
-    .from('walk_in_tokens')
-    .select('id, phone, status, arrived_at, completed_at, meta, type')
-    .eq('restaurant_id', restaurantId)
-    .eq('id', token)
-    .in('phone', variants)
-    .limit(1)
-    .maybeSingle();
+  let menuToken = null;
+  try {
+    const { data: menuData, error: menuErr } = await supabaseAdmin
+      .from('menu_tokens')
+      .select('session_token, phone, walk_in_token_id, expires_at, is_active')
+      .eq('restaurant_id', restaurantId)
+      .eq('session_token', token)
+      .in('phone', variants)
+      .eq('is_active', true)
+      .gt('expires_at', new Date().toISOString())
+      .limit(1)
+      .maybeSingle();
 
-  if (error) throw error;
+    if (menuErr) {
+      const raw = `${menuErr.code || ''} ${menuErr.message || ''}`.toLowerCase();
+      const missingTable = raw.includes('menu_tokens') || raw.includes('pgrst205') || raw.includes('42p01');
+      if (!missingTable) throw menuErr;
+    } else {
+      menuToken = menuData || null;
+    }
+  } catch (err) {
+    throw err;
+  }
+
+  const walkTokenId = menuToken?.walk_in_token_id || token;
+
+  let data = null;
+  if (walkTokenId) {
+    const { data: byId, error } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .select('id, phone, status, arrived_at, completed_at, meta, type')
+      .eq('restaurant_id', restaurantId)
+      .eq('id', walkTokenId)
+      .in('phone', variants)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    data = byId || null;
+  }
+
+  if (!data && menuToken) {
+    const { data: byPhone, error } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .select('id, phone, status, arrived_at, completed_at, meta, type')
+      .eq('restaurant_id', restaurantId)
+      .in('phone', variants)
+      .order('arrived_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    data = byPhone || null;
+
+    if (data?.id && !menuToken.walk_in_token_id) {
+      await supabaseAdmin
+        .from('menu_tokens')
+        .update({ walk_in_token_id: data.id })
+        .eq('restaurant_id', restaurantId)
+        .eq('session_token', token)
+        .eq('is_active', true)
+        .in('phone', variants);
+    }
+  }
+
   if (!data) return null;
 
   if (!ACTIVE_TOKEN_STATUSES.has(data.status) || data.completed_at) return null;
