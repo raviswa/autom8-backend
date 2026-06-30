@@ -1374,6 +1374,19 @@ def _normalize_phone_digits(phone: str) -> str:
     return digits
 
 
+def _build_web_menu_url(slug: str, token: str, phone_digits: str) -> str:
+    """
+    Build a reachable web-menu URL.
+    Default is backend public route (/menu) with slug query; can be overridden.
+    """
+    base = (
+        _os.getenv("WEB_MENU_BASE_URL")
+        or _os.getenv("AUTOM8_BACKEND_URL")
+        or "https://api.autom8.works"
+    ).rstrip("/")
+    return f"{base}/menu?slug={slug}&token={token}&phone={phone_digits}"
+
+
 async def _send_web_menu_message(
     customer_phone: str,
     restaurant_id: str,
@@ -1410,7 +1423,7 @@ async def _send_web_menu_message(
         )
         session_state['menu_session_token'] = str(token_id)
 
-        url = f"https://{slug}.autom8.works/menu?token={token_id}&phone={phone_digits}"
+        url = _build_web_menu_url(slug, str(token_id), phone_digits)
         message = (
             "🍽️ Browse Our Menu\n"
             f"📍 {display_name}\n"
