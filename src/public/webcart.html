@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Munafe Cart</title>
+  <style>
+    :root {
+      --bg: #fff9ef;
+      --panel: #fffef8;
+      --ink: #1f2937;
+      --muted: #6b7280;
+      --brand: #c2410c;
+      --line: #f1d9bf;
+      --ok: #166534;
+      --danger: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 10% 10%, #ffe2bd 0%, transparent 25%),
+        radial-gradient(circle at 90% 0%, #ffd8cb 0%, transparent 28%),
+        var(--bg);
+    }
+    .shell { max-width: 1080px; margin: 0 auto; padding: 16px; }
+    .header {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      position: sticky;
+      top: 10px;
+      z-index: 20;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .logo {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      object-fit: cover;
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+    .pill {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-weight: 700;
+      color: #fff;
+      background: var(--brand);
+      cursor: pointer;
+    }
+    .layout { display: grid; grid-template-columns: 1fr 350px; gap: 14px; margin-top: 14px; }
+    .menu, .drawer {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+    }
+    .menu-head, .drawer-head { padding: 14px; border-bottom: 1px solid var(--line); }
+    .section { padding: 12px; border-bottom: 1px solid var(--line); }
+    .section h3 { margin: 0 0 8px; font-size: 14px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 11px;
+      background: #fff;
+      color: var(--ink);
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 12px;
+    }
+    .chip.active { background: var(--brand); border-color: var(--brand); color: #fff; }
+    .note {
+      display: inline-block;
+      margin-top: 6px;
+      font-size: 11px;
+      color: #92400e;
+      background: #ffedd5;
+      border: 1px solid #fed7aa;
+      padding: 3px 8px;
+      border-radius: 999px;
+    }
+    .menu-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(220px,1fr)); gap: 10px; padding: 12px; }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .card img { width: 100%; height: 120px; object-fit: cover; background: #f3f4f6; }
+    .card-body { padding: 10px; display: grid; gap: 8px; }
+    .cat { color: var(--muted); font-size: 12px; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .btn {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 10px;
+      padding: 8px 10px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    .btn.primary { background: var(--brand); color: #fff; border-color: var(--brand); }
+    .drawer-body { padding: 12px; display: grid; gap: 10px; }
+    .line { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+    .line small { color: var(--muted); }
+    textarea, input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      font: inherit;
+      background: #fff;
+    }
+    .msg {
+      margin-top: 12px;
+      padding: 10px;
+      border-radius: 10px;
+      display: none;
+    }
+    .msg.ok { display: block; background: #dcfce7; color: var(--ok); }
+    .msg.err { display: block; background: #fee2e2; color: var(--danger); }
+    .banner {
+      margin-top: 12px;
+      padding: 10px;
+      border-radius: 10px;
+      border: 1px solid #f59e0b;
+      background: #fffbeb;
+      color: #92400e;
+      font-size: 13px;
+    }
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+      .drawer { position: sticky; bottom: 6px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="header">
+      <div class="brand">
+        <img id="brandLogo" class="logo" alt="logo" />
+        <div>
+          <div id="brandName" style="font-weight:800">Munafe</div>
+          <small id="sessionMeta" style="color:var(--muted)"></small>
+        </div>
+      </div>
+      <button class="pill" id="refreshBtn">Refresh session</button>
+    </div>
+
+    <div id="status" class="msg"></div>
+    <div id="slotBanner" class="banner" style="display:none"></div>
+
+    <div class="layout">
+      <section class="menu">
+        <div class="menu-head"><strong>Menu</strong></div>
+        <div id="specialWrap" class="section" style="display:none">
+          <h3>⭐ Today's Special</h3>
+          <div id="specialGrid" class="menu-grid" style="padding:0"></div>
+        </div>
+        <div id="availableNowWrap" class="section" style="display:none">
+          <h3>🍽️ Available Now</h3>
+          <div id="availableNowGrid" class="menu-grid" style="padding:0"></div>
+        </div>
+        <div class="section">
+          <div id="tabChips" class="chips"></div>
+        </div>
+        <div id="menuGrid" class="menu-grid"></div>
+      </section>
+
+      <aside class="drawer">
+        <div class="drawer-head"><strong>Your Cart</strong></div>
+        <div class="drawer-body">
+          <div id="cartLines"></div>
+          <div class="line"><small>Subtotal</small><strong id="subtotal">Rs 0</strong></div>
+          <div class="line"><small>Discount</small><strong id="discount">Rs 0</strong></div>
+          <div class="line"><small>Total</small><strong id="grand">Rs 0</strong></div>
+
+          <input id="promo" placeholder="Promo code (optional)" />
+          <textarea id="notes" rows="3" placeholder="Special request (optional)"></textarea>
+          <button id="submitBtn" class="btn primary">Continue to WhatsApp</button>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token') || '';
+    const phone = params.get('phone') || '';
+    const slug = params.get('slug') || '';
+
+    const state = {
+      menu: [],
+      cart: new Map(),
+      restaurant: null,
+      currentSlot: null,
+      slotState: null,
+      slotBanner: null,
+      categorySlots: {},
+      categories: [],
+      primaryCategory: 'all',
+      activeTab: 'all',
+      todaysSpecial: [],
+      availableNow: [],
+      promo: null,
+    };
+
+    const statusBox = document.getElementById('status');
+    const menuGrid = document.getElementById('menuGrid');
+    const specialGrid = document.getElementById('specialGrid');
+    const availableNowGrid = document.getElementById('availableNowGrid');
+    const specialWrap = document.getElementById('specialWrap');
+    const availableNowWrap = document.getElementById('availableNowWrap');
+    const tabChips = document.getElementById('tabChips');
+    const cartLines = document.getElementById('cartLines');
+
+    function showStatus(text, type) {
+      statusBox.className = `msg ${type}`;
+      statusBox.textContent = text;
+    }
+
+    function money(v) { return `Rs ${Math.max(0, Number(v || 0)).toFixed(0)}`; }
+
+    function currentDiscount(subtotal) {
+      const code = (document.getElementById('promo').value || '').trim().toUpperCase();
+      if (code === 'MUNAFE10') {
+        return { code, amount: Math.round(subtotal * 0.1) };
+      }
+      return { code: '', amount: 0 };
+    }
+
+    function renderCart() {
+      const lines = [...state.cart.values()];
+      cartLines.innerHTML = lines.length
+        ? lines.map(l => `<div class="line"><small>${l.qty}x ${l.name}</small><strong>${money(l.qty * l.price)}</strong></div>`).join('')
+        : '<small style="color:var(--muted)">No items yet.</small>';
+
+      const subtotal = lines.reduce((s, l) => s + l.qty * l.price, 0);
+      const promo = currentDiscount(subtotal);
+      const total = Math.max(0, subtotal - promo.amount);
+
+      document.getElementById('subtotal').textContent = money(subtotal);
+      document.getElementById('discount').textContent = `- ${money(promo.amount)}`;
+      document.getElementById('grand').textContent = money(total);
+      state.promo = promo.code || null;
+    }
+
+    function addToCart(item) {
+      const key = item.retailer_id || item.id;
+      const prev = state.cart.get(key);
+      if (prev) prev.qty += 1;
+      else state.cart.set(key, { id: key, name: item.name, price: Number(item.price || 0), qty: 1 });
+      renderCart();
+    }
+
+    function cardHtml(item, { showSpecialNote = false } = {}) {
+      return `
+        <article class="card">
+          <img src="${item.image_url || ''}" alt="" onerror="this.style.visibility='hidden'" />
+          <div class="card-body">
+            <div class="cat">${item.category || 'General'}</div>
+            <strong>${item.name}</strong>
+            ${showSpecialNote && item.special_note ? `<span class="note">${item.special_note}</span>` : ''}
+            <div class="row">
+              <span>${money(item.price)}</span>
+              <button class="btn" data-id="${item.id}">Add</button>
+            </div>
+          </div>
+        </article>
+      `;
+    }
+
+    function bindAddHandlers(root = document) {
+      root.querySelectorAll('button[data-id]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const item = state.menu.find(i => i.id === btn.dataset.id);
+          if (item) addToCart(item);
+        });
+      });
+    }
+
+    function renderMenu() {
+      state.categories = [...new Set(state.menu.map(i => i.category || 'General'))].sort((a, b) => a.localeCompare(b));
+
+      specialWrap.style.display = state.todaysSpecial.length ? 'block' : 'none';
+      specialGrid.innerHTML = state.todaysSpecial.map(i => cardHtml(i, { showSpecialNote: true })).join('');
+
+      availableNowWrap.style.display = state.availableNow.length ? 'block' : 'none';
+      availableNowGrid.innerHTML = state.availableNow.map(i => cardHtml(i)).join('');
+
+      const tabs = ['all', ...state.categories];
+      tabChips.innerHTML = tabs.map(tab => {
+        const active = state.activeTab === tab;
+        const label = tab === 'all' ? 'All Items' : tab;
+        return `<button class="chip ${active ? 'active' : ''}" data-tab="${tab}">${label}</button>`;
+      }).join('');
+
+      tabChips.querySelectorAll('button[data-tab]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.activeTab = btn.dataset.tab;
+          renderMenu();
+        });
+      });
+
+      const visible = state.activeTab === 'all'
+        ? state.menu
+        : state.menu.filter(i => (i.category || 'General') === state.activeTab);
+
+      menuGrid.innerHTML = visible.map(i => cardHtml(i)).join('');
+      bindAddHandlers(document);
+    }
+
+    async function loadSession() {
+      if (!token || !phone) {
+        showStatus('This cart link is incomplete. Please reopen from WhatsApp.', 'err');
+        return;
+      }
+
+      try {
+        const q = new URLSearchParams({ token, phone });
+        if (slug) q.set('slug', slug);
+        const res = await fetch(`/api/webcart/session?${q.toString()}`);
+        const data = await res.json();
+
+        if (!res.ok || !data.valid) {
+          showStatus(data.message || 'Session expired. Please request a new link on WhatsApp.', 'err');
+          return;
+        }
+
+        state.restaurant = data.restaurant;
+        state.menu = data.menu_items || [];
+        state.currentSlot = data.current_slot || null;
+        state.slotState = data.slot_state || null;
+        state.slotBanner = data.slot_banner || null;
+        state.categorySlots = data.category_slots || {};
+        state.todaysSpecial = data.todays_special || [];
+        state.availableNow = data.available_now || [];
+        state.primaryCategory = data.primary_category || 'all';
+        state.activeTab = state.primaryCategory || 'all';
+
+        document.documentElement.style.setProperty('--brand', (data.theme || {}).primary_color || '#C2410C');
+        document.getElementById('brandName').textContent = data.restaurant.name || 'Munafe';
+        document.getElementById('sessionMeta').textContent = `Token ${data.session.token} • ${data.session.phone}`;
+        const logo = document.getElementById('brandLogo');
+        if (data.restaurant.logo_url) logo.src = data.restaurant.logo_url;
+        else logo.style.display = 'none';
+
+        const banner = document.getElementById('slotBanner');
+        if (state.slotBanner) {
+          banner.style.display = 'block';
+          banner.textContent = state.slotBanner;
+        } else {
+          banner.style.display = 'none';
+        }
+
+        renderMenu();
+        renderCart();
+      } catch (_e) {
+        showStatus('Unable to load the cart session right now. Please try again.', 'err');
+      }
+    }
+
+    async function submitOrder() {
+      if (!state.cart.size) {
+        showStatus('Add at least one item before submitting.', 'err');
+        return;
+      }
+
+      const body = {
+        token,
+        phone,
+        items: [...state.cart.values()],
+        promo_code: (document.getElementById('promo').value || '').trim() || null,
+        special_request: (document.getElementById('notes').value || '').trim() || null,
+      };
+
+      try {
+        const q = new URLSearchParams();
+        if (slug) q.set('slug', slug);
+        const res = await fetch(`/api/webcart/submit?${q.toString()}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+
+        if (!res.ok || !data.ok) {
+          showStatus(data.message || data.error || 'Could not submit your order.', 'err');
+          return;
+        }
+
+        showStatus(`Ready to continue in WhatsApp. Ref: ${data.order_ref}`, 'ok');
+      } catch (_e) {
+        showStatus('Order submission failed. Please try again.', 'err');
+      }
+    }
+
+    document.getElementById('submitBtn').addEventListener('click', submitOrder);
+    document.getElementById('refreshBtn').addEventListener('click', loadSession);
+    document.getElementById('promo').addEventListener('input', renderCart);
+    loadSession();
+  </script>
+</body>
+</html>

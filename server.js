@@ -90,6 +90,9 @@ app.use('/api/whatsapp',    require('./src/routes/webhook'));
 app.use('/api/v1/takeaway', require('./src/routes/takeaway'));
 app.use('/api/staff',       require('./src/routes/staff'));
 
+// ── Public web cart (slug/token based) ──────────────────────────────────────
+app.use('/',                require('./src/routes/webcart'));
+
 // ── Receipt + order verification (public HTML pages) ─────────────────────────
 app.use('/',                require('./src/routes/receipts'));
 

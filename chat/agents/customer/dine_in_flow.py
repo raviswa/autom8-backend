@@ -77,6 +77,7 @@ from agents.customer.booking_helpers import (
     status_after_booking_menu,
     start_special_notes_timer,
     stop_special_notes_timer,
+    normalize_special_notes_input,
     handle_unknown_booking_step,
 )
 from agents.customer.conversation_helpers import safe_build_order_suggestion
@@ -1151,22 +1152,17 @@ async def handle_dine_in_flow(
 
         asked_at  = session_state.get("special_notes_asked_at", 0)
         timed_out = (time.time() - asked_at) > 120
-        if timed_out:
-            raw_notes = "SKIP"
+        special_notes, notes_error = normalize_special_notes_input(raw_notes, timed_out=timed_out)
+        if notes_error == "too_long":
+            await send_whatsapp_message(
+                customer_phone,
+                "Your message is a bit too long (max 500 characters). "
+                "Please keep it brief, or just tap *No notes*.",
+                restaurant_id,
+            )
+            return {"status": "awaiting_special_notes"}
 
-        if not raw_notes or raw_notes.upper() in ("SKIP", "NO", "NONE"):
-            special_notes: str | None = None
-        else:
-            if len(raw_notes) > 500:
-                await send_whatsapp_message(
-                    customer_phone,
-                    "Your message is a bit too long (max 500 characters). "
-                    "Please keep it brief, or just tap *No notes*.",
-                    restaurant_id,
-                )
-                return {"status": "awaiting_special_notes"}
-
-            special_notes = raw_notes
+        if special_notes:
             await send_whatsapp_message(
                 manager_phone,
                 f"📝 Special Notes — Token {token}\n────────────────────\n"

@@ -630,7 +630,7 @@ async function handleInternalMenuItems(req, res) {
     if (!restaurantId) return res.status(400).json({ error: 'restaurant_id required' });
 
     const { data, error } = await supabaseAdmin.from('menu_items')
-      .select('id, name, description, price, image_url, time_slot, retailer_id, is_available, is_stocked, category, is_special_today')
+      .select('id, name, description, price, image_url, time_slot, retailer_id, is_available, is_stocked, category, is_special_today, is_todays_special, special_note, applicable_slots')
       .eq('restaurant_id', restaurantId)
       .eq('is_available', true)
       .order('time_slot', { ascending: true }).order('name', { ascending: true });
@@ -831,9 +831,17 @@ async function handleMenuItemSpecialToday(req, res) {
     if (!['owner', 'manager', 'brand_owner'].includes(req.user_role))
       return res.status(403).json({ error: 'Unauthorized' });
 
-    const { is_special_today } = req.body;
-    if (typeof is_special_today !== 'boolean')
-      return res.status(400).json({ error: 'is_special_today (boolean) required' });
+    const {
+      is_special_today,
+      is_todays_special,
+      special_note,
+      recurring_special,
+    } = req.body;
+    const nextSpecial =
+      typeof is_todays_special === 'boolean' ? is_todays_special : is_special_today;
+    if (typeof nextSpecial !== 'boolean') {
+      return res.status(400).json({ error: 'is_special_today/is_todays_special (boolean) required' });
+    }
 
     const { data: item, error: fetchErr } = await supabaseAdmin
       .from('menu_items').select('id, name')
@@ -841,10 +849,16 @@ async function handleMenuItemSpecialToday(req, res) {
 
     if (fetchErr || !item) return res.status(404).json({ error: 'Menu item not found' });
 
-    const { error: updateErr } = await supabaseAdmin.from('menu_items').update({
-      is_special_today,
+    const patch = {
+      is_special_today: nextSpecial,
+      is_todays_special: nextSpecial,
       updated_at: new Date().toISOString(),
-    }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id);
+    };
+    if (special_note !== undefined) patch.special_note = String(special_note || '').trim() || null;
+    if (recurring_special !== undefined) patch.recurring_special = !!recurring_special;
+
+    const { error: updateErr } = await supabaseAdmin.from('menu_items').update(patch)
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id);
 
     if (updateErr) {
       if (/is_special_today/i.test(updateErr.message)) {
@@ -857,11 +871,25 @@ async function handleMenuItemSpecialToday(req, res) {
 
     await writeAuditLog({
       user_id: req.user.sub, restaurant_id: req.restaurant_id,
-      action: is_special_today ? "Marked today's special" : "Removed today's special",
-      details: { item_id: req.params.id, item_name: item.name, is_special_today },
+      action: nextSpecial ? "Marked today's special" : "Removed today's special",
+      details: {
+        item_id: req.params.id,
+        item_name: item.name,
+        is_special_today: nextSpecial,
+        special_note: patch.special_note ?? null,
+        recurring_special: patch.recurring_special ?? null,
+      },
     });
 
-    res.json({ success: true, id: req.params.id, is_special_today, name: item.name });
+    res.json({
+      success: true,
+      id: req.params.id,
+      is_special_today: nextSpecial,
+      is_todays_special: nextSpecial,
+      special_note: patch.special_note ?? null,
+      recurring_special: patch.recurring_special ?? false,
+      name: item.name,
+    });
   } catch (err) {
     console.error('[menu-item-special-today]', err.message);
     if (!res.headersSent) res.status(500).json({ error: err.message });
@@ -875,8 +903,9 @@ router.put('/menu-items/:id/special-today', ...menuItemSpecialTodayMiddleware);
 async function resetDailySpecialDishes() {
   const { data, error } = await supabaseAdmin
     .from('menu_items')
-    .update({ is_special_today: false, updated_at: new Date().toISOString() })
-    .eq('is_special_today', true)
+    .update({ is_special_today: false, is_todays_special: false, updated_at: new Date().toISOString() })
+    .or('is_special_today.eq.true,is_todays_special.eq.true')
+    .eq('recurring_special', false)
     .select('id');
 
   if (error) {
@@ -887,6 +916,73 @@ async function resetDailySpecialDishes() {
   if (n) console.log(`[special-dish-reset] Cleared ${n} special-dish flag(s)`);
   return n;
 }
+
+function normalizeSlotArray(input) {
+  const ALLOWED = new Set(['tiffin', 'lunch', 'dinner', 'anytime']);
+  const list = Array.isArray(input) ? input : [];
+  const clean = [...new Set(list.map(s => String(s || '').toLowerCase().trim()).filter(Boolean))]
+    .filter(s => ALLOWED.has(s));
+  return clean.length ? clean : ['anytime'];
+}
+
+router.get('/menu-categories/slots', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('menu_categories')
+      .select('name, applicable_slots')
+      .eq('restaurant_id', req.restaurant_id)
+      .order('name', { ascending: true });
+    if (error) throw error;
+    res.json({ success: true, categories: data || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/menu-categories/:name/slots', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (!['owner', 'manager', 'brand_owner'].includes(req.user_role)) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    const name = String(req.params.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'Category name is required' });
+
+    const applicableSlots = normalizeSlotArray(req.body?.applicable_slots);
+    const patch = {
+      restaurant_id: req.restaurant_id,
+      name,
+      applicable_slots: applicableSlots,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabaseAdmin
+      .from('menu_categories')
+      .upsert(patch, { onConflict: 'restaurant_id,name' });
+    if (error) throw error;
+
+    res.json({ success: true, category: name, applicable_slots: applicableSlots });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/menu-items/:id/slots', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (!['owner', 'manager', 'brand_owner'].includes(req.user_role)) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    const slots = req.body?.applicable_slots;
+    const normalized = slots == null ? null : normalizeSlotArray(slots);
+    const { error } = await supabaseAdmin.from('menu_items').update({
+      applicable_slots: normalized,
+      updated_at: new Date().toISOString(),
+    }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id);
+    if (error) throw error;
+    res.json({ success: true, id: req.params.id, applicable_slots: normalized });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Export helpers for use by schedulers/index.js
 module.exports = router;

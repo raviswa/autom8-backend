@@ -1110,28 +1110,25 @@ async def handle_dine_in_flow(
     elif booking_step == "awaiting_special_notes":
         raw_notes: str = message.strip()
         token = session_state.get("token_number", "")
+        from agents.customer.booking_helpers import normalize_special_notes_input
 
-        # Allow skipping with empty message, "SKIP", "NO", or "NONE"
-        if not raw_notes or raw_notes.upper() in ("SKIP", "NO", "NONE"):
-            special_notes: str | None = None
+        special_notes, notes_error = normalize_special_notes_input(raw_notes)
+        if notes_error == "too_long":
+            await send_whatsapp_message(
+                customer_phone,
+                "Your message is a bit too long (max 500 characters). "
+                "Please keep it brief, or just tap *No notes*.",
+                restaurant_id,
+            )
+            return {"status": "awaiting_special_notes"}
+
+        if not special_notes:
             await send_whatsapp_message(
                 customer_phone,
                 "No problem! Your order is being prepared. Enjoy your meal! 🍽️",
                 restaurant_id,
             )
         else:
-            # Validate length
-            if len(raw_notes) > 500:
-                await send_whatsapp_message(
-                    customer_phone,
-                    "Your message is a bit too long (max 500 characters). "
-                    "Please keep it brief, or just tap *No notes*.",
-                    restaurant_id,
-                )
-                return {"status": "awaiting_special_notes"}
-
-            special_notes = raw_notes
-
             # Notify manager only if there are actual notes
             await send_whatsapp_message(
                 manager_phone,

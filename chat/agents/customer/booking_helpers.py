@@ -1432,6 +1432,25 @@ _nudge_tasks: dict = {}
 
 
 SPECIAL_NOTES_WAIT_SECS = 120
+SPECIAL_NOTES_MAX_CHARS = 500
+SPECIAL_NOTES_SKIP_TOKENS = frozenset({"", "SKIP", "NO", "NONE"})
+
+
+def normalize_special_notes_input(raw_text: str, *, timed_out: bool = False) -> tuple[str | None, str | None]:
+    """
+    Shared special-request parser used by all order-finalization flows.
+
+    Returns:
+      (normalized_notes, error_key)
+      - normalized_notes: None when skipped/empty, otherwise cleaned text
+      - error_key: None when valid, "too_long" when it exceeds max length
+    """
+    text = "SKIP" if timed_out else str(raw_text or "").strip()
+    if text.upper() in SPECIAL_NOTES_SKIP_TOKENS:
+        return None, None
+    if len(text) > SPECIAL_NOTES_MAX_CHARS:
+        return None, "too_long"
+    return text, None
 
 
 def start_special_notes_timer(
