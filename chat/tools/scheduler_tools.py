@@ -30,6 +30,11 @@ from tools.campaign_tools import (
 
 logger = logging.getLogger(__name__)
 
+try:
+    from tools.receipt_tools import cleanup_expired_receipts
+except Exception:
+    cleanup_expired_receipts = None
+
 # ─────────────────────────────────────────────────────────────────────────────
 # db_tools.py changes required alongside this file:
 #
@@ -127,12 +132,18 @@ async def start_scheduler():
         name="Dispatch scheduled campaigns",
     )
 
-    scheduler.add_job(
-        lambda: asyncio.create_task(cleanup_expired_receipts()),
-        'cron', hour=3, minute=0, id='cleanup_receipts',
-        replace_existing=True,
-    )
-    
+    if cleanup_expired_receipts is not None:
+        scheduler.add_job(
+            lambda: asyncio.create_task(cleanup_expired_receipts()),
+            trigger="cron",
+            hour="3",
+            minute="0",
+            id="cleanup_expired_receipts",
+            replace_existing=True,
+        )
+    else:
+        logger.warning("cleanup_expired_receipts unavailable; skipping scheduled cleanup job")
+
     scheduler.add_job(
         track_campaign_conversions,
         trigger=CronTrigger(hour="*/4"),  # Every 4 hours
