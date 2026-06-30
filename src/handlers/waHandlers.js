@@ -500,17 +500,36 @@ async function handleWhatsAppOrder(message, metadata, preResolvedRestaurantId = 
 
     // ── Create order header ───────────────────────────────────────────────────
     const orderNumber = `ORD-WA-${Date.now()}`;
-    const { data: orderData, error: orderError } = await supabaseAdmin
+    const orderPayload = {
+      restaurant_id: restaurantId,
+      table_id:      token.table_id,
+      order_number:  orderNumber,
+      status:        'pending',
+      source:        'whatsapp',
+      customer_phone: normalizedPhone,
+      customer_name:  token.name || 'Guest',
+      token_id:       token.id,
+    };
+
+    let orderData = null;
+    let orderError = null;
+
+    ({ data: orderData, error: orderError } = await supabaseAdmin
       .from('orders')
-      .insert({
-        restaurant_id: restaurantId,
-        table_id:      token.table_id,
-        order_number:  orderNumber,
-        status:        'pending',
-        source:        'whatsapp',
-      })
+      .insert(orderPayload)
       .select()
-      .single();
+      .single());
+
+    // Backward compatibility: environments where orders.token_id isn't migrated yet.
+    if (orderError && /token_id/i.test(orderError.message || '')) {
+      const fallbackPayload = { ...orderPayload };
+      delete fallbackPayload.token_id;
+      ({ data: orderData, error: orderError } = await supabaseAdmin
+        .from('orders')
+        .insert(fallbackPayload)
+        .select()
+        .single());
+    }
 
     if (orderError || !orderData) {
       console.error('[waHandlers:order] Failed to create order:', orderError?.message);

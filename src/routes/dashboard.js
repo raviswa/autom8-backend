@@ -12,6 +12,12 @@ const { supabaseAdmin } = require('../config/supabase');
 const { computeDashboardInsights } = require('../helpers/dashboardAnalytics');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 
+function normPhone(raw) {
+  if (!raw) return null;
+  const digits = String(raw).replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : null;
+}
+
 function requireOutlet(req, res, next) {
   if (!req.restaurant_id)
     return res.status(403).json({ error: 'No restaurant outlet linked to this account' });
@@ -107,16 +113,69 @@ router.get('/wa-orders', authenticateToken, getRestaurantId, requireOutlet, asyn
       return res.status(500).json({ error: error.message });
     }
 
-    const orders = (data ?? []).map(t => ({
-      id:           t.id,
-      created_at:   t.arrived_at,
-      service_type: t.type,
-      status:       t.status,
-      party_size:   t.pax,
-      token_number: t.id,
-      total_amount: null,
-      customers:    { name: t.name, phone: t.phone },
-    }));
+    const tokens = data ?? [];
+
+    let orderRows = [];
+    const primaryOrders = await supabaseAdmin
+      .from('orders')
+      .select('id, created_at, status, total_amount, customer_phone, token_id')
+      .eq('restaurant_id', req.restaurant_id)
+      .gte('created_at', start)
+      .lte('created_at', end)
+      .neq('status', 'cancelled');
+
+    if (!primaryOrders.error) {
+      orderRows = primaryOrders.data ?? [];
+    } else {
+      const fallbackOrders = await supabaseAdmin
+        .from('orders')
+        .select('id, created_at, status, total_amount, customer_phone')
+        .eq('restaurant_id', req.restaurant_id)
+        .gte('created_at', start)
+        .lte('created_at', end)
+        .neq('status', 'cancelled');
+
+      if (fallbackOrders.error) {
+        console.error('[dashboard/wa-orders] orders query failed:', fallbackOrders.error.message);
+        return res.status(500).json({ error: fallbackOrders.error.message });
+      }
+
+      orderRows = (fallbackOrders.data ?? []).map(r => ({ ...r, token_id: null }));
+    }
+
+    const amountByToken = {};
+    const amountByPhone = {};
+
+    for (const row of orderRows) {
+      const amount = Number(row.total_amount) || 0;
+      if (amount <= 0) continue;
+
+      if (row.token_id) {
+        amountByToken[row.token_id] = (amountByToken[row.token_id] || 0) + amount;
+      } else {
+        const phoneKey = normPhone(row.customer_phone);
+        if (!phoneKey) continue;
+        amountByPhone[phoneKey] = (amountByPhone[phoneKey] || 0) + amount;
+      }
+    }
+
+    const orders = tokens.map(t => {
+      const tokenAmount = amountByToken[t.id];
+      const phoneAmount = amountByPhone[normPhone(t.phone)];
+      const resolvedAmount = tokenAmount != null ? tokenAmount : (phoneAmount || 0);
+
+      return {
+        id:           t.id,
+        created_at:   t.arrived_at,
+        service_type: t.type,
+        status:       t.status,
+        party_size:   t.pax,
+        token_number: t.id,
+        total_amount: Math.round(resolvedAmount * 100) / 100,
+        amount_match_mode: tokenAmount != null ? 'token_id_exact' : (phoneAmount != null ? 'phone_fallback' : 'none'),
+        customers:    { name: t.name, phone: t.phone },
+      };
+    });
 
     console.log(`[dashboard/wa-orders] ${orders.length} tokens`);
     res.json({ success: true, orders });
@@ -132,7 +191,7 @@ router.get('/cancel-stats', authenticateToken, getRestaurantId, requireOutlet, a
     const { start, end } = req.query;
     if (!start || !end) return res.status(400).json({ error: 'start and end required' });
 
-    const [cancelRes, totalRes, sessionRes, completedRes, abandonedRes] = await Promise.all([
+    const [cancelRes, totalRes, sessionRes, completedRes, abortedRes] = await Promise.all([
       supabaseAdmin.from('orders').select('total_amount')
         .eq('restaurant_id', req.restaurant_id).eq('status', 'cancelled')
         .gte('created_at', start).lte('created_at', end),
@@ -161,7 +220,7 @@ router.get('/cancel-stats', authenticateToken, getRestaurantId, requireOutlet, a
     const orderRevLost    = orderCancels.reduce((s, o) => s + (o.total_amount ?? 0), 0);
     const totalSessions   = sessionRes.count ?? 0;
     const sessionsCompleted = completedRes.count ?? 0;
-    const sessionAborts   = abandonedRes.count ?? 0;
+    const sessionsAborted = abortedRes.count ?? 0;
 
     res.json({
       success:       true,
@@ -172,12 +231,16 @@ router.get('/cancel-stats', authenticateToken, getRestaurantId, requireOutlet, a
       // WhatsApp session outcomes (walk_in_tokens)
       totalSessions,
       sessionsCompleted,
-      sessionAborts,
-      sessionAbortRate: totalSessions > 0 ? Math.round((sessionAborts / totalSessions) * 100) : 0,
+      sessionsAborted,
+      sessionAborts: sessionsAborted,
+      sessionAbortRate: totalSessions > 0 ? Math.round((sessionsAborted / totalSessions) * 100) : 0,
+      sessionsIdleAbandoned: null,
+      sessionsIdleAbandonedSupported: false,
+      sessionAbortDefinition: 'explicit_cancel_only',
       // Legacy keys — kept for older clients; now map to corrected semantics
-      bookingCancels:  sessionAborts,
+      bookingCancels:  sessionsAborted,
       totalBookings:   totalSessions,
-      bookingRate:     totalSessions > 0 ? Math.round((sessionAborts / totalSessions) * 100) : 0,
+      bookingRate:     totalSessions > 0 ? Math.round((sessionsAborted / totalSessions) * 100) : 0,
     });
   } catch (err) {
     console.error('[dashboard/cancel-stats]', err.message);

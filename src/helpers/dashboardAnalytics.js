@@ -45,33 +45,42 @@ function istDateKey(iso) {
 }
 
 function buildRevenueHeatmap(orders, endISO) {
-  const end = new Date(endISO);
-  const days = [];
-  for (let i = 6; i >= 0; i--) {
-    const d = new Date(end);
-    d.setDate(d.getDate() - i);
-    const ist = new Date(d.getTime() + IST_OFFSET_MS);
-    const date = `${ist.getUTCFullYear()}-${String(ist.getUTCMonth() + 1).padStart(2, '0')}-${String(ist.getUTCDate()).padStart(2, '0')}`;
-    days.push({
-      date,
-      label: ist.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', timeZone: 'UTC' }),
-      dow: ist.toLocaleDateString('en-IN', { weekday: 'short', timeZone: 'UTC' }),
-    });
-  }
-  const dayIndex = Object.fromEntries(days.map((d, i) => [d.date, i]));
-  const matrix = Array.from({ length: 7 }, () => Array(24).fill(0));
-  let max = 0;
+  const days = [
+    { key: 1, label: 'Mon' },
+    { key: 2, label: 'Tue' },
+    { key: 3, label: 'Wed' },
+    { key: 4, label: 'Thu' },
+    { key: 5, label: 'Fri' },
+    { key: 6, label: 'Sat' },
+    { key: 0, label: 'Sun' },
+  ];
 
+  const dayIndex = Object.fromEntries(days.map((d, i) => [d.key, i]));
+  const revenueSum = Array.from({ length: 7 }, () => Array(24).fill(0));
+  const orderCount = Array.from({ length: 7 }, () => Array(24).fill(0));
+  const matrix = Array.from({ length: 7 }, () => Array(24).fill(0));
+
+  let max = 0;
   for (const o of orders) {
     if (!o.created_at || o.status === 'cancelled') continue;
     const ist = toISTDate(o.created_at);
-    const dateKey = istDateKey(o.created_at);
-    const idx = dayIndex[dateKey];
-    if (idx === undefined) continue;
+    const di = dayIndex[ist.getUTCDay()];
+    if (di == null) continue;
+
     const hour = ist.getUTCHours();
     const rev = Number(o.total_amount) || 0;
-    matrix[idx][hour] += rev;
-    if (matrix[idx][hour] > max) max = matrix[idx][hour];
+    if (rev <= 0) continue;
+
+    revenueSum[di][hour] += rev;
+    orderCount[di][hour] += 1;
+  }
+
+  for (let di = 0; di < 7; di++) {
+    for (let h = 0; h < 24; h++) {
+      const avg = orderCount[di][h] > 0 ? (revenueSum[di][h] / orderCount[di][h]) : 0;
+      matrix[di][h] = Math.round(avg);
+      if (matrix[di][h] > max) max = matrix[di][h];
+    }
   }
 
   const peaks = [];
@@ -81,15 +90,23 @@ function buildRevenueHeatmap(orders, endISO) {
         peaks.push({
           dayIndex: di,
           hour: h,
-          revenue: Math.round(matrix[di][h]),
-          label: `${days[di].dow} ${h % 12 || 12}${h < 12 ? 'am' : 'pm'}`,
+          revenue: matrix[di][h],
+          label: `${days[di].label} ${h % 12 || 12}${h < 12 ? 'am' : 'pm'}`,
         });
       }
     }
   }
+
   peaks.sort((a, b) => b.revenue - a.revenue);
 
-  return { days, hours: Array.from({ length: 24 }, (_, i) => i), matrix, max: Math.round(max), peaks: peaks.slice(0, 5) };
+  return {
+    days,
+    hours: Array.from({ length: 24 }, (_, i) => i),
+    matrix,
+    max: Math.round(max),
+    peaks: peaks.slice(0, 5),
+    aggregation: 'average_revenue_per_order',
+  };
 }
 
 function buildServiceSplit(orders) {
@@ -101,10 +118,11 @@ function buildServiceSplit(orders) {
     if (o.status === 'cancelled') continue;
     const rev = Number(o.total_amount) || 0;
     if (rev <= 0) continue;
-    const ch = channelFromSource(o.source);
+    const sourceHint = o.service_type || o.source;
+    const ch = channelFromSource(sourceHint);
     buckets[ch] = (buckets[ch] || 0) + rev;
     total += rev;
-    if (isWhatsappSource(o.source)) whatsappRevenue += rev;
+    if (o.token_id || isWhatsappSource(o.source)) whatsappRevenue += rev;
   }
 
   // Fix double-count for other channel
@@ -167,8 +185,11 @@ function buildRepeatTrend(orders) {
     });
 }
 
-function buildCustomerInsights(orders, tokens) {
+function buildCustomerInsights(orders, tokens, orderRevenueById = {}) {
   const customers = {};
+  const tokenPhoneById = Object.fromEntries(
+    (tokens || []).map(t => [t.id, normPhone(t.phone)]).filter(([, p]) => Boolean(p))
+  );
 
   const touch = (phone, name, ts, amount) => {
     const p = normPhone(phone);
@@ -183,7 +204,11 @@ function buildCustomerInsights(orders, tokens) {
 
   for (const o of orders) {
     if (o.status === 'cancelled') continue;
-    touch(o.customer_phone, o.customer_name, o.created_at, o.total_amount);
+    const amount = Number(o.total_amount) > 0
+      ? Number(o.total_amount)
+      : Number(orderRevenueById[o.id]) || 0;
+    const phone = o.customer_phone || tokenPhoneById[o.token_id] || null;
+    touch(phone, o.customer_name, o.created_at, amount);
   }
   for (const t of tokens) {
     touch(t.phone, t.name, t.arrived_at, null);
@@ -281,11 +306,20 @@ function buildStockOutages(auditRows) {
     }));
 }
 
+function extractItemName(row) {
+  const fromMenu = row?.menu_item?.name;
+  const fromItemName = row?.item_name;
+  const fromSpecial = row?.special_instructions;
+  const name = fromMenu || fromItemName || fromSpecial || '';
+  const clean = String(name).trim();
+  return clean || null;
+}
+
 function buildComboPatterns(orderItems) {
   const byOrder = {};
   for (const row of orderItems) {
     const oid = row.order_id;
-    const name = row.menu_item?.name;
+    const name = extractItemName(row);
     if (!oid || !name) continue;
     if (!byOrder[oid]) byOrder[oid] = new Set();
     byOrder[oid].add(name);
@@ -315,7 +349,7 @@ function buildComboPatterns(orderItems) {
 function buildMenuQuadrant(orderItems) {
   const map = {};
   for (const row of orderItems) {
-    const name = row.menu_item?.name;
+    const name = extractItemName(row);
     if (!name) continue;
     if (!map[name]) map[name] = { name, qty: 0, revenue: 0 };
     const q = row.quantity ?? 1;
@@ -330,7 +364,12 @@ function buildMenuQuadrant(orderItems) {
     revenue: Math.round(i.revenue * 100) / 100,
   }));
 
-  if (!items.length) return { items: [], medians: { qty: 0, revenue: 0 } };
+  if (!items.length) return {
+    items: [],
+    medians: { qty: 0, revenue: 0 },
+    mode: 'revenue_popularity_fallback',
+    unavailableReason: 'No item sales in selected period',
+  };
 
   const medQty = median(items.map(i => i.qty));
   const medRev = median(items.map(i => i.revenue));
@@ -347,33 +386,34 @@ function buildMenuQuadrant(orderItems) {
   return {
     items: items.sort((a, b) => b.revenue - a.revenue),
     medians: { qty: Math.round(medQty), revenue: Math.round(medRev) },
+    mode: 'revenue_popularity_fallback',
   };
 }
 
 async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, endISO) {
-  const heatStart = new Date(endISO);
-  heatStart.setDate(heatStart.getDate() - 6);
-  const heatStartISO = heatStart.toISOString();
+  let orders = [];
+  const primaryOrders = await supabaseAdmin.from('orders')
+    .select('id, created_at, total_amount, status, source, service_type, token_id, customer_phone, customer_name')
+    .eq('restaurant_id', restaurantId)
+    .gte('created_at', startISO).lte('created_at', endISO)
+    .neq('status', 'cancelled')
+    .order('created_at', { ascending: true });
 
-  const [
-    ordersRes,
-    heatOrdersRes,
-    tokensRes,
-    auditRes,
-  ] = await Promise.all([
-    supabaseAdmin.from('orders')
+  if (!primaryOrders.error) {
+    orders = primaryOrders.data ?? [];
+  } else {
+    const fallbackOrders = await supabaseAdmin.from('orders')
       .select('id, created_at, total_amount, status, source, customer_phone, customer_name')
       .eq('restaurant_id', restaurantId)
       .gte('created_at', startISO).lte('created_at', endISO)
       .neq('status', 'cancelled')
-      .order('created_at', { ascending: true }),
-    supabaseAdmin.from('orders')
-      .select('created_at, total_amount, status')
-      .eq('restaurant_id', restaurantId)
-      .gte('created_at', heatStartISO).lte('created_at', endISO)
-      .neq('status', 'cancelled'),
+      .order('created_at', { ascending: true });
+    orders = (fallbackOrders.data ?? []).map(o => ({ ...o, token_id: null, service_type: null }));
+  }
+
+  const [tokensRes, auditRes] = await Promise.all([
     supabaseAdmin.from('walk_in_tokens')
-      .select('phone, name, arrived_at, status')
+      .select('id, phone, name, arrived_at, status')
       .eq('restaurant_id', restaurantId)
       .gte('arrived_at', startISO).lte('arrived_at', endISO),
     supabaseAdmin.from('audit_logs')
@@ -383,27 +423,54 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
       .or('action.ilike.%stock%,action.ilike.%Stock%'),
   ]);
 
-  const orders = ordersRes.data ?? [];
   const orderIds = orders.map(o => o.id).filter(Boolean);
 
   let orderItems = [];
+  const orderRevenueById = {};
   if (orderIds.length) {
     const CHUNK = 150;
     for (let i = 0; i < orderIds.length; i += CHUNK) {
       const chunk = orderIds.slice(i, i + CHUNK);
-      const { data: oiData } = await supabaseAdmin.from('order_items')
-        .select('order_id, quantity, unit_price, menu_item:menu_item_id(name, price)')
+      let oiData = [];
+      const primaryItems = await supabaseAdmin.from('order_items')
+        .select('order_id, quantity, unit_price, item_name, special_instructions, menu_item:menu_item_id(name, price)')
         .in('order_id', chunk);
-      if (oiData?.length) orderItems.push(...oiData);
+
+      if (!primaryItems.error) {
+        oiData = primaryItems.data ?? [];
+      } else {
+        const fallbackItems = await supabaseAdmin.from('order_items')
+          .select('order_id, quantity, unit_price, menu_item:menu_item_id(name, price)')
+          .in('order_id', chunk);
+        oiData = (fallbackItems.data ?? []).map(r => ({ ...r, item_name: null, special_instructions: null }));
+      }
+
+      if (oiData.length) {
+        orderItems.push(...oiData);
+        for (const row of oiData) {
+          const qty = Number(row.quantity) || 0;
+          const price = Number(row.unit_price ?? row.menu_item?.price) || 0;
+          const rev = qty * price;
+          if (!row.order_id || rev <= 0) continue;
+          orderRevenueById[row.order_id] = (orderRevenueById[row.order_id] || 0) + rev;
+        }
+      }
     }
   }
 
+  const stockOutages = buildStockOutages(auditRes.data);
+
   return {
-    revenueHeatmap: buildRevenueHeatmap(heatOrdersRes.data ?? [], endISO),
+    revenueHeatmap: buildRevenueHeatmap(orders, endISO),
     serviceSplit: buildServiceSplit(orders),
     repeatTrend: buildRepeatTrend(orders),
-    customers: buildCustomerInsights(orders, tokensRes.data ?? []),
-    stockOutages: buildStockOutages(auditRes.data),
+    customers: buildCustomerInsights(orders, tokensRes.data ?? [], orderRevenueById),
+    stockOutages,
+    stockOutagesMeta: {
+      source: 'audit_logs',
+      instrumented: true,
+      eventCount: (auditRes.data ?? []).length,
+    },
     comboPatterns: buildComboPatterns(orderItems),
     menuQuadrant: buildMenuQuadrant(orderItems),
   };
