@@ -8,7 +8,8 @@ import re
 from agents.customer.identity_agent import handle_identity_flow
 from agents.customer.booking_agent import handle_booking_flow
 from agents.manager.commands_agent import parse_manager_command
-from tools.cart_tools import handle_incoming_message   # FIX: import cart router
+from tools.cart_tools import handle_incoming_message
+from tools.whatsapp_tools import send_whatsapp_message
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +136,7 @@ async def route_message(
     whatsapp_profile_name: str | None = None,
     table_number: int | None = None,
     session_state: Dict[str, Any] | None = None,
-    raw_message_obj: Dict[str, Any] | None = None,  # ✨ NEW: preserve raw webhook
+    raw_message_obj: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     if session_state is None:
         session_state = {}
@@ -234,6 +235,28 @@ async def route_message(
             f"status: {result.get('status')} | Next State: {session_state.get('current_state')}"
         )
         return result
+
+    # ── 2.5 DETERMINISTIC BASIC INTENTS (NO LLM / NO CLOSED-GUARD) ─────────
+    user_text = _norm(message)
+
+    if user_text in _HOME_WORDS:
+        session_state["current_state"] = "booking"
+        session_state["booking_step"] = "awaiting_service_selection"
+        await send_whatsapp_message(
+            sender_phone,
+            "🏠 Home\nPlease choose a service:\n• Dine-in\n• Takeaway\n• Delivery\n• Reserve Table",
+            restaurant_id,
+        )
+        logger.info(f"Processed {sender_phone} | Status: reset_complete | Next State: booking")
+        return {"status": "reset_complete"}
+
+    if user_text in _GREET_WORDS and session_state.get("booking_step") in (None, "awaiting_service_selection", "ask_service"):
+        await send_whatsapp_message(
+            sender_phone,
+            "Hi! 👋 Please choose a service:\n• Dine-in\n• Takeaway\n• Delivery\n• Reserve Table",
+            restaurant_id,
+        )
+        return {"status": "greeting_handled"}
 
     # ── 3. CART PRE-ROUTER ────────────────────────────────────────────────────
     # handle_incoming_message() owns these steps exclusively:
