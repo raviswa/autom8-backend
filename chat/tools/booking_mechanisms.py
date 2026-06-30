@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os as _os
+import secrets
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -1457,17 +1458,34 @@ async def _send_web_menu_message(
         # session-only uuid4 fallback above would throw a FK violation
         # and crash the whole send (which is exactly what was happening).
         walk_token_id = token_id if token_id_is_real_walk_row else None
+
+        # The walk_in_tokens id (token_id, e.g. "T-2606-136") is the
+        # staff/KDS-facing display token — it's sequential and predictable
+        # by design (so floor staff can call out "Token 136"). It must
+        # NEVER be reused as the public URL token: anyone could enumerate
+        # T-2606-001, 002, 003... and view (or submit into) other
+        # customers' carts. So we mint a separate, cryptographically
+        # random session_token here purely for the URL/menu_tokens row,
+        # and keep walk_in_token_id as the FK back to the real display
+        # token. Reuse the same random token across repeated sends within
+        # one WA session so we don't invalidate a link the customer may
+        # still have open in their browser.
+        url_token = session_state.get('menu_url_session_token')
+        if not url_token:
+            url_token = secrets.token_urlsafe(16)
+            session_state['menu_url_session_token'] = url_token
+
         await create_menu_link_token(
             restaurant_id=restaurant_id,
             customer_phone=phone_digits or customer_phone,
-            session_token=str(token_id),
+            session_token=url_token,
             walk_in_token_id=str(walk_token_id) if walk_token_id else None,
             expires_in_hours=24,
         )
         if token_id_is_real_walk_row:
             session_state['menu_session_token'] = str(token_id)
 
-        url = _build_web_menu_url(slug, str(token_id), phone_digits)
+        url = _build_web_menu_url(slug, url_token, phone_digits)
         body_text = (
             f"📍 {display_name}\n"
             f"{service_icon} {service_label}\n\n"
