@@ -140,11 +140,23 @@ def _normalize_services_enabled(restaurant: dict) -> list[str]:
         or restaurant.get("subscribed_features")
         or []
     )
+
+    # Support boolean maps like {"dine_in": true, ...}.
+    if isinstance(services_enabled, dict):
+        return [str(k) for k, v in services_enabled.items() if bool(v)]
+
     if isinstance(services_enabled, str):
         try:
-            services_enabled = json.loads(services_enabled)
+            parsed = json.loads(services_enabled)
+            if isinstance(parsed, dict):
+                return [str(k) for k, v in parsed.items() if bool(v)]
+            services_enabled = parsed
         except Exception:
-            services_enabled = []
+            services_enabled = [x.strip() for x in services_enabled.split(",") if x.strip()]
+
+    if not isinstance(services_enabled, list):
+        return []
+
     return [str(x) for x in services_enabled]
 
 
@@ -181,7 +193,7 @@ def build_service_selection_payload(restaurant: dict) -> dict | None:
     if Feature.DINE_IN in services_enabled:
         rows_sec1.append(_service_row("dine_in_now"))
 
-    if Feature.RESERVE_TABLE in services_enabled:
+    if Feature.DINE_IN in services_enabled:
         rows_sec2.append(_service_row("table_reservation"))
 
     if Feature.DELIVERY in services_enabled:

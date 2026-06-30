@@ -442,15 +442,17 @@ async def handle_booking_flow(
     # ── awaiting_service_selection ────────────────────────────────────────────
     if current_step == "awaiting_service_selection":
         _SERVICE_TEXT_MAP = {
+            "1":"dine_in_now", "2":"takeaway_now", "3":"door_delivery_now", "4":"table_reservation",
+            "5":"scheduled_delivery", "6":"scheduled_pickup",
             "dine":"dine_in_now","dine in":"dine_in_now","dinein":"dine_in_now","dine-in":"dine_in_now",
             "dine in now":"dine_in_now","dining":"dine_in_now","table":"dine_in_now","eat in":"dine_in_now",
             "takeaway now":"takeaway_now","take-away now":"takeaway_now","take away now":"takeaway_now",
-            "takeaway":"scheduled_pickup","take away":"scheduled_pickup",
-            "take-away":"scheduled_pickup","scheduled take-away":"scheduled_pickup",
+            "takeaway":"takeaway_now","take away":"takeaway_now",
+            "take-away":"takeaway_now","scheduled take-away":"scheduled_pickup",
             "pickup":"takeaway_now","pick up":"takeaway_now",
             "carry out":"takeaway_now","parcel":"takeaway_now","take out":"takeaway_now",
             "deliver now":"door_delivery_now","delivery now":"door_delivery_now",
-            "deliver":"scheduled_delivery","delivery":"scheduled_delivery",
+            "deliver":"door_delivery_now","delivery":"door_delivery_now",
             "home delivery":"door_delivery_now",
             "reserve":"table_reservation","reservation":"table_reservation","book":"table_reservation",
             "booking":"table_reservation","book a table":"table_reservation","reserve a table":"table_reservation",
@@ -497,10 +499,12 @@ async def handle_booking_flow(
 
         if service_type is None:
             await send_whatsapp_message(
-                customer_phone, "No problem! Feel free to message us anytime you need help. 😊", restaurant_id
+                customer_phone,
+                "Sorry, I did not catch that. Please tap one of the options above." + _HOME_HINT,
+                restaurant_id,
             )
-            session_state.clear()
-            return {"status": "cancelled"}
+            session_state["booking_step"] = "awaiting_service_selection"
+            return {"status": "awaiting_service_selection"}
 
         session_state["service_type"]  = service_type
         session_state["customer_name"] = customer_name

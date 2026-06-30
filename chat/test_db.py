@@ -116,5 +116,38 @@ def test_service_selection_payload_zero_rows_returns_text():
     assert payload["type"] == "text"
     assert "not accepting orders right now" in payload["text"]["body"]
 
+
+def test_service_selection_payload_uses_subscribed_features_list():
+    restaurant = {
+        "subscribed_features": ["dine_in", "delivery"],
+        "scheduled_delivery_enabled": True,
+        "scheduled_takeaway_enabled": False,
+    }
+
+    payload = build_service_selection_payload(restaurant)
+    rows = _row_ids(payload)
+
+    assert payload["type"] == "interactive"
+    assert set(rows) == {"dine_in_now", "door_delivery_now", "scheduled_delivery"}
+
+
+def test_service_selection_payload_uses_subscribed_features_dict():
+    restaurant = {
+        "subscribed_features": {
+            "dine_in": True,
+            "takeaway": True,
+            "delivery": False,
+            "reserve_table": False,
+        },
+        "scheduled_delivery_enabled": True,
+        "scheduled_takeaway_enabled": True,
+    }
+
+    payload = build_service_selection_payload(restaurant)
+    rows = _row_ids(payload)
+
+    assert payload["type"] == "interactive"
+    assert set(rows) == {"dine_in_now", "takeaway_now", "scheduled_pickup"}
+
 if __name__ == '__main__':
     main()

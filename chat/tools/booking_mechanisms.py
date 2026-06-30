@@ -163,19 +163,35 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict:
         key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
         if not (base and key):
             return {}
-        resp = await get_http().get(
-            f"{base}/rest/v1/restaurants",
-            params={
-                "select": "name,display_name,receipt_tagline,cuisine_type,timezone,whatsapp_number,address,phone,gstin,fssai_license,sac_code,website,city,state,parcel_charge_per_item,takeaway_ready_range,delivery_ready_range,kitchen_busy,restaurant_type,pickup_address,pickup_latitude,pickup_longitude,delivery_charge_default,delivery_charge_tiers,min_delivery_order_amount,min_takeaway_order_amount,scheduled_delivery_enabled,scheduled_takeaway_enabled,scheduled_kds_lead_minutes,max_delivery_radius_km,scheduled_slot_max_orders,schedule_buffer_minutes,schedule_rounding_minutes,payment_mode",
-                "id":     f"eq.{restaurant_id}",
-                "limit":  "1",
-            },
-            headers={"apikey": key, "Authorization": f"Bearer {key}"},
-            timeout=aiohttp.ClientTimeout(total=3),
+        base_select = (
+            "name,display_name,receipt_tagline,cuisine_type,timezone,"
+            "whatsapp_number,address,phone,gstin,fssai_license,sac_code,website,city,state,"
+            "parcel_charge_per_item,takeaway_ready_range,delivery_ready_range,kitchen_busy,"
+            "restaurant_type,pickup_address,pickup_latitude,pickup_longitude,delivery_charge_default,"
+            "delivery_charge_tiers,min_delivery_order_amount,min_takeaway_order_amount,"
+            "scheduled_delivery_enabled,scheduled_takeaway_enabled,scheduled_kds_lead_minutes,"
+            "max_delivery_radius_km,scheduled_slot_max_orders,schedule_buffer_minutes,"
+            "schedule_rounding_minutes,payment_mode"
         )
-        if resp.status == 200:
-            rows = await resp.json()
-            return rows[0] if rows else {}
+        select_attempts = [
+            f"{base_select},services_enabled,subscribed_features",
+            f"{base_select},subscribed_features",
+        ]
+
+        for select_clause in select_attempts:
+            resp = await get_http().get(
+                f"{base}/rest/v1/restaurants",
+                params={
+                    "select": select_clause,
+                    "id":     f"eq.{restaurant_id}",
+                    "limit":  "1",
+                },
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                timeout=aiohttp.ClientTimeout(total=3),
+            )
+            if resp.status == 200:
+                rows = await resp.json()
+                return rows[0] if rows else {}
     except Exception as e:
         logger.debug(f"[receipt] restaurant info fetch failed (non-fatal): {e}")
     return {}
