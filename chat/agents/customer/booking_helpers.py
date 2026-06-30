@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import re as _re_party
+import secrets
 import time
 from datetime import datetime
 from typing import Dict, Any
@@ -37,7 +38,12 @@ from zoneinfo import ZoneInfo
 from tools.whatsapp_tools import send_whatsapp_message
 from tools.cart_tools import clear_cart, _send_interactive, sanitize_list_rows
 from tools.feature_gate import build_service_menu_rows
-from tools.db_tools import update_booking_status, get_active_walk_in_token, get_restaurant_by_id
+from tools.db_tools import (
+    update_booking_status,
+    get_active_walk_in_token,
+    get_restaurant_by_id,
+    create_menu_link_token,
+)
 
 # send_catalog_with_fallback is the alias for send_unified_booking_menu
 from tools.booking_mechanisms import (  # noqa: F401 — re-exported
@@ -115,9 +121,29 @@ async def send_webcart_link_for_add_more(
         restaurant = await get_restaurant_by_id(restaurant_id)
         slug = _slugify_restaurant_name((restaurant or {}).get("name") or "")
 
+        # NEVER put the raw display token (T-2606-136 — sequential, staff-
+        # facing, trivially enumerable) in a customer-shared URL. Mint/reuse
+        # a random, opaque session_token via menu_tokens instead, same as
+        # the main web-menu sender. This also restores the 24h-expiry +
+        # phone-binding check in webcart.js's resolveSession, which this
+        # path previously bypassed entirely by relying on the "token ==
+        # walk_in_tokens.id" fallback lookup.
+        url_token = session_state.get("menu_url_session_token")
+        if not url_token:
+            url_token = secrets.token_urlsafe(16)
+            session_state["menu_url_session_token"] = url_token
+
+        await create_menu_link_token(
+            restaurant_id=restaurant_id,
+            customer_phone=phone_digits,
+            session_token=url_token,
+            walk_in_token_id=str(token_id),
+            expires_in_hours=24,
+        )
+
         base = os.getenv("AUTOM8_BACKEND_URL", "https://api.autom8.works").rstrip("/")
         params = [
-            f"token={quote(str(token_id))}",
+            f"token={quote(url_token)}",
             f"phone={quote(phone_digits)}",
         ]
         if slug:
