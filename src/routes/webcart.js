@@ -162,21 +162,25 @@ function normalizeSlots(input) {
 }
 
 async function resolveSession({ restaurantId, token, phone }) {
-  const variants = phoneVariants(phone);
-  if (!restaurantId || !token || !variants.length) return null;
+  const rawVariants = phoneVariants(phone);
+  if (!restaurantId || !token) return null;
 
   let menuToken = null;
   try {
-    const { data: menuData, error: menuErr } = await supabaseAdmin
+    let menuQuery = supabaseAdmin
       .from('menu_tokens')
       .select('session_token, phone, walk_in_token_id, expires_at, is_active')
       .eq('restaurant_id', restaurantId)
       .eq('session_token', token)
-      .in('phone', variants)
       .eq('is_active', true)
       .gt('expires_at', new Date().toISOString())
-      .limit(1)
-      .maybeSingle();
+      .limit(1);
+
+    if (rawVariants.length) {
+      menuQuery = menuQuery.in('phone', rawVariants);
+    }
+
+    const { data: menuData, error: menuErr } = await menuQuery.maybeSingle();
 
     if (menuErr) {
       const raw = `${menuErr.code || ''} ${menuErr.message || ''}`.toLowerCase();
@@ -188,6 +192,10 @@ async function resolveSession({ restaurantId, token, phone }) {
   } catch (err) {
     throw err;
   }
+
+  const tokenPhone = menuToken?.phone || '';
+  const variants = rawVariants.length ? rawVariants : phoneVariants(tokenPhone);
+  if (!variants.length) return null;
 
   const walkTokenId = menuToken?.walk_in_token_id || token;
 

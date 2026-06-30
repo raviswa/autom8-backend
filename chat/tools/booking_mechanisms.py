@@ -1429,8 +1429,9 @@ async def _send_web_menu_message(
             f"📍 {display_name}\n"
             f"{service_icon} {service_label}\n\n"
             "Tap the button below to browse our full menu with search "
-            "and easy selection. Add items to your cart and submit when ready!\n"
-            f"[View Menu] {url}"
+            "and easy selection. Add items to your cart and submit when ready!\n\n"
+            "👉 View Menu\n"
+            f"{url}"
         )
         await send_whatsapp_message(customer_phone, message, restaurant_id)
         logger.info(f"[BOOKING] {customer_phone} → Web menu sent ({url})")
