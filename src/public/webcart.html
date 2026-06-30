@@ -2,197 +2,348 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Munafe Cart</title>
   <style>
     :root {
-      --bg: #fff9ef;
-      --panel: #fffef8;
+      --header: #14532d;      /* deep green ribbon, like Geetham */
+      --header-ink: #ffffff;
+      --brand: #c2410c;       /* Munafe orange — CTAs, chips, prices */
+      --brand-ink: #ffffff;
+      --bg: #fff9ef;          /* cream body */
+      --panel: #ffffff;
       --ink: #1f2937;
       --muted: #6b7280;
-      --brand: #c2410c;
       --line: #f1d9bf;
       --ok: #166534;
       --danger: #b91c1c;
+      --radius: 14px;
     }
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100%; }
     body {
       margin: 0;
       font-family: "Segoe UI", system-ui, sans-serif;
       color: var(--ink);
-      background:
-        radial-gradient(circle at 10% 10%, #ffe2bd 0%, transparent 25%),
-        radial-gradient(circle at 90% 0%, #ffd8cb 0%, transparent 28%),
-        var(--bg);
+      background: var(--bg);
+      padding-bottom: 64px; /* room for bottom nav */
     }
-    .shell { max-width: 1080px; margin: 0 auto; padding: 16px; }
+    img { -webkit-user-drag: none; }
+    button { font-family: inherit; }
+
+    /* ---------- Header ribbon ---------- */
     .header {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 14px;
+      background: linear-gradient(135deg, var(--header), #0f3d22);
+      color: var(--header-ink);
+      padding: 14px 16px;
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
       position: sticky;
-      top: 10px;
-      z-index: 20;
+      top: 0;
+      z-index: 30;
     }
-    .brand { display: flex; align-items: center; gap: 10px; }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
     .logo {
-      width: 40px;
-      height: 40px;
-      border-radius: 10px;
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
       object-fit: cover;
-      border: 1px solid var(--line);
       background: #fff;
+      border: 2px solid rgba(255,255,255,0.6);
+      flex-shrink: 0;
     }
-    .pill {
+    .logo-fallback {
+      width: 42px; height: 42px; border-radius: 50%;
+      background: #fff; color: var(--header);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 800; flex-shrink: 0;
+    }
+    .brand-text { min-width: 0; }
+    #brandName { font-weight: 800; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #sessionMeta { color: rgba(255,255,255,0.8); font-size: 11px; }
+    .slot-pill {
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-weight: 700;
+      font-size: 12px;
+      background: rgba(255,255,255,0.15);
+      border: 1px solid rgba(255,255,255,0.3);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .slot-pill.open { background: #22c55e; border-color: #22c55e; color: #06280f; }
+
+    .shell { max-width: 1080px; margin: 0 auto; padding: 12px 14px 0; }
+
+    .search-wrap { position: relative; margin-bottom: 10px; }
+    .search-wrap input {
+      width: 100%;
       border: 1px solid var(--line);
       border-radius: 999px;
-      padding: 8px 12px;
-      font-weight: 700;
-      color: #fff;
-      background: var(--brand);
-      cursor: pointer;
-    }
-    .layout { display: grid; grid-template-columns: 1fr 350px; gap: 14px; margin-top: 14px; }
-    .menu, .drawer {
+      padding: 11px 14px 11px 38px;
+      font: inherit;
       background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      overflow: hidden;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.03);
     }
-    .menu-head, .drawer-head { padding: 14px; border-bottom: 1px solid var(--line); }
-    .section { padding: 12px; border-bottom: 1px solid var(--line); }
-    .section h3 { margin: 0 0 8px; font-size: 14px; }
-    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .search-wrap svg { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); opacity: .5; }
+
+    #status { margin-bottom: 10px; padding: 10px 12px; border-radius: 10px; display: none; }
+    #status.ok { display: block; background: #dcfce7; color: var(--ok); }
+    #status.err { display: block; background: #fee2e2; color: var(--danger); }
+    .banner {
+      margin-bottom: 10px; padding: 10px 12px; border-radius: 10px;
+      border: 1px solid #f59e0b; background: #fffbeb; color: #92400e; font-size: 13px;
+    }
+
+    .layout { display: grid; grid-template-columns: 1fr; gap: 14px; }
+
+    .hscroll { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 10px; scrollbar-width: none; }
+    .hscroll::-webkit-scrollbar { display: none; }
+    .hcard {
+      flex: 0 0 150px; background: var(--panel); border: 1px solid var(--line);
+      border-radius: var(--radius); overflow: hidden; cursor: pointer;
+    }
+    .hcard img { width: 100%; height: 90px; object-fit: cover; background: #f3f4f6; display: block; }
+    .hcard .hc-body { padding: 8px; }
+    .hcard .hc-name { font-size: 12.5px; font-weight: 700; line-height: 1.25; }
+    .hcard .hc-price { color: var(--brand); font-weight: 800; font-size: 12.5px; margin-top: 4px; }
+
+    .section-title { font-weight: 800; font-size: 14px; margin: 4px 0 8px; display: flex; align-items: center; gap: 6px; }
+
+    .chips { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 12px; scrollbar-width: none; }
+    .chips::-webkit-scrollbar { display: none; }
     .chip {
       border: 1px solid var(--line);
       border-radius: 999px;
-      padding: 7px 11px;
-      background: #fff;
+      padding: 8px 14px;
+      background: var(--panel);
       color: var(--ink);
       cursor: pointer;
       font-weight: 700;
-      font-size: 12px;
+      font-size: 12.5px;
+      white-space: nowrap;
+      flex-shrink: 0;
     }
-    .chip.active { background: var(--brand); border-color: var(--brand); color: #fff; }
+    .chip.active { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); }
+
+    .menu-list { display: flex; flex-direction: column; gap: 10px; padding-bottom: 8px; }
+    .row-card {
+      display: flex; gap: 10px; align-items: center;
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: var(--radius); padding: 8px;
+    }
+    .row-card img { width: 64px; height: 64px; border-radius: 10px; object-fit: cover; background: #f3f4f6; flex-shrink: 0; }
+    .row-card .img-fallback {
+      width: 64px; height: 64px; border-radius: 10px; background: #f3f4f6; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 10px;
+    }
+    .row-info { flex: 1; min-width: 0; }
+    .row-cat { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .03em; }
+    .row-name { font-weight: 700; font-size: 14px; line-height: 1.3; }
+    .row-price { color: var(--brand); font-weight: 800; font-size: 13.5px; margin-top: 2px; }
     .note {
-      display: inline-block;
-      margin-top: 6px;
-      font-size: 11px;
-      color: #92400e;
-      background: #ffedd5;
-      border: 1px solid #fed7aa;
-      padding: 3px 8px;
-      border-radius: 999px;
+      display: inline-block; margin-top: 4px; font-size: 10.5px; color: #92400e;
+      background: #ffedd5; border: 1px solid #fed7aa; padding: 2px 7px; border-radius: 999px;
     }
-    .menu-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(220px,1fr)); gap: 10px; padding: 12px; }
-    .card {
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background: #fff;
-      overflow: hidden;
-      display: flex;
-      flex-direction: column;
+    .add-zone { flex-shrink: 0; }
+    .btn-add {
+      border: none; background: var(--brand); color: #fff; border-radius: 10px;
+      width: 38px; height: 38px; font-size: 20px; font-weight: 700; cursor: pointer; line-height: 1;
     }
-    .card img { width: 100%; height: 120px; object-fit: cover; background: #f3f4f6; }
-    .card-body { padding: 10px; display: grid; gap: 8px; }
-    .cat { color: var(--muted); font-size: 12px; }
-    .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-    .btn {
-      border: 1px solid var(--line);
-      background: #fff;
-      border-radius: 10px;
-      padding: 8px 10px;
-      cursor: pointer;
-      font-weight: 700;
+    .stepper {
+      display: flex; align-items: center; gap: 0; border: 1px solid var(--brand); border-radius: 10px; overflow: hidden;
     }
-    .btn.primary { background: var(--brand); color: #fff; border-color: var(--brand); }
-    .drawer-body { padding: 12px; display: grid; gap: 10px; }
-    .line { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
-    .line small { color: var(--muted); }
-    textarea, input {
-      width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 10px;
-      font: inherit;
-      background: #fff;
+    .stepper button {
+      border: none; background: var(--brand); color: #fff; width: 32px; height: 38px;
+      font-size: 17px; font-weight: 800; cursor: pointer;
     }
-    .msg {
-      margin-top: 12px;
-      padding: 10px;
-      border-radius: 10px;
-      display: none;
+    .stepper span { width: 26px; text-align: center; font-weight: 800; font-size: 13.5px; }
+    .empty-state { text-align: center; color: var(--muted); padding: 40px 10px; font-size: 13.5px; }
+
+    /* ---------- Cart panel: bottom sheet on mobile, static aside on desktop ---------- */
+    .cart-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+      z-index: 40; display: none;
     }
-    .msg.ok { display: block; background: #dcfce7; color: var(--ok); }
-    .msg.err { display: block; background: #fee2e2; color: var(--danger); }
-    .banner {
-      margin-top: 12px;
-      padding: 10px;
-      border-radius: 10px;
-      border: 1px solid #f59e0b;
-      background: #fffbeb;
-      color: #92400e;
-      font-size: 13px;
+    .cart-overlay.open { display: block; }
+    .cart-panel {
+      position: fixed; left: 0; right: 0; bottom: 0;
+      max-height: 86vh;
+      background: var(--panel);
+      border-radius: 18px 18px 0 0;
+      z-index: 50;
+      transform: translateY(100%);
+      transition: transform .25s ease;
+      display: flex; flex-direction: column;
+      box-shadow: 0 -8px 24px rgba(0,0,0,0.15);
     }
-    @media (max-width: 900px) {
-      .layout { grid-template-columns: 1fr; }
-      .drawer { position: sticky; bottom: 6px; }
+    .cart-panel.open { transform: translateY(0); }
+    .cart-head {
+      padding: 14px 16px; border-bottom: 1px solid var(--line);
+      display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;
+    }
+    .cart-head strong { font-size: 16px; }
+    .icon-btn { border: none; background: #f3f4f6; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; font-size: 16px; }
+    .cart-body { padding: 12px 16px; overflow-y: auto; display: grid; gap: 10px; }
+    .cart-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .cart-line .cl-name { font-size: 13.5px; font-weight: 600; }
+    .cart-line .cl-price { color: var(--muted); font-size: 11.5px; }
+    .cart-line .cl-total { font-weight: 800; font-size: 13.5px; min-width: 56px; text-align: right; }
+    .totals { border-top: 1px dashed var(--line); padding-top: 10px; display: grid; gap: 6px; }
+    .line { display: flex; justify-content: space-between; gap: 10px; align-items: center; font-size: 13.5px; }
+    .line.grand { font-size: 16px; font-weight: 800; }
+    textarea, input.field {
+      width: 100%; border: 1px solid var(--line); border-radius: 10px;
+      padding: 10px; font: inherit; background: #fff;
+    }
+    .cart-foot { padding: 12px 16px 16px; border-top: 1px solid var(--line); flex-shrink: 0; }
+    .btn-submit {
+      width: 100%; border: none; background: var(--header); color: #fff;
+      border-radius: 12px; padding: 13px; font-weight: 800; font-size: 14.5px; cursor: pointer;
+    }
+    .btn-submit:disabled { opacity: .6; cursor: not-allowed; }
+    .wa-fallback { display: none; margin-top: 10px; text-align: center; }
+    .wa-fallback a { color: var(--ok); font-weight: 700; font-size: 13px; }
+
+    /* Floating "View Cart" bar */
+    .float-bar {
+      position: fixed; left: 14px; right: 14px; bottom: 70px; z-index: 35;
+      background: var(--header); color: #fff; border-radius: 14px;
+      padding: 12px 16px; display: none; align-items: center; justify-content: space-between;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.2); cursor: pointer;
+    }
+    .float-bar.show { display: flex; }
+    .float-bar .fb-count { font-size: 12px; opacity: .85; }
+    .float-bar .fb-total { font-weight: 800; font-size: 14.5px; }
+    .float-bar .fb-cta { font-weight: 800; font-size: 13px; display: flex; align-items: center; gap: 4px; }
+
+    /* Bottom navigation */
+    .bottom-nav {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 36;
+      background: var(--panel); border-top: 1px solid var(--line);
+      display: flex; padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
+    }
+    .nav-item {
+      flex: 1; border: none; background: none; display: flex; flex-direction: column;
+      align-items: center; gap: 2px; padding: 6px 4px; cursor: pointer; color: var(--muted); font-size: 10.5px; font-weight: 700;
+      position: relative;
+    }
+    .nav-item.active { color: var(--brand); }
+    .nav-badge {
+      position: absolute; top: 0; right: 18%; background: var(--brand); color: #fff;
+      border-radius: 999px; font-size: 9px; min-width: 15px; height: 15px; display: flex;
+      align-items: center; justify-content: center; padding: 0 3px; font-weight: 800;
+    }
+
+    /* ---------- Desktop: persistent side cart, no overlay ---------- */
+    @media (min-width: 901px) {
+      body { padding-bottom: 0; }
+      .shell { padding-top: 16px; }
+      .layout { grid-template-columns: 1fr 360px; align-items: start; }
+      .bottom-nav { display: none; }
+      .float-bar { display: none !important; }
+      .cart-overlay { display: none !important; }
+      .cart-panel {
+        position: sticky; top: 86px; transform: none; max-height: calc(100vh - 110px);
+        border-radius: var(--radius); border: 1px solid var(--line); box-shadow: none;
+      }
+      .header { position: sticky; top: 0; border-radius: 0; }
     }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <div class="header">
-      <div class="brand">
-        <img id="brandLogo" class="logo" alt="logo" />
-        <div>
-          <div id="brandName" style="font-weight:800">Munafe</div>
-          <small id="sessionMeta" style="color:var(--muted)"></small>
-        </div>
+  <div class="header">
+    <div class="brand">
+      <img id="brandLogo" class="logo" alt="logo" style="display:none" />
+      <div id="brandLogoFallback" class="logo-fallback">M</div>
+      <div class="brand-text">
+        <div id="brandName">Munafe</div>
+        <div id="sessionMeta"></div>
       </div>
-      <button class="pill" id="refreshBtn">Refresh session</button>
     </div>
+    <div id="slotPill" class="slot-pill">—</div>
+  </div>
 
-    <div id="status" class="msg"></div>
+  <div class="shell">
+    <div id="status"></div>
     <div id="slotBanner" class="banner" style="display:none"></div>
 
+    <div class="search-wrap">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="searchBox" placeholder="Search dishes, categories…" />
+    </div>
+
     <div class="layout">
-      <section class="menu">
-        <div class="menu-head"><strong>Menu</strong></div>
-        <div id="specialWrap" class="section" style="display:none">
-          <h3>⭐ Today's Special</h3>
-          <div id="specialGrid" class="menu-grid" style="padding:0"></div>
+      <section class="menu" id="menuCol">
+        <div id="specialWrap" style="display:none">
+          <div class="section-title">⭐ Today's Special</div>
+          <div id="specialGrid" class="hscroll"></div>
         </div>
-        <div id="availableNowWrap" class="section" style="display:none">
-          <h3>🍽️ Available Now</h3>
-          <div id="availableNowGrid" class="menu-grid" style="padding:0"></div>
+        <div id="availableNowWrap" style="display:none">
+          <div class="section-title">🍽️ Available Now</div>
+          <div id="availableNowGrid" class="hscroll"></div>
         </div>
-        <div class="section">
-          <div id="tabChips" class="chips"></div>
-        </div>
-        <div id="menuGrid" class="menu-grid"></div>
+
+        <div id="tabChips" class="chips"></div>
+        <div id="menuList" class="menu-list"></div>
       </section>
 
-      <aside class="drawer">
-        <div class="drawer-head"><strong>Your Cart</strong></div>
-        <div class="drawer-body">
+      <!-- Cart: bottom-sheet on mobile, sticky aside on desktop -->
+      <div id="cartOverlay" class="cart-overlay"></div>
+      <aside id="cartPanel" class="cart-panel">
+        <div class="cart-head">
+          <strong>🛒 Your Cart</strong>
+          <button class="icon-btn" id="closeCartBtn">✕</button>
+        </div>
+        <div class="cart-body">
           <div id="cartLines"></div>
-          <div class="line"><small>Subtotal</small><strong id="subtotal">Rs 0</strong></div>
-          <div class="line"><small>Discount</small><strong id="discount">Rs 0</strong></div>
-          <div class="line"><small>Total</small><strong id="grand">Rs 0</strong></div>
-
-          <input id="promo" placeholder="Promo code (optional)" />
-          <textarea id="notes" rows="3" placeholder="Special request (optional)"></textarea>
-          <button id="submitBtn" class="btn primary">Continue to WhatsApp</button>
+          <div class="totals">
+            <div class="line"><span>Subtotal</span><strong id="subtotal">Rs 0</strong></div>
+            <div class="line"><span>Discount</span><strong id="discount">Rs 0</strong></div>
+            <div class="line grand"><span>Total</span><strong id="grand">Rs 0</strong></div>
+          </div>
+          <input class="field" id="promo" placeholder="Promo code (optional)" />
+          <textarea id="notes" rows="2" placeholder="Special request (optional)"></textarea>
+        </div>
+        <div class="cart-foot">
+          <button id="submitBtn" class="btn-submit">Continue to WhatsApp</button>
+          <div id="waFallback" class="wa-fallback">
+            Didn't open automatically? <a id="waLink" href="#" target="_blank" rel="noopener">Tap here to open WhatsApp</a>
+          </div>
         </div>
       </aside>
     </div>
   </div>
+
+  <div class="float-bar" id="floatBar">
+    <div>
+      <div class="fb-count" id="fbCount">0 items</div>
+      <div class="fb-total" id="fbTotal">Rs 0</div>
+    </div>
+    <div class="fb-cta">View Cart →</div>
+  </div>
+
+  <nav class="bottom-nav">
+    <button class="nav-item active" id="navMenu">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      Menu
+    </button>
+    <button class="nav-item" id="navSearch">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      Search
+    </button>
+    <button class="nav-item" id="navCart">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.7 13.4a2 2 0 0 0 2 1.6h9.7a2 2 0 0 0 2-1.6L23 6H6"/></svg>
+      Cart
+      <span class="nav-badge" id="navCartBadge" style="display:none">0</span>
+    </button>
+    <button class="nav-item" id="navHelp">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+      Help
+    </button>
+  </nav>
 
   <script>
     const params = new URLSearchParams(window.location.search);
@@ -205,129 +356,227 @@
       cart: new Map(),
       phone: phone || '',
       restaurant: null,
-      currentSlot: null,
-      slotState: null,
-      slotBanner: null,
-      categorySlots: {},
+      session: null,
       categories: [],
-      primaryCategory: 'all',
       activeTab: 'all',
+      searchQuery: '',
       todaysSpecial: [],
       availableNow: [],
-      promo: null,
     };
 
-    const statusBox = document.getElementById('status');
-    const menuGrid = document.getElementById('menuGrid');
-    const specialGrid = document.getElementById('specialGrid');
-    const availableNowGrid = document.getElementById('availableNowGrid');
-    const specialWrap = document.getElementById('specialWrap');
-    const availableNowWrap = document.getElementById('availableNowWrap');
-    const tabChips = document.getElementById('tabChips');
-    const cartLines = document.getElementById('cartLines');
+    const $ = (id) => document.getElementById(id);
+    const statusBox = $('status');
+    const menuList = $('menuList');
+    const specialGrid = $('specialGrid');
+    const availableNowGrid = $('availableNowGrid');
+    const tabChips = $('tabChips');
+    const cartLines = $('cartLines');
+    const cartPanel = $('cartPanel');
+    const cartOverlay = $('cartOverlay');
+    const floatBar = $('floatBar');
+    const isDesktop = () => window.innerWidth >= 901;
 
     function showStatus(text, type) {
-      statusBox.className = `msg ${type}`;
+      statusBox.className = type || '';
       statusBox.textContent = text;
     }
-
     function money(v) { return `Rs ${Math.max(0, Number(v || 0)).toFixed(0)}`; }
 
+    function openCart() {
+      cartPanel.classList.add('open');
+      if (!isDesktop()) cartOverlay.classList.add('open');
+    }
+    function closeCart() {
+      if (isDesktop()) return; // always open on desktop
+      cartPanel.classList.remove('open');
+      cartOverlay.classList.remove('open');
+    }
+    $('closeCartBtn').addEventListener('click', closeCart);
+    cartOverlay.addEventListener('click', closeCart);
+    floatBar.addEventListener('click', openCart);
+    $('navCart').addEventListener('click', openCart);
+    $('navMenu').addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+    $('navSearch').addEventListener('click', () => { $('searchBox').focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+    $('navHelp').addEventListener('click', () => {
+      const phoneNum = (state.restaurant && state.restaurant.support_phone) || '';
+      const msg = encodeURIComponent(`Hi, I need help with my order at ${(state.restaurant && state.restaurant.name) || 'the restaurant'}.`);
+      if (phoneNum) window.open(`https://wa.me/${phoneNum}?text=${msg}`, '_blank');
+    });
+
     function currentDiscount(subtotal) {
-      const code = (document.getElementById('promo').value || '').trim().toUpperCase();
-      if (code === 'MUNAFE10') {
-        return { code, amount: Math.round(subtotal * 0.1) };
-      }
+      const code = ($('promo').value || '').trim().toUpperCase();
+      if (code === 'MUNAFE10') return { code, amount: Math.round(subtotal * 0.1) };
       return { code: '', amount: 0 };
     }
 
-    function renderCart() {
+    function cartTotals() {
       const lines = [...state.cart.values()];
-      cartLines.innerHTML = lines.length
-        ? lines.map(l => `<div class="line"><small>${l.qty}x ${l.name}</small><strong>${money(l.qty * l.price)}</strong></div>`).join('')
-        : '<small style="color:var(--muted)">No items yet.</small>';
-
       const subtotal = lines.reduce((s, l) => s + l.qty * l.price, 0);
       const promo = currentDiscount(subtotal);
       const total = Math.max(0, subtotal - promo.amount);
-
-      document.getElementById('subtotal').textContent = money(subtotal);
-      document.getElementById('discount').textContent = `- ${money(promo.amount)}`;
-      document.getElementById('grand').textContent = money(total);
-      state.promo = promo.code || null;
+      const count = lines.reduce((s, l) => s + l.qty, 0);
+      return { lines, subtotal, promo, total, count };
     }
 
-    function addToCart(item) {
-      const key = item.retailer_id || item.id;
+    function renderCart() {
+      const { lines, subtotal, promo, total, count } = cartTotals();
+
+      cartLines.innerHTML = lines.length
+        ? lines.map(l => `
+          <div class="cart-line">
+            <div>
+              <div class="cl-name">${l.name}</div>
+              <div class="cl-price">${money(l.price)} each</div>
+            </div>
+            <div class="stepper" style="border-color:var(--brand)">
+              <button data-step="-1" data-id="${l.id}">−</button>
+              <span>${l.qty}</span>
+              <button data-step="1" data-id="${l.id}">+</button>
+            </div>
+          </div>`).join('')
+        : '<div class="empty-state">Your cart is empty.<br>Add some delicious items to get started!</div>';
+
+      cartLines.querySelectorAll('button[data-step]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          changeQty(btn.dataset.id, Number(btn.dataset.step));
+        });
+      });
+
+      $('subtotal').textContent = money(subtotal);
+      $('discount').textContent = `- ${money(promo.amount)}`;
+      $('grand').textContent = money(total);
+
+      $('fbCount').textContent = `${count} item${count === 1 ? '' : 's'}`;
+      $('fbTotal').textContent = money(total);
+      floatBar.classList.toggle('show', count > 0 && !isDesktop());
+
+      const badge = $('navCartBadge');
+      if (count > 0) { badge.style.display = 'flex'; badge.textContent = count; }
+      else badge.style.display = 'none';
+
+      renderMenuList(); // refresh +/- buttons on rows in sync with cart
+    }
+
+    function changeQty(id, delta) {
+      const item = state.menu.find(i => String(i.id) === String(id));
+      const key = item ? (item.retailer_id || item.id) : id;
       const prev = state.cart.get(key);
-      if (prev) prev.qty += 1;
-      else state.cart.set(key, { id: key, name: item.name, price: Number(item.price || 0), qty: 1 });
+      const nextQty = (prev ? prev.qty : 0) + delta;
+      if (nextQty <= 0) {
+        state.cart.delete(key);
+      } else if (prev) {
+        prev.qty = nextQty;
+      } else if (item) {
+        state.cart.set(key, { id: key, name: item.name, price: Number(item.price || 0), qty: nextQty });
+      }
       renderCart();
     }
 
-    function cardHtml(item, { showSpecialNote = false } = {}) {
-      return `
-        <article class="card">
-          <img src="${item.image_url || ''}" alt="" onerror="this.style.visibility='hidden'" />
-          <div class="card-body">
-            <div class="cat">${item.category || 'General'}</div>
-            <strong>${item.name}</strong>
-            ${showSpecialNote && item.special_note ? `<span class="note">${item.special_note}</span>` : ''}
-            <div class="row">
-              <span>${money(item.price)}</span>
-              <button class="btn" data-id="${item.id}">Add</button>
-            </div>
-          </div>
-        </article>
-      `;
+    function addToCart(item) { changeQty(item.id, 1); }
+
+    function rowQty(item) {
+      const key = item.retailer_id || item.id;
+      const line = state.cart.get(key);
+      return line ? line.qty : 0;
     }
 
-    function bindAddHandlers(root = document) {
-      root.querySelectorAll('button[data-id]').forEach(btn => {
+    function hCardHtml(item) {
+      return `
+        <div class="hcard" data-id="${item.id}">
+          ${item.image_url ? `<img src="${item.image_url}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'img-fallback',style:'height:90px',textContent:'No image'}))" />` : `<div class="img-fallback" style="width:100%;height:90px;border-radius:0">No image</div>`}
+          <div class="hc-body">
+            <div class="hc-name">${item.name}</div>
+            <div class="hc-price">${money(item.price)}</div>
+            ${item.special_note ? `<span class="note">${item.special_note}</span>` : ''}
+          </div>
+        </div>`;
+    }
+
+    function rowCardHtml(item) {
+      const qty = rowQty(item);
+      const actions = qty > 0
+        ? `<div class="stepper"><button data-step="-1" data-id="${item.id}">−</button><span>${qty}</span><button data-step="1" data-id="${item.id}">+</button></div>`
+        : `<button class="btn-add" data-add="${item.id}">+</button>`;
+      return `
+        <div class="row-card">
+          ${item.image_url ? `<img src="${item.image_url}" alt="" onerror="this.outerHTML='<div class=\\'img-fallback\\'>No image</div>'" />` : `<div class="img-fallback">No image</div>`}
+          <div class="row-info">
+            <div class="row-cat">${item.category || 'General'}</div>
+            <div class="row-name">${item.name}</div>
+            <div class="row-price">${money(item.price)}</div>
+            ${item.special_note ? `<span class="note">${item.special_note}</span>` : ''}
+          </div>
+          <div class="add-zone">${actions}</div>
+        </div>`;
+    }
+
+    function bindRowHandlers(root) {
+      root.querySelectorAll('button[data-add]').forEach(btn => {
         btn.addEventListener('click', () => {
-          const item = state.menu.find(i => i.id === btn.dataset.id);
+          const item = state.menu.find(i => String(i.id) === btn.dataset.add);
+          if (item) addToCart(item);
+        });
+      });
+      root.querySelectorAll('button[data-step]').forEach(btn => {
+        btn.addEventListener('click', () => changeQty(btn.dataset.id, Number(btn.dataset.step)));
+      });
+      root.querySelectorAll('.hcard[data-id]').forEach(card => {
+        card.addEventListener('click', () => {
+          const item = state.menu.find(i => String(i.id) === card.dataset.id);
           if (item) addToCart(item);
         });
       });
     }
 
-    function renderMenu() {
+    function renderTopSections() {
+      $('specialWrap').style.display = state.todaysSpecial.length ? 'block' : 'none';
+      specialGrid.innerHTML = state.todaysSpecial.map(hCardHtml).join('');
+      bindRowHandlers(specialGrid);
+
+      $('availableNowWrap').style.display = state.availableNow.length ? 'block' : 'none';
+      availableNowGrid.innerHTML = state.availableNow.map(hCardHtml).join('');
+      bindRowHandlers(availableNowGrid);
+    }
+
+    function renderChips() {
       state.categories = [...new Set(state.menu.map(i => i.category || 'General'))].sort((a, b) => a.localeCompare(b));
-
-      specialWrap.style.display = state.todaysSpecial.length ? 'block' : 'none';
-      specialGrid.innerHTML = state.todaysSpecial.map(i => cardHtml(i, { showSpecialNote: true })).join('');
-
-      availableNowWrap.style.display = state.availableNow.length ? 'block' : 'none';
-      availableNowGrid.innerHTML = state.availableNow.map(i => cardHtml(i)).join('');
-
       const tabs = ['all', ...state.categories];
       tabChips.innerHTML = tabs.map(tab => {
         const active = state.activeTab === tab;
         const label = tab === 'all' ? 'All Items' : tab;
         return `<button class="chip ${active ? 'active' : ''}" data-tab="${tab}">${label}</button>`;
       }).join('');
-
       tabChips.querySelectorAll('button[data-tab]').forEach(btn => {
-        btn.addEventListener('click', () => {
-          state.activeTab = btn.dataset.tab;
-          renderMenu();
-        });
+        btn.addEventListener('click', () => { state.activeTab = btn.dataset.tab; renderMenuList(); });
       });
+    }
 
-      const visible = state.activeTab === 'all'
+    function renderMenuList() {
+      const q = state.searchQuery.trim().toLowerCase();
+      let visible = state.activeTab === 'all'
         ? state.menu
         : state.menu.filter(i => (i.category || 'General') === state.activeTab);
-
-      menuGrid.innerHTML = visible.map(i => cardHtml(i)).join('');
-      bindAddHandlers(document);
+      if (q) {
+        visible = state.menu.filter(i =>
+          i.name.toLowerCase().includes(q) || (i.category || '').toLowerCase().includes(q)
+        );
+      }
+      menuList.innerHTML = visible.length
+        ? visible.map(rowCardHtml).join('')
+        : '<div class="empty-state">No dishes match your search.</div>';
+      bindRowHandlers(menuList);
     }
+
+    $('searchBox').addEventListener('input', (e) => {
+      state.searchQuery = e.target.value;
+      renderMenuList();
+    });
 
     async function loadSession() {
       if (!token) {
         showStatus('This cart link is incomplete. Please reopen from WhatsApp.', 'err');
         return;
       }
-
       try {
         const q = new URLSearchParams({ token });
         if (phone) q.set('phone', phone);
@@ -341,37 +590,72 @@
         }
 
         state.restaurant = data.restaurant;
+        state.session = data.session;
         state.phone = (data.session && data.session.phone) ? data.session.phone : (phone || '');
         state.menu = data.menu_items || [];
-        state.currentSlot = data.current_slot || null;
-        state.slotState = data.slot_state || null;
-        state.slotBanner = data.slot_banner || null;
-        state.categorySlots = data.category_slots || {};
         state.todaysSpecial = data.todays_special || [];
         state.availableNow = data.available_now || [];
-        state.primaryCategory = data.primary_category || 'all';
-        state.activeTab = state.primaryCategory || 'all';
+        state.activeTab = data.primary_category || 'all';
 
-        document.documentElement.style.setProperty('--brand', (data.theme || {}).primary_color || '#C2410C');
-        document.getElementById('brandName').textContent = data.restaurant.name || 'Munafe';
-        document.getElementById('sessionMeta').textContent = `Token ${data.session.token} • ${data.session.phone}`;
-        const logo = document.getElementById('brandLogo');
-        if (data.restaurant.logo_url) logo.src = data.restaurant.logo_url;
-        else logo.style.display = 'none';
-
-        const banner = document.getElementById('slotBanner');
-        if (state.slotBanner) {
-          banner.style.display = 'block';
-          banner.textContent = state.slotBanner;
-        } else {
-          banner.style.display = 'none';
+        if (data.theme && data.theme.primary_color) {
+          document.documentElement.style.setProperty('--brand', data.theme.primary_color);
+        }
+        if (data.theme && data.theme.accent_color) {
+          document.documentElement.style.setProperty('--header', data.theme.accent_color);
         }
 
-        renderMenu();
+        $('brandName').textContent = data.restaurant.name || 'Munafe';
+        $('sessionMeta').textContent = `Token ${data.session.token} • ${data.session.phone}`;
+        const logo = $('brandLogo');
+        const fallback = $('brandLogoFallback');
+        if (data.restaurant.logo_url) {
+          logo.src = data.restaurant.logo_url;
+          logo.style.display = 'block';
+          fallback.style.display = 'none';
+        } else {
+          fallback.textContent = (data.restaurant.name || 'M').trim().charAt(0).toUpperCase();
+        }
+
+        const pill = $('slotPill');
+        if (data.current_slot) {
+          pill.textContent = `${data.current_slot[0].toUpperCase()}${data.current_slot.slice(1)} • Open`;
+          pill.classList.add('open');
+        } else {
+          pill.textContent = data.slot_state === 'closed' ? 'Closed' : 'Browse menu';
+          pill.classList.remove('open');
+        }
+
+        const banner = $('slotBanner');
+        if (data.slot_banner) { banner.style.display = 'block'; banner.textContent = data.slot_banner; }
+        else banner.style.display = 'none';
+
+        renderTopSections();
+        renderChips();
+        renderMenuList();
         renderCart();
+
+        if (isDesktop()) openCart();
       } catch (_e) {
         showStatus('Unable to load the cart session right now. Please try again.', 'err');
       }
+    }
+
+    function buildWhatsAppMessage(orderRef) {
+      const { lines, total } = cartTotals();
+      const itemLines = lines.map(l => `• ${l.qty}x ${l.name} — ${money(l.qty * l.price)}`).join('\n');
+      const notes = ($('notes').value || '').trim();
+      const restaurantName = (state.restaurant && state.restaurant.name) || 'Munafe';
+      const tokenLabel = (state.session && state.session.token) || token;
+      return [
+        `Order for ${restaurantName}`,
+        `Token: ${tokenLabel}`,
+        `Order Ref: ${orderRef}`,
+        '',
+        itemLines,
+        '',
+        `Total: ${money(total)}`,
+        notes ? `Note: ${notes}` : '',
+      ].filter(Boolean).join('\n');
     }
 
     async function submitOrder() {
@@ -379,13 +663,16 @@
         showStatus('Add at least one item before submitting.', 'err');
         return;
       }
+      const submitBtn = $('submitBtn');
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Submitting…';
 
       const body = {
         token,
         phone: state.phone,
         items: [...state.cart.values()],
-        promo_code: (document.getElementById('promo').value || '').trim() || null,
-        special_request: (document.getElementById('notes').value || '').trim() || null,
+        promo_code: ($('promo').value || '').trim() || null,
+        special_request: ($('notes').value || '').trim() || null,
       };
 
       try {
@@ -400,18 +687,30 @@
 
         if (!res.ok || !data.ok) {
           showStatus(data.message || data.error || 'Could not submit your order.', 'err');
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Continue to WhatsApp';
           return;
         }
 
-        showStatus(`Ready to continue in WhatsApp. Ref: ${data.order_ref}`, 'ok');
+        showStatus(`Order placed! Ref: ${data.order_ref}. Opening WhatsApp…`, 'ok');
+
+        const supportPhone = (state.restaurant && state.restaurant.support_phone) || '';
+        const msg = encodeURIComponent(buildWhatsAppMessage(data.order_ref));
+        const waUrl = supportPhone ? `https://wa.me/${supportPhone}?text=${msg}` : `https://wa.me/?text=${msg}`;
+
+        $('waLink').href = waUrl;
+        $('waFallback').style.display = 'block';
+        window.location.href = waUrl;
       } catch (_e) {
         showStatus('Order submission failed. Please try again.', 'err');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Continue to WhatsApp';
       }
     }
 
-    document.getElementById('submitBtn').addEventListener('click', submitOrder);
-    document.getElementById('refreshBtn').addEventListener('click', loadSession);
-    document.getElementById('promo').addEventListener('input', renderCart);
+    $('submitBtn').addEventListener('click', submitOrder);
+    $('promo').addEventListener('input', renderCart);
+    window.addEventListener('resize', () => { if (isDesktop()) openCart(); });
     loadSession();
   </script>
 </body>
