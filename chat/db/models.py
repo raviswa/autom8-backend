@@ -77,6 +77,12 @@ class Restaurant(Base):
     opening_hours   = Column(JSON)
     meta_catalog_id = Column(String(64))
 
+    # ── Dynamic service/booking columns ───────────────────────────────────────
+    scheduled_delivery_enabled = Column(Boolean, default=False, nullable=False)
+    scheduled_takeaway_enabled = Column(Boolean, default=False, nullable=False)
+    services_enabled           = Column(JSON, default=list, server_default="[]")
+    restaurant_type            = Column(String(50))
+
     # Relationships (RestaurantDetails removed — table dropped in migration)
     integrations        = relationship("RestaurantIntegration", back_populates="restaurant", cascade="all, delete-orphan")
     subscription        = relationship("RestaurantSubscription",back_populates="restaurant", uselist=False, cascade="all, delete-orphan")

@@ -442,18 +442,18 @@ async def handle_booking_flow(
     # ── awaiting_service_selection ────────────────────────────────────────────
     if current_step == "awaiting_service_selection":
         _SERVICE_TEXT_MAP = {
-            "dine":"dine_in","dine in":"dine_in","dinein":"dine_in","dine-in":"dine_in",
-            "dine in now":"dine_in","dining":"dine_in","table":"dine_in","eat in":"dine_in",
+            "dine":"dine_in_now","dine in":"dine_in_now","dinein":"dine_in_now","dine-in":"dine_in_now",
+            "dine in now":"dine_in_now","dining":"dine_in_now","table":"dine_in_now","eat in":"dine_in_now",
             "takeaway now":"takeaway_now","take-away now":"takeaway_now","take away now":"takeaway_now",
-            "takeaway":"takeaway_schedule","take away":"takeaway_schedule",
-            "take-away":"takeaway_schedule","scheduled take-away":"takeaway_schedule",
+            "takeaway":"scheduled_pickup","take away":"scheduled_pickup",
+            "take-away":"scheduled_pickup","scheduled take-away":"scheduled_pickup",
             "pickup":"takeaway_now","pick up":"takeaway_now",
             "carry out":"takeaway_now","parcel":"takeaway_now","take out":"takeaway_now",
-            "deliver now":"delivery_now","delivery now":"delivery_now",
-            "deliver":"delivery_schedule","delivery":"delivery_schedule",
-            "home delivery":"delivery_now",
-            "reserve":"reserve_table","reservation":"reserve_table","book":"reserve_table",
-            "booking":"reserve_table","book a table":"reserve_table","reserve a table":"reserve_table",
+            "deliver now":"door_delivery_now","delivery now":"door_delivery_now",
+            "deliver":"scheduled_delivery","delivery":"scheduled_delivery",
+            "home delivery":"door_delivery_now",
+            "reserve":"table_reservation","reservation":"table_reservation","book":"table_reservation",
+            "booking":"table_reservation","book a table":"table_reservation","reserve a table":"table_reservation",
         }
         _raw_choice = message.strip()
         if is_name_correction_trigger(_raw_choice, customer_name):

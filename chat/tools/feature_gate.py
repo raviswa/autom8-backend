@@ -105,15 +105,115 @@ def _feature_val(feature) -> str:
 def _parse_row_id(row_id: str) -> tuple[str | None, str | None]:
     """Map menu row id → (service_type, order_mode)."""
     mapping: dict[str, tuple[str | None, str | None]] = {
-        "dine_in": (Feature.DINE_IN, None),
+        "dine_in_now": (Feature.DINE_IN, None),
+        "door_delivery_now": (Feature.DELIVERY, ORDER_MODE_IMMEDIATE),
         "takeaway_now": (Feature.TAKEAWAY, ORDER_MODE_IMMEDIATE),
-        "takeaway_schedule": (Feature.TAKEAWAY, ORDER_MODE_SCHEDULED),
-        "delivery_now": (Feature.DELIVERY, ORDER_MODE_IMMEDIATE),
-        "delivery_schedule": (Feature.DELIVERY, ORDER_MODE_SCHEDULED),
-        "reserve_table": (Feature.RESERVE_TABLE, None),
+        "table_reservation": (Feature.RESERVE_TABLE, None),
+        "scheduled_delivery": (Feature.DELIVERY, ORDER_MODE_SCHEDULED),
+        "scheduled_pickup": (Feature.TAKEAWAY, ORDER_MODE_SCHEDULED),
         "nothing": (None, None),
     }
     return mapping.get(row_id, (None, None))
+
+
+def build_service_selection_payload(restaurant: dict) -> dict | None:
+    """
+    Build WhatsApp interactive list message payload based on Rule 1-3.
+    Returns:
+      - dict (type: list payload or type: text payload)
+      - None if Rule 3 triggers (caller proceeds directly)
+    """
+    services_enabled = restaurant.get("services_enabled") or []
+    if isinstance(services_enabled, str):
+        import json
+        try:
+            services_enabled = json.loads(services_enabled)
+        except Exception:
+            services_enabled = []
+
+    scheduled_delivery_enabled = bool(restaurant.get("scheduled_delivery_enabled"))
+    scheduled_takeaway_enabled = bool(restaurant.get("scheduled_takeaway_enabled"))
+
+    rows_sec1 = []
+    rows_sec2 = []
+
+    # Section 1: 🚀 INSTANT / NOW
+    if "dine_in" in services_enabled:
+        rows_sec1.append({
+            "id": "dine_in_now",
+            "title": "🍽️ Dine-In Now",
+            "description": "Order food at your table",
+        })
+    if "delivery" in services_enabled:
+        rows_sec1.append({
+            "id": "door_delivery_now",
+            "title": "🛵 Home Delivery",
+            "description": "Fresh food delivered to your door",
+        })
+    if "takeaway" in services_enabled:
+        rows_sec1.append({
+            "id": "takeaway_now",
+            "title": "🛍️ Take Away",
+            "description": "Skip the line, pick up now",
+        })
+
+    # Section 2: ⏰ PLANNED / LATER
+    if "dine_in" in services_enabled:
+        rows_sec2.append({
+            "id": "table_reservation",
+            "title": "🗓️ Future Reservation",
+            "description": "Book your preferred table in advance",
+        })
+    if "delivery" in services_enabled and scheduled_delivery_enabled:
+        rows_sec2.append({
+            "id": "scheduled_delivery",
+            "title": "🕒 Scheduled Delivery",
+            "description": "Schedule a delivery up to 7 days ahead",
+        })
+    if "takeaway" in services_enabled and scheduled_takeaway_enabled:
+        rows_sec2.append({
+            "id": "scheduled_pickup",
+            "title": "🚗 Scheduled Take Away",
+            "description": "Plan your pick-up time in advance",
+        })
+
+    total_rows = len(rows_sec1) + len(rows_sec2)
+
+    # RULE 2: Minimum viable menu guard
+    if total_rows == 0:
+        return {
+            "type": "text",
+            "text": {
+                "body": "We're not accepting orders right now. Please check back later or contact us directly."
+            }
+        }
+
+    # RULE 3: Single row shortcut
+    if total_rows == 1:
+        return None
+
+    sections = []
+    if rows_sec1:
+        sections.append({
+            "title": "🚀 INSTANT / NOW"[:24],
+            "rows": rows_sec1
+        })
+    if rows_sec2:
+        sections.append({
+            "title": "⏰ PLANNED / LATER"[:24],
+            "rows": rows_sec2
+        })
+
+    return {
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "action": {
+                "button": "👉 Select Service",
+                "sections": sections
+            }
+        }
+    }
 
 
 async def build_service_menu_rows(
@@ -133,69 +233,113 @@ async def build_service_menu_rows(
             "description": "Exit",
         }]
 
-    features = await get_features(restaurant_id)
-    feature_set = set(features)
+    from tools.booking_mechanisms import fetch_restaurant_info
+    info = await fetch_restaurant_info(restaurant_id)
 
-    sched_delivery = state.get("scheduled_delivery_enabled")
-    sched_takeaway = state.get("scheduled_takeaway_enabled")
-    if sched_delivery is None or sched_takeaway is None:
-        from tools.booking_mechanisms import fetch_restaurant_info
-        info = await fetch_restaurant_info(restaurant_id)
-        if sched_delivery is None:
-            sched_delivery = bool(info.get("scheduled_delivery_enabled"))
-        if sched_takeaway is None:
-            sched_takeaway = bool(info.get("scheduled_takeaway_enabled"))
+    services_enabled = info.get("services_enabled") or []
+    if isinstance(services_enabled, str):
+        import json
+        try:
+            services_enabled = json.loads(services_enabled)
+        except Exception:
+            services_enabled = []
 
-    rows: list[dict] = []
+    scheduled_delivery_enabled = bool(info.get("scheduled_delivery_enabled"))
+    scheduled_takeaway_enabled = bool(info.get("scheduled_takeaway_enabled"))
 
-    if _feature_val(Feature.DINE_IN) in feature_set:
+    rows = []
+    # Section 1: 🚀 INSTANT / NOW
+    if "dine_in" in services_enabled:
         rows.append({
-            "id": "dine_in",
-            "title": "Dine-in Now 🍽️",
+            "id": "dine_in_now",
+            "title": "🍽️ Dine-In Now",
             "description": "Order food at your table",
         })
-
-    if _feature_val(Feature.TAKEAWAY) in feature_set:
+    if "delivery" in services_enabled:
+        rows.append({
+            "id": "door_delivery_now",
+            "title": "🛵 Home Delivery",
+            "description": "Fresh food delivered to your door",
+        })
+    if "takeaway" in services_enabled:
         rows.append({
             "id": "takeaway_now",
-            "title": "Take-away now 🛍️",
-            "description": "Pick up as soon as it's ready",
+            "title": "🛍️ Take Away",
+            "description": "Skip the line, pick up now",
         })
 
-    if _feature_val(Feature.DELIVERY) in feature_set:
+    # Section 2: ⏰ PLANNED / LATER
+    if "dine_in" in services_enabled:
         rows.append({
-            "id": "delivery_now",
-            "title": "Deliver Now 🛵",
-            "description": "We deliver to your door ASAP",
+            "id": "table_reservation",
+            "title": "🗓️ Future Reservation",
+            "description": "Book your preferred table in advance",
         })
-
-    if _feature_val(Feature.TAKEAWAY) in feature_set and sched_takeaway:
+    if "delivery" in services_enabled and scheduled_delivery_enabled:
         rows.append({
-            "id": "takeaway_schedule",
-            "title": "Scheduled take-away 📅",
-            "description": "Choose pickup date & time on the calendar",
+            "id": "scheduled_delivery",
+            "title": "🕒 Scheduled Delivery",
+            "description": "Schedule a delivery slot up to 7 days ahead",
         })
-
-    if _feature_val(Feature.DELIVERY) in feature_set and sched_delivery:
+    if "takeaway" in services_enabled and scheduled_takeaway_enabled:
         rows.append({
-            "id": "delivery_schedule",
-            "title": "Schedule Delivery 📅",
-            "description": "Scheduled door delivery — pick date & time",
+            "id": "scheduled_pickup",
+            "title": "🚗 Scheduled Take Away",
+            "description": "Plan your take away time in advance",
         })
 
-    if _feature_val(Feature.RESERVE_TABLE) in feature_set:
-        rows.append({
-            "id": "reserve_table",
-            "title": "Reserve a Table 📅",
-            "description": "Book a table for a future visit",
-        })
+    # Cache in session state
+    state["scheduled_delivery_enabled"] = scheduled_delivery_enabled
+    state["scheduled_takeaway_enabled"] = scheduled_takeaway_enabled
+    state["services_enabled"] = services_enabled
 
-    rows.append({
-        "id": "nothing",
-        "title": "Nothing, thanks ❌",
-        "description": "Exit",
-    })
     return rows
+
+
+# ─── Assertion Tests ─────────────────────────────────────────────────────────
+def _run_assertions():
+    # TEST A
+    res_a = build_service_selection_payload({
+        "services_enabled": ["dine_in", "takeaway", "delivery"],
+        "scheduled_delivery_enabled": True,
+        "scheduled_takeaway_enabled": True,
+    })
+    assert res_a is not None
+    assert res_a["type"] == "interactive"
+    secs = res_a["interactive"]["action"]["sections"]
+    assert len(secs) == 2
+    assert secs[0]["title"] == "🚀 INSTANT / NOW"
+    assert len(secs[0]["rows"]) == 3
+    assert secs[1]["title"] == "⏰ PLANNED / LATER"
+    assert len(secs[1]["rows"]) == 3
+
+    # TEST B
+    res_b = build_service_selection_payload({
+        "services_enabled": ["delivery"],
+        "scheduled_delivery_enabled": False,
+        "scheduled_takeaway_enabled": False,
+    })
+    # Since total_rows == 1, Rule 3 triggers, returning None
+    assert res_b is None
+
+    # TEST C
+    res_c = build_service_selection_payload({
+        "services_enabled": ["takeaway"],
+        "scheduled_delivery_enabled": False,
+        "scheduled_takeaway_enabled": True,
+    })
+    assert res_c is not None
+    assert res_c["type"] == "interactive"
+    secs_c = res_c["interactive"]["action"]["sections"]
+    assert len(secs_c) == 2
+    assert secs_c[0]["title"] == "🚀 INSTANT / NOW"
+    assert len(secs_c[0]["rows"]) == 1
+    assert secs_c[0]["rows"][0]["id"] == "takeaway_now"
+    assert secs_c[1]["title"] == "⏰ PLANNED / LATER"
+    assert len(secs_c[1]["rows"]) == 1
+    assert secs_c[1]["rows"][0]["id"] == "scheduled_pickup"
+
+_run_assertions()
 
 
 def _resolve_choice_from_rows(
