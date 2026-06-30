@@ -28,6 +28,12 @@ const { handleWhatsAppOrder, handleFeedbackReply, validateReferralCode }
   = require('../handlers/waHandlers');
 const { isWhatsAppAutoReply } = require('../helpers/whatsappAutoReply');
 const { writeAuditLog } = require('../helpers/auditLog');
+const { getSession } = require('../bot/session/sessionStore');
+const { handleLocationMessage } = require('../bot/handlers/locationHandler');
+const {
+  handleInteractiveReply,
+  handleCustomAddressText,
+} = require('../bot/handlers/interactiveReplyHandler');
 
 const CHAT_SERVICE_URL  = process.env.CHAT_SERVICE_URL || 'http://localhost:8001';
 const OUR_WHATSAPP_PHONE = process.env.WHATSAPP_PHONE_NUMBER || '';
@@ -96,12 +102,46 @@ router.post('/webhook', async (req, res) => {
             }
           }
 
+          const session = restaurantId
+            ? await getSession(restaurantId, message.from).catch(err => {
+                console.warn('[WA Webhook] getSession error:', err.message);
+                return null;
+              })
+            : null;
+
+          if (message.type === 'location' && restaurantId && session) {
+            const handledLocation = await handleLocationMessage(message, session).catch(err => {
+              console.error('[WA Webhook] handleLocationMessage failed:', err.message);
+              return false;
+            });
+            if (handledLocation) continue;
+          }
+
           if (message.type === 'order') {
             await handleWhatsAppOrder(message, metadata, restaurantId).catch(err =>
               console.error('[WA Webhook] handleWhatsAppOrder failed:', err.message)
             );
 
           } else if (message.type === 'text' || message.type === 'button' || message.type === 'interactive') {
+            if (restaurantId && session && message.type === 'interactive') {
+              const handledInteractive = await handleInteractiveReply(message, session).catch(err => {
+                console.error('[WA Webhook] handleInteractiveReply failed:', err.message);
+                return false;
+              });
+              if (handledInteractive) continue;
+            }
+
+            if (restaurantId && session && message.type === 'text') {
+              const handledCustomAddress = await handleCustomAddressText(
+                message.text?.body || '',
+                session,
+              ).catch(err => {
+                console.error('[WA Webhook] handleCustomAddressText failed:', err.message);
+                return false;
+              });
+              if (handledCustomAddress) continue;
+            }
+
             // ── Priority 1: Feedback reply ─────────────────────────────────
             const wasFeedback = restaurantId
               ? await handleFeedbackReply(message.from, message, restaurantId).catch(err => {
