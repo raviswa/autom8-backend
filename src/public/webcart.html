@@ -327,9 +327,7 @@
         </div>
         <div class="cart-foot">
           <button id="submitBtn" class="btn-submit">Continue to WhatsApp</button>
-          <div id="waFallback" class="wa-fallback">
-            Didn't open automatically? <a id="waLink" href="#" target="_blank" rel="noopener">Tap here to open WhatsApp</a>
-          </div>
+          <div id="waFallback" class="wa-fallback"></div>
         </div>
       </aside>
     </div>
@@ -698,24 +696,6 @@
       }
     }
 
-    function buildWhatsAppMessage(orderRef) {
-      const { lines, total } = cartTotals();
-      const itemLines = lines.map(l => `• ${l.qty}x ${l.name} — ${money(l.qty * l.price)}`).join('\n');
-      const notes = ($('notes').value || '').trim();
-      const restaurantName = (state.restaurant && state.restaurant.name) || 'Munafe';
-      const tokenLabel = (state.session && state.session.token) || token;
-      return [
-        `Order for ${restaurantName}`,
-        `Token: ${tokenLabel}`,
-        `Order Ref: ${orderRef}`,
-        '',
-        itemLines,
-        '',
-        `Total: ${money(total)}`,
-        notes ? `Note: ${notes}` : '',
-      ].filter(Boolean).join('\n');
-    }
-
     async function submitOrder() {
       if (!state.cart.size) {
         showStatus('Add at least one item before submitting.', 'err');
@@ -750,20 +730,19 @@
           return;
         }
 
-        showStatus(`Order placed! Ref: ${data.order_ref}. Opening WhatsApp…`, 'ok');
-
-        const supportPhone = (state.restaurant && state.restaurant.support_phone) || '';
-        const msg = encodeURIComponent(buildWhatsAppMessage(data.order_ref));
-        const waUrl = supportPhone ? `https://wa.me/${supportPhone}?text=${msg}` : `https://wa.me/?text=${msg}`;
+        showStatus(
+          `Order placed! Ref: ${data.order_ref}. Check WhatsApp for the Confirm & Pay button to complete payment.`,
+          'ok',
+        );
 
         // FIX (4): clear the saved cart now that the order has been
         // submitted, so coming back to this link starts fresh instead of
         // re-showing the just-submitted items as still "in cart".
         clearCartLocal();
+        state.cart = new Map();
+        renderCart();
 
-        $('waLink').href = waUrl;
-        $('waFallback').style.display = 'block';
-        window.location.href = waUrl;
+        submitBtn.textContent = 'Confirm & Pay Sent';
       } catch (_e) {
         showStatus('Order submission failed. Please try again.', 'err');
         submitBtn.disabled = false;

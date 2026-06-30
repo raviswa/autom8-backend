@@ -5,12 +5,14 @@ const router = express.Router();
 const path = require('path');
 
 const { supabaseAdmin } = require('../config/supabase');
+const { getKdsSecret } = require('../config/internalSecret');
 
 const ACTIVE_TOKEN_STATUSES = new Set(['waiting', 'pending_approval', 'seated', 'takeaway']);
 const DEFAULT_THEME = {
   primary_color: '#C2410C',
   accent_color: '#111827',
 };
+const CHAT_SERVICE_URL = (process.env.CHAT_SERVICE_URL || 'http://localhost:8001').replace(/\/$/, '');
 
 function digitsOnly(value) {
   return String(value || '').replace(/\D/g, '');
@@ -278,6 +280,34 @@ async function fetchMenuItems(restaurantId) {
   return { items, categorySlotMap };
 }
 
+async function triggerConfirmAndPay(payload) {
+  const secret = getKdsSecret();
+  const response = await fetch(`${CHAT_SERVICE_URL}/internal/webcart-confirm-pay`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-internal-secret': secret,
+      Authorization: `Bearer ${secret}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  let data = {};
+  try {
+    data = await response.json();
+  } catch (_) {
+    data = {};
+  }
+
+  if (!response.ok || !data.ok) {
+    const err = new Error(data.error || `Chat service error (${response.status})`);
+    err.response = data;
+    throw err;
+  }
+
+  return data;
+}
+
 router.get('/api/webcart/session', async (req, res) => {
   try {
     const token = String(req.query.token || '').trim();
@@ -393,13 +423,19 @@ router.post('/api/webcart/submit', async (req, res) => {
 
     const { data: liveItems, error: liveErr } = await supabaseAdmin
       .from('menu_items')
-      .select('id, retailer_id, name')
+      .select('id, retailer_id, name, price')
       .eq('restaurant_id', restaurant.id)
       .eq('is_stocked', true);
 
     if (liveErr) throw liveErr;
 
-    const liveKey = new Set((liveItems || []).flatMap(row => [String(row.id), String(row.retailer_id || '')]));
+    const liveMap = new Map();
+    for (const row of (liveItems || [])) {
+      liveMap.set(String(row.id), row);
+      if (row.retailer_id) liveMap.set(String(row.retailer_id), row);
+    }
+
+    const liveKey = new Set(liveMap.keys());
     const unavailable = items
       .filter(i => !liveKey.has(String(i.id || '')))
       .map(i => i.name)
@@ -414,14 +450,47 @@ router.post('/api/webcart/submit', async (req, res) => {
       });
     }
 
+    const normalizedItems = [];
+    for (const row of items) {
+      const source = liveMap.get(String(row.id || ''));
+      if (!source) continue;
+
+      const qty = Math.max(0, Math.floor(Number(row.qty || 0)));
+      if (!qty) continue;
+
+      const unitPrice = Number(source.price || 0);
+      normalizedItems.push({
+        id: source.retailer_id || source.id,
+        name: source.name,
+        qty,
+        price: unitPrice,
+        line_total: unitPrice * qty,
+      });
+    }
+
+    if (!normalizedItems.length) {
+      return res.status(400).json({ ok: false, error: 'No valid items to submit.' });
+    }
+
+    const subtotal = normalizedItems.reduce((sum, line) => sum + Number(line.line_total || 0), 0);
+    const totalAmount = Math.max(0, Number(subtotal.toFixed(2)));
+    if (totalAmount < 1) {
+      return res.status(400).json({ ok: false, error: 'Total amount is too low to process payment.' });
+    }
+
+    const orderRef = `${session.id}-${Date.now().toString().slice(-6)}`;
+
     const nextMeta = {
       ...(session.meta || {}),
       web_cart_submission: {
         submitted_at: new Date().toISOString(),
         promo_code: promo_code ? String(promo_code).trim().slice(0, 40) : null,
         special_request: special_request ? String(special_request).trim().slice(0, 500) : null,
-        item_count: items.length,
-        items,
+        item_count: normalizedItems.length,
+        items: normalizedItems,
+        subtotal: totalAmount,
+        total: totalAmount,
+        order_ref: orderRef,
       },
     };
 
@@ -434,10 +503,25 @@ router.post('/api/webcart/submit', async (req, res) => {
 
     if (error) throw error;
 
+    await triggerConfirmAndPay({
+      restaurant_id: restaurant.id,
+      customer_phone: session.phone,
+      customer_name:
+        String(session.meta?.customer_name || session.meta?.name || '').trim() ||
+        'Guest',
+      token: String(session.id),
+      order_ref: orderRef,
+      service_type: String(session.type || 'takeaway'),
+      total: totalAmount,
+      items: normalizedItems,
+      promo_code: promo_code ? String(promo_code).trim().slice(0, 40) : null,
+      special_request: special_request ? String(special_request).trim().slice(0, 500) : null,
+    });
+
     return res.json({
       ok: true,
-      order_ref: `${session.id}-${Date.now().toString().slice(-6)}`,
-      message: 'Order submitted successfully.',
+      order_ref: orderRef,
+      message: 'Confirm & Pay has been sent to your WhatsApp.',
     });
   } catch (err) {
     console.error('[webcart/submit]', err.message);

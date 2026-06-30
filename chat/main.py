@@ -19,12 +19,15 @@ from tools.db_tools import (
     get_restaurant_by_whatsapp_number,
     get_restaurant_by_phone_number_id,
     get_customer,
+    create_customer,
+    create_booking,
+    get_next_token_number,
     update_booking_status,
     get_session_state,
     save_session_state,
     customer_lock,
 )
-from tools.whatsapp_tools import parse_incoming, send_whatsapp_message
+from tools.whatsapp_tools import parse_incoming, send_whatsapp_message, send_whatsapp_cta_url
 from agents.customer.booking_helpers import touch_session_activity, is_reset_keyword, mark_session_visit_complete
 from tools.feedback_bridge import try_handle_feedback_via_api, try_dismiss_feedback_via_api
 from tools.payment_tools import (
@@ -35,6 +38,7 @@ from tools.payment_tools import (
     prepare_checkout_page,
     render_checkout_html,
     verify_checkout_payment,
+    ensure_prepay_payment_link,
 )
 from tools.auto_reply_filter import is_whatsapp_auto_reply
 from tools.booking_mechanisms import (
@@ -556,6 +560,154 @@ async def internal_scheduled_approval_payment(request: Request):
     )
     status_code = 200 if result.get("ok") else 500
     return JSONResponse(status_code=status_code, content=result)
+
+
+@app.post("/internal/webcart-confirm-pay")
+async def internal_webcart_confirm_pay(request: Request):
+    """Node API calls this after webcart submit to send customer-facing Confirm & Pay CTA."""
+    if not _verify_internal_secret(request):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    restaurant_id = str(body.get("restaurant_id") or "").strip()
+    customer_phone = str(body.get("customer_phone") or "").strip()
+    customer_name = str(body.get("customer_name") or "Guest").strip() or "Guest"
+    service_type = str(body.get("service_type") or "takeaway").strip().lower()
+    token_label = str(body.get("token") or "").strip()
+    order_ref = str(body.get("order_ref") or "").strip()
+    items = body.get("items") or []
+
+    try:
+        total = float(body.get("total") or 0)
+    except Exception:
+        total = 0.0
+
+    if not restaurant_id or not customer_phone or not isinstance(items, list) or not items:
+        raise HTTPException(status_code=400, detail="restaurant_id, customer_phone, and items are required")
+    if total < 1:
+        raise HTTPException(status_code=400, detail="total must be at least 1")
+
+    if service_type not in ("takeaway", "delivery", "dine_in"):
+        service_type = "takeaway"
+
+    phone_digits = "".join(ch for ch in customer_phone if ch.isdigit())
+    phone_candidates = [customer_phone, phone_digits]
+    if len(phone_digits) == 10:
+        phone_candidates.append(f"91{phone_digits}")
+    if len(phone_digits) == 12 and phone_digits.startswith("91"):
+        phone_candidates.append(phone_digits[2:])
+    phone_candidates = [p for p in dict.fromkeys([p.strip() for p in phone_candidates if p and p.strip()])]
+    canonical_phone = phone_candidates[0]
+
+    customer = None
+    for ph in phone_candidates:
+        customer = await get_customer(restaurant_id, ph)
+        if customer:
+            canonical_phone = ph
+            break
+
+    if not customer:
+        customer = await create_customer(
+            restaurant_id,
+            canonical_phone,
+            customer_name,
+            profile_name=customer_name,
+        )
+
+    customer_id = str(customer.get("id") or "").strip()
+    if not customer_id:
+        raise HTTPException(status_code=500, detail="Customer resolution failed")
+
+    token_number = await get_next_token_number(restaurant_id)
+    booking = await create_booking(
+        restaurant_id,
+        customer_id,
+        service_type,
+        token_number=token_number,
+    )
+    booking_id = str(booking.get("id") or "").strip()
+    if not booking_id:
+        raise HTTPException(status_code=500, detail="Booking creation failed")
+
+    session_state: dict = {
+        "payment_mode": "prepay",
+        "service_type": service_type,
+    }
+    payment_link = await ensure_prepay_payment_link(
+        booking_id,
+        total,
+        customer_name,
+        f"Web cart {service_type.replace('_', ' ')} order",
+        customer_phone=canonical_phone,
+        session_state=session_state,
+    )
+    if not payment_link:
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": "payment_link_unavailable", "booking_id": booking_id},
+        )
+
+    preview_lines = []
+    for row in items[:6]:
+        try:
+            qty = int(row.get("qty") or 0)
+        except Exception:
+            qty = 0
+        name = str(row.get("name") or "Item").strip() or "Item"
+        if qty > 0:
+            preview_lines.append(f"- {qty}x {name}")
+    order_preview = "\n".join(preview_lines)
+    if len(items) > 6:
+        order_preview += f"\n- +{len(items) - 6} more item(s)"
+
+    body_text = (
+        "Your order is almost confirmed.\n\n"
+        f"Order ref: {order_ref or booking_id[-8:]}\n"
+        f"Token: {token_label or token_number}\n"
+        f"Total: INR {total:.0f}\n\n"
+        f"{order_preview}\n\n"
+        "Tap Confirm & Pay to complete payment securely via Razorpay."
+    ).strip()
+
+    sent = await send_whatsapp_cta_url(
+        canonical_phone,
+        restaurant_id,
+        body_text=body_text,
+        button_text="Confirm & Pay",
+        url=str(payment_link),
+        header_text="Confirm Your Order",
+        footer_text="Secure payment powered by Razorpay",
+    )
+
+    if not sent:
+        fallback_text = (
+            "Your order is almost confirmed.\n"
+            f"Order ref: {order_ref or booking_id[-8:]}\n"
+            f"Total: INR {total:.0f}\n\n"
+            "Confirm & Pay:\n"
+            f"{payment_link}"
+        )
+        sent = await send_whatsapp_message(canonical_phone, fallback_text, restaurant_id)
+
+    if not sent:
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": "whatsapp_send_failed", "booking_id": booking_id},
+        )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "ok": True,
+            "booking_id": booking_id,
+            "payment_link": payment_link,
+            "customer_phone": canonical_phone,
+        },
+    )
 
 
 @app.get("/payment/complete")
