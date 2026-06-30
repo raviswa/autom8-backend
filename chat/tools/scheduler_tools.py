@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 
 try:
     from tools.receipt_tools import cleanup_expired_receipts
-except Exception:
+except Exception as e:
+    logger.warning("Failed to import cleanup_expired_receipts: %s", e)
     cleanup_expired_receipts = None
 
 # ─────────────────────────────────────────────────────────────────────────────
