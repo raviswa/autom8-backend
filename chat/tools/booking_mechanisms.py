@@ -54,6 +54,7 @@ from tools.db_tools import (
     get_active_walk_in_token,
     get_restaurant_by_id,
     create_menu_link_token,
+    create_walk_in_token_direct,
 )
 
 logger = logging.getLogger(__name__)
@@ -1376,15 +1377,19 @@ def _normalize_phone_digits(phone: str) -> str:
 
 def _build_web_menu_url(slug: str, token: str, phone_digits: str) -> str:
     """
-    Build a reachable web-menu URL.
-    Default is backend public route (/menu) with slug query; can be overridden.
+    Build the branded web-menu URL as {slug}.autom8.works/menu?token=...&phone=...
+    `webcart.js` resolves the restaurant from the subdomain (readHostSlug),
+    so no slug query param is needed on the live domain. WEB_MENU_BASE_URL
+    can still override the whole base (e.g. for local/staging testing where
+    wildcard subdomains aren't set up).
     """
-    base = (
-        _os.getenv("WEB_MENU_BASE_URL")
-        or _os.getenv("AUTOM8_BACKEND_URL")
-        or "https://api.autom8.works"
-    ).rstrip("/")
-    return f"{base}/menu?slug={slug}&token={token}&phone={phone_digits}"
+    override = _os.getenv("WEB_MENU_BASE_URL")
+    if override:
+        base = override.rstrip("/")
+        return f"{base}/menu?slug={slug}&token={token}&phone={phone_digits}"
+
+    domain = _os.getenv("WEB_MENU_DOMAIN", "autom8.works").strip().lstrip(".")
+    return f"https://{slug}.{domain}/menu?token={token}&phone={phone_digits}"
 
 
 async def _send_web_menu_message(
@@ -1410,10 +1415,34 @@ async def _send_web_menu_message(
             token_id = str(walk.get('id'))
 
     if not token_id:
-        token_id = uuid4().hex
+        # No walk_in_tokens row exists yet (e.g. customer tapped a service
+        # button before any order details were collected). Create one now
+        # so the web cart can resolve a real session instead of a 410.
+        service = str(session_state.get('service_type') or '').strip().lower()
+        mode = str(session_state.get('order_mode') or '').strip().lower()
+        if service == 'dine_in':
+            wtype = 'dinein'
+        elif service == 'delivery':
+            wtype = 'scheduled_delivery' if mode == 'scheduled' else 'takeaway'
+        else:
+            wtype = 'scheduled_takeaway' if mode == 'scheduled' else 'takeaway'
+
+        created_id = await create_walk_in_token_direct(
+            restaurant_id=restaurant_id,
+            name=session_state.get('customer_name') or 'WhatsApp Guest',
+            phone=customer_phone,
+            token_type=wtype,
+            pax=int(session_state.get('pax') or 1),
+            meta={'source': 'web_menu_link'},
+        )
+        token_id = created_id or uuid4().hex
 
     try:
-        walk_token_id = session_state.get('token_number') or session_state.get('display_token')
+        walk_token_id = (
+            session_state.get('token_number')
+            or session_state.get('display_token')
+            or token_id
+        )
         await create_menu_link_token(
             restaurant_id=restaurant_id,
             customer_phone=phone_digits or customer_phone,
