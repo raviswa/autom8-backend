@@ -2209,8 +2209,12 @@ async def _next_portal_token_id(session, restaurant_id: str) -> str:
         seq = result.scalar_one()
         if seq is not None:
             return _build_portal_token_id(int(seq))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"[portal-token] allocate_portal_token_seq failed, falling back: {e}")
+        # IMPORTANT: a failed statement poisons the rest of this transaction
+        # in Postgres — every subsequent query on this session will raise
+        # InFailedSQLTransactionError until we roll back.
+        await session.rollback()
 
     yymm = _portal_token_month_key()
     result = await session.execute(
@@ -3171,4 +3175,3 @@ async def get_walk_in_token_by_id(restaurant_id: str, token_id: str) -> dict | N
         )
         row = result.mappings().first()
         return dict(row) if row else None
-
