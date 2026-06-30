@@ -96,7 +96,10 @@
       border: 1px solid #f59e0b; background: #fffbeb; color: #92400e; font-size: 13px;
     }
 
+    /* FIX (2): give menu column min-width:0 so it never gets pushed/overlapped
+       by the sticky cart column on desktop grids */
     .layout { display: grid; grid-template-columns: 1fr; gap: 14px; }
+    .menu { min-width: 0; }
 
     .hscroll { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 10px; scrollbar-width: none; }
     .hscroll::-webkit-scrollbar { display: none; }
@@ -127,21 +130,27 @@
     }
     .chip.active { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); }
 
-    .menu-list { display: flex; flex-direction: column; gap: 10px; padding-bottom: 8px; }
+    /* FIX (2): denser rows + 2-col grid on tablet/wide-mobile widths so the
+       large blank space next to short single-line item names goes away */
+    .menu-list { display: flex; flex-direction: column; gap: 8px; padding-bottom: 8px; }
+    @media (min-width: 520px) and (max-width: 900px) {
+      .menu-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    }
     .row-card {
       display: flex; gap: 10px; align-items: center;
       background: var(--panel); border: 1px solid var(--line);
-      border-radius: var(--radius); padding: 8px;
+      border-radius: var(--radius); padding: 9px;
+      min-height: 0;
     }
-    .row-card img { width: 64px; height: 64px; border-radius: 10px; object-fit: cover; background: #f3f4f6; flex-shrink: 0; }
+    .row-card img { width: 56px; height: 56px; border-radius: 10px; object-fit: cover; background: #f3f4f6; flex-shrink: 0; }
     .row-card .img-fallback {
-      width: 64px; height: 64px; border-radius: 10px; background: #f3f4f6; flex-shrink: 0;
+      width: 56px; height: 56px; border-radius: 10px; background: #f3f4f6; flex-shrink: 0;
       display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 10px;
     }
-    .row-info { flex: 1; min-width: 0; }
-    .row-cat { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .03em; }
-    .row-name { font-weight: 700; font-size: 14px; line-height: 1.3; }
-    .row-price { color: var(--brand); font-weight: 800; font-size: 13.5px; margin-top: 2px; }
+    .row-info { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 1px; }
+    .row-cat { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .03em; }
+    .row-name { font-weight: 700; font-size: 13.5px; line-height: 1.25; }
+    .row-price { color: var(--brand); font-weight: 800; font-size: 13px; margin-top: 1px; }
     .note {
       display: inline-block; margin-top: 4px; font-size: 10.5px; color: #92400e;
       background: #ffedd5; border: 1px solid #fed7aa; padding: 2px 7px; border-radius: 999px;
@@ -149,17 +158,17 @@
     .add-zone { flex-shrink: 0; }
     .btn-add {
       border: none; background: var(--brand); color: #fff; border-radius: 10px;
-      width: 38px; height: 38px; font-size: 20px; font-weight: 700; cursor: pointer; line-height: 1;
+      width: 36px; height: 36px; font-size: 19px; font-weight: 700; cursor: pointer; line-height: 1;
     }
     .stepper {
       display: flex; align-items: center; gap: 0; border: 1px solid var(--brand); border-radius: 10px; overflow: hidden;
     }
     .stepper button {
-      border: none; background: var(--brand); color: #fff; width: 32px; height: 38px;
-      font-size: 17px; font-weight: 800; cursor: pointer;
+      border: none; background: var(--brand); color: #fff; width: 30px; height: 36px;
+      font-size: 16px; font-weight: 800; cursor: pointer;
     }
-    .stepper span { width: 26px; text-align: center; font-weight: 800; font-size: 13.5px; }
-    .empty-state { text-align: center; color: var(--muted); padding: 40px 10px; font-size: 13.5px; }
+    .stepper span { width: 24px; text-align: center; font-weight: 800; font-size: 13px; }
+    .empty-state { text-align: center; color: var(--muted); padding: 40px 10px; font-size: 13.5px; grid-column: 1 / -1; }
 
     /* ---------- Cart panel: bottom sheet on mobile, static aside on desktop ---------- */
     .cart-overlay {
@@ -236,7 +245,9 @@
       align-items: center; justify-content: center; padding: 0 3px; font-weight: 800;
     }
 
-    /* ---------- Desktop: persistent side cart, no overlay ---------- */
+    /* ---------- Desktop: persistent side cart, no overlay ----------
+       FIX (3): explicit !important overrides so the mobile fixed/transform
+       rules can never leak through on resize/zoom and overlap the menu. */
     @media (min-width: 901px) {
       body { padding-bottom: 0; }
       .shell { padding-top: 16px; }
@@ -245,8 +256,12 @@
       .float-bar { display: none !important; }
       .cart-overlay { display: none !important; }
       .cart-panel {
-        position: sticky; top: 86px; transform: none; max-height: calc(100vh - 110px);
+        position: sticky !important;
+        top: 86px;
+        transform: none !important;
+        max-height: calc(100vh - 110px);
         border-radius: var(--radius); border: 1px solid var(--line); box-shadow: none;
+        z-index: 1;
       }
       .header { position: sticky; top: 0; border-radius: 0; }
     }
@@ -381,6 +396,26 @@
     }
     function money(v) { return `Rs ${Math.max(0, Number(v || 0)).toFixed(0)}`; }
 
+    // FIX (4): persist cart per-token in sessionStorage so the +/- stepper
+    // state survives reloads, the WhatsApp redirect-and-back flow, etc.
+    // Without this, state.cart resets to an empty Map on every page load
+    // and every item appears to lose its "already added" stepper state.
+    const cartStorageKey = () => `munafe_cart:${token}`;
+    function saveCartLocal() {
+      try {
+        sessionStorage.setItem(cartStorageKey(), JSON.stringify([...state.cart.entries()]));
+      } catch (_e) { /* storage unavailable — fail silently, cart still works in-memory */ }
+    }
+    function loadCartLocal() {
+      try {
+        const raw = sessionStorage.getItem(cartStorageKey());
+        if (raw) state.cart = new Map(JSON.parse(raw));
+      } catch (_e) { /* ignore corrupt/missing data */ }
+    }
+    function clearCartLocal() {
+      try { sessionStorage.removeItem(cartStorageKey()); } catch (_e) {}
+    }
+
     function openCart() {
       cartPanel.classList.add('open');
       if (!isDesktop()) cartOverlay.classList.add('open');
@@ -418,6 +453,8 @@
     }
 
     function renderCart() {
+      saveCartLocal(); // FIX (4): keep storage in sync on every cart render
+
       const { lines, subtotal, promo, total, count } = cartTotals();
 
       cartLines.innerHTML = lines.length
@@ -596,6 +633,10 @@
         state.availableNow = data.available_now || [];
         state.activeTab = data.primary_category || 'all';
 
+        // FIX (4): restore any cart saved before this page load (reload, or
+        // returning from the WhatsApp redirect) so steppers show correctly.
+        loadCartLocal();
+
         if (data.theme && data.theme.primary_color) {
           document.documentElement.style.setProperty('--brand', data.theme.primary_color);
         }
@@ -605,14 +646,28 @@
 
         $('brandName').textContent = data.restaurant.name || 'Munafe';
         $('sessionMeta').textContent = `Token ${data.session.token} • ${data.session.phone}`;
+
+        // FIX (1): robust logo handling — show fallback immediately if no
+        // logo_url, and fall back gracefully if the URL fails to load
+        // (broken link, CORS-blocked host, etc.) instead of leaving a
+        // broken-image icon or a permanently empty slot.
         const logo = $('brandLogo');
         const fallback = $('brandLogoFallback');
+        const initial = (data.restaurant.name || 'M').trim().charAt(0).toUpperCase() || 'M';
+        fallback.textContent = initial;
         if (data.restaurant.logo_url) {
+          logo.onerror = () => {
+            logo.style.display = 'none';
+            fallback.style.display = 'flex';
+          };
+          logo.onload = () => {
+            logo.style.display = 'block';
+            fallback.style.display = 'none';
+          };
           logo.src = data.restaurant.logo_url;
-          logo.style.display = 'block';
-          fallback.style.display = 'none';
         } else {
-          fallback.textContent = (data.restaurant.name || 'M').trim().charAt(0).toUpperCase();
+          logo.style.display = 'none';
+          fallback.style.display = 'flex';
         }
 
         const pill = $('slotPill');
@@ -696,6 +751,11 @@
         const supportPhone = (state.restaurant && state.restaurant.support_phone) || '';
         const msg = encodeURIComponent(buildWhatsAppMessage(data.order_ref));
         const waUrl = supportPhone ? `https://wa.me/${supportPhone}?text=${msg}` : `https://wa.me/?text=${msg}`;
+
+        // FIX (4): clear the saved cart now that the order has been
+        // submitted, so coming back to this link starts fresh instead of
+        // re-showing the just-submitted items as still "in cart".
+        clearCartLocal();
 
         $('waLink').href = waUrl;
         $('waFallback').style.display = 'block';
