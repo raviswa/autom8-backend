@@ -150,6 +150,74 @@ async def send_whatsapp_template(
 
 
 # ---------------------------------------------------------------------------
+# Outbound: CTA URL button (interactive)
+# ---------------------------------------------------------------------------
+
+async def send_whatsapp_cta_url(
+    phone: str,
+    restaurant_id: str,
+    *,
+    body_text: str,
+    button_text: str,
+    url: str,
+    header_text: str | None = None,
+    footer_text: str | None = None,
+) -> bool:
+    """Send a WhatsApp 'cta_url' interactive message — a tappable button
+    that opens `url`, instead of a plain link inside the message body.
+
+    Note: Meta only follows redirects up to a point and some in-app
+    browsers behave oddly with dynamic query params, but this is the
+    standard pattern for "View Menu" / "Track Order" style CTAs.
+    """
+    try:
+        credentials = await _get_whatsapp_credentials(restaurant_id)
+        if not credentials:
+            return False
+
+        url_endpoint = f"{credentials['api_endpoint']}/{credentials['phone_number_id']}/messages"
+
+        interactive: dict = {
+            "type": "cta_url",
+            "body": {"text": body_text},
+            "action": {
+                "name": "cta_url",
+                "parameters": {
+                    "display_text": button_text[:20],  # Meta hard limit: 20 chars
+                    "url": url,
+                },
+            },
+        }
+        if header_text:
+            interactive["header"] = {"type": "text", "text": header_text[:60]}
+        if footer_text:
+            interactive["footer"] = {"text": footer_text[:60]}
+
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": phone,
+            "type": "interactive",
+            "interactive": interactive,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {credentials['access_token']}",
+        }
+
+        client = _get_http_client()
+        response = await client.post(url_endpoint, json=payload, headers=headers)
+        logger.info(
+            f"send_whatsapp_cta_url → {response.status_code} | to={phone} | "
+            f"url={url} | response={response.text[:200]}"
+        )
+        return response.status_code in (200, 201)
+
+    except Exception as e:
+        logger.error(f"Failed to send WhatsApp CTA URL to {phone}: {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Outbound: WhatsApp Flow
 # ---------------------------------------------------------------------------
 
