@@ -48,7 +48,7 @@ from uuid import uuid4
 import aiohttp
 
 from tools.catalog_tools import parse_whatsapp_order
-from tools.whatsapp_tools import send_whatsapp_message
+from tools.whatsapp_tools import send_whatsapp_message, send_whatsapp_cta_url
 from tools.db_tools import (
     get_available_tables,
     get_active_walk_in_token,
@@ -1453,6 +1453,26 @@ async def _send_web_menu_message(
         session_state['menu_session_token'] = str(token_id)
 
         url = _build_web_menu_url(slug, str(token_id), phone_digits)
+        body_text = (
+            f"📍 {display_name}\n"
+            f"{service_icon} {service_label}\n\n"
+            "Tap the button below to browse our full menu with search "
+            "and easy selection. Add items to your cart and submit when ready!"
+        )
+
+        cta_sent = await send_whatsapp_cta_url(
+            customer_phone,
+            restaurant_id,
+            body_text=body_text,
+            button_text="View Menu",
+            url=url,
+            header_text="🍽️ Browse Our Menu",
+        )
+        if cta_sent:
+            return True
+
+        # Fallback: plain-text link if the CTA button send fails
+        # (e.g. older template/account restrictions).
         message = (
             "🍽️ Browse Our Menu\n"
             f"📍 {display_name}\n"
