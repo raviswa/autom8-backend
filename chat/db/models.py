@@ -8,7 +8,7 @@ from sqlalchemy import (
     Boolean, Column, DateTime, Enum, ForeignKey, Integer, JSON,
     Numeric, String, Text, UniqueConstraint, Index, ARRAY, func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 

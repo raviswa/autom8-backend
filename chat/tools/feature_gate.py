@@ -141,8 +141,6 @@ def _normalize_services_enabled(restaurant: dict) -> list[str]:
         or []
     )
     if isinstance(services_enabled, str):
-        import json
-
         try:
             services_enabled = json.loads(services_enabled)
         except Exception:
@@ -180,43 +178,21 @@ def build_service_selection_payload(restaurant: dict) -> dict | None:
     rows_sec1 = []
     rows_sec2 = []
 
-    if "dine_in" in services_enabled:
-        rows_sec1.append({
-            "id": "dine_in_now",
-            "title": "🍽️ Dine-In Now",
-            "description": "Order food at your table",
-        })
-        rows_sec2.append({
-            "id": "table_reservation",
-            "title": "🗓️ Future Reservation",
-            "description": "Book your preferred table in advance",
-        })
+    if Feature.DINE_IN in services_enabled:
+        rows_sec1.append(_service_row("dine_in_now"))
 
-    if "delivery" in services_enabled:
-        rows_sec1.append({
-            "id": "door_delivery_now",
-            "title": "🛵 Home Delivery",
-            "description": "Fresh food delivered to your door",
-        })
+    if Feature.RESERVE_TABLE in services_enabled:
+        rows_sec2.append(_service_row("table_reservation"))
+
+    if Feature.DELIVERY in services_enabled:
+        rows_sec1.append(_service_row("door_delivery_now"))
         if scheduled_delivery_enabled:
-            rows_sec2.append({
-                "id": "scheduled_delivery",
-                "title": "🕒 Scheduled Delivery",
-                "description": "Schedule a delivery up to 7 days ahead",
-            })
+            rows_sec2.append(_service_row("scheduled_delivery"))
 
-    if "takeaway" in services_enabled:
-        rows_sec1.append({
-            "id": "takeaway_now",
-            "title": "🛍️ Take Away",
-            "description": "Skip the line, pick up now",
-        })
+    if Feature.TAKEAWAY in services_enabled:
+        rows_sec1.append(_service_row("takeaway_now"))
         if scheduled_takeaway_enabled:
-            rows_sec2.append({
-                "id": "scheduled_pickup",
-                "title": "🚗 Scheduled Take Away",
-                "description": "Plan your pick-up time in advance",
-            })
+            rows_sec2.append(_service_row("scheduled_pickup"))
 
     total_rows = len(rows_sec1) + len(rows_sec2)
 
