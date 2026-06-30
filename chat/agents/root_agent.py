@@ -9,7 +9,7 @@ from agents.customer.identity_agent import handle_identity_flow
 from agents.customer.booking_agent import handle_booking_flow
 from agents.manager.commands_agent import parse_manager_command
 from tools.cart_tools import handle_incoming_message
-from tools.whatsapp_tools import send_whatsapp_message
+# from tools.whatsapp_tools import send_whatsapp_message  # no longer needed
 
 logger = logging.getLogger(__name__)
 
@@ -241,22 +241,43 @@ async def route_message(
 
     if user_text in _HOME_WORDS:
         session_state["current_state"] = "booking"
-        session_state["booking_step"] = "awaiting_service_selection"
-        await send_whatsapp_message(
-            sender_phone,
-            "🏠 Home\nPlease choose a service:\n• Dine-in\n• Takeaway\n• Delivery\n• Reserve Table",
-            restaurant_id,
+        session_state["booking_step"] = "ask_service"
+
+        # Delegate to booking agent so it sends native interactive service picker
+        result = await handle_booking_flow(
+            restaurant_id=restaurant_id,
+            customer_id=customer_id,
+            customer_name=session_state.get("customer_name", "Guest"),
+            customer_phone=sender_phone,
+            manager_phone=restaurant_manager_phone,
+            message="home",
+            session_state=session_state,
+            table_number=table_number,
+            raw_message_obj=raw_message_obj,
         )
-        logger.info(f"Processed {sender_phone} | Status: reset_complete | Next State: booking")
-        return {"status": "reset_complete"}
+        if result.get("status") != "error":
+            session_state["current_state"] = "booking"
+        return result
 
     if user_text in _GREET_WORDS and session_state.get("booking_step") in (None, "awaiting_service_selection", "ask_service"):
-        await send_whatsapp_message(
-            sender_phone,
-            "Hi! 👋 Please choose a service:\n• Dine-in\n• Takeaway\n• Delivery\n• Reserve Table",
-            restaurant_id,
+        session_state["current_state"] = "booking"
+        session_state["booking_step"] = "ask_service"
+
+        # Delegate to booking agent so it sends native interactive service picker
+        result = await handle_booking_flow(
+            restaurant_id=restaurant_id,
+            customer_id=customer_id,
+            customer_name=session_state.get("customer_name", "Guest"),
+            customer_phone=sender_phone,
+            manager_phone=restaurant_manager_phone,
+            message="hi",
+            session_state=session_state,
+            table_number=table_number,
+            raw_message_obj=raw_message_obj,
         )
-        return {"status": "greeting_handled"}
+        if result.get("status") != "error":
+            session_state["current_state"] = "booking"
+        return result
 
     # ── 3. CART PRE-ROUTER ────────────────────────────────────────────────────
     # handle_incoming_message() owns these steps exclusively:
