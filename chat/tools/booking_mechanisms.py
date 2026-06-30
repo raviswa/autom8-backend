@@ -1409,10 +1409,12 @@ async def _send_web_menu_message(
         or session_state.get('token_number')
         or session_state.get('display_token')
     )
+    token_id_is_real_walk_row = bool(token_id)  # these all originate from real walk_in_tokens rows
     if not token_id:
         walk = await get_active_walk_in_token(restaurant_id, customer_phone)
         if walk and walk.get('id'):
             token_id = str(walk.get('id'))
+            token_id_is_real_walk_row = True
 
     if not token_id:
         # No walk_in_tokens row exists yet (e.g. customer tapped a service
@@ -1435,14 +1437,26 @@ async def _send_web_menu_message(
             pax=int(session_state.get('pax') or 1),
             meta={'source': 'web_menu_link'},
         )
-        token_id = created_id or uuid4().hex
+        if created_id:
+            token_id = created_id
+            token_id_is_real_walk_row = True
+        else:
+            # Real walk_in_tokens row could not be created (DB error etc).
+            # Use a session-only token so the link still works via phone
+            # lookup, but NEVER reference it as a walk_in_token_id FK below.
+            logger.error(
+                "[BOOKING] %s → could not create walk_in_tokens row; "
+                "menu link will rely on phone-based session lookup only",
+                customer_phone,
+            )
+            token_id = uuid4().hex
 
     try:
-        walk_token_id = (
-            session_state.get('token_number')
-            or session_state.get('display_token')
-            or token_id
-        )
+        # Only pass walk_in_token_id when token_id genuinely refers to a
+        # walk_in_tokens row — it's a foreign key, so passing the
+        # session-only uuid4 fallback above would throw a FK violation
+        # and crash the whole send (which is exactly what was happening).
+        walk_token_id = token_id if token_id_is_real_walk_row else None
         await create_menu_link_token(
             restaurant_id=restaurant_id,
             customer_phone=phone_digits or customer_phone,
@@ -1450,7 +1464,8 @@ async def _send_web_menu_message(
             walk_in_token_id=str(walk_token_id) if walk_token_id else None,
             expires_in_hours=24,
         )
-        session_state['menu_session_token'] = str(token_id)
+        if token_id_is_real_walk_row:
+            session_state['menu_session_token'] = str(token_id)
 
         url = _build_web_menu_url(slug, str(token_id), phone_digits)
         body_text = (
