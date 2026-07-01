@@ -109,7 +109,7 @@ async function notifyCustomerSeated(token, restaurantId, tableNumbers, messagePr
   // Brief pause — back-to-back text + interactive often fails on Meta.
   await new Promise((resolve) => setTimeout(resolve, 1500));
 
-  const menuSendResult = await sendWhatsAppCatalogWithSpecials(token.phone, restaurantId);
+  const menuSendResult = await sendWhatsAppCatalogWithSpecials(token.phone, restaurantId, token.id);
   if (!menuSendResult.catalogOk && !menuSendResult.pickerSent) {
     console.error(
       `[dine-in-auto] Menu send failed after seating ${token.id} → ${token.phone}`,
