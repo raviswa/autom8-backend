@@ -40,12 +40,6 @@ from tools.payment_tools import (
     verify_checkout_payment,
     ensure_prepay_payment_link,
 )
-
-
-# After the payment_link check, ADD:
-from tools.db_tools import save_session_state
-await save_session_state(restaurant_id, canonical_phone, session_state)
-
 from tools.auto_reply_filter import is_whatsapp_auto_reply
 from tools.booking_mechanisms import (
     is_catalog_order,
@@ -642,7 +636,7 @@ async def internal_webcart_confirm_pay(request: Request):
     session_state: dict = {
         "payment_mode": "prepay",
         "service_type": service_type,
-        "order_total": total, 
+        "order_total": total,
     }
     payment_link = await ensure_prepay_payment_link(
         booking_id,
@@ -652,7 +646,7 @@ async def internal_webcart_confirm_pay(request: Request):
         customer_phone=canonical_phone,
         session_state=session_state,
     )
-    
+
     if not payment_link:
         return JSONResponse(
             status_code=500,
@@ -660,12 +654,11 @@ async def internal_webcart_confirm_pay(request: Request):
         )
 
     try:
-        from tools.db_tools import save_session_state    
         await save_session_state(restaurant_id, canonical_phone, session_state)
     except Exception as _sess_err:
         logger.warning(f"[webcart-confirm-pay] session save failed for {booking_id}: {_sess_err}")
         # Non-fatal — payment link was created; customer can still pay.
-    
+
     preview_lines = []
     for row in items[:6]:
         try:
