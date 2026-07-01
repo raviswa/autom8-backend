@@ -653,6 +653,46 @@ async def internal_webcart_confirm_pay(request: Request):
             content={"ok": False, "error": "payment_link_unavailable", "booking_id": booking_id},
         )
 
+    # Durable persistence — mirrors every other booking flow (takeaway_flow,
+    # delivery_flow, dine_in_flow, reserve_table_flow). The hosted /pay
+    # checkout page reads session_state["order_total"] first, but that key
+    # lives only in the ephemeral WhatsApp conversation session and is lost
+    # the moment any other inbound message re-saves session_state before the
+    # customer taps "Confirm & Pay". Without this, prepare_checkout_page()
+    # falls back to load_prepay_payload(), which previously found nothing
+    # for web-cart orders and returned {"error": "amount_missing"} — this is
+    # the root cause of the takeaway/delivery "Payment unavailable" bug.
+    from tools.prepay_fulfillment import build_prepay_payload, stash_and_persist_prepay_payload
+
+    prepay_payload = build_prepay_payload(
+        service_type=service_type,
+        session_state=session_state,
+        restaurant_id=restaurant_id,
+        customer_id=customer_id,
+        customer_name=customer_name,
+        customer_phone=canonical_phone,
+        booking_id=booking_id,
+        token=token_label or str(token_number),
+        total=total,
+        booking_time=datetime.utcnow().isoformat(),
+        order_text_display="\n".join(
+            f"{int(row.get('qty') or 0)}x {str(row.get('name') or 'Item').strip()}"
+            for row in items if int(row.get('qty') or 0) > 0
+        ),
+        cart_snapshot={"items": items},
+        totals={"total": total},
+        order_ref=order_ref,
+    )
+
+    try:
+        await stash_and_persist_prepay_payload(session_state, booking_id, prepay_payload)
+    except Exception as _payload_err:
+        logger.warning(
+            f"[webcart-confirm-pay] prepay payload persistence failed for {booking_id}: {_payload_err}"
+        )
+        # Non-fatal on its own, but without this the checkout page can still
+        # amount_missing if the session is lost — log loudly for ops.
+
     try:
         await save_session_state(restaurant_id, canonical_phone, session_state)
     except Exception as _sess_err:
