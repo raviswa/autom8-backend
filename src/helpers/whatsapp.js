@@ -10,6 +10,7 @@
 
 'use strict';
 
+const crypto = require('crypto');
 const { supabaseAdmin } = require('../config/supabase');
 const { broadcastToRestaurant } = require('../websocket');
 const { getMetaCatalogId, getWhatsAppIntegration } = require('./restaurantConfig');
@@ -466,53 +467,123 @@ async function sendMenuLastResortPrompt(toNumber, restaurantId) {
 /**
  * Option B menu send with full fallback chain (mirrors Python send_unified_booking_menu).
  */
-async function sendWhatsAppCatalogWithSpecials(toNumber, restaurantId) {
-  let categoryRowMap = null;
+// ── Web-cart menu link (replaces native/legacy catalog for the "View Menu"
+// send) ─────────────────────────────────────────────────────────────────────
+// Mirrors chat/tools/booking_mechanisms.py's _send_web_menu_message +
+// chat/tools/db_tools.py's create_menu_link_token, so a table-seated dine-in
+// customer gets the same branded web-cart link as takeaway/delivery
+// customers already do via the Python chat service.
 
-  let pickerResult = await sendCatalogCategoryPicker(toNumber, restaurantId);
-  if (!pickerResult.ok) {
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    pickerResult = await sendCatalogCategoryPicker(toNumber, restaurantId);
+function slugifySubdomain(name) {
+  const raw = String(name || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  const clean = raw.split('-').filter(Boolean).join('-');
+  return clean || 'restaurant';
+}
+
+function normalizePhoneDigits(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (digits.startsWith('91') && digits.length === 12) return digits.slice(2);
+  return digits;
+}
+
+function buildWebMenuUrl(slug, token, phoneDigits) {
+  const override = process.env.WEB_MENU_BASE_URL;
+  if (override) {
+    return `${override.replace(/\/$/, '')}/menu?slug=${slug}&token=${token}&phone=${phoneDigits}`;
   }
+  const domain = (process.env.WEB_MENU_DOMAIN || 'autom8.works').replace(/^\.+/, '');
+  return `https://${slug}.${domain}/menu?token=${token}&phone=${phoneDigits}`;
+}
 
-  let pickerSent = pickerResult.ok;
-  if (pickerSent) categoryRowMap = pickerResult.categoryRowMap;
-
-  let catalogOk = pickerSent;
-  let mechanism = pickerSent ? 'catalog_b' : 'none';
-
-  if (!pickerSent) {
-    catalogOk = await sendWhatsAppCatalogMessage(toNumber, restaurantId);
-    if (!catalogOk) {
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-      catalogOk = await sendWhatsAppCatalogMessage(toNumber, restaurantId);
-    }
-    mechanism = catalogOk ? 'catalog' : 'none';
-  }
-
-  if (!catalogOk && !pickerSent) {
-    const textOk = await sendPlainTextMenuFallback(toNumber, restaurantId);
-    if (textOk) {
-      mechanism = 'cart_text';
-      catalogOk = true;
-    }
-  }
-
-  if (!catalogOk && !pickerSent) {
-    await sendMenuLastResortPrompt(toNumber, restaurantId);
-    console.error(
-      `[catalog-b] ALL menu mechanisms failed for ${toNumber} (restaurant ${restaurantId})`,
+async function createMenuLinkToken(restaurantId, phone, sessionToken, walkInTokenId = null, expiresInHours = 24) {
+  const expiresAt = new Date(Date.now() + Math.max(1, expiresInHours) * 60 * 60 * 1000).toISOString();
+  const { error } = await supabaseAdmin
+    .from('menu_tokens')
+    .upsert(
+      {
+        restaurant_id: restaurantId,
+        phone,
+        session_token: sessionToken,
+        walk_in_token_id: walkInTokenId,
+        expires_at: expiresAt,
+        is_active: true,
+      },
+      { onConflict: 'restaurant_id,phone' },
     );
+  if (error) throw error;
+}
+
+async function sendWebCartMenuLink(toNumber, restaurantId, walkInTokenId = null) {
+  try {
+    const label = await getRestaurantLabel(restaurantId);
+    const slug = slugifySubdomain(label);
+    const phoneDigits = normalizePhoneDigits(toNumber);
+    const sessionToken = crypto.randomBytes(18).toString('base64url');
+
+    await createMenuLinkToken(restaurantId, phoneDigits || String(toNumber), sessionToken, walkInTokenId);
+    const url = buildWebMenuUrl(slug, sessionToken, phoneDigits);
+
+    const ok = await sendWhatsAppInteractive(
+      toNumber,
+      {
+        type: 'cta_url',
+        header: { type: 'text', text: `🍽️ ${label}` },
+        body: {
+          text:
+            'Tap below to browse our full menu, add items to your cart, ' +
+            'and place your order right from your table. 🪑',
+        },
+        footer: { text: 'Prices excl. GST' },
+        action: {
+          name: 'cta_url',
+          parameters: { display_text: 'View Menu', url },
+        },
+      },
+      restaurantId,
+    );
+
+    if (ok) {
+      console.log(`[web-cart-link] Sent to ${toNumber} → ${url}`);
+      return true;
+    }
+
+    // Fallback: plain text link if the CTA button send itself fails.
+    const textOk = await sendWhatsAppMessage(
+      toNumber,
+      `🍽️ *${label}*\n\nTap to view the menu and order:\n${url}`,
+      restaurantId,
+    );
+    if (textOk) console.log(`[web-cart-link] Fallback text link sent to ${toNumber}`);
+    return textOk;
+  } catch (err) {
+    console.error('[web-cart-link] Failed:', err.message);
+    return false;
   }
+}
+
+/**
+ * Sends the seated-dine-in "menu" message. Previously sent Meta's native
+ * catalog (category picker → product_list, "Option B" below) — that mechanism
+ * predates the web cart and was never migrated when the web cart shipped, so
+ * dine-in customers kept landing on the old in-chat catalog instead of the
+ * new web menu. Now routes to the same web-cart link the Python chat service
+ * sends for takeaway/delivery. `sendWhatsAppCatalogMessage` /
+ * `sendCatalogCategoryPicker` are kept below (still exported) in case
+ * anything needs the legacy mechanism as a manual fallback, but are no
+ * longer used in this send path.
+ */
+async function sendWhatsAppCatalogWithSpecials(toNumber, restaurantId, walkInTokenId = null) {
+  const catalogOk = await sendWebCartMenuLink(toNumber, restaurantId, walkInTokenId);
 
   await new Promise((resolve) => setTimeout(resolve, 1500));
   const specialsSent = await sendSpecialDishesNote(toNumber, restaurantId);
+
   return {
-    catalogOk: catalogOk || pickerSent,
-    pickerSent,
+    catalogOk,
+    pickerSent: false,
     specialsSent,
-    mechanism,
-    categoryRowMap,
+    mechanism: catalogOk ? 'web_cart' : 'none',
+    categoryRowMap: null,
   };
 }
 
