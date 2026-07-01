@@ -77,7 +77,7 @@ async function resolveRestaurantBySlug(req) {
 
   const { data, error } = await supabaseAdmin
     .from('restaurants')
-    .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category')
+    .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category, parcel_charge_per_item, delivery_charge_default, delivery_charge_tiers, gst_rate')
     .eq('is_active', true)
     .limit(500);
 
@@ -473,7 +473,27 @@ router.post('/api/webcart/submit', async (req, res) => {
     }
 
     const subtotal = normalizedItems.reduce((sum, line) => sum + Number(line.line_total || 0), 0);
-    const totalAmount = Math.max(0, Number(subtotal.toFixed(2)));
+    const serviceType = String(session.type || 'takeaway').toLowerCase();
+    const parcelPerItem = parseFloat(restaurant.parcel_charge_per_item || 0);
+    const gstRate = parseFloat(restaurant.gst_rate || 5.0);
+
+// Parcel charge: sum of qty × rate per item (only for takeaway/delivery)
+    let parcelCharge = 0;
+    if (['takeaway', 'delivery'].includes(serviceType) && parcelPerItem > 0) {
+      parcelCharge = normalizedItems.reduce((s, l) => s + l.qty * parcelPerItem, 0);
+      parcelCharge = Math.round(parcelCharge * 100) / 100;
+    }
+
+// Delivery charge (only for delivery)
+    let deliveryCharge = 0;
+    if (serviceType === 'delivery') {
+      deliveryCharge = parseFloat(restaurant.delivery_charge_default || 40);
+    }
+
+    const preGst = Math.round((subtotal + parcelCharge + deliveryCharge) * 100) / 100;
+    const gstAmount = Math.round(preGst * gstRate / 100 * 100) / 100;
+    const totalAmount = Math.round((preGst + gstAmount) * 100) / 100;
+
     if (totalAmount < 1) {
       return res.status(400).json({ ok: false, error: 'Total amount is too low to process payment.' });
     }
@@ -488,8 +508,12 @@ router.post('/api/webcart/submit', async (req, res) => {
         special_request: special_request ? String(special_request).trim().slice(0, 500) : null,
         item_count: normalizedItems.length,
         items: normalizedItems,
-        subtotal: totalAmount,
-        total: totalAmount,
+        parcel_charge: parcelCharge,
+        delivery_charge: deliveryCharge,
+        gst_rate: gstRate,
+        gst_amount: gstAmount,
+        pre_gst_total: preGst,
+        total: totalAmount,   // ← this is the correct grand total
         order_ref: orderRef,
       },
     };
