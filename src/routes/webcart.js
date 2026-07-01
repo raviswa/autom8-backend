@@ -77,7 +77,7 @@ async function resolveRestaurantBySlug(req) {
 
   const { data, error } = await supabaseAdmin
     .from('restaurants')
-    .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category, parcel_charge_per_item, delivery_charge_default, delivery_charge_tiers, gst_rate')
+    .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category, parcel_charge_per_item, delivery_charge_default, delivery_charge_tiers, gst_rate, kitchen_busy')
     .eq('is_active', true)
     .limit(500);
 
@@ -253,7 +253,7 @@ async function fetchMenuItems(restaurantId) {
   const [itemsRes, categoriesRes] = await Promise.all([
     supabaseAdmin
       .from('menu_items')
-      .select('id, retailer_id, name, price, category, description, image_url, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked')
+      .select('id, retailer_id, name, price, category, description, image_url, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked, is_available')
       .eq('restaurant_id', restaurantId)
       .eq('is_stocked', true)
       .order('category', { ascending: true })
@@ -341,14 +341,31 @@ router.get('/api/webcart/session', async (req, res) => {
     }
 
     const { items: menuItems, categorySlotMap } = await fetchMenuItems(restaurant.id);
-    const slotInfo = resolveCurrentSlot(restaurant);
-    const availableNow = slotInfo.current_slot
-      ? menuItems.filter(i => i.effective_slots.includes('anytime') || i.effective_slots.includes(slotInfo.current_slot))
-      : [];
+    let slotInfo = resolveCurrentSlot(restaurant);
+
+    // Manager portal "Kitchen: Open" override (POST /api/catalog/kitchen-toggle
+    // in src/routes/catalog.js) works by flipping menu_items.is_available — it
+    // never touches restaurant.opening_hours, which is all resolveCurrentSlot()
+    // above looks at. So outside scheduled hours the web menu kept showing
+    // "Kitchen is closed" even after the manager explicitly opened it, while
+    // the WhatsApp bot (chat/tools/kitchen_hours.py → has_manager_kitchen_override)
+    // already honored the same signal. Detect it here the same way so both
+    // channels agree.
+    const managerOverrideItems = menuItems.filter(i => i.is_available);
+    const managerOverrideActive = slotInfo.slot_state !== 'open' && managerOverrideItems.length > 0;
+    if (managerOverrideActive) {
+      slotInfo = { ...slotInfo, slot_state: 'open', manager_override: true, banner: null };
+    }
+
+    const availableNow = !slotInfo.current_slot && managerOverrideActive
+      ? managerOverrideItems
+      : slotInfo.current_slot
+        ? menuItems.filter(i => i.effective_slots.includes('anytime') || i.effective_slots.includes(slotInfo.current_slot))
+        : [];
     const todaysSpecial = menuItems.filter(i => i.is_todays_special);
 
     const countsByCategory = {};
-    if (slotInfo.current_slot) {
+    if (slotInfo.slot_state === 'open') {
       for (const item of availableNow) {
         const cat = item.category || 'General';
         countsByCategory[cat] = (countsByCategory[cat] || 0) + 1;
@@ -394,6 +411,12 @@ router.get('/api/webcart/session', async (req, res) => {
       current_slot: slotInfo.current_slot,
       slot_state: slotInfo.slot_state,
       slot_banner: slotInfo.banner || null,
+      kitchen_manual_override: !!slotInfo.manager_override,
+      // Informational only — the manager's "busy kitchen" rush-hour flag
+      // (POST /api/catalog/kitchen-busy-toggle) intentionally does not block
+      // ordering here; it's surfaced for future conversational-flow use
+      // (e.g. showing a longer prep-time notice), not as a booking gate.
+      kitchen_busy: !!restaurant.kitchen_busy,
       primary_category: primaryCategory,
       category_slots: categorySlotMap,
       promotions: [],
