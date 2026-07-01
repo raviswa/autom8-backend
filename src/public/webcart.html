@@ -317,13 +317,16 @@
         </div>
         <div class="cart-body">
           <div id="cartLines"></div>
-          <div class="totals">
+            <div class="totals">
             <div class="line"><span>Subtotal</span><strong id="subtotal">Rs 0</strong></div>
-            <div class="line"><span>Discount</span><strong id="discount">Rs 0</strong></div>
+            <div class="line"><span>Discount</span><strong id="discount">- Rs 0</strong></div>
+            <div class="line" id="parcelRow" style="display:none"><span>Parcel/packaging</span><strong id="parcelAmt">Rs 0</strong></div>
+            <div class="line" id="deliveryRow" style="display:none"><span>Delivery charge</span><strong id="deliveryAmt">Rs 0</strong></div>
+            <div class="line" id="gstRow" style="display:none"><span id="gstLabel">GST (5%)</span><strong id="gstAmt">Rs 0</strong></div>
             <div class="line grand"><span>Total</span><strong id="grand">Rs 0</strong></div>
-          </div>
-          <input class="field" id="promo" placeholder="Promo code (optional)" />
-          <textarea id="notes" rows="2" placeholder="Special request (optional)"></textarea>
+          </div>          
+        <input class="field" id="promo" placeholder="Promo code (optional)" />
+        <textarea id="notes" rows="2" placeholder="Special request (optional)"></textarea>
         </div>
         <div class="cart-foot">
           <button id="submitBtn" class="btn-submit">Continue to WhatsApp</button>
@@ -445,13 +448,35 @@
       return { code: '', amount: 0 };
     }
 
-    function cartTotals() {
+function cartTotals() {
       const lines = [...state.cart.values()];
       const subtotal = lines.reduce((s, l) => s + l.qty * l.price, 0);
       const promo = currentDiscount(subtotal);
-      const total = Math.max(0, subtotal - promo.amount);
+      const afterDiscount = Math.max(0, subtotal - promo.amount);
       const count = lines.reduce((s, l) => s + l.qty, 0);
-      return { lines, subtotal, promo, total, count };
+
+      // Pricing config from session (populated in loadSession)
+      const cfg = state.pricingConfig || {};
+      const serviceType = (state.session && state.session.type) || 'takeaway';
+      const parcelPerItem = parseFloat(cfg.parcel_charge_per_item || 0);
+      const gstRate = parseFloat(cfg.gst_rate || 5);
+      const deliveryDefault = parseFloat(cfg.delivery_charge_default || 40);
+
+      // Parcel charge: qty × rate, only for takeaway / delivery
+      let parcelCharge = 0;
+      if (['takeaway', 'delivery'].includes(serviceType) && parcelPerItem > 0) {
+        parcelCharge = Math.round(lines.reduce((s, l) => s + l.qty * parcelPerItem, 0) * 100) / 100;
+      }
+
+      // Delivery charge: only for delivery
+      const deliveryCharge = serviceType === 'delivery' ? deliveryDefault : 0;
+
+      const preGst = Math.round((afterDiscount + parcelCharge + deliveryCharge) * 100) / 100;
+      const gstAmount = Math.round(preGst * gstRate / 100 * 100) / 100;
+      const total = Math.round((preGst + gstAmount) * 100) / 100;
+
+      return { lines, subtotal, promo, afterDiscount, parcelCharge, deliveryCharge,
+               gstRate, gstAmount, total, count };
     }
 
     function renderCart() {
@@ -480,8 +505,34 @@
         });
       });
 
-      $('subtotal').textContent = money(subtotal);
+$('subtotal').textContent = money(subtotal);
       $('discount').textContent = `- ${money(promo.amount)}`;
+
+      // Parcel row
+      if (parcelCharge > 0) {
+        $('parcelAmt').textContent = money(parcelCharge);
+        $('parcelRow').style.display = '';
+      } else {
+        $('parcelRow').style.display = 'none';
+      }
+
+      // Delivery row
+      if (deliveryCharge > 0) {
+        $('deliveryAmt').textContent = money(deliveryCharge);
+        $('deliveryRow').style.display = '';
+      } else {
+        $('deliveryRow').style.display = 'none';
+      }
+
+      // GST row — always show when cart has items
+      if (count > 0) {
+        $('gstLabel').textContent = `GST (${gstRate}%)`;
+        $('gstAmt').textContent = money(gstAmount);
+        $('gstRow').style.display = '';
+      } else {
+        $('gstRow').style.display = 'none';
+      }
+
       $('grand').textContent = money(total);
 
       $('fbCount').textContent = `${count} item${count === 1 ? '' : 's'}`;
@@ -631,6 +682,7 @@
         state.session = data.session;
         state.phone = (data.session && data.session.phone) ? data.session.phone : (phone || '');
         state.menu = data.menu_items || [];
+        state.pricingConfig = data.pricing_config || {};
         state.todaysSpecial = data.todays_special || [];
         state.availableNow = data.available_now || [];
         state.activeTab = data.primary_category || 'all';
