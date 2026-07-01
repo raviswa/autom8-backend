@@ -648,11 +648,16 @@ async def _mark_paid_and_fulfill(booking_id: str, *, source: str) -> dict[str, A
     if booking and booking.get("payment_status") == "paid" and booking.get("status") == "confirmed":
         return {"ok": True, "booking_id": booking_id, "fulfilled": True, "source": source, "already_done": True}
 
+    # Payment capture and kitchen dispatch are separate concerns.
+    # Never strand payment_status when fulfillment has a transient failure.
+    if not booking or booking.get("payment_status") != "paid":
+        await update_booking_payment_status(booking_id, "paid")
+
     fulfilled = await fulfill_from_webhook(booking_id)
     if not fulfilled:
         logger.error(
             f"[razorpay] Fulfillment failed for booking {booking_id} source={source} — "
-            "payment_status NOT updated"
+            "payment_status kept as paid"
         )
         return {
             "ok": False,
@@ -660,9 +665,9 @@ async def _mark_paid_and_fulfill(booking_id: str, *, source: str) -> dict[str, A
             "fulfilled": False,
             "source": source,
             "reason": "fulfillment_failed",
+            "payment_status": "paid",
         }
 
-    await update_booking_payment_status(booking_id, "paid")
     logger.info(
         f"[razorpay] Booking {booking_id} payment_status=paid "
         f"fulfilled={fulfilled} source={source}"

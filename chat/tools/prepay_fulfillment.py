@@ -84,6 +84,61 @@ _SESSION_HINT_KEYS = (
 )
 
 
+def _normalize_cart_snapshot(cart_snapshot: Any) -> dict[str, dict[str, Any]]:
+    """Coerce cart payloads into canonical cart format keyed by item id.
+
+    Supports legacy/cross-service shapes:
+    - {"ITEM_ID": {"title": ..., "qty": ..., "unit_price": ...}}
+    - {"items": [{"id"|"retailer_id"|"name", "qty", "unit_price"|"price", ...}]}
+    - [{...}, {...}] (same row shape as above)
+    """
+    if not cart_snapshot:
+        return {}
+
+    rows: list[dict[str, Any]] = []
+    if isinstance(cart_snapshot, dict):
+        maybe_items = cart_snapshot.get("items")
+        if isinstance(maybe_items, list):
+            rows = [r for r in maybe_items if isinstance(r, dict)]
+        else:
+            out: dict[str, dict[str, Any]] = {}
+            for item_id, line in cart_snapshot.items():
+                if not isinstance(line, dict):
+                    continue
+                title = str(line.get("title") or line.get("name") or item_id).strip() or str(item_id)
+                out[str(item_id)] = {
+                    "title": title,
+                    "name": title,
+                    "qty": int(line.get("qty") or line.get("quantity") or 1),
+                    "unit_price": float(line.get("unit_price") or line.get("price") or 0),
+                }
+            return out
+    elif isinstance(cart_snapshot, list):
+        rows = [r for r in cart_snapshot if isinstance(r, dict)]
+    else:
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    for idx, row in enumerate(rows, start=1):
+        item_id = str(
+            row.get("retailer_id")
+            or row.get("id")
+            or row.get("sku")
+            or row.get("name")
+            or f"item_{idx}"
+        ).strip()
+        if not item_id:
+            item_id = f"item_{idx}"
+        title = str(row.get("title") or row.get("name") or item_id).strip() or item_id
+        out[item_id] = {
+            "title": title,
+            "name": title,
+            "qty": int(row.get("qty") or row.get("quantity") or 1),
+            "unit_price": float(row.get("unit_price") or row.get("price") or 0),
+        }
+    return out
+
+
 def prepay_fulfillment_required(session_state: dict[str, Any]) -> bool:
     link = session_state.get("payment_link")
     if not link or is_placeholder_payment_link(str(link)):
@@ -98,7 +153,7 @@ def restore_dine_in_kitchen_from_prepay(
     payload: dict[str, Any],
 ) -> None:
     """Keep order payload available for KDS even if session fields were lost."""
-    cart = dict(payload.get("cart_snapshot") or {})
+    cart = _normalize_cart_snapshot(payload.get("cart_snapshot") or {})
     order_text = payload.get("order_text_display") or ""
     if not cart and not order_text:
         return
@@ -290,7 +345,7 @@ async def _dispatch_to_kds(
     special_notes: str | None = None,
 ) -> str | None:
     """Push order to KDS; return order_id only when items were created."""
-    cart_copy = dict(cart or {})
+    cart_copy = _normalize_cart_snapshot(cart or {})
     if cart_copy:
         from tools.cart_tools import enrich_cart_titles
         await enrich_cart_titles(cart_copy, restaurant_id)
@@ -346,7 +401,7 @@ async def _build_retry_payload_from_booking(
         except Exception:
             meta = {}
 
-    cart = dict(meta.get("cart") or {})
+    cart = _normalize_cart_snapshot(meta.get("cart") or {})
     order_text = (meta.get("order_text") or "").strip()
 
     if not cart and not order_text:
@@ -538,6 +593,72 @@ async def _queue_feedback(
         logger.warning(f"[prepay-fulfill] feedback queue non-fatal: {exc}")
 
 
+async def _notify_manager_kds_dispatch_failed(
+    *,
+    restaurant_id: str,
+    booking_id: str,
+    token: str,
+    service_type: str,
+    customer_name: str,
+    customer_phone: str,
+    order_text: str = "",
+    total: float | None = None,
+    booking_time: str = "",
+    manager_phone: str = "",
+) -> None:
+    """Escalate paid orders that failed KDS dispatch so staff can intervene quickly."""
+    from tools.restaurant_config import get_manager_phone
+
+    alert_phone = (manager_phone or "").strip()
+    if not alert_phone:
+        alert_phone = (await get_manager_phone(restaurant_id) or "").strip()
+    if not alert_phone:
+        logger.warning(
+            f"[prepay-fulfill] Manager KDS failure alert skipped — no manager phone "
+            f"for restaurant {restaurant_id}"
+        )
+        return
+
+    service_label = {
+        "takeaway": "Takeaway",
+        "delivery": "Delivery",
+        "dine_in": "Dine-in",
+    }.get((service_type or "").lower(), service_type or "Order")
+
+    total_line = ""
+    if total is not None:
+        total_line = f"Total: ₹{float(total):.0f}\n"
+
+    order_preview = (order_text or "—").strip()
+    if len(order_preview) > 120:
+        order_preview = f"{order_preview[:117]}..."
+
+    body = (
+        f"⚠️ *KDS Dispatch Failed — Paid Order*\n"
+        f"────────────────────\n"
+        f"Service: {service_label}\n"
+        f"Token: {token}\n"
+        f"Booking ID: {booking_id}\n"
+        f"Customer: {customer_name}\n"
+        f"Phone: {customer_phone}\n"
+        + (f"Booking Time: {booking_time}\n" if booking_time else "")
+        + total_line
+        + f"Order: {order_preview}\n"
+        f"────────────────────\n"
+        f"Payment is received. Please check the KDS/portal and push this order to kitchen immediately."
+    )
+    try:
+        await send_whatsapp_message(alert_phone, body, restaurant_id)
+        logger.info(
+            f"[prepay-fulfill] Manager KDS failure alert sent for booking {booking_id} "
+            f"token {token}"
+        )
+    except Exception as exc:
+        logger.warning(
+            f"[prepay-fulfill] Manager KDS failure alert failed for {booking_id}: {exc}"
+        )
+
+
 async def _send_receipt(
     *,
     restaurant_id: str,
@@ -618,7 +739,7 @@ async def _ensure_scheduled_schedule_persisted(payload: dict[str, Any]) -> dict[
         slot_dt = parse_slot_datetime(sched_raw)
         if not slot_dt:
             slot_dt = datetime.fromisoformat(str(sched_raw).replace("Z", "+00:00"))
-        cart_snapshot = payload.get("cart_snapshot") or {}
+        cart_snapshot = _normalize_cart_snapshot(payload.get("cart_snapshot") or {})
         order_text = payload.get("order_text_display") or ""
         transit = resolve_transit_minutes(
             svc,
@@ -688,7 +809,7 @@ async def _enqueue_scheduled_kds_jobs(payload: dict[str, Any]) -> bool:
     booking_id = payload["booking_id"]
     restaurant_id = payload["restaurant_id"]
     token = str(payload.get("token") or payload.get("display_token") or "—")
-    cart = payload.get("cart_snapshot") or {}
+    cart = _normalize_cart_snapshot(payload.get("cart_snapshot") or {})
 
     items = []
     for item_id, line in cart.items():
@@ -741,7 +862,7 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
     customer_phone = payload["customer_phone"]
     customer_name = payload["customer_name"]
     booking_id = payload["booking_id"]
-    cart_snapshot = payload["cart_snapshot"]
+    cart_snapshot = _normalize_cart_snapshot(payload.get("cart_snapshot") or {})
     order_text_display = payload["order_text_display"]
     total = float(payload["total"])
     totals = payload.get("totals") or {}
@@ -888,9 +1009,24 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
         logger.error(
             f"[prepay-fulfill] Takeaway KDS failed for booking {booking_id} token {kds_token}"
         )
-        return False
+        await _notify_manager_kds_dispatch_failed(
+            restaurant_id=restaurant_id,
+            booking_id=booking_id,
+            token=str(display_token),
+            service_type="takeaway",
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            order_text=order_text_display,
+            total=total,
+            booking_time=booking_time,
+            manager_phone=str(payload.get("manager_phone") or ""),
+        )
+        logger.warning(
+            f"[prepay-fulfill] Continuing customer post-payment steps for {booking_id} "
+            "despite KDS dispatch failure"
+        )
 
-    if dispatched_now:
+    if not defer:
         await _queue_feedback(restaurant_id, customer_phone, customer_name, display_token)
     await _send_receipt(
         restaurant_id=restaurant_id,
@@ -914,7 +1050,7 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
     customer_phone = payload["customer_phone"]
     customer_name = payload["customer_name"]
     booking_id = payload["booking_id"]
-    cart_snapshot = payload["cart_snapshot"]
+    cart_snapshot = _normalize_cart_snapshot(payload.get("cart_snapshot") or {})
     order_text_display = payload["order_text_display"]
     total = float(payload["total"])
     totals = payload.get("totals") or {}
@@ -1057,9 +1193,24 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
         logger.error(
             f"[prepay-fulfill] Delivery KDS failed for booking {booking_id} token {token}"
         )
-        return False
+        await _notify_manager_kds_dispatch_failed(
+            restaurant_id=restaurant_id,
+            booking_id=booking_id,
+            token=token,
+            service_type="delivery",
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            order_text=order_text_display,
+            total=total,
+            booking_time=booking_time,
+            manager_phone=manager_phone,
+        )
+        logger.warning(
+            f"[prepay-fulfill] Continuing customer post-payment steps for {booking_id} "
+            "despite KDS dispatch failure"
+        )
 
-    if dispatched_now:
+    if not defer:
         await _queue_feedback(restaurant_id, customer_phone, customer_name, token)
     await _send_receipt(
         restaurant_id=restaurant_id,
@@ -1086,6 +1237,13 @@ async def _fulfill_dine_in(payload: dict[str, Any]) -> bool:
     customer_phone = payload["customer_phone"]
     customer_name = payload["customer_name"]
     booking_id = payload["booking_id"]
+    cart_snapshot = _normalize_cart_snapshot(payload.get("cart_snapshot") or {})
+    totals = payload.get("totals") or {}
+    token = str(payload.get("token") or payload.get("display_token") or "—")
+    table_number = payload.get("table_number")
+    order_text_display = payload.get("order_text_display") or ""
+    booking_time = str(payload.get("booking_time") or "")
+    total = float(payload.get("total") or 0)
 
     state = await get_session_state(restaurant_id, customer_phone)
     state["_payment_received"] = True
@@ -1138,8 +1296,37 @@ async def _fulfill_dine_in(payload: dict[str, Any]) -> bool:
             + _HOME_HINT,
             restaurant_id,
         )
+        await _notify_manager_kds_dispatch_failed(
+            restaurant_id=restaurant_id,
+            booking_id=booking_id,
+            token=token,
+            service_type="dine_in",
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            order_text=order_text_display,
+            total=total,
+            booking_time=booking_time,
+            manager_phone=str(payload.get("manager_phone") or state.get("manager_phone") or ""),
+        )
 
     await save_session_state(restaurant_id, customer_phone, state)
+    await _queue_feedback(
+        restaurant_id,
+        customer_phone,
+        customer_name,
+        token,
+        table_number=str(table_number) if table_number is not None else None,
+    )
+    await _send_receipt(
+        restaurant_id=restaurant_id,
+        customer_phone=customer_phone,
+        customer_name=customer_name,
+        token=token,
+        service_type="dine_in",
+        cart_snapshot=cart_snapshot,
+        totals=totals,
+        table_number=str(table_number or ""),
+    )
     await update_booking_status(booking_id, "confirmed")
     logger.info(
         f"[prepay-fulfill] Dine-in booking {booking_id} payment received "

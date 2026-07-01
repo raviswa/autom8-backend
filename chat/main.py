@@ -664,6 +664,34 @@ async def internal_webcart_confirm_pay(request: Request):
     # the root cause of the takeaway/delivery "Payment unavailable" bug.
     from tools.prepay_fulfillment import build_prepay_payload, stash_and_persist_prepay_payload
 
+    cart_snapshot = {}
+    for idx, row in enumerate(items, start=1):
+        if not isinstance(row, dict):
+            continue
+        try:
+            qty = int(row.get("qty") or 0)
+        except Exception:
+            qty = 0
+        if qty <= 0:
+            continue
+        name = str(row.get("name") or "Item").strip() or "Item"
+        item_id = str(
+            row.get("retailer_id")
+            or row.get("id")
+            or row.get("sku")
+            or name
+            or f"item_{idx}"
+        ).strip() or f"item_{idx}"
+        try:
+            unit_price = float(row.get("unit_price") or row.get("price") or 0)
+        except Exception:
+            unit_price = 0.0
+        cart_snapshot[item_id] = {
+            "title": name,
+            "qty": qty,
+            "unit_price": unit_price,
+        }
+
     prepay_payload = build_prepay_payload(
         service_type=service_type,
         session_state=session_state,
@@ -679,7 +707,7 @@ async def internal_webcart_confirm_pay(request: Request):
             f"{int(row.get('qty') or 0)}x {str(row.get('name') or 'Item').strip()}"
             for row in items if int(row.get('qty') or 0) > 0
         ),
-        cart_snapshot={"items": items},
+        cart_snapshot=cart_snapshot,
         totals={"total": total},
         order_ref=order_ref,
     )

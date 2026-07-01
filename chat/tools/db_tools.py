@@ -121,6 +121,11 @@ _INTEGRATION_TTL = 300
 _MENU_TTL = 300
 _TABLES_TTL = 30    # tables change frequently during service
 
+# Portal token sequence RPC capability cache.
+# None -> unknown, True -> usable, False -> unavailable (use SQL fallback path).
+_PORTAL_SEQ_RPC_AVAILABLE: bool | None = None
+_PORTAL_SEQ_SCHEMA_ATTEMPTED = False
+
 
 # ─── Advisory lock helpers ────────────────────────────────────────────────────
 
@@ -2199,22 +2204,106 @@ def _build_portal_token_id(seq: int) -> str:
     return f"T-{_portal_token_month_key()}-{str(int(seq)).zfill(3)}"
 
 
+async def _ensure_portal_token_sequence_schema(session) -> bool:
+        """Best-effort runtime bootstrap for missing portal token sequence schema."""
+        global _PORTAL_SEQ_SCHEMA_ATTEMPTED
+        if _PORTAL_SEQ_SCHEMA_ATTEMPTED:
+                return False
+        _PORTAL_SEQ_SCHEMA_ATTEMPTED = True
+
+        try:
+                await session.execute(text("""
+                        ALTER TABLE public.restaurants
+                        ADD COLUMN IF NOT EXISTS portal_token_seq integer NOT NULL DEFAULT 0
+                """))
+                await session.execute(text("""
+                        ALTER TABLE public.restaurants
+                        ADD COLUMN IF NOT EXISTS portal_token_seq_month text
+                """))
+                await session.execute(text("""
+                        CREATE OR REPLACE FUNCTION public.allocate_portal_token_seq(p_restaurant_id uuid)
+                        RETURNS integer
+                        LANGUAGE plpgsql
+                        AS $$
+                        DECLARE
+                            v_month text;
+                            v_next integer;
+                        BEGIN
+                            v_month := to_char((now() AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM');
+
+                            UPDATE public.restaurants
+                            SET
+                                portal_token_seq = CASE
+                                    WHEN portal_token_seq_month IS DISTINCT FROM v_month THEN 1
+                                    ELSE portal_token_seq + 1
+                                END,
+                                portal_token_seq_month = v_month
+                            WHERE id = p_restaurant_id
+                            RETURNING portal_token_seq INTO v_next;
+
+                            IF v_next IS NULL THEN
+                                RAISE EXCEPTION 'restaurant % not found', p_restaurant_id;
+                            END IF;
+
+                            RETURN v_next;
+                        END;
+                        $$
+                """))
+                await session.commit()
+                logger.info("[portal-token] ✅ auto-created portal token sequence schema/function")
+                return True
+        except Exception as e:
+                await session.rollback()
+                logger.warning(f"[portal-token] auto-bootstrap unavailable, using SQL fallback: {e}")
+                return False
+
+
 async def _next_portal_token_id(session, restaurant_id: str) -> str:
     """Sequential T-YYMM-001 style ID — monthly reset via allocate_portal_token_seq."""
-    try:
-        result = await session.execute(
-            text("SELECT allocate_portal_token_seq(CAST(:rid AS uuid))"),
-            {"rid": restaurant_id},
-        )
-        seq = result.scalar_one()
-        if seq is not None:
-            return _build_portal_token_id(int(seq))
-    except Exception as e:
-        logger.warning(f"[portal-token] allocate_portal_token_seq failed, falling back: {e}")
-        # IMPORTANT: a failed statement poisons the rest of this transaction
-        # in Postgres — every subsequent query on this session will raise
-        # InFailedSQLTransactionError until we roll back.
-        await session.rollback()
+    global _PORTAL_SEQ_RPC_AVAILABLE
+    if _PORTAL_SEQ_RPC_AVAILABLE is not False:
+        try:
+            result = await session.execute(
+                text("SELECT allocate_portal_token_seq(CAST(:rid AS uuid))"),
+                {"rid": restaurant_id},
+            )
+            seq = result.scalar_one()
+            if seq is not None:
+                _PORTAL_SEQ_RPC_AVAILABLE = True
+                return _build_portal_token_id(int(seq))
+        except Exception as e:
+            await session.rollback()
+            msg = str(e)
+            missing_rpc = (
+                "allocate_portal_token_seq" in msg
+                or "UndefinedColumnError" in msg
+                or "UndefinedFunction" in msg
+                or "column \"portal_token_seq\" does not exist" in msg
+                or "function allocate_portal_token_seq" in msg
+            )
+            if missing_rpc:
+                logger.warning(
+                    "[portal-token] allocate_portal_token_seq missing; attempting one-time auto-bootstrap"
+                )
+                created = await _ensure_portal_token_sequence_schema(session)
+                if created:
+                    try:
+                        result = await session.execute(
+                            text("SELECT allocate_portal_token_seq(CAST(:rid AS uuid))"),
+                            {"rid": restaurant_id},
+                        )
+                        seq = result.scalar_one()
+                        if seq is not None:
+                            _PORTAL_SEQ_RPC_AVAILABLE = True
+                            return _build_portal_token_id(int(seq))
+                    except Exception as retry_err:
+                        await session.rollback()
+                        logger.warning(
+                            f"[portal-token] allocate_portal_token_seq retry failed; using fallback: {retry_err}"
+                        )
+                _PORTAL_SEQ_RPC_AVAILABLE = False
+            else:
+                logger.warning(f"[portal-token] allocate_portal_token_seq failed, falling back: {e}")
 
     yymm = _portal_token_month_key()
     result = await session.execute(
