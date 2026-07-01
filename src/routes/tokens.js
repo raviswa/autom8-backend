@@ -1044,7 +1044,7 @@ router.put('/:id/assign', outletAuth, async (req, res) => {
         restaurantId
       );
       await new Promise((resolve) => setTimeout(resolve, 1500));
-      menuSendResult = await sendWhatsAppCatalogWithSpecials(token.phone, restaurantId);
+      menuSendResult = await sendWhatsAppCatalogWithSpecials(token.phone, restaurantId, token.id);
     }
 
     await syncConversationForTokenApproval({
@@ -1223,7 +1223,7 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
         restaurantId
       );
       await new Promise((resolve) => setTimeout(resolve, 1500));
-      menuSendResult = await sendWhatsAppCatalogWithSpecials(token.phone, restaurantId);
+      menuSendResult = await sendWhatsAppCatalogWithSpecials(token.phone, restaurantId, token.id);
     }
 
     await syncConversationForTokenApproval({
