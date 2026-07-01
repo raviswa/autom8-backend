@@ -366,9 +366,68 @@
 
   <script>
     const params = new URLSearchParams(window.location.search);
-    const token = params.get('token') || '';
-    const phone = params.get('phone') || '';
+    const hashParams = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
+    let token = params.get('token') || '';
+    let phone = params.get('phone') || '';
+    if (!token) token = hashParams.get('token') || '';
+    if (!phone) phone = hashParams.get('phone') || '';
     const slug = params.get('slug') || '';
+    const isFilePreview = String(window.location.protocol || '').toLowerCase() === 'file:';
+    const hostSlug = (() => {
+      const host = String(window.location.hostname || '').toLowerCase();
+      const parts = host.split('.').filter(Boolean);
+      return parts.length ? parts[0] : 'default';
+    })();
+    const linkContextKey = () => `munafe_link_ctx:${slug || hostSlug}`;
+
+    function restoreLinkContext() {
+      try {
+        const raw = sessionStorage.getItem(linkContextKey());
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return;
+        if (!token && parsed.token) token = String(parsed.token);
+        if (!phone && parsed.phone) phone = String(parsed.phone);
+      } catch (_e) { /* ignore invalid cache */ }
+    }
+
+    function persistLinkContext() {
+      if (!token) return;
+      try {
+        sessionStorage.setItem(linkContextKey(), JSON.stringify({
+          token,
+          phone: String(phone || ''),
+          ts: Date.now(),
+        }));
+      } catch (_e) { /* storage unavailable */ }
+    }
+
+    function syncUrlWithContext() {
+      if (!token) return;
+      try {
+        const current = new URL(window.location.href);
+        let changed = false;
+        if (!current.searchParams.get('token')) {
+          current.searchParams.set('token', token);
+          changed = true;
+        }
+        if (phone && !current.searchParams.get('phone')) {
+          current.searchParams.set('phone', phone);
+          changed = true;
+        }
+        if (slug && !current.searchParams.get('slug')) {
+          current.searchParams.set('slug', slug);
+          changed = true;
+        }
+        if (changed) window.history.replaceState({}, '', current.toString());
+      } catch (_e) { /* non-fatal */ }
+    }
+
+    // Recover link context first to avoid false "incomplete" errors when
+    // webview/navigation strips query params.
+    restoreLinkContext();
+    persistLinkContext();
+    syncUrlWithContext();
 
     const state = {
       menu: [],
@@ -381,6 +440,12 @@
       searchQuery: '',
       todaysSpecial: [],
       availableNow: [],
+      submitting: false,
+      lastSubmittedFingerprint: null,
+      lastSubmittedAt: 0,
+      lastSubmittedOrderRef: null,
+      paymentPollTimer: null,
+      paymentPollInFlight: false,
     };
 
     const $ = (id) => document.getElementById(id);
@@ -406,6 +471,7 @@
     // Without this, state.cart resets to an empty Map on every page load
     // and every item appears to lose its "already added" stepper state.
     const cartStorageKey = () => `munafe_cart:${token}`;
+    const lastSubmitStorageKey = () => `munafe_last_submit:${token}`;
     function saveCartLocal() {
       try {
         sessionStorage.setItem(cartStorageKey(), JSON.stringify([...state.cart.entries()]));
@@ -419,6 +485,41 @@
     }
     function clearCartLocal() {
       try { sessionStorage.removeItem(cartStorageKey()); } catch (_e) {}
+    }
+    function loadLastSubmitLocal() {
+      try {
+        const raw = sessionStorage.getItem(lastSubmitStorageKey());
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return;
+        state.lastSubmittedFingerprint = parsed.fingerprint || null;
+        state.lastSubmittedAt = Number(parsed.ts || 0);
+        state.lastSubmittedOrderRef = parsed.orderRef || null;
+      } catch (_e) { /* ignore corrupt/missing data */ }
+    }
+    function saveLastSubmitLocal(fingerprint, orderRef) {
+      const now = Date.now();
+      state.lastSubmittedFingerprint = fingerprint || null;
+      state.lastSubmittedAt = now;
+      state.lastSubmittedOrderRef = orderRef || null;
+      try {
+        sessionStorage.setItem(lastSubmitStorageKey(), JSON.stringify({ fingerprint, orderRef: orderRef || null, ts: now }));
+      } catch (_e) { /* storage unavailable */ }
+    }
+    function clearLastSubmitLocal() {
+      state.lastSubmittedFingerprint = null;
+      state.lastSubmittedAt = 0;
+      state.lastSubmittedOrderRef = null;
+      try { sessionStorage.removeItem(lastSubmitStorageKey()); } catch (_e) {}
+    }
+    function cartFingerprint() {
+      const lines = [...state.cart.values()]
+        .map((l) => ({ id: String(l.id || ''), qty: Number(l.qty || 0), price: Number(l.price || 0) }))
+        .filter((l) => l.id && l.qty > 0)
+        .sort((a, b) => a.id.localeCompare(b.id));
+      const promo = ($('promo').value || '').trim().toUpperCase();
+      const notes = ($('notes').value || '').trim();
+      return JSON.stringify({ lines, promo, notes });
     }
 
     function openCart() {
@@ -482,7 +583,17 @@ function cartTotals() {
     function renderCart() {
       saveCartLocal(); // FIX (4): keep storage in sync on every cart render
 
-      const { lines, subtotal, promo, total, count } = cartTotals();
+      const {
+        lines,
+        subtotal,
+        promo,
+        parcelCharge,
+        deliveryCharge,
+        gstRate,
+        gstAmount,
+        total,
+        count,
+      } = cartTotals();
 
       cartLines.innerHTML = lines.length
         ? lines.map(l => `
@@ -543,7 +654,67 @@ $('subtotal').textContent = money(subtotal);
       if (count > 0) { badge.style.display = 'flex'; badge.textContent = count; }
       else badge.style.display = 'none';
 
+      const submitBtn = $('submitBtn');
+      const now = Date.now();
+      const sameAsLast =
+        state.lastSubmittedFingerprint &&
+        state.lastSubmittedFingerprint === cartFingerprint() &&
+        now - Number(state.lastSubmittedAt || 0) < 20 * 60 * 1000;
+      submitBtn.disabled = count === 0 || state.submitting || sameAsLast;
+      if (state.submitting) submitBtn.textContent = 'Submitting…';
+      else if (sameAsLast) submitBtn.textContent = 'Payment Link Sent';
+      else submitBtn.textContent = 'Continue to WhatsApp';
+
       renderMenuList(); // refresh +/- buttons on rows in sync with cart
+    }
+
+    async function checkPaymentStatus() {
+      if (state.paymentPollInFlight) return;
+      if (!token || !state.phone || !state.lastSubmittedOrderRef) return;
+
+      state.paymentPollInFlight = true;
+      try {
+        const q = new URLSearchParams({ token, phone: state.phone, order_ref: state.lastSubmittedOrderRef });
+        if (slug) q.set('slug', slug);
+        const res = await fetch(`/api/webcart/payment-status?${q.toString()}`);
+        const data = await res.json();
+
+        if (!res.ok || !data.ok) return;
+
+        if (data.paid) {
+          clearCartLocal();
+          clearLastSubmitLocal();
+          state.cart = new Map();
+          $('promo').value = '';
+          $('notes').value = '';
+          renderCart();
+          showStatus('Payment confirmed. Your order is now being processed.', 'ok');
+          stopPaymentPolling();
+          return;
+        }
+
+        if (!data.has_active_submission) {
+          stopPaymentPolling();
+        }
+      } catch (_e) {
+        /* ignore transient polling errors */
+      } finally {
+        state.paymentPollInFlight = false;
+      }
+    }
+
+    function startPaymentPolling() {
+      if (!state.lastSubmittedOrderRef) return;
+      if (state.paymentPollTimer) return;
+      checkPaymentStatus();
+      state.paymentPollTimer = setInterval(checkPaymentStatus, 12000);
+    }
+
+    function stopPaymentPolling() {
+      if (state.paymentPollTimer) {
+        clearInterval(state.paymentPollTimer);
+        state.paymentPollTimer = null;
+      }
     }
 
     function changeQty(id, delta) {
@@ -662,13 +833,20 @@ $('subtotal').textContent = money(subtotal);
     });
 
     async function loadSession() {
+      if (isFilePreview) {
+        showStatus(
+          'This cart cannot run from VS Code file preview. Open the backend-served URL (/menu) or the WhatsApp menu link.',
+          'err',
+        );
+        return;
+      }
       if (!token) {
         showStatus('This cart link is incomplete. Please reopen from WhatsApp.', 'err');
         return;
       }
       try {
         const q = new URLSearchParams({ token });
-        if (phone) q.set('phone', phone);
+        if (state.phone) q.set('phone', state.phone);
         if (slug) q.set('slug', slug);
         const res = await fetch(`/api/webcart/session?${q.toString()}`);
         const data = await res.json();
@@ -681,6 +859,9 @@ $('subtotal').textContent = money(subtotal);
         state.restaurant = data.restaurant;
         state.session = data.session;
         state.phone = (data.session && data.session.phone) ? data.session.phone : (phone || '');
+        phone = state.phone || phone;
+        persistLinkContext();
+        syncUrlWithContext();
         state.menu = data.menu_items || [];
         state.pricingConfig = data.pricing_config || {};
         state.todaysSpecial = data.todays_special || [];
@@ -749,13 +930,26 @@ $('subtotal').textContent = money(subtotal);
     }
 
     async function submitOrder() {
+      if (state.submitting) return;
       if (!state.cart.size) {
         showStatus('Add at least one item before submitting.', 'err');
         return;
       }
+      const fingerprint = cartFingerprint();
+      const sameAsLast =
+        state.lastSubmittedFingerprint &&
+        state.lastSubmittedFingerprint === fingerprint &&
+        Date.now() - Number(state.lastSubmittedAt || 0) < 20 * 60 * 1000;
+      if (sameAsLast) {
+        showStatus('Payment link already sent. Please check WhatsApp and complete payment.', 'ok');
+        renderCart();
+        return;
+      }
+
+      state.submitting = true;
+      renderCart();
+
       const submitBtn = $('submitBtn');
-      submitBtn.disabled = true;
-      submitBtn.textContent = 'Submitting…';
 
       const body = {
         token,
@@ -777,8 +971,8 @@ $('subtotal').textContent = money(subtotal);
 
         if (!res.ok || !data.ok) {
           showStatus(data.message || data.error || 'Could not submit your order.', 'err');
-          submitBtn.disabled = false;
-          submitBtn.textContent = 'Continue to WhatsApp';
+          state.submitting = false;
+          renderCart();
           return;
         }
 
@@ -787,25 +981,27 @@ $('subtotal').textContent = money(subtotal);
           'ok',
         );
 
-        // FIX (4): clear the saved cart now that the order has been
-        // submitted, so coming back to this link starts fresh instead of
-        // re-showing the just-submitted items as still "in cart".
-        clearCartLocal();
-        state.cart = new Map();
+        // Keep cart visible after Continue to WhatsApp to prevent accidental
+        // reordering when the customer returns before payment completion.
+        saveLastSubmitLocal(fingerprint, data.order_ref || null);
+        state.submitting = false;
         renderCart();
-
-        submitBtn.textContent = 'Confirm & Pay Sent';
+        startPaymentPolling();
       } catch (_e) {
         showStatus('Order submission failed. Please try again.', 'err');
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Continue to WhatsApp';
+        state.submitting = false;
+        renderCart();
       }
     }
 
     $('submitBtn').addEventListener('click', submitOrder);
     $('promo').addEventListener('input', renderCart);
+    $('notes').addEventListener('input', renderCart);
     window.addEventListener('resize', () => { if (isDesktop()) openCart(); });
+    window.addEventListener('beforeunload', stopPaymentPolling);
+    loadLastSubmitLocal();
     loadSession();
+    if (state.lastSubmittedOrderRef) startPaymentPolling();
   </script>
 </body>
 </html>

@@ -460,6 +460,7 @@ async def ensure_prepay_payment_link(
         )
         return None
 
+    checkout_url = build_checkout_page_url(str(booking_id))
     existing = _reusable_payment_link(session_state)
     if existing:
         return existing
@@ -472,6 +473,9 @@ async def ensure_prepay_payment_link(
         if existing:
             logger.info(f"[razorpay] Reusing open checkout for booking {booking_id}")
             return existing
+        # Session may be unavailable in scheduler/reminder contexts.
+        # Hosted checkout URL is deterministic for booking_id, so return it.
+        return checkout_url
 
     try:
         await create_razorpay_order(
@@ -479,7 +483,7 @@ async def ensure_prepay_payment_link(
             customer_phone=customer_phone,
             session_state=session_state,
         )
-        return _reusable_payment_link(session_state)
+        return _reusable_payment_link(session_state) or checkout_url
     except Exception as exc:
         logger.error(f"[razorpay] ensure_prepay_payment_link failed for {booking_id}: {exc}")
         return None

@@ -52,6 +52,26 @@ function pickSupportPhone(restaurant) {
   );
 }
 
+function buildSubmissionFingerprint({ items, promo_code, special_request, total }) {
+  const stableLines = (Array.isArray(items) ? items : [])
+    .map((line) => ({
+      id: String(line?.id || ''),
+      qty: Number(line?.qty || 0),
+      price: Number(line?.price || 0),
+    }))
+    .filter((line) => line.id && line.qty > 0)
+    .sort((a, b) => a.id.localeCompare(b.id));
+
+  const stablePayload = {
+    items: stableLines,
+    promo_code: String(promo_code || '').trim().toUpperCase(),
+    special_request: String(special_request || '').trim(),
+    total: Number(total || 0),
+  };
+
+  return JSON.stringify(stablePayload);
+}
+
 function buildExpiredPayload(restaurant) {
   const supportPhone = pickSupportPhone(restaurant);
   const name = restaurant?.display_name || restaurant?.name || 'this restaurant';
@@ -427,6 +447,88 @@ router.get('/api/webcart/session', async (req, res) => {
   }
 });
 
+router.get('/api/webcart/payment-status', async (req, res) => {
+  try {
+    const token = String(req.query.token || '').trim();
+    const phone = String(req.query.phone || '').trim();
+    const orderRefFilter = String(req.query.order_ref || '').trim();
+
+    if (!token || !phone) {
+      return res.status(400).json({ ok: false, error: 'token and phone are required.' });
+    }
+
+    const restaurant = await resolveRestaurantBySlug(req);
+    if (!restaurant) return res.status(404).json({ ok: false, error: 'Restaurant not found.' });
+
+    const session = await resolveSession({
+      restaurantId: restaurant.id,
+      token,
+      phone,
+    });
+    if (!session) {
+      return res.status(410).json(buildExpiredPayload(restaurant));
+    }
+
+    const submission = session?.meta?.web_cart_submission || null;
+    if (!submission) {
+      return res.json({
+        ok: true,
+        has_active_submission: false,
+        paid: false,
+        status: 'no_submission',
+      });
+    }
+
+    const submissionOrderRef = String(submission.order_ref || '').trim();
+    if (orderRefFilter && submissionOrderRef && submissionOrderRef !== orderRefFilter) {
+      return res.json({
+        ok: true,
+        has_active_submission: false,
+        paid: false,
+        status: 'stale_submission',
+      });
+    }
+
+    const bookingId = String(submission.booking_id || '').trim();
+    if (!bookingId) {
+      return res.json({
+        ok: true,
+        has_active_submission: true,
+        paid: false,
+        status: 'booking_pending',
+        order_ref: submissionOrderRef || null,
+      });
+    }
+
+    const { data: booking, error: bookingErr } = await supabaseAdmin
+      .from('bookings')
+      .select('id, status, payment_status, updated_at')
+      .eq('restaurant_id', restaurant.id)
+      .eq('id', bookingId)
+      .limit(1)
+      .maybeSingle();
+    if (bookingErr) throw bookingErr;
+
+    const bookingStatus = String(booking?.status || '').trim().toLowerCase();
+    const paymentStatus = String(booking?.payment_status || '').trim().toLowerCase();
+    const paid = paymentStatus === 'paid' || bookingStatus === 'confirmed';
+
+    return res.json({
+      ok: true,
+      has_active_submission: true,
+      booking_id: bookingId,
+      order_ref: submissionOrderRef || null,
+      paid,
+      booking_status: bookingStatus || null,
+      payment_status: paymentStatus || null,
+      updated_at: booking?.updated_at || null,
+    });
+  } catch (err) {
+    console.error('[webcart/payment-status]', err.message);
+    return res.status(500).json({ ok: false, error: 'Failed to fetch payment status.' });
+  }
+});
+
 router.post('/api/webcart/submit', async (req, res) => {
   try {
     const { token, phone, items, special_request, promo_code } = req.body || {};
@@ -528,6 +630,29 @@ router.post('/api/webcart/submit', async (req, res) => {
     }
 
     const orderRef = `${session.id}-${Date.now().toString().slice(-6)}`;
+    const submissionFingerprint = buildSubmissionFingerprint({
+      items: normalizedItems,
+      promo_code,
+      special_request,
+      total: totalAmount,
+    });
+
+    const prevSubmission = session?.meta?.web_cart_submission || {};
+    const prevSubmittedAt = prevSubmission?.submitted_at ? new Date(prevSubmission.submitted_at).getTime() : 0;
+    const prevIsFresh = Number.isFinite(prevSubmittedAt) && (Date.now() - prevSubmittedAt) < (20 * 60 * 1000);
+    const isSameSubmission =
+      prevSubmission?.submission_fingerprint &&
+      prevSubmission.submission_fingerprint === submissionFingerprint;
+    const alreadySent = !!prevSubmission?.payment_cta_sent;
+
+    if (prevIsFresh && isSameSubmission && alreadySent) {
+      return res.json({
+        ok: true,
+        order_ref: prevSubmission.order_ref || orderRef,
+        message: 'Confirm & Pay was already sent to your WhatsApp. Please complete payment there.',
+        deduped: true,
+      });
+    }
 
     const nextMeta = {
       ...(session.meta || {}),
@@ -544,6 +669,8 @@ router.post('/api/webcart/submit', async (req, res) => {
         pre_gst_total: preGst,
         total: totalAmount,   // ← this is the correct grand total
         order_ref: orderRef,
+        submission_fingerprint: submissionFingerprint,
+        payment_cta_sent: false,
       },
     };
 
@@ -556,7 +683,7 @@ router.post('/api/webcart/submit', async (req, res) => {
 
     if (error) throw error;
 
-    await triggerConfirmAndPay({
+    const confirmResult = await triggerConfirmAndPay({
       restaurant_id: restaurant.id,
       customer_phone: session.phone,
       customer_name:
@@ -570,6 +697,23 @@ router.post('/api/webcart/submit', async (req, res) => {
       promo_code: promo_code ? String(promo_code).trim().slice(0, 40) : null,
       special_request: special_request ? String(special_request).trim().slice(0, 500) : null,
     });
+
+    const confirmedMeta = {
+      ...(nextMeta || {}),
+      web_cart_submission: {
+        ...(nextMeta.web_cart_submission || {}),
+        payment_cta_sent: true,
+        booking_id: confirmResult?.booking_id || null,
+        payment_link: confirmResult?.payment_link || null,
+      },
+    };
+
+    await supabaseAdmin
+      .from('walk_in_tokens')
+      .update({ meta: confirmedMeta })
+      .eq('restaurant_id', restaurant.id)
+      .eq('id', session.id)
+      .eq('phone', session.phone);
 
     return res.json({
       ok: true,
