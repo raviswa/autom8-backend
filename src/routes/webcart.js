@@ -376,6 +376,12 @@ router.get('/api/webcart/session', async (req, res) => {
         logo_url: restaurant.logo_url || null,
         support_phone: pickSupportPhone(restaurant) || null,
       },
+      pricing_config: {                                         // ← ADD THIS BLOCK
+        parcel_charge_per_item: restaurant.parcel_charge_per_item || 0,
+        gst_rate: restaurant.gst_rate || 5,
+        delivery_charge_default: restaurant.delivery_charge_default || 40,
+      },
+      
       theme: DEFAULT_THEME,
       session: {
         token: session.id,
