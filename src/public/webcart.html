@@ -234,9 +234,23 @@
     .wa-guide-card {
       width: min(520px, 100%);
       border-radius: 20px;
-      padding: 12px 4px;
+      padding: 16px 6px;
       text-align: center;
       background: #fff;
+    }
+    .wa-guide-icon {
+      width: 70px;
+      height: 70px;
+      border-radius: 50%;
+      margin: 0 auto 14px;
+      background: #fff4ea;
+      border: 1px solid #ffd9bf;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #cc5b1f;
+      font-size: 32px;
+      line-height: 1;
     }
     .wa-guide-kicker {
       display: inline-flex;
@@ -263,6 +277,16 @@
       color: var(--muted);
       font-size: 15px;
       line-height: 1.6;
+    }
+    .wa-guide-tip {
+      margin: 12px auto 0;
+      font-size: 12.5px;
+      color: #8b5e3c;
+      background: #fff7ef;
+      border: 1px dashed #ffd9bf;
+      border-radius: 10px;
+      padding: 8px 10px;
+      width: min(360px, 100%);
     }
     .wa-guide-actions {
       margin-top: 20px;
@@ -297,6 +321,11 @@
       .wa-guide-card {
         width: 100%;
         padding: 8px 2px;
+      }
+      .wa-guide-icon {
+        width: 62px;
+        height: 62px;
+        font-size: 28px;
       }
       .wa-guide-title { font-size: 25px; }
       .wa-guide-sub { font-size: 14px; }
@@ -429,12 +458,14 @@
 
   <div id="waGuideOverlay" class="wa-guide-overlay" aria-hidden="true">
     <div class="wa-guide-card">
+      <div class="wa-guide-icon" aria-hidden="true">W</div>
       <div class="wa-guide-kicker">WhatsApp Checkout</div>
       <h2 class="wa-guide-title">Payment Link Sent</h2>
       <p class="wa-guide-sub">
         We sent your <strong>Confirm &amp; Pay</strong> link on WhatsApp.<br>
         Switch to WhatsApp now and tap the button to complete payment.
       </p>
+      <p class="wa-guide-tip">After payment, return to this page. It will auto-update.</p>
       <div class="wa-guide-actions">
         <button id="waOpenBtn" class="wa-primary" type="button">Go to WhatsApp</button>
         <button id="waCloseBtn" class="wa-secondary" type="button">I will pay now</button>
@@ -784,7 +815,7 @@ $('subtotal').textContent = money(subtotal);
     function openWhatsApp() {
       const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
       if (isMobile) {
-        window.location.href = 'whatsapp://';
+        window.location.href = 'https://wa.me/';
       } else {
         window.open('https://web.whatsapp.com', '_blank', 'noopener,noreferrer');
       }
@@ -1120,6 +1151,12 @@ $('subtotal').textContent = money(subtotal);
     $('submitBtn').addEventListener('click', submitOrder);
     $('waOpenBtn').addEventListener('click', openWhatsApp);
     $('waCloseBtn').addEventListener('click', hideWhatsAppGuide);
+    waGuideOverlay.addEventListener('click', (e) => {
+      if (e.target === waGuideOverlay) hideWhatsAppGuide();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') hideWhatsAppGuide();
+    });
     $('promo').addEventListener('input', renderCart);
     $('notes').addEventListener('input', renderCart);
     window.addEventListener('resize', () => { if (isDesktop()) openCart(); });
