@@ -891,6 +891,7 @@ def render_checkout_html(ctx: dict[str, Any]) -> str:
 
         function finishRedirect(status, reason) {{
             var q = "?status=" + encodeURIComponent(status || "unknown");
+            if (bookingId) q += "&booking_id=" + encodeURIComponent(bookingId);
             if (reason) q += "&reason=" + encodeURIComponent(reason);
             if (retryUrl) q += "&retry=" + encodeURIComponent(retryUrl);
             setTimeout(function() {{
@@ -911,9 +912,13 @@ def render_checkout_html(ctx: dict[str, Any]) -> str:
           headers: {{ "Content-Type": "application/json" }},
           body: JSON.stringify(response)
         }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
-          window.location.href = data.redirect || "/payment/complete?status=paid";
+                    var paidFallback = "/payment/complete?status=paid";
+                    if (bookingId) paidFallback += "&booking_id=" + encodeURIComponent(bookingId);
+                    window.location.href = data.redirect || paidFallback;
         }}).catch(function() {{
-          window.location.href = "/payment/complete?status=paid";
+                    var paidFallback = "/payment/complete?status=paid";
+                    if (bookingId) paidFallback += "&booking_id=" + encodeURIComponent(bookingId);
+                    window.location.href = paidFallback;
         }});
       }},
       modal: {{
@@ -979,7 +984,13 @@ async def verify_checkout_payment(body: dict[str, Any]) -> dict[str, Any]:
 
     try:
         result = await _mark_paid_and_fulfill(str(booking_id), source="checkout")
-        return {**result, "redirect": f"{settings.chat_public_url.rstrip('/')}/payment/complete?status=paid"}
+        return {
+            **result,
+            "redirect": (
+                f"{settings.chat_public_url.rstrip('/')}/payment/complete"
+                f"?status=paid&booking_id={quote(str(booking_id))}"
+            ),
+        }
     except Exception as exc:
         logger.error(f"[razorpay] checkout fulfillment failed for {booking_id}: {exc}")
         return {"ok": False, "error": str(exc)}

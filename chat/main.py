@@ -18,6 +18,7 @@ from tools.db_tools import (
     init_db,
     get_restaurant_by_whatsapp_number,
     get_restaurant_by_phone_number_id,
+    get_restaurant_by_id,
     get_customer,
     create_customer,
     create_booking,
@@ -120,6 +121,13 @@ async def receipt_redirect(token: str):
 
 _processed_message_ids: OrderedDict[str, int] = OrderedDict()
 _processed_message_ids_lock = asyncio.Lock()
+
+
+def _normalize_whatsapp_phone(raw: str | None) -> str:
+    digits = "".join(ch for ch in str(raw or "") if ch.isdigit())
+    if len(digits) == 12 and digits.startswith("91"):
+        return digits[2:]
+    return digits
 
 
 # ─────────────────────────────────────────────
@@ -288,6 +296,13 @@ async def _process_meta_payload(payload: dict):
         parsed = await parse_incoming(payload)
         phone  = message_obj.get("from")
         metadata = value.get("metadata", {})
+
+        # Ignore Meta echoes of our own outbound messages.
+        our_display_phone = _normalize_whatsapp_phone(metadata.get("display_phone_number"))
+        incoming_phone = _normalize_whatsapp_phone(phone)
+        if our_display_phone and incoming_phone and incoming_phone == our_display_phone:
+            logger.info("[webhook] ignoring outbound echo from own WABA number=%s", incoming_phone)
+            return
 
         restaurant = None
         phone_number_id = metadata.get("phone_number_id")
@@ -822,8 +837,9 @@ async def payment_complete(request: Request):
         result = {"ok": True, "fulfilled": True}
 
     retry_url = params.get("retry", "")
-    support_phone = "7397222111"
-    restaurant_name = "our restaurant"
+    support_phone = ""
+    waba_phone = ""
+    restaurant_name = "your restaurant"
 
     booking_id_hint = (
         params.get("booking_id")
@@ -863,6 +879,10 @@ async def payment_complete(request: Request):
                 digits = "".join(ch for ch in str(info.get("whatsapp_number") or info.get("phone") or "") if ch.isdigit())
                 if digits:
                     support_phone = digits
+
+                rest = await get_restaurant_by_id(str(booking["restaurant_id"]))
+                if rest and rest.get("whatsapp_number"):
+                    waba_phone = str(rest.get("whatsapp_number"))
         except Exception as _meta_err:
             logger.debug(f"[payment-complete] metadata resolve failed: {_meta_err}")
 
@@ -894,7 +914,10 @@ async def payment_complete(request: Request):
         )
         tone = "warn"
 
+    chat_phone = _normalize_whatsapp_phone(waba_phone) or _normalize_whatsapp_phone(support_phone)
     safe_status = escape(status or "unknown")
+    safe_support_phone = escape(support_phone, quote=True)
+    safe_chat_phone = escape(chat_phone, quote=True)
     safe_retry = escape(retry_url, quote=True)
 
     retry_btn = ""
@@ -904,6 +927,16 @@ async def payment_complete(request: Request):
     cause_block = ""
     if cause_hint:
         cause_block = f'<p class="help">{cause_hint}</p>'
+
+    support_actions = ""
+    if support_phone:
+        support_actions = f"""
+        <p class=\"help\">To speak with customer care, call <strong>{safe_support_phone}</strong>.</p>
+        <div class=\"support-row\">
+            <a class=\"support-link\" href=\"tel:{safe_support_phone}\">Call Support</a>
+            <a class=\"support-link\" href=\"https://wa.me/{safe_support_phone}\">WhatsApp Support</a>
+        </div>
+        """
 
     html = f"""
 <!doctype html>
@@ -980,7 +1013,8 @@ async def payment_complete(request: Request):
     <script>
         function goToWhatsApp() {{
             var ua = String(navigator.userAgent || '').toLowerCase();
-            var chatUrl = 'https://wa.me/{support_phone}?text=' + encodeURIComponent('Hi');
+            var supportPhone = '{safe_chat_phone}';
+            var chatUrl = supportPhone ? ('https://wa.me/' + supportPhone) : 'https://web.whatsapp.com/';
             var movedAway = false;
             function onHide() {{
                 movedAway = true;
@@ -1005,7 +1039,7 @@ async def payment_complete(request: Request):
                 }}, 1500);
                 return;
             }}
-            window.location.href = 'https://web.whatsapp.com/send?phone={support_phone}';
+            window.location.href = supportPhone ? ('https://web.whatsapp.com/send?phone=' + supportPhone) : 'https://web.whatsapp.com/';
         }}
     </script>
 </head>
@@ -1020,12 +1054,8 @@ async def payment_complete(request: Request):
             {retry_btn}
         </div>
         <p class="help">🙏 Thank you for reaching out to <strong>{escape(restaurant_name)}</strong>.</p>
-        <p class="help">To place an order or check your queue, send <strong>Hi</strong> on WhatsApp.</p>
-        <p class="help">To speak with customer care, call <strong>{support_phone}</strong>.</p>
-        <div class="support-row">
-            <a class="support-link" href="tel:{support_phone}">Call Support</a>
-            <a class="support-link" href="https://wa.me/{support_phone}">WhatsApp Support</a>
-        </div>
+        <p class="help">To place an order or check your queue, message us on WhatsApp.</p>
+        {support_actions}
         <p class="help">Works for dine-in, takeaway, and delivery prepay flows.</p>
     </main>
 </body>
@@ -1038,8 +1068,9 @@ async def payment_complete(request: Request):
 @app.get("/pay/{booking_id}")
 async def pay_checkout(booking_id: str, request: Request):
     """Hosted Razorpay Checkout page (Orders API — unlimited test checkouts)."""
-    support_phone = "7397222111"
-    restaurant_name = "our restaurant"
+    support_phone = ""
+    waba_phone = ""
+    restaurant_name = "your restaurant"
     booking: dict | None = None
 
     async def notify_customer_pay_fallback(reason: str) -> None:
@@ -1094,6 +1125,7 @@ async def pay_checkout(booking_id: str, request: Request):
 
     def render_pay_error_page(title: str, message: str, status_code: int, ref: str = ""):
         ref_line = f"<p class='help'>Reference: <strong>{ref}</strong></p>" if ref else ""
+        chat_phone = _normalize_whatsapp_phone(waba_phone) or _normalize_whatsapp_phone(support_phone)
         html = f"""
 <!doctype html>
 <html lang='en'>
@@ -1118,8 +1150,8 @@ async def pay_checkout(booking_id: str, request: Request):
         <h1>{title}</h1>
         <p>{message}</p>
         <div class='actions'>
-            <a class='btn btn-primary' href='https://wa.me/{support_phone}?text=Hi'>Open WhatsApp Support</a>
-            <a class='btn btn-secondary' href='tel:{support_phone}'>Call Support</a>
+            <a class='btn btn-primary' href='{'https://wa.me/' + chat_phone if chat_phone else 'https://web.whatsapp.com/'}'>Open WhatsApp</a>
+            <a class='btn btn-secondary' href='{'tel:' + chat_phone if chat_phone else '#'}'>Call Support</a>
         </div>
         <p class='help'>🙏 Thank you for reaching out to <strong>{restaurant_name}</strong>.</p>
         <p class='help'>Reply <strong>pay</strong> on WhatsApp to receive a fresh payment link.</p>
@@ -1168,6 +1200,10 @@ async def pay_checkout(booking_id: str, request: Request):
             )
             if digits:
                 support_phone = digits
+
+            rest = await get_restaurant_by_id(str(booking["restaurant_id"]))
+            if rest and rest.get("whatsapp_number"):
+                waba_phone = str(rest.get("whatsapp_number"))
     except Exception as _ctx_err:
         logger.debug("[pay-checkout] support details resolve failed booking_id=%s err=%s", booking_id, _ctx_err)
 
@@ -1273,6 +1309,30 @@ async def pay_failure_event(request: Request):
         str(details.get("step") or ""),
         str(details.get("description") or "")[:180],
     )
+
+    # Tenant-safe manager alert for live gateway failures.
+    if booking_id:
+        try:
+            from tools.db_tools import get_booking_with_customer
+
+            booking = await get_booking_with_customer(str(booking_id))
+            if booking and booking.get("restaurant_id"):
+                restaurant = await get_restaurant_by_id(str(booking["restaurant_id"]))
+                manager_phone = str((restaurant or {}).get("manager_phone") or "").strip()
+                if manager_phone:
+                    token = str(booking.get("token_number") or booking_id[-8:])
+                    failure_reason = str(details.get("reason") or kind or "payment_failed")
+                    note = (
+                        "⚠️ Payment attempt failed\n"
+                        f"Token: {token}\n"
+                        f"Customer: {str(booking.get('customer_phone') or '')}\n"
+                        f"Reason: {failure_reason}\n"
+                        "Customer can retry from the same payment link."
+                    )
+                    await send_whatsapp_message(manager_phone, note, str(booking["restaurant_id"]))
+        except Exception as _mgr_err:
+            logger.debug("[pay-failure-event] manager alert skipped booking_id=%s err=%s", booking_id, _mgr_err)
+
     return JSONResponse(status_code=200, content={"ok": True})
 
 
