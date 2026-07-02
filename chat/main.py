@@ -1035,6 +1035,7 @@ async def pay_checkout(booking_id: str, request: Request):
         from uuid import UUID
         UUID(str(booking_id))
     except Exception:
+        logger.warning("[pay-checkout] invalid booking id format booking_id=%s", booking_id)
         return HTMLResponse(
             "<h1>Invalid payment link</h1>"
             "<p>This payment URL is not valid. Return to WhatsApp and tap Confirm &amp; Pay again.</p>",
@@ -1044,24 +1045,38 @@ async def pay_checkout(booking_id: str, request: Request):
     try:
         ctx = await prepare_checkout_page(booking_id, token)
     except Exception as exc:
-        logger.exception("[pay-checkout] unhandled error for booking_id=%s: %s", booking_id, exc)
+        from uuid import uuid4
+
+        error_ref = str(uuid4())[:8]
+        logger.exception(
+            "[pay-checkout] unhandled error ref=%s booking_id=%s token_present=%s: %s",
+            error_ref,
+            booking_id,
+            bool(token),
+            exc,
+        )
         return HTMLResponse(
             "<h1>Payment temporarily unavailable</h1>"
             "<p>We could not open the payment page right now.</p>"
-            "<p>Please return to WhatsApp and tap Confirm &amp; Pay again, or reply <em>pay</em>.</p>",
+            "<p>Please return to WhatsApp and tap Confirm &amp; Pay again, or reply <em>pay</em>.</p>"
+            f"<p>Reference: <strong>{error_ref}</strong></p>",
             status_code=503,
         )
 
     if ctx.get("error") == "invalid_token":
+        logger.info("[pay-checkout] invalid token booking_id=%s", booking_id)
         return HTMLResponse("<h1>Invalid or expired payment link</h1>", status_code=403)
     if ctx.get("error") == "booking_not_found":
+        logger.info("[pay-checkout] booking not found booking_id=%s", booking_id)
         return HTMLResponse("<h1>Order not found</h1>", status_code=404)
     if ctx.get("already_paid"):
+        logger.info("[pay-checkout] already paid booking_id=%s", booking_id)
         return HTMLResponse(
             "<h1>Already paid ✅</h1><p>Return to WhatsApp for your confirmation.</p>",
             status_code=200,
         )
     if ctx.get("error"):
+        logger.warning("[pay-checkout] payment unavailable booking_id=%s reason=%s", booking_id, str(ctx.get("error")))
         return HTMLResponse(f"<h1>Payment unavailable</h1><p>{ctx['error']}</p>", status_code=400)
     return HTMLResponse(render_checkout_html(ctx), status_code=200)
 
