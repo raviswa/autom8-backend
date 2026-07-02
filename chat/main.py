@@ -965,14 +965,28 @@ async def payment_complete(request: Request):
     <script>
         function goToWhatsApp() {{
             var ua = String(navigator.userAgent || '').toLowerCase();
+            var movedAway = false;
+            function onHide() {{
+                movedAway = true;
+                document.removeEventListener('visibilitychange', onHide);
+            }}
+            document.addEventListener('visibilitychange', onHide, {{ once: true }});
             if (ua.indexOf('android') >= 0) {{
                 window.location.href = 'intent://send/#Intent;scheme=whatsapp;package=com.whatsapp;end';
-                setTimeout(function () {{ window.location.href = 'https://wa.me/'; }}, 800);
+                setTimeout(function () {{
+                    if (!movedAway && document.visibilityState === 'visible') {{
+                        window.location.href = 'https://wa.me/';
+                    }}
+                }}, 1500);
                 return;
             }}
             if (/(iphone|ipad|ipod)/.test(ua)) {{
                 window.location.href = 'whatsapp://send';
-                setTimeout(function () {{ window.location.href = 'https://wa.me/'; }}, 800);
+                setTimeout(function () {{
+                    if (!movedAway && document.visibilityState === 'visible') {{
+                        window.location.href = 'https://wa.me/';
+                    }}
+                }}, 1500);
                 return;
             }}
             window.location.href = 'https://web.whatsapp.com';
@@ -1009,7 +1023,35 @@ async def payment_complete(request: Request):
 async def pay_checkout(booking_id: str, request: Request):
     """Hosted Razorpay Checkout page (Orders API — unlimited test checkouts)."""
     token = request.query_params.get("t", "")
-    ctx = await prepare_checkout_page(booking_id, token)
+    logger.info(
+        "[pay-checkout] open booking_id=%s token_present=%s ua=%s",
+        booking_id,
+        bool(token),
+        (request.headers.get("user-agent") or "")[:120],
+    )
+
+    # Quick UUID-format guard to avoid avoidable server exceptions on malformed links.
+    try:
+        from uuid import UUID
+        UUID(str(booking_id))
+    except Exception:
+        return HTMLResponse(
+            "<h1>Invalid payment link</h1>"
+            "<p>This payment URL is not valid. Return to WhatsApp and tap Confirm &amp; Pay again.</p>",
+            status_code=400,
+        )
+
+    try:
+        ctx = await prepare_checkout_page(booking_id, token)
+    except Exception as exc:
+        logger.exception("[pay-checkout] unhandled error for booking_id=%s: %s", booking_id, exc)
+        return HTMLResponse(
+            "<h1>Payment temporarily unavailable</h1>"
+            "<p>We could not open the payment page right now.</p>"
+            "<p>Please return to WhatsApp and tap Confirm &amp; Pay again, or reply <em>pay</em>.</p>",
+            status_code=503,
+        )
+
     if ctx.get("error") == "invalid_token":
         return HTMLResponse("<h1>Invalid or expired payment link</h1>", status_code=403)
     if ctx.get("error") == "booking_not_found":
@@ -1031,7 +1073,20 @@ async def pay_verify(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    logger.info(
+        "[pay-verify] order_id=%s payment_id=%s",
+        str(body.get("razorpay_order_id") or ""),
+        str(body.get("razorpay_payment_id") or ""),
+    )
+
     result = await verify_checkout_payment(body)
+    logger.info(
+        "[pay-verify] ok=%s booking_id=%s reason=%s",
+        bool(result.get("ok")),
+        str(result.get("booking_id") or ""),
+        str(result.get("reason") or ""),
+    )
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(status_code=status_code, content=result)
 

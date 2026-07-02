@@ -603,7 +603,7 @@
         .join(' ');
     }
 
-    function sessionFallbackMessage({ restaurantName, supportPhone } = {}) {
+    function sessionFallbackContext({ restaurantName, supportPhone } = {}) {
       const resolvedName = String(
         restaurantName ||
         (state.restaurant && state.restaurant.name) ||
@@ -614,6 +614,11 @@
         (state.restaurant && state.restaurant.support_phone) ||
         fallbackSupportPhone
       ).replace(/\D/g, '');
+      return { resolvedName, resolvedPhone: resolvedPhone || fallbackSupportPhone };
+    }
+
+    function sessionFallbackMessage({ restaurantName, supportPhone } = {}) {
+      const { resolvedName, resolvedPhone } = sessionFallbackContext({ restaurantName, supportPhone });
       return [
         `🙏 Thank you for reaching out to ${resolvedName}!`,
         '',
@@ -621,8 +626,24 @@
         '',
         '---',
         'To place an order or check your queue, send Hi',
-        `To speak with customer care, call ${resolvedPhone || fallbackSupportPhone}`,
+        `To speak with customer care, call ${resolvedPhone}`,
       ].join('\n');
+    }
+
+    function renderSessionFallbackActions({ restaurantName, supportPhone } = {}) {
+      const { resolvedPhone } = sessionFallbackContext({ restaurantName, supportPhone });
+      if (!statusBox) return;
+      statusBox.innerHTML = `
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+          <a href="tel:${resolvedPhone}" style="padding:7px 10px;border-radius:999px;border:1px solid #fca5a5;background:#fff;color:#991b1b;font-size:12px;font-weight:700;text-decoration:none">Call Support</a>
+          <a href="https://wa.me/${resolvedPhone}" target="_blank" rel="noopener noreferrer" style="padding:7px 10px;border-radius:999px;border:1px solid #fca5a5;background:#fff;color:#991b1b;font-size:12px;font-weight:700;text-decoration:none">WhatsApp Support</a>
+        </div>
+      `;
+    }
+
+    function showSessionFallbackStatus(context = {}) {
+      showStatus(sessionFallbackMessage(context), 'err');
+      renderSessionFallbackActions(context);
     }
 
     function showStatus(text, type) {
@@ -851,22 +872,33 @@ $('subtotal').textContent = money(subtotal);
       const ua = String(navigator.userAgent || '').toLowerCase();
       const isAndroid = ua.includes('android');
       const isIOS = /iphone|ipad|ipod/.test(ua);
+      let movedAway = false;
+
+      const onHide = () => {
+        movedAway = true;
+        document.removeEventListener('visibilitychange', onHide);
+      };
+      document.addEventListener('visibilitychange', onHide, { once: true });
 
       // Prefer native deep links first. If blocked, fall back to web WhatsApp.
       if (isAndroid) {
         const intentUrl = 'intent://send/#Intent;scheme=whatsapp;package=com.whatsapp;end';
         window.location.href = intentUrl;
         setTimeout(() => {
-          window.location.href = 'https://wa.me/';
-        }, 800);
+          if (!movedAway && document.visibilityState === 'visible') {
+            window.location.href = 'https://wa.me/';
+          }
+        }, 1500);
         return;
       }
 
       if (isIOS) {
         window.location.href = 'whatsapp://send';
         setTimeout(() => {
-          window.location.href = 'https://wa.me/';
-        }, 800);
+          if (!movedAway && document.visibilityState === 'visible') {
+            window.location.href = 'https://wa.me/';
+          }
+        }, 1500);
         return;
       }
 
@@ -1047,7 +1079,7 @@ $('subtotal').textContent = money(subtotal);
         return;
       }
       if (!token) {
-        showStatus(sessionFallbackMessage(), 'err');
+        showSessionFallbackStatus();
         return;
       }
       try {
@@ -1058,13 +1090,10 @@ $('subtotal').textContent = money(subtotal);
         const data = await res.json();
 
         if (!res.ok || !data.valid) {
-          showStatus(
-            sessionFallbackMessage({
-              restaurantName: data && (data.restaurant_name || data.restaurant || data.name),
-              supportPhone: data && data.support_phone,
-            }),
-            'err',
-          );
+          showSessionFallbackStatus({
+            restaurantName: data && (data.restaurant_name || data.restaurant || data.name),
+            supportPhone: data && data.support_phone,
+          });
           return;
         }
 
