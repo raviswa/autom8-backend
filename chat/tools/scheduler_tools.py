@@ -6,7 +6,7 @@ import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from tools.whatsapp_tools import send_whatsapp_message
+from tools.whatsapp_tools import send_whatsapp_message, send_whatsapp_cta_url
 from tools.db_tools import (
     get_todays_bookings,
     get_unpaid_bookings,
@@ -303,7 +303,7 @@ async def send_prepay_payment_reminders():
             name = row.get("customer_name") or "Guest"
             restaurant_id = row["restaurant_id"]
 
-            pay_line = ""
+            pay_link = ""
             if total >= 1:
                 try:
                     link = await create_payment_link(
@@ -312,20 +312,40 @@ async def send_prepay_payment_reminders():
                         customer_phone=phone,
                     )
                     if not is_placeholder_payment_link(link):
-                        pay_line = "\n\n" + format_razorpay_payment_line(
-                            link, label="💳 Pay here:",
-                        )
+                        pay_link = str(link)
                 except Exception as link_err:
                     logger.warning(f"[prepay-reminder] link failed for {booking_id}: {link_err}")
 
-            await send_whatsapp_message(
-                phone,
-                f"Hi {name}! 👋\n\n"
-                f"Your {service_type.replace('_', ' ')} order is still awaiting payment."
-                f"{pay_line}\n\n"
-                f"Reply *pay* on WhatsApp to get your link again.",
-                restaurant_id,
-            )
+            cta_sent = False
+            if pay_link:
+                cta_sent = await send_whatsapp_cta_url(
+                    phone,
+                    restaurant_id,
+                    body_text=(
+                        f"Hi {name}! 👋\n\n"
+                        f"Your {service_type.replace('_', ' ')} order is still awaiting payment.\n\n"
+                        "Tap Confirm & Pay to complete payment securely."
+                    ),
+                    button_text="Confirm & Pay",
+                    url=pay_link,
+                    header_text="Payment Pending",
+                    footer_text="Secure payment powered by Razorpay",
+                )
+
+            if not cta_sent:
+                pay_line = ""
+                if pay_link:
+                    pay_line = "\n\n" + format_razorpay_payment_line(
+                        pay_link, label="💳 Pay here:",
+                    )
+                await send_whatsapp_message(
+                    phone,
+                    f"Hi {name}! 👋\n\n"
+                    f"Your {service_type.replace('_', ' ')} order is still awaiting payment."
+                    f"{pay_line}\n\n"
+                    f"Reply *pay* on WhatsApp to get your link again.",
+                    restaurant_id,
+                )
             await increment_prepay_reminder_count(booking_id)
             sent += 1
 
