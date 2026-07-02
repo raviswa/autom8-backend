@@ -1023,11 +1023,12 @@ async def payment_complete(request: Request):
 @app.get("/pay/{booking_id}")
 async def pay_checkout(booking_id: str, request: Request):
     """Hosted Razorpay Checkout page (Orders API — unlimited test checkouts)."""
-        support_phone = "7397222111"
+    support_phone = "7397222111"
+    restaurant_name = "our restaurant"
 
-        def render_pay_error_page(title: str, message: str, status_code: int, ref: str = ""):
-                ref_line = f"<p class='help'>Reference: <strong>{ref}</strong></p>" if ref else ""
-                html = f"""
+    def render_pay_error_page(title: str, message: str, status_code: int, ref: str = ""):
+        ref_line = f"<p class='help'>Reference: <strong>{ref}</strong></p>" if ref else ""
+        html = f"""
 <!doctype html>
 <html lang='en'>
 <head>
@@ -1054,13 +1055,14 @@ async def pay_checkout(booking_id: str, request: Request):
             <a class='btn btn-primary' href='https://wa.me/{support_phone}?text=Hi'>Open WhatsApp Support</a>
             <a class='btn btn-secondary' href='tel:{support_phone}'>Call Support</a>
         </div>
+        <p class='help'>🙏 Thank you for reaching out to <strong>{restaurant_name}</strong>.</p>
         <p class='help'>Reply <strong>pay</strong> on WhatsApp to receive a fresh payment link.</p>
         {ref_line}
     </main>
 </body>
 </html>
 """
-                return HTMLResponse(html, status_code=status_code)
+        return HTMLResponse(html, status_code=status_code)
 
     token = request.query_params.get("t", "")
     logger.info(
@@ -1081,6 +1083,27 @@ async def pay_checkout(booking_id: str, request: Request):
             "This payment URL is not valid. Return to WhatsApp and tap Confirm & Pay again.",
             400,
         )
+
+    # Best-effort dynamic fallback details for support pages.
+    try:
+        from tools.db_tools import get_booking_with_customer
+        from tools.booking_mechanisms import fetch_restaurant_info
+
+        booking = await get_booking_with_customer(str(booking_id))
+        if booking and booking.get("restaurant_id"):
+            info = await fetch_restaurant_info(str(booking["restaurant_id"]))
+            restaurant_name = (
+                (info.get("display_name") or "").strip()
+                or (info.get("name") or "").strip()
+                or restaurant_name
+            )
+            digits = "".join(
+                ch for ch in str(info.get("whatsapp_number") or info.get("phone") or "") if ch.isdigit()
+            )
+            if digits:
+                support_phone = digits
+    except Exception as _ctx_err:
+        logger.debug("[pay-checkout] support details resolve failed booking_id=%s err=%s", booking_id, _ctx_err)
 
     try:
         ctx = await prepare_checkout_page(booking_id, token)
