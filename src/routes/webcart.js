@@ -14,6 +14,13 @@ const DEFAULT_THEME = {
 };
 const CHAT_SERVICE_URL = (process.env.CHAT_SERVICE_URL || 'http://localhost:8001').replace(/\/$/, '');
 
+// Webcart APIs are polled frequently by the frontend. Keep tiny in-memory caches
+// to avoid repeated identical DB reads during launch/refresh loops.
+const RESTAURANT_CACHE_TTL_MS = 60 * 1000;
+const MENU_CACHE_TTL_MS = 5 * 1000;
+let _restaurantCache = { rows: null, fetchedAt: 0 };
+const _menuCache = new Map(); // restaurantId -> { items, categorySlotMap, fetchedAt }
+
 function digitsOnly(value) {
   return String(value || '').replace(/\D/g, '');
 }
@@ -96,14 +103,18 @@ function buildExpiredPayload(restaurant) {
 async function resolveRestaurantBySlug(req) {
   const slug = (req.query.slug || readHostSlug(req) || '').toString().trim().toLowerCase();
 
-  const { data, error } = await supabaseAdmin
-    .from('restaurants')
-    .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category, parcel_charge_per_item, delivery_charge_default, delivery_charge_tiers, gst_rate, kitchen_busy')
-    .eq('is_active', true)
-    .limit(500);
-
-  if (error) throw error;
-  const rows = data || [];
+  const now = Date.now();
+  let rows = _restaurantCache.rows;
+  if (!rows || (now - _restaurantCache.fetchedAt) > RESTAURANT_CACHE_TTL_MS) {
+    const { data, error } = await supabaseAdmin
+      .from('restaurants')
+      .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category, parcel_charge_per_item, delivery_charge_default, delivery_charge_tiers, gst_rate, kitchen_busy')
+      .eq('is_active', true)
+      .limit(500);
+    if (error) throw error;
+    rows = data || [];
+    _restaurantCache = { rows, fetchedAt: now };
+  }
 
   if (!slug) return rows[0] || null;
 
@@ -271,6 +282,12 @@ async function resolveSession({ restaurantId, token, phone }) {
 }
 
 async function fetchMenuItems(restaurantId) {
+  const cached = _menuCache.get(restaurantId);
+  const now = Date.now();
+  if (cached && (now - cached.fetchedAt) <= MENU_CACHE_TTL_MS) {
+    return { items: cached.items, categorySlotMap: cached.categorySlotMap };
+  }
+
   const [itemsRes, categoriesRes] = await Promise.all([
     supabaseAdmin
       .from('menu_items')
@@ -297,6 +314,8 @@ async function fetchMenuItems(restaurantId) {
     effective_slots: normalizeSlots(item.applicable_slots || categorySlotMap[item.category] || ['anytime']),
     is_todays_special: !!(item.is_todays_special || item.is_special_today),
   }));
+
+  _menuCache.set(restaurantId, { items, categorySlotMap, fetchedAt: now });
 
   return { items, categorySlotMap };
 }
@@ -728,7 +747,9 @@ router.post('/api/webcart/submit', async (req, res) => {
 });
 
 router.get(['/cart', '/menu'], (_req, res) => {
-  res.setHeader('Cache-Control', 'no-store');
+  // Allow short-lived browser cache with revalidation to speed up reopen.
+  // Dynamic session/menu data is fetched via API endpoints, not from this HTML.
+  res.setHeader('Cache-Control', 'private, max-age=60, must-revalidate');
   res.sendFile(path.join(__dirname, '..', 'public', 'webcart.html'));
 });
 

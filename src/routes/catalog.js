@@ -50,6 +50,11 @@ const SLOT_DISPLAY_LABELS = {
   dinner:         'Dinner',
 };
 
+// Manual manager-open overrides outside slot hours.
+// This is intentionally in-memory: it controls scheduler behavior at runtime
+// so a manual open is not immediately overwritten by slot rotation.
+const MANUAL_KITCHEN_OPEN_OVERRIDES = new Set();
+
 function nextOpenLabelIST() {
   const hour = new Date(Date.now() + 5.5 * 60 * 60 * 1000).getUTCHours();
   for (const s of SLOTS) {
@@ -418,6 +423,7 @@ router.post('/kitchen-toggle', authenticateToken, getRestaurantId, async (req, r
     if (open) {
       const slot = getCurrentSlotIST();
       if (slot) {
+        MANUAL_KITCHEN_OPEN_OVERRIDES.delete(req.restaurant_id);
         result = await applySlotAvailability(req.restaurant_id, slot);
       } else {
         const { data, error } = await supabaseAdmin.from('menu_items')
@@ -426,9 +432,11 @@ router.post('/kitchen-toggle', authenticateToken, getRestaurantId, async (req, r
           .eq('is_stocked', true)
           .select('id');
         if (error) throw error;
+        MANUAL_KITCHEN_OPEN_OVERRIDES.add(req.restaurant_id);
         result = { slot: 'manual', available: data?.length ?? 0 };
       }
     } else {
+      MANUAL_KITCHEN_OPEN_OVERRIDES.delete(req.restaurant_id);
       result = await applySlotAvailability(req.restaurant_id, null);
     }
 
@@ -489,6 +497,7 @@ router.post('/slot-sync', authenticateToken, getRestaurantId, async (req, res) =
     const { onKitchenOpened, countAvailableMenuItems } = require('../helpers/kitchenReminders');
     const wasOpen = (await countAvailableMenuItems(req.restaurant_id)) > 0;
     const result = await applySlotAvailability(req.restaurant_id, slot);
+    MANUAL_KITCHEN_OPEN_OVERRIDES.delete(req.restaurant_id);
     if (slot && !wasOpen) {
       onKitchenOpened(req.restaurant_id, { source: 'slot-sync' }).catch(err =>
         console.error('[kitchen-remind] slot-sync notify failed:', err.message),
@@ -999,6 +1008,11 @@ module.exports.currentSlotLabelIST = currentSlotLabelIST;
 module.exports.applySlotForAllRestaurants = async function() {
   const slot = getCurrentSlotIST();
   const { data: restaurants } = await supabaseAdmin.from('restaurants').select('id').eq('is_active', true);
-  for (const r of restaurants ?? [])
+  for (const r of restaurants ?? []) {
+    if (!slot && MANUAL_KITCHEN_OPEN_OVERRIDES.has(r.id)) {
+      console.log(`[slot] Keeping manual-open override for restaurant ${r.id} while slot is CLOSED`);
+      continue;
+    }
     await applySlotAvailability(r.id, slot).catch(e => console.error(`[slot] Failed for ${r.id}:`, e.message));
+  }
 };
