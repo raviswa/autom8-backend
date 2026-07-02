@@ -293,6 +293,20 @@
       display: grid;
       gap: 10px;
     }
+    .wa-open-help {
+      display: none;
+      margin-top: 10px;
+      font-size: 13px;
+      color: #7a5a3a;
+      background: #fff7ef;
+      border: 1px solid #ffd9bf;
+      border-radius: 10px;
+      padding: 8px 10px;
+    }
+    .wa-open-help a {
+      color: #b45309;
+      font-weight: 700;
+    }
     .wa-primary,
     .wa-secondary {
       border-radius: 12px;
@@ -470,6 +484,9 @@
         <button id="waOpenBtn" class="wa-primary" type="button">Go to WhatsApp</button>
         <button id="waCloseBtn" class="wa-secondary" type="button">Stay on this page</button>
       </div>
+      <div id="waOpenHelp" class="wa-open-help">
+        Could not open WhatsApp automatically. <a id="waOpenLink" href="#" target="_self">Tap here to open chat</a>.
+      </div>
     </div>
   </div>
 
@@ -588,6 +605,8 @@
     const cartOverlay = $('cartOverlay');
     const floatBar = $('floatBar');
     const waGuideOverlay = $('waGuideOverlay');
+    const waOpenHelp = $('waOpenHelp');
+    const waOpenLink = $('waOpenLink');
     const isDesktop = () => window.innerWidth >= 901;
     const fallbackSupportPhone = '7397222111';
 
@@ -872,7 +891,14 @@ $('subtotal').textContent = money(subtotal);
       const ua = String(navigator.userAgent || '').toLowerCase();
       const isAndroid = ua.includes('android');
       const isIOS = /iphone|ipad|ipod/.test(ua);
+      const supportDigits = String((state.restaurant && state.restaurant.support_phone) || fallbackSupportPhone || '').replace(/\D/g, '');
+      const chatUrl = supportDigits
+        ? `https://wa.me/${supportDigits}?text=${encodeURIComponent('Hi')}`
+        : 'https://api.whatsapp.com/';
       let movedAway = false;
+
+      if (waOpenHelp) waOpenHelp.style.display = 'none';
+      if (waOpenLink) waOpenLink.setAttribute('href', chatUrl);
 
       const onHide = () => {
         movedAway = true;
@@ -886,7 +912,8 @@ $('subtotal').textContent = money(subtotal);
         window.location.href = intentUrl;
         setTimeout(() => {
           if (!movedAway && document.visibilityState === 'visible') {
-            window.location.href = 'https://wa.me/';
+            if (waOpenHelp) waOpenHelp.style.display = 'block';
+            window.location.href = chatUrl;
           }
         }, 1500);
         return;
@@ -896,7 +923,8 @@ $('subtotal').textContent = money(subtotal);
         window.location.href = 'whatsapp://send';
         setTimeout(() => {
           if (!movedAway && document.visibilityState === 'visible') {
-            window.location.href = 'https://wa.me/';
+            if (waOpenHelp) waOpenHelp.style.display = 'block';
+            window.location.href = chatUrl;
           }
         }, 1500);
         return;
