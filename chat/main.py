@@ -39,6 +39,7 @@ from tools.payment_tools import (
     render_checkout_html,
     verify_checkout_payment,
     ensure_prepay_payment_link,
+    build_checkout_page_url,
 )
 from tools.auto_reply_filter import is_whatsapp_auto_reply
 from tools.booking_mechanisms import (
@@ -648,6 +649,20 @@ async def internal_webcart_confirm_pay(request: Request):
     )
 
     if not payment_link:
+        fallback_text = (
+            "We couldn't create your payment link right now.\n"
+            f"Order ref: {order_ref or booking_id[-8:]}\n"
+            f"Total: INR {total:.0f}\n\n"
+            "Please reply *PAY* in this chat and we'll resend your payment link."
+        )
+        try:
+            await send_whatsapp_message(canonical_phone, fallback_text, restaurant_id)
+        except Exception as _send_err:
+            logger.warning(
+                "[webcart-confirm-pay] fallback whatsapp failed booking_id=%s err=%s",
+                booking_id,
+                _send_err,
+            )
         return JSONResponse(
             status_code=500,
             content={"ok": False, "error": "payment_link_unavailable", "booking_id": booking_id},
@@ -1025,6 +1040,57 @@ async def pay_checkout(booking_id: str, request: Request):
     """Hosted Razorpay Checkout page (Orders API — unlimited test checkouts)."""
     support_phone = "7397222111"
     restaurant_name = "our restaurant"
+    booking: dict | None = None
+
+    async def notify_customer_pay_fallback(reason: str) -> None:
+        """Best-effort WhatsApp fallback when hosted checkout cannot open."""
+        if not booking:
+            return
+
+        restaurant_id = str(booking.get("restaurant_id") or "").strip()
+        customer_phone = str(
+            booking.get("customer_phone")
+            or booking.get("phone")
+            or booking.get("customer_whatsapp")
+            or ""
+        ).strip()
+        if not restaurant_id or not customer_phone:
+            return
+
+        try:
+            retry_url = build_checkout_page_url(str(booking_id))
+        except Exception:
+            retry_url = ""
+
+        text = (
+            "Your payment page did not open just now.\n"
+            f"Order: {str(booking.get('token_number') or booking_id[-8:])}\n\n"
+            "Please reply *PAY* to receive a fresh payment link."
+        )
+        if retry_url:
+            text += f"\n\nRetry link:\n{retry_url}"
+
+        try:
+            sent = await send_whatsapp_message(customer_phone, text, restaurant_id)
+            if sent:
+                logger.info(
+                    "[pay-checkout] fallback message sent booking_id=%s reason=%s",
+                    booking_id,
+                    reason,
+                )
+            else:
+                logger.warning(
+                    "[pay-checkout] fallback message send failed booking_id=%s reason=%s",
+                    booking_id,
+                    reason,
+                )
+        except Exception as _notify_err:
+            logger.warning(
+                "[pay-checkout] fallback notify error booking_id=%s reason=%s err=%s",
+                booking_id,
+                reason,
+                _notify_err,
+            )
 
     def render_pay_error_page(title: str, message: str, status_code: int, ref: str = ""):
         ref_line = f"<p class='help'>Reference: <strong>{ref}</strong></p>" if ref else ""
@@ -1118,6 +1184,7 @@ async def pay_checkout(booking_id: str, request: Request):
             bool(token),
             exc,
         )
+        await notify_customer_pay_fallback("prepare_checkout_exception")
         return render_pay_error_page(
             "Payment temporarily unavailable",
             "We could not open the payment page right now. Please return to WhatsApp and tap Confirm & Pay again.",
@@ -1127,6 +1194,7 @@ async def pay_checkout(booking_id: str, request: Request):
 
     if ctx.get("error") == "invalid_token":
         logger.info("[pay-checkout] invalid token booking_id=%s", booking_id)
+        await notify_customer_pay_fallback("invalid_token")
         return render_pay_error_page(
             "Invalid or expired payment link",
             "This link has expired. Please return to WhatsApp and request a fresh link.",
@@ -1147,6 +1215,7 @@ async def pay_checkout(booking_id: str, request: Request):
         )
     if ctx.get("error"):
         logger.warning("[pay-checkout] payment unavailable booking_id=%s reason=%s", booking_id, str(ctx.get("error")))
+        await notify_customer_pay_fallback(f"ctx_error:{str(ctx.get('error'))}")
         return render_pay_error_page(
             "Payment unavailable",
             f"Payment could not start ({ctx['error']}). Please return to WhatsApp and tap Confirm & Pay again.",
