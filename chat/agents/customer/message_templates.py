@@ -7,11 +7,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 _CUISINE_LINES: dict[str, str] = {
-    "veg": "Pure veg goodness, made fresh.",
-    "non_veg": "Bold flavours, cooked to order.",
-    "asian": "Asian flavours, served with care.",
-    "continental": "Classic continental, every time.",
-    "fast_food": "Hot, fast, and just right.",
+    "veg": "Serving fresh, flavourful vegetarian food every day!",
+    "non_veg": "Serving fresh, flavourful non-vegetarian favourites every day!",
+    "asian": "Serving bold, wok-fresh Asian flavours every day!",
+    "continental": "Serving fresh, flavourful continental classics every day!",
+    "fast_food": "Serving hot, fresh comfort bites every day!",
 }
 
 _CUISINE_MENU_HOOKS: dict[str, str] = {
@@ -61,8 +61,8 @@ def build_greeting(
     restaurant_cuisine: list[str],
     timezone: str,
 ) -> str:
-    """Warm, restaurant-specific greeting — never mixes new/returning language."""
-    period, emoji = get_time_period(timezone)
+    """Structured greeting for service menu opening."""
+    period, _ = get_time_period(timezone)
     display = (restaurant_display_name or "our restaurant").strip()
 
     primary_cuisine = next(
@@ -71,28 +71,13 @@ def build_greeting(
     )
     warmth = _CUISINE_LINES.get(primary_cuisine, "Good food, your way.")
 
-    db_name = (customer_name or "").strip()
-    first_name = db_name.split()[0] if db_name else None
-
-    if not is_new and first_name:
-        return (
-            f"Good {period}, {first_name}! {emoji}\n"
-            f"Welcome back to *{display}*.\n"
-            f"Great to see you again. What can we get for you today?"
-        )
-
-    if not is_new:
-        return (
-            f"Good {period}! {emoji}\n"
-            f"Welcome back to *{display}*.\n"
-            f"What would you like today?"
-        )
+    greet = f"Good {period.capitalize()}"
+    welcome = "Welcome to" if is_new else "Welcome back to"
 
     return (
-        f"Good {period}! {emoji}\n"
-        f"Welcome to *{display}*! 🎉\n"
-        f"{warmth}\n"
-        f"Let's get your order started."
+        f"{greet} 👋\n"
+        f"{welcome} *{display}* 🍽️\n"
+        f"{warmth}"
     )
 
 

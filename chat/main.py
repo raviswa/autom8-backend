@@ -36,8 +36,9 @@ from tools.payment_tools import (
     handle_payment_webhook,
     razorpay_status_message,
     handle_payment_link_callback,
-    prepare_checkout_page,
-    render_checkout_html,
+    resolve_checkout_context,
+    render_method_selection_html,
+    create_order_for_method,
     verify_checkout_payment,
     ensure_prepay_payment_link,
     build_checkout_page_url,
@@ -1068,197 +1069,41 @@ async def payment_complete(request: Request):
 
 @app.get("/pay/{booking_id}")
 async def pay_checkout(booking_id: str, request: Request):
-    """Hosted Razorpay Checkout page (Orders API — unlimited test checkouts)."""
-    support_phone = ""
-    waba_phone = ""
-    restaurant_name = "your restaurant"
-    booking: dict | None = None
-
-    async def notify_customer_pay_fallback(reason: str) -> None:
-        """Best-effort WhatsApp fallback when hosted checkout cannot open."""
-        if not booking:
-            return
-
-        restaurant_id = str(booking.get("restaurant_id") or "").strip()
-        customer_phone = str(
-            booking.get("customer_phone")
-            or booking.get("phone")
-            or booking.get("customer_whatsapp")
-            or ""
-        ).strip()
-        if not restaurant_id or not customer_phone:
-            return
-
-        try:
-            retry_url = build_checkout_page_url(str(booking_id))
-        except Exception:
-            retry_url = ""
-
-        text = (
-            "Your payment page did not open just now.\n"
-            f"Order: {str(booking.get('token_number') or booking_id[-8:])}\n\n"
-            "Please reply *PAY* to receive a fresh payment link."
-        )
-        if retry_url:
-            text += f"\n\nRetry link:\n{retry_url}"
-
-        try:
-            sent = await send_whatsapp_message(customer_phone, text, restaurant_id)
-            if sent:
-                logger.info(
-                    "[pay-checkout] fallback message sent booking_id=%s reason=%s",
-                    booking_id,
-                    reason,
-                )
-            else:
-                logger.warning(
-                    "[pay-checkout] fallback message send failed booking_id=%s reason=%s",
-                    booking_id,
-                    reason,
-                )
-        except Exception as _notify_err:
-            logger.warning(
-                "[pay-checkout] fallback notify error booking_id=%s reason=%s err=%s",
-                booking_id,
-                reason,
-                _notify_err,
-            )
-
-    def render_pay_error_page(title: str, message: str, status_code: int, ref: str = ""):
-        ref_line = f"<p class='help'>Reference: <strong>{ref}</strong></p>" if ref else ""
-        chat_phone = _normalize_whatsapp_phone(waba_phone) or _normalize_whatsapp_phone(support_phone)
-        html = f"""
-<!doctype html>
-<html lang='en'>
-<head>
-    <meta charset='utf-8' />
-    <meta name='viewport' content='width=device-width, initial-scale=1' />
-    <title>{title}</title>
-    <style>
-        body {{ font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; margin: 0; padding: 18px; background: #f8fafc; color: #0f172a; }}
-        .card {{ max-width: 620px; margin: 0 auto; background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 18px; }}
-        h1 {{ margin: 0 0 10px; font-size: 40px; line-height: 1.05; }}
-        p {{ margin: 0; font-size: 19px; line-height: 1.5; color: #334155; }}
-        .actions {{ margin-top: 16px; display: grid; gap: 10px; }}
-        .btn {{ text-decoration: none; text-align: center; border-radius: 12px; padding: 12px 14px; font-weight: 700; border: 1px solid transparent; }}
-        .btn-primary {{ background: #e36d26; color: #fff; border-color: #e36d26; }}
-        .btn-secondary {{ background: #fff; color: #0f172a; border-color: #e2e8f0; }}
-        .help {{ margin-top: 10px; font-size: 13px; color: #64748b; }}
-    </style>
-</head>
-<body>
-    <main class='card'>
-        <h1>{title}</h1>
-        <p>{message}</p>
-        <div class='actions'>
-            <a class='btn btn-primary' href='{'https://wa.me/' + chat_phone if chat_phone else 'https://web.whatsapp.com/'}'>Open WhatsApp</a>
-            <a class='btn btn-secondary' href='{'tel:' + chat_phone if chat_phone else '#'}'>Call Support</a>
-        </div>
-        <p class='help'>🙏 Thank you for reaching out to <strong>{restaurant_name}</strong>.</p>
-        <p class='help'>Reply <strong>pay</strong> on WhatsApp to receive a fresh payment link.</p>
-        {ref_line}
-    </main>
-</body>
-</html>
-"""
-        return HTMLResponse(html, status_code=status_code)
-
+    """Payment method selection screen before hosted Razorpay checkout."""
     token = request.query_params.get("t", "")
-    logger.info(
-        "[pay-checkout] open booking_id=%s token_present=%s ua=%s",
-        booking_id,
-        bool(token),
-        (request.headers.get("user-agent") or "")[:120],
-    )
-
-    # Quick UUID-format guard to avoid avoidable server exceptions on malformed links.
-    try:
-        from uuid import UUID
-        UUID(str(booking_id))
-    except Exception:
-        logger.warning("[pay-checkout] invalid booking id format booking_id=%s", booking_id)
-        return render_pay_error_page(
-            "Invalid payment link",
-            "This payment URL is not valid. Return to WhatsApp and tap Confirm & Pay again.",
-            400,
-        )
-
-    # Best-effort dynamic fallback details for support pages.
-    try:
-        from tools.db_tools import get_booking_with_customer
-        from tools.booking_mechanisms import fetch_restaurant_info
-
-        booking = await get_booking_with_customer(str(booking_id))
-        if booking and booking.get("restaurant_id"):
-            info = await fetch_restaurant_info(str(booking["restaurant_id"]))
-            restaurant_name = (
-                (info.get("display_name") or "").strip()
-                or (info.get("name") or "").strip()
-                or restaurant_name
-            )
-            digits = "".join(
-                ch for ch in str(info.get("whatsapp_number") or info.get("phone") or "") if ch.isdigit()
-            )
-            if digits:
-                support_phone = digits
-
-            rest = await get_restaurant_by_id(str(booking["restaurant_id"]))
-            if rest and rest.get("whatsapp_number"):
-                waba_phone = str(rest.get("whatsapp_number"))
-    except Exception as _ctx_err:
-        logger.debug("[pay-checkout] support details resolve failed booking_id=%s err=%s", booking_id, _ctx_err)
-
-    try:
-        ctx = await prepare_checkout_page(booking_id, token)
-    except Exception as exc:
-        from uuid import uuid4
-
-        error_ref = str(uuid4())[:8]
-        logger.exception(
-            "[pay-checkout] unhandled error ref=%s booking_id=%s token_present=%s: %s",
-            error_ref,
-            booking_id,
-            bool(token),
-            exc,
-        )
-        await notify_customer_pay_fallback("prepare_checkout_exception")
-        return render_pay_error_page(
-            "Payment temporarily unavailable",
-            "We could not open the payment page right now. Please return to WhatsApp and tap Confirm & Pay again.",
-            503,
-            error_ref,
-        )
+    ctx = await resolve_checkout_context(booking_id, token)
 
     if ctx.get("error") == "invalid_token":
-        logger.info("[pay-checkout] invalid token booking_id=%s", booking_id)
-        await notify_customer_pay_fallback("invalid_token")
-        return render_pay_error_page(
-            "Invalid or expired payment link",
-            "This link has expired. Please return to WhatsApp and request a fresh link.",
-            403,
-        )
+        return HTMLResponse("<h1>Invalid or expired payment link</h1>", status_code=403)
     if ctx.get("error") == "booking_not_found":
-        logger.info("[pay-checkout] booking not found booking_id=%s", booking_id)
-        return render_pay_error_page(
-            "Order not found",
-            "We could not find this order. Please return to WhatsApp and send Hi to restart.",
-            404,
-        )
+        return HTMLResponse("<h1>Order not found</h1>", status_code=404)
     if ctx.get("already_paid"):
-        logger.info("[pay-checkout] already paid booking_id=%s", booking_id)
         return HTMLResponse(
             "<h1>Already paid ✅</h1><p>Return to WhatsApp for your confirmation.</p>",
             status_code=200,
         )
     if ctx.get("error"):
-        logger.warning("[pay-checkout] payment unavailable booking_id=%s reason=%s", booking_id, str(ctx.get("error")))
-        await notify_customer_pay_fallback(f"ctx_error:{str(ctx.get('error'))}")
-        return render_pay_error_page(
-            "Payment unavailable",
-            f"Payment could not start ({ctx['error']}). Please return to WhatsApp and tap Confirm & Pay again.",
-            400,
+        return HTMLResponse(
+            f"<h1>Payment unavailable</h1><p>{ctx['error']}</p>",
+            status_code=400,
         )
-    return HTMLResponse(render_checkout_html(ctx), status_code=200)
+
+    return HTMLResponse(render_method_selection_html(ctx), status_code=200)
+
+
+@app.post("/pay/{booking_id}/create-order")
+async def pay_create_order(booking_id: str, request: Request):
+    """Create Razorpay order once customer selects a payment method tile."""
+    token = request.query_params.get("t", "")
+    method = (request.query_params.get("method") or "").strip().lower()
+
+    ctx = await create_order_for_method(booking_id, token, method)
+    if ctx.get("error") == "invalid_token":
+        return JSONResponse(status_code=403, content=ctx)
+    if ctx.get("error"):
+        return JSONResponse(status_code=400, content=ctx)
+
+    return JSONResponse(status_code=200, content=ctx)
 
 
 @app.post("/pay/verify")

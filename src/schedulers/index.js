@@ -41,6 +41,20 @@ const { pushInvoiceToAccounting } = require('../routes/invoices');
 // ── startSlotScheduler ────────────────────────────────────────────────────────
 
 function startSlotScheduler() {
+  const normalizeDiningDurationMinutes = (raw) => {
+    const parsed = parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 45;
+    return parsed;
+  };
+
+  const isTokenStale = (token, minutes) => {
+    const referenceTs = token?.seated_at || token?.arrived_at;
+    if (!referenceTs) return false;
+    const atMs = new Date(referenceTs).getTime();
+    if (!Number.isFinite(atMs)) return false;
+    return (Date.now() - atMs) >= (minutes * 60 * 1000);
+  };
+
   // Auto-release stale seated tokens using each restaurant's dining_duration_minutes
   setInterval(async () => {
     try {
@@ -50,26 +64,45 @@ function startSlotScheduler() {
         .eq('is_active', true);
 
       for (const restaurant of restaurants ?? []) {
-        const minutes = restaurant.dining_duration_minutes || 45;
+        const minutes = normalizeDiningDurationMinutes(restaurant.dining_duration_minutes);
         const cutoff = new Date(Date.now() - minutes * 60 * 1000).toISOString();
 
-        const { data: staleTokens } = await supabaseAdmin
+        const { data: seatedTokens, error: seatedErr } = await supabaseAdmin
           .from('walk_in_tokens')
-          .update({ status: 'completed', completed_at: new Date().toISOString() })
+          .select('*')
           .eq('status', 'seated')
           .eq('restaurant_id', restaurant.id)
-          .lt('seated_at', cutoff)
-          .select('*');
+          .or(`seated_at.lt.${cutoff},and(seated_at.is.null,arrived_at.lt.${cutoff})`);
+        if (seatedErr) {
+          console.error(`[auto-release] Seated token fetch failed (${restaurant.id}):`, seatedErr.message);
+          continue;
+        }
 
-        for (const token of staleTokens ?? []) {
-          const freed = await releaseTablesForToken(supabaseAdmin, token, restaurant.id, {
-            queueFeedback: true,
-            feedbackSource: 'auto-release',
-          });
-          console.log(
-            `[auto-release] Token ${token.id} freed ${freed.length} table(s) ` +
-            `(duration=${minutes}m)`,
-          );
+        const staleTokens = (seatedTokens ?? []).filter((token) => isTokenStale(token, minutes));
+        if (staleTokens.length) {
+          const staleIds = staleTokens.map((token) => token.id);
+          const { data: completedTokens, error: completeErr } = await supabaseAdmin
+            .from('walk_in_tokens')
+            .update({ status: 'completed', completed_at: new Date().toISOString() })
+            .in('id', staleIds)
+            .eq('status', 'seated')
+            .select('*');
+
+          if (completeErr) {
+            console.error(`[auto-release] Token completion failed (${restaurant.id}):`, completeErr.message);
+            continue;
+          }
+
+          for (const token of completedTokens ?? []) {
+            const freed = await releaseTablesForToken(supabaseAdmin, token, restaurant.id, {
+              queueFeedback: true,
+              feedbackSource: 'auto-release',
+            });
+            console.log(
+              `[auto-release] Token ${token.id} freed ${freed.length} table(s) ` +
+              `(duration=${minutes}m)`,
+            );
+          }
         }
 
         const orphans = await releaseOrphanedOccupiedTables(supabaseAdmin, restaurant.id);

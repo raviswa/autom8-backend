@@ -243,6 +243,11 @@ class Booking(Base):
     token_advance    = Column(Numeric(12, 2))
     payment_status   = Column(Enum("pending","paid","refunded","na", name="payment_status_enum"), nullable=False, default="pending")
     razorpay_order_id     = Column(String(255))
+    payment_method        = Column(String(20))   # 'upi' | 'card'
+    munafe_fee_pct        = Column(Numeric(6, 4))
+    munafe_fee_amount     = Column(Numeric(12, 2))
+    order_subtotal        = Column(Numeric(12, 2))
+    restaurant_payout     = Column(Numeric(12, 2))
     kitchen_start_at      = Column(DateTime(timezone=True))
     scheduled_slot_at     = Column(DateTime(timezone=True))
     total_cook_minutes    = Column(Integer)

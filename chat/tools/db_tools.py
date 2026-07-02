@@ -949,6 +949,44 @@ async def save_prepay_fulfillment_payload(booking_id: str, payload: dict[str, An
         logger.warning(f"[prepay] save_prepay_fulfillment_payload failed for {booking_id}: {e}")
 
 
+async def save_booking_payment_meta(
+    booking_id: str,
+    *,
+    payment_method: str,
+    fee_pct: float,
+    fee_amount: float,
+    order_subtotal: float,
+    restaurant_payout: float,
+) -> None:
+    """Persist payment-method and fee breakdown on the booking row."""
+    if AsyncSessionLocal is None:
+        return
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text("""
+                    UPDATE bookings
+                    SET payment_method = :payment_method,
+                        munafe_fee_pct = :fee_pct,
+                        munafe_fee_amount = :fee_amount,
+                        order_subtotal = :order_subtotal,
+                        restaurant_payout = :restaurant_payout
+                    WHERE id = CAST(:bid AS uuid)
+                """),
+                {
+                    "bid": booking_id,
+                    "payment_method": payment_method,
+                    "fee_pct": fee_pct,
+                    "fee_amount": fee_amount,
+                    "order_subtotal": order_subtotal,
+                    "restaurant_payout": restaurant_payout,
+                },
+            )
+            await session.commit()
+    except Exception as e:
+        logger.warning(f"[payment] save_booking_payment_meta failed for {booking_id}: {e}")
+
+
 async def load_prepay_fulfillment_payload(booking_id: str) -> dict[str, Any] | None:
     """Load persisted prepay payload from booking row."""
     if AsyncSessionLocal is None:

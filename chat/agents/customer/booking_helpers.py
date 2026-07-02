@@ -884,15 +884,17 @@ async def send_service_menu(
     normalize_last_order_summary(state)
     from agents.customer.message_templates import (
         ensure_restaurant_greeting_context,
-        get_time_period,
     )
     await ensure_restaurant_greeting_context(state, restaurant_id)
-    period, _ = get_time_period(state.get("_restaurant_timezone", "Asia/Kolkata"))
-    header = f"Good {period}".capitalize()
+    header = (state.get("_restaurant_display_name") or "Service Menu").strip()
 
     body_lines = []
     if greeting and greeting.strip():
-        body_lines.append(greeting.strip())
+        greeting_text = greeting.strip()
+        first_line, sep, rest = greeting_text.partition("\n")
+        if first_line.strip().lower() == header.strip().lower() and rest.strip():
+            greeting_text = rest.strip()
+        body_lines.append(greeting_text)
 
     if not state.get("_last_visit_abandoned"):
         from tools.db_tools import get_ready_takeaway_order
@@ -904,10 +906,10 @@ async def send_service_menu(
             )
 
     state.pop("_last_visit_abandoned", None)
-    body_lines.append("What would you like to do today?")
+    body_lines.append("How can we help you today?")
     body_text = "\n\n".join(body_lines)
 
-    footer = "HOM · PAY · Update name"
+    footer = "Tap below to start ordering"
 
     ok = await _send_interactive(customer_phone, {
         "interactive": {

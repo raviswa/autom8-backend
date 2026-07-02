@@ -17,6 +17,46 @@ logger = logging.getLogger(__name__)
 
 _PLACEHOLDER_URL = "https://payment-placeholder.com"
 
+FEE_RATES: dict[str, float] = {
+    "upi": 0.01,
+    "card": 0.028,
+}
+
+_RAZORPAY_METHOD_CONFIG: dict[str, dict[str, int]] = {
+    "upi": {
+        "netbanking": 0,
+        "card": 0,
+        "upi": 1,
+        "wallet": 0,
+        "paylater": 0,
+        "emi": 0,
+    },
+    "card": {
+        "netbanking": 1,
+        "card": 1,
+        "upi": 0,
+        "wallet": 1,
+        "paylater": 0,
+        "emi": 0,
+    },
+}
+
+
+def compute_fee_inclusive_total(subtotal: float, method: str) -> dict[str, float]:
+    """Compute fee split where customer pays subtotal and payout is net of Munafe fee."""
+    pct = FEE_RATES.get(method)
+    if pct is None:
+        raise ValueError(f"Unknown payment method: {method}")
+    base = round(float(subtotal), 2)
+    fee_amount = round(base * pct, 2)
+    return {
+        "subtotal": base,
+        "fee_pct": pct,
+        "fee_amount": fee_amount,
+        "restaurant_payout": round(base - fee_amount, 2),
+        "customer_total": base,
+    }
+
 RAZORPAY_NON_REFUND_NOTICE = (
     "⚠️ *Please note:* Payment cannot be reversed once completed. "
     "Cancellations or amendments are *not* possible after payment."
@@ -186,6 +226,8 @@ async def create_razorpay_order(
     *,
     customer_phone: str | None = None,
     session_state: dict[str, Any] | None = None,
+    payment_method: str | None = None,
+    fee_meta: dict[str, float] | None = None,
 ) -> str:
     """Create Razorpay Order (Orders API) — unlimited checkouts in test mode."""
     client = _get_client()
@@ -207,6 +249,13 @@ async def create_razorpay_order(
     }
     if customer_phone:
         notes["customer_phone"] = re.sub(r"\D", "", str(customer_phone))[-12:]
+    if payment_method:
+        notes["payment_method"] = str(payment_method)
+    if fee_meta:
+        notes["munafe_fee_pct"] = str(fee_meta.get("fee_pct", ""))
+        notes["munafe_fee_amount"] = str(fee_meta.get("fee_amount", ""))
+        notes["order_subtotal"] = str(fee_meta.get("subtotal", ""))
+        notes["restaurant_payout"] = str(fee_meta.get("restaurant_payout", ""))
 
     payload: dict[str, Any] = {
         "amount": amount_paise,
@@ -225,7 +274,9 @@ async def create_razorpay_order(
         session_state["payment_link"] = build_checkout_page_url(str(booking_id))
         session_state.pop("razorpay_payment_link_id", None)
 
-    logger.info(f"[razorpay] Order created: {order_id} for booking {booking_id}")
+    logger.info(
+        f"[razorpay] Order created: {order_id} for booking {booking_id} method={payment_method}"
+    )
     return str(order_id)
 
 
@@ -834,6 +885,251 @@ async def prepare_checkout_page(booking_id: str, token: str) -> dict[str, Any]:
     }
 
 
+async def resolve_checkout_context(booking_id: str, token: str) -> dict[str, Any]:
+    """Load booking and subtotal for method selection (no order creation yet)."""
+    if not verify_checkout_token(booking_id, token):
+        return {"error": "invalid_token"}
+
+    from tools.db_tools import get_booking_with_customer, get_session_state
+
+    booking = await get_booking_with_customer(booking_id)
+    if not booking:
+        return {"error": "booking_not_found"}
+    if booking.get("payment_status") == "paid" or booking.get("status") == "confirmed":
+        return {"already_paid": True}
+
+    restaurant_id = str(booking["restaurant_id"])
+    phone = booking.get("customer_phone") or ""
+    session: dict[str, Any] = {}
+    if phone:
+        session = dict(await get_session_state(restaurant_id, phone) or {})
+
+    subtotal = float(session.get("order_total") or 0)
+    if subtotal < 1:
+        from tools.prepay_fulfillment import load_prepay_payload
+        payload = await load_prepay_payload(restaurant_id, phone, booking_id)
+        subtotal = float((payload or {}).get("total") or 0)
+    if subtotal < 1:
+        return {"error": "amount_missing"}
+
+    return {
+        "booking_id": booking_id,
+        "token": token,
+        "subtotal": round(subtotal, 2),
+        "token_label": booking.get("token_number") or "",
+    }
+
+
+async def create_order_for_method(booking_id: str, token: str, method: str) -> dict[str, Any]:
+    """Create a Razorpay order restricted to selected payment method."""
+    if not verify_checkout_token(booking_id, token):
+        return {"error": "invalid_token"}
+    if method not in FEE_RATES:
+        return {"error": "invalid_method"}
+
+    from tools.db_tools import (
+        get_booking_with_customer,
+        get_session_state,
+        save_session_state,
+        save_booking_payment_meta,
+    )
+
+    booking = await get_booking_with_customer(booking_id)
+    if not booking:
+        return {"error": "booking_not_found"}
+    if booking.get("payment_status") == "paid" or booking.get("status") == "confirmed":
+        return {"already_paid": True}
+
+    restaurant_id = str(booking["restaurant_id"])
+    phone = booking.get("customer_phone") or ""
+    session: dict[str, Any] = {}
+    if phone:
+        session = dict(await get_session_state(restaurant_id, phone) or {})
+
+    subtotal = float(session.get("order_total") or 0)
+    if subtotal < 1:
+        from tools.prepay_fulfillment import load_prepay_payload
+        payload = await load_prepay_payload(restaurant_id, phone, booking_id)
+        subtotal = float((payload or {}).get("total") or 0)
+    if subtotal < 1:
+        return {"error": "amount_missing"}
+
+    fee = compute_fee_inclusive_total(subtotal, method)
+
+    session.pop("razorpay_order_id", None)
+    customer_name = booking.get("customer_name") or session.get("customer_name") or "Guest"
+    token_label = booking.get("token_number") or ""
+    description = f"Order {token_label}".strip() or f"Booking {booking_id[:8]}"
+
+    order_id = await create_razorpay_order(
+        booking_id,
+        fee["customer_total"],
+        customer_name,
+        description,
+        customer_phone=phone,
+        session_state=session,
+        payment_method=method,
+        fee_meta=fee,
+    )
+
+    if phone and session:
+        await save_session_state(restaurant_id, phone, session)
+
+    await save_booking_payment_meta(
+        booking_id,
+        payment_method=method,
+        fee_pct=fee["fee_pct"],
+        fee_amount=fee["fee_amount"],
+        order_subtotal=fee["subtotal"],
+        restaurant_payout=fee["restaurant_payout"],
+    )
+
+    restaurant_name = "Restaurant"
+    try:
+        from tools.booking_mechanisms import fetch_restaurant_info
+        info = await fetch_restaurant_info(restaurant_id)
+        restaurant_name = (info.get("display_name") or info.get("name") or restaurant_name)
+    except Exception:
+        pass
+
+    contact = _format_contact(phone) or ""
+    return {
+        "key_id": settings.razorpay_key_id,
+        "order_id": order_id,
+        "amount_paise": int(round(fee["customer_total"] * 100)),
+        "restaurant_name": restaurant_name[:120],
+        "description": description[:255],
+        "customer_name": customer_name[:120],
+        "contact": contact.lstrip("+"),
+        "booking_id": booking_id,
+        "method": method,
+        "method_config": _RAZORPAY_METHOD_CONFIG[method],
+    }
+
+
+def render_method_selection_html(ctx: dict[str, Any]) -> str:
+    """Render method picker and open Razorpay only after customer chooses a tile."""
+    import json
+
+    booking_id = json.dumps(ctx["booking_id"])
+    token = json.dumps(ctx["token"])
+    subtotal = float(ctx.get("subtotal") or 0)
+    amount_display = f"INR {subtotal:.0f}" if subtotal == int(subtotal) else f"INR {subtotal:.2f}"
+    token_label = str(ctx.get("token_label") or "").strip()
+    token_html = f'<p class="muted">Order {token_label}</p>' if token_label else ""
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>Choose payment method</title>
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{ font-family: system-ui, sans-serif; margin: 0; padding: 20px; background: #f8fafc; color: #0f172a; }}
+        .card {{ max-width: 440px; margin: 0 auto; background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 20px; }}
+        h1 {{ margin: 0 0 6px; font-size: 26px; }}
+        .amount {{ margin: 0 0 16px; font-size: 30px; font-weight: 700; }}
+        .tile {{ width: 100%; text-align: left; display: block; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; margin-bottom: 10px; background: #fff; cursor: pointer; }}
+        .tile strong {{ display: block; font-size: 16px; margin-bottom: 4px; }}
+        .tile span {{ display: block; color: #475569; font-size: 13px; }}
+        .tile:disabled {{ opacity: 0.55; cursor: not-allowed; }}
+        .spinner {{ display: none; margin-top: 12px; color: #475569; font-size: 13px; }}
+        .muted {{ color: #64748b; font-size: 12px; margin: 0; }}
+    </style>
+</head>
+<body>
+    <main class="card">
+        <h1>Choose payment method</h1>
+        <p class="amount">{amount_display}</p>
+        {token_html}
+
+        <button class="tile" id="tile-upi" onclick="pay('upi')">
+            <strong>Pay via UPI</strong>
+            <span>Google Pay, PhonePe, Paytm, BHIM</span>
+        </button>
+
+        <button class="tile" id="tile-card" onclick="pay('card')">
+            <strong>Card / Netbanking / Wallet</strong>
+            <span>Credit or debit card, netbanking, wallets</span>
+        </button>
+
+        <p class="spinner" id="spinner">Preparing secure payment...</p>
+        <p class="muted">Payment cannot be reversed once completed.</p>
+    </main>
+
+    <script>
+        var bookingId = {booking_id};
+        var token = {token};
+
+        function lockTiles(lock) {{
+            document.getElementById("tile-upi").disabled = lock;
+            document.getElementById("tile-card").disabled = lock;
+            document.getElementById("spinner").style.display = lock ? "block" : "none";
+        }}
+
+        function failBack(reason) {{
+            var q = "?status=failed";
+            if (bookingId) q += "&booking_id=" + encodeURIComponent(bookingId);
+            if (reason) q += "&reason=" + encodeURIComponent(reason);
+            window.location.href = "/payment/complete" + q;
+        }}
+
+        function pay(method) {{
+            lockTiles(true);
+            var url = "/pay/" + bookingId + "/create-order?t=" + encodeURIComponent(token) + "&method=" + encodeURIComponent(method);
+            fetch(url, {{ method: "POST" }})
+            .then(function(r) {{ return r.json(); }})
+            .then(function(ctx) {{
+                if (ctx.error) {{ lockTiles(false); alert("Could not start payment. Please try again."); return; }}
+                if (ctx.already_paid) {{ window.location.href = "/payment/complete?status=paid&booking_id=" + encodeURIComponent(bookingId); return; }}
+                openRazorpay(ctx);
+            }})
+            .catch(function() {{ lockTiles(false); failBack("create_order_failed"); }});
+        }}
+
+        function openRazorpay(ctx) {{
+            var options = {{
+                key: ctx.key_id,
+                order_id: ctx.order_id,
+                amount: ctx.amount_paise,
+                name: ctx.restaurant_name,
+                description: ctx.description,
+                prefill: {{ name: ctx.customer_name, contact: ctx.contact }},
+                method: ctx.method_config,
+                theme: {{ color: "#e36d26" }},
+                handler: function (response) {{
+                    fetch("/pay/verify", {{
+                        method: "POST",
+                        headers: {{ "Content-Type": "application/json" }},
+                        body: JSON.stringify(response)
+                    }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+                        window.location.href = data.redirect || ("/payment/complete?status=paid&booking_id=" + encodeURIComponent(bookingId));
+                    }}).catch(function() {{
+                        window.location.href = "/payment/complete?status=paid&booking_id=" + encodeURIComponent(bookingId);
+                    }});
+                }},
+                modal: {{
+                    ondismiss: function() {{
+                        lockTiles(false);
+                        failBack("checkout_dismissed");
+                    }}
+                }}
+            }};
+
+            var rzp = new Razorpay(options);
+            rzp.on("payment.failed", function(response) {{
+                var err = (response && response.error) || {{}};
+                failBack(err.reason || err.code || "payment_failed");
+            }});
+            rzp.open();
+        }}
+    </script>
+</body>
+</html>"""
+
+
 def render_checkout_html(ctx: dict[str, Any]) -> str:
     """Minimal mobile page that auto-opens Razorpay Standard Checkout."""
     import json
@@ -1002,15 +1298,38 @@ async def verify_checkout_payment(body: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "reason": "invalid_signature"}
 
     booking_id = None
+    order_notes: dict[str, Any] = {}
     try:
         order = client.order.fetch(order_id)
-        booking_id = (order.get("notes") or {}).get("booking_id")
+        order_notes = order.get("notes") or {}
+        booking_id = order_notes.get("booking_id")
     except Exception as exc:
         logger.error(f"[razorpay] fetch order {order_id} after checkout: {exc}")
         return {"ok": False, "reason": "order_fetch_failed"}
 
     if not booking_id:
         return {"ok": False, "reason": "booking_id_missing"}
+
+    payment_method = str(order_notes.get("payment_method") or "").strip().lower()
+    if payment_method in FEE_RATES:
+        try:
+            from tools.db_tools import save_booking_payment_meta
+
+            subtotal = round((float(order.get("amount") or 0) / 100.0), 2)
+            fee_pct = float(order_notes.get("munafe_fee_pct") or FEE_RATES[payment_method])
+            fee_amount = float(order_notes.get("munafe_fee_amount") or round(subtotal * fee_pct, 2))
+            restaurant_payout = float(order_notes.get("restaurant_payout") or round(subtotal - fee_amount, 2))
+
+            await save_booking_payment_meta(
+                str(booking_id),
+                payment_method=payment_method,
+                fee_pct=fee_pct,
+                fee_amount=fee_amount,
+                order_subtotal=subtotal,
+                restaurant_payout=restaurant_payout,
+            )
+        except Exception as meta_err:
+            logger.warning(f"[razorpay] checkout fee-meta persist failed for {booking_id}: {meta_err}")
 
     try:
         result = await _mark_paid_and_fulfill(str(booking_id), source="checkout")
