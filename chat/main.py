@@ -806,39 +806,49 @@ async def payment_complete(request: Request):
     elif simple_status == "paid":
         result = {"ok": True, "fulfilled": True}
 
-        retry_url = params.get("retry", "")
+    retry_url = params.get("retry", "")
+    support_phone = "7397222111"
 
-        title = "Payment status"
-        message = "Return to WhatsApp and reply <em>pay</em> to get a new payment link."
-        tone = "neutral"
+    title = "Payment status"
+    message = "Return to WhatsApp and reply <em>pay</em> to get a new payment link."
+    cause_hint = ""
+    tone = "neutral"
 
-        if status == "paid" and result.get("fulfilled") is not False and result.get("ok") is not False:
-                title = "Thank you!"
-                message = "Your payment was received. Return to WhatsApp for confirmation."
-                tone = "ok"
-        elif status == "paid":
-                title = "Payment received"
-                message = (
-                        "We received your payment. If confirmation does not arrive in a few minutes, "
-                        "send <em>pay</em> on WhatsApp to retry confirmation."
-                )
-                tone = "ok"
-        elif status in ("cancelled", "failed", "expired"):
-                title = "Payment not completed"
-                message = (
-                        "No worries. Return to WhatsApp and tap Confirm &amp; Pay again, "
-                        "or retry payment below."
-                )
-                tone = "warn"
+    if status == "paid" and result.get("fulfilled") is not False and result.get("ok") is not False:
+        title = "Thank you!"
+        message = "Your payment was received. Return to WhatsApp for confirmation."
+        tone = "ok"
+    elif status == "paid":
+        title = "Payment received"
+        message = (
+            "We received your payment. If confirmation does not arrive in a few minutes, "
+            "send <em>pay</em> on WhatsApp to retry confirmation."
+        )
+        tone = "ok"
+    elif status in ("cancelled", "failed", "expired"):
+        title = "Payment not completed"
+        message = (
+            "No worries. Return to WhatsApp and tap Confirm &amp; Pay again, "
+            "or retry payment below."
+        )
+        cause_hint = (
+            "This can happen due to network interruption, app close, bank timeout, "
+            "or UPI/card cancellation."
+        )
+        tone = "warn"
 
-        safe_status = escape(status or "unknown")
-        safe_retry = escape(retry_url, quote=True)
+    safe_status = escape(status or "unknown")
+    safe_retry = escape(retry_url, quote=True)
 
-        retry_btn = ""
-        if retry_url:
-            retry_btn = f'<a class="btn btn-secondary" href="{safe_retry}">Try Payment Again</a>'
+    retry_btn = ""
+    if retry_url:
+        retry_btn = f'<a class="btn btn-secondary" href="{safe_retry}">Try Payment Again</a>'
 
-        html = f"""
+    cause_block = ""
+    if cause_hint:
+        cause_block = f'<p class="help">{cause_hint}</p>'
+
+    html = f"""
 <!doctype html>
 <html lang="en">
 <head>
@@ -921,17 +931,20 @@ async def payment_complete(request: Request):
         <div class="status {tone}">Payment status: {safe_status}</div>
         <h1>{title}</h1>
         <p>{message}</p>
+        {cause_block}
         <div class="actions">
             <button class="btn btn-primary" type="button" onclick="goToWhatsApp()">Return to WhatsApp</button>
             {retry_btn}
         </div>
+        <p class="help">To place an order or check your queue, send <strong>Hi</strong> on WhatsApp.</p>
+        <p class="help">To speak with customer care, call <strong>{support_phone}</strong>.</p>
         <p class="help">Works for dine-in, takeaway, and delivery prepay flows.</p>
     </main>
 </body>
 </html>
 """
 
-        return HTMLResponse(html, status_code=200)
+    return HTMLResponse(html, status_code=200)
 
 
 @app.get("/pay/{booking_id}")

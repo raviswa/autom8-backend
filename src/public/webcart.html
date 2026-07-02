@@ -8,7 +8,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
     :root {
-      --header: #14532d;      /* deep green ribbon, like Geetham */
+      --header: #000000;      /* solid black header */
       --header-ink: #ffffff;
       --brand: #E36D26;       /* Updated brand orange */
       --brand-ink: #ffffff;
@@ -36,7 +36,7 @@
 
     /* ---------- Header ribbon ---------- */
     .header {
-      background: linear-gradient(135deg, var(--header), #0f3d22);
+      background: var(--header);
       color: var(--header-ink);
       padding: 14px 16px;
       display: flex;
@@ -92,7 +92,7 @@
     }
     .search-wrap svg { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); opacity: .5; }
 
-    #status { margin-bottom: 10px; padding: 10px 12px; border-radius: 10px; display: none; }
+    #status { margin-bottom: 10px; padding: 10px 12px; border-radius: 10px; display: none; white-space: pre-line; }
     #status.ok { display: block; background: #dcfce7; color: var(--ok); }
     #status.err { display: block; background: #fee2e2; color: var(--danger); }
     .banner {
@@ -589,6 +589,19 @@
     const floatBar = $('floatBar');
     const waGuideOverlay = $('waGuideOverlay');
     const isDesktop = () => window.innerWidth >= 901;
+    const supportPhone = '7397222111';
+
+    function sessionFallbackMessage() {
+      return [
+        '🙏 Thank you for reaching out to Geetham Veg!',
+        '',
+        "It looks like your session has expired or hasn't been started yet.",
+        '',
+        '---',
+        'To place an order or check your queue, send Hi',
+        `To speak with customer care, call ${supportPhone}`,
+      ].join('\n');
+    }
 
     function showStatus(text, type) {
       statusBox.className = type || '';
@@ -1012,7 +1025,7 @@ $('subtotal').textContent = money(subtotal);
         return;
       }
       if (!token) {
-        showStatus('This cart link is incomplete. Please reopen from WhatsApp.', 'err');
+        showStatus(sessionFallbackMessage(), 'err');
         return;
       }
       try {
@@ -1023,7 +1036,7 @@ $('subtotal').textContent = money(subtotal);
         const data = await res.json();
 
         if (!res.ok || !data.valid) {
-          showStatus(data.message || 'Session expired. Please request a new link on WhatsApp.', 'err');
+          showStatus(sessionFallbackMessage(), 'err');
           return;
         }
 
@@ -1045,9 +1058,8 @@ $('subtotal').textContent = money(subtotal);
 
         // Keep CTA/accent color fixed per current brand requirement.
         document.documentElement.style.setProperty('--brand', '#E36D26');
-        if (data.theme && data.theme.accent_color) {
-          document.documentElement.style.setProperty('--header', data.theme.accent_color);
-        }
+        // Keep header fixed to black across all flows.
+        document.documentElement.style.setProperty('--header', '#000000');
 
         $('brandName').textContent = data.restaurant.name || 'Munafe';
         $('sessionMeta').textContent = `Token ${data.session.token} • ${data.session.phone}`;
