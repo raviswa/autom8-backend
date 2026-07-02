@@ -830,6 +830,7 @@ async def prepare_checkout_page(booking_id: str, token: str) -> dict[str, Any]:
         "contact": contact.lstrip("+"),
         "booking_id": booking_id,
         "retry_url": build_hosted_checkout_url(booking_id),
+        "test_mode": razorpay_status_message() == "enabled_test",
     }
 
 
@@ -845,6 +846,7 @@ def render_checkout_html(ctx: dict[str, Any]) -> str:
     contact = json.dumps(ctx.get("contact") or "")
     retry_url = json.dumps(ctx.get("retry_url") or "")
     booking_id = json.dumps(ctx.get("booking_id") or "")
+    test_mode = "true" if ctx.get("test_mode") else "false"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -860,9 +862,14 @@ def render_checkout_html(ctx: dict[str, Any]) -> str:
 <body>
   <h2>Opening secure payment…</h2>
   <p class="muted">Complete payment to confirm your order.<br/>You can return to WhatsApp after paying.</p>
+    <div id="testTools" style="display:none;max-width:28rem;margin:1.25rem auto 0;padding:0.85rem 1rem;border:1px dashed #f59e0b;border-radius:0.85rem;background:#fffbeb;">
+        <p class="muted" style="margin:0 0 0.65rem;color:#92400e;"><strong>Test mode</strong>: Razorpay sandbox methods can fail unpredictably. Use the button below to simulate a successful payment for QA.</p>
+        <button id="mockSuccessBtn" type="button" style="appearance:none;border:none;border-radius:0.75rem;background:#e36d26;color:#fff;padding:0.8rem 1rem;font-weight:700;cursor:pointer;">Simulate Test Payment Success</button>
+    </div>
   <script>
         var retryUrl = {retry_url};
         var bookingId = {booking_id};
+                var testMode = {test_mode};
 
         function sendFailureEvent(kind, details) {{
             var payload = JSON.stringify({{
@@ -897,6 +904,29 @@ def render_checkout_html(ctx: dict[str, Any]) -> str:
             setTimeout(function() {{
                 window.location.href = "/payment/complete" + q;
             }}, 180);
+        }}
+
+        function simulateSuccess() {{
+            fetch("/pay/mock-success", {{
+                method: "POST",
+                headers: {{ "Content-Type": "application/json" }},
+                body: JSON.stringify({{ booking_id: bookingId, order_id: {order_id} }})
+            }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+                if (data && data.ok && data.redirect) {{
+                    window.location.href = data.redirect;
+                    return;
+                }}
+                finishRedirect("failed", (data && data.reason) || "mock_success_failed");
+            }}).catch(function() {{
+                finishRedirect("failed", "mock_success_failed");
+            }});
+        }}
+
+        if (testMode) {{
+            var testTools = document.getElementById("testTools");
+            var mockSuccessBtn = document.getElementById("mockSuccessBtn");
+            if (testTools) testTools.style.display = "block";
+            if (mockSuccessBtn) mockSuccessBtn.addEventListener("click", simulateSuccess);
         }}
 
     var options = {{
@@ -994,6 +1024,41 @@ async def verify_checkout_payment(body: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         logger.error(f"[razorpay] checkout fulfillment failed for {booking_id}: {exc}")
         return {"ok": False, "error": str(exc)}
+
+
+async def mark_test_checkout_paid(booking_id: str, order_id: str) -> dict[str, Any]:
+    """Test-mode only: simulate a successful checkout for QA when Razorpay sandbox is flaky."""
+    if razorpay_status_message() != "enabled_test":
+        return {"ok": False, "reason": "not_test_mode"}
+    if not booking_id or not order_id:
+        return {"ok": False, "reason": "missing_fields"}
+
+    client = _get_client()
+    if not client:
+        return {"ok": False, "reason": "not_configured"}
+
+    try:
+        order = client.order.fetch(order_id)
+    except Exception as exc:
+        logger.error(f"[razorpay] test checkout order fetch failed {order_id}: {exc}")
+        return {"ok": False, "reason": "order_fetch_failed"}
+
+    order_booking_id = str((order.get("notes") or {}).get("booking_id") or "")
+    if order_booking_id != str(booking_id):
+        return {"ok": False, "reason": "booking_order_mismatch"}
+
+    try:
+        result = await _mark_paid_and_fulfill(str(booking_id), source="test_checkout")
+        return {
+            **result,
+            "redirect": (
+                f"{settings.chat_public_url.rstrip('/')}/payment/complete"
+                f"?status=paid&booking_id={quote(str(booking_id))}"
+            ),
+        }
+    except Exception as exc:
+        logger.error(f"[razorpay] test checkout fulfillment failed for {booking_id}: {exc}")
+        return {"ok": False, "reason": "fulfillment_failed", "error": str(exc)}
 
 
 async def handle_payment_link_callback(query_params: dict[str, str]) -> dict[str, Any]:

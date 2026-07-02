@@ -41,6 +41,7 @@ from tools.payment_tools import (
     verify_checkout_payment,
     ensure_prepay_payment_link,
     build_checkout_page_url,
+    mark_test_checkout_paid,
 )
 from tools.auto_reply_filter import is_whatsapp_auto_reply
 from tools.booking_mechanisms import (
@@ -1280,6 +1281,22 @@ async def pay_verify(request: Request):
         bool(result.get("ok")),
         str(result.get("booking_id") or ""),
         str(result.get("reason") or ""),
+    )
+    status_code = 200 if result.get("ok") else 400
+    return JSONResponse(status_code=status_code, content=result)
+
+
+@app.post("/pay/mock-success")
+async def pay_mock_success(request: Request):
+    """Test-mode only: simulate a successful payment when Razorpay sandbox methods are unreliable."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    result = await mark_test_checkout_paid(
+        str(body.get("booking_id") or ""),
+        str(body.get("order_id") or ""),
     )
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(status_code=status_code, content=result)

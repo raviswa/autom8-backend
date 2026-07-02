@@ -996,6 +996,7 @@ async def get_pending_prepay_reminder_candidates(
     min_age_minutes: int = 15,
     max_age_hours: int = 24,
     max_reminders: int = 3,
+    cooldown_minutes: int = 60,
 ) -> list[dict[str, Any]]:
     """Bookings awaiting Razorpay prepay that may need a WhatsApp payment reminder."""
     if AsyncSessionLocal is None:
@@ -1024,6 +1025,10 @@ async def get_pending_prepay_reminder_candidates(
                       AND COALESCE(
                             (b.prepay_fulfillment_payload->>'reminder_count')::int, 0
                           ) < :max_reminders
+                                            AND COALESCE(
+                                                        NULLIF(b.prepay_fulfillment_payload->>'last_reminder_at', '')::timestamptz,
+                                                        b.created_at
+                                                    ) < NOW() - (:cooldown || ' minutes')::interval
                     ORDER BY b.created_at ASC
                     LIMIT 30
                 """),
@@ -1031,6 +1036,7 @@ async def get_pending_prepay_reminder_candidates(
                     "min_age": str(min_age_minutes),
                     "max_age": str(max_age_hours),
                     "max_reminders": max_reminders,
+                                        "cooldown": str(cooldown_minutes),
                 },
             )
             rows = result.mappings().all()
@@ -1041,7 +1047,7 @@ async def get_pending_prepay_reminder_candidates(
 
 
 async def increment_prepay_reminder_count(booking_id: str) -> None:
-    """Bump reminder_count inside prepay_fulfillment_payload."""
+    """Bump reminder_count and record last_reminder_at inside prepay_fulfillment_payload."""
     if AsyncSessionLocal is None:
         return
     try:
@@ -1050,12 +1056,17 @@ async def increment_prepay_reminder_count(booking_id: str) -> None:
                 text("""
                     UPDATE bookings
                     SET prepay_fulfillment_payload = jsonb_set(
-                      COALESCE(prepay_fulfillment_payload, '{}'::jsonb),
-                      '{reminder_count}',
-                      to_jsonb(
-                        COALESCE((prepay_fulfillment_payload->>'reminder_count')::int, 0) + 1
-                      ),
-                      true
+                        jsonb_set(
+                            COALESCE(prepay_fulfillment_payload, '{}'::jsonb),
+                            '{reminder_count}',
+                            to_jsonb(
+                                COALESCE((prepay_fulfillment_payload->>'reminder_count')::int, 0) + 1
+                            ),
+                            true
+                        ),
+                        '{last_reminder_at}',
+                        to_jsonb(to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')),
+                        true
                     )
                     WHERE id = CAST(:bid AS uuid)
                 """),
