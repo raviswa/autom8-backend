@@ -789,6 +789,8 @@ async def internal_webcart_confirm_pay(request: Request):
 @app.get("/payment/complete")
 async def payment_complete(request: Request):
     """Customer redirect after Razorpay checkout (Orders API or legacy payment links)."""
+    from html import escape
+
     params = dict(request.query_params)
     simple_status = params.get("status", "")
     status = params.get("razorpay_payment_link_status", "") or simple_status
@@ -804,32 +806,132 @@ async def payment_complete(request: Request):
     elif simple_status == "paid":
         result = {"ok": True, "fulfilled": True}
 
-    if status == "paid" and result.get("fulfilled") is not False and result.get("ok") is not False:
-        html = (
-            "<h1>Thank you! 🙏</h1>"
-            "<p>Your payment was received. You can return to WhatsApp — "
-            "we'll confirm your order there shortly.</p>"
-        )
-    elif status == "paid":
-        html = (
-            "<h1>Payment received ✅</h1>"
-            "<p>We received your payment. If you don't get a WhatsApp confirmation "
-            "within a few minutes, please message us <em>pay</em> to retry confirmation.</p>"
-        )
-    elif status in ("cancelled", "failed", "expired"):
-        html = (
-            "<h1>Payment not completed</h1>"
-            "<p>Your payment was not completed. Return to WhatsApp — "
-            "we've sent you a link to try again.</p>"
-        )
-    else:
-        html = (
-            "<h1>Payment status unknown</h1>"
-            "<p>Return to WhatsApp and reply <em>pay</em> to get your payment link, "
-            "or type <em>Home</em> to start over.</p>"
-        )
+        retry_url = params.get("retry", "")
 
-    return HTMLResponse(html, status_code=200)
+        title = "Payment status"
+        message = "Return to WhatsApp and reply <em>pay</em> to get a new payment link."
+        tone = "neutral"
+
+        if status == "paid" and result.get("fulfilled") is not False and result.get("ok") is not False:
+                title = "Thank you!"
+                message = "Your payment was received. Return to WhatsApp for confirmation."
+                tone = "ok"
+        elif status == "paid":
+                title = "Payment received"
+                message = (
+                        "We received your payment. If confirmation does not arrive in a few minutes, "
+                        "send <em>pay</em> on WhatsApp to retry confirmation."
+                )
+                tone = "ok"
+        elif status in ("cancelled", "failed", "expired"):
+                title = "Payment not completed"
+                message = (
+                        "No worries. Return to WhatsApp and tap Confirm &amp; Pay again, "
+                        "or retry payment below."
+                )
+                tone = "warn"
+
+        safe_status = escape(status or "unknown")
+        safe_retry = escape(retry_url, quote=True)
+
+        retry_btn = ""
+        if retry_url:
+            retry_btn = f'<a class="btn btn-secondary" href="{safe_retry}">Try Payment Again</a>'
+
+        html = f"""
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <style>
+        :root {{
+            --ink: #0f172a;
+            --muted: #475569;
+            --line: #e2e8f0;
+            --ok-bg: #ecfdf3;
+            --ok-line: #86efac;
+            --warn-bg: #fff7ed;
+            --warn-line: #fdba74;
+            --cta: #e36d26;
+        }}
+        * {{ box-sizing: border-box; }}
+        body {{
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f8fafc;
+            color: var(--ink);
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            padding: 20px;
+        }}
+        .card {{
+            width: min(560px, 100%);
+            background: #fff;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            padding: 22px;
+        }}
+        .status {{
+            border-radius: 12px;
+            padding: 12px 14px;
+            font-size: 13px;
+            margin-bottom: 14px;
+        }}
+        .status.ok {{ background: var(--ok-bg); border: 1px solid var(--ok-line); }}
+        .status.warn {{ background: var(--warn-bg); border: 1px solid var(--warn-line); }}
+        h1 {{ margin: 0 0 8px; font-size: 34px; line-height: 1.1; }}
+        p {{ margin: 0; color: var(--muted); font-size: 18px; line-height: 1.5; }}
+        .actions {{ display: grid; gap: 10px; margin-top: 18px; }}
+        .btn {{
+            appearance: none;
+            text-decoration: none;
+            border-radius: 12px;
+            padding: 13px 14px;
+            text-align: center;
+            font-weight: 700;
+            border: 1px solid transparent;
+            cursor: pointer;
+        }}
+        .btn-primary {{ background: var(--cta); color: #fff; border-color: var(--cta); }}
+        .btn-secondary {{ background: #fff; color: var(--ink); border-color: var(--line); }}
+        .help {{ margin-top: 10px; font-size: 13px; color: #64748b; }}
+    </style>
+    <script>
+        function goToWhatsApp() {{
+            var ua = String(navigator.userAgent || '').toLowerCase();
+            if (ua.indexOf('android') >= 0) {{
+                window.location.href = 'intent://send/#Intent;scheme=whatsapp;package=com.whatsapp;end';
+                setTimeout(function () {{ window.location.href = 'https://wa.me/'; }}, 800);
+                return;
+            }}
+            if (/(iphone|ipad|ipod)/.test(ua)) {{
+                window.location.href = 'whatsapp://send';
+                setTimeout(function () {{ window.location.href = 'https://wa.me/'; }}, 800);
+                return;
+            }}
+            window.location.href = 'https://web.whatsapp.com';
+        }}
+    </script>
+</head>
+<body>
+    <main class="card">
+        <div class="status {tone}">Payment status: {safe_status}</div>
+        <h1>{title}</h1>
+        <p>{message}</p>
+        <div class="actions">
+            <button class="btn btn-primary" type="button" onclick="goToWhatsApp()">Return to WhatsApp</button>
+            {retry_btn}
+        </div>
+        <p class="help">Works for dine-in, takeaway, and delivery prepay flows.</p>
+    </main>
+</body>
+</html>
+"""
+
+        return HTMLResponse(html, status_code=200)
 
 
 @app.get("/pay/{booking_id}")

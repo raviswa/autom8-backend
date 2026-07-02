@@ -468,7 +468,7 @@
       <p class="wa-guide-tip">After payment, return to this page. It will auto-update.</p>
       <div class="wa-guide-actions">
         <button id="waOpenBtn" class="wa-primary" type="button">Go to WhatsApp</button>
-        <button id="waCloseBtn" class="wa-secondary" type="button">I will pay now</button>
+        <button id="waCloseBtn" class="wa-secondary" type="button">Stay on this page</button>
       </div>
     </div>
   </div>
@@ -813,12 +813,29 @@ $('subtotal').textContent = money(subtotal);
     }
 
     function openWhatsApp() {
-      const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
-      if (isMobile) {
-        window.location.href = 'https://wa.me/';
-      } else {
-        window.open('https://web.whatsapp.com', '_blank', 'noopener,noreferrer');
+      const ua = String(navigator.userAgent || '').toLowerCase();
+      const isAndroid = ua.includes('android');
+      const isIOS = /iphone|ipad|ipod/.test(ua);
+
+      // Prefer native deep links first. If blocked, fall back to web WhatsApp.
+      if (isAndroid) {
+        const intentUrl = 'intent://send/#Intent;scheme=whatsapp;package=com.whatsapp;end';
+        window.location.href = intentUrl;
+        setTimeout(() => {
+          window.location.href = 'https://wa.me/';
+        }, 800);
+        return;
       }
+
+      if (isIOS) {
+        window.location.href = 'whatsapp://send';
+        setTimeout(() => {
+          window.location.href = 'https://wa.me/';
+        }, 800);
+        return;
+      }
+
+      window.open('https://web.whatsapp.com', '_blank', 'noopener,noreferrer');
     }
 
     async function checkPaymentStatus() {

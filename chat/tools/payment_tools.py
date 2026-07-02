@@ -824,6 +824,7 @@ async def prepare_checkout_page(booking_id: str, token: str) -> dict[str, Any]:
         "customer_name": customer_name[:120],
         "contact": contact.lstrip("+"),
         "booking_id": booking_id,
+        "retry_url": build_hosted_checkout_url(booking_id),
     }
 
 
@@ -837,6 +838,7 @@ def render_checkout_html(ctx: dict[str, Any]) -> str:
     description = json.dumps(ctx["description"])
     customer_name = json.dumps(ctx["customer_name"])
     contact = json.dumps(ctx.get("contact") or "")
+    retry_url = json.dumps(ctx.get("retry_url") or "")
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -853,6 +855,13 @@ def render_checkout_html(ctx: dict[str, Any]) -> str:
   <h2>Opening secure payment…</h2>
   <p class="muted">Complete payment to confirm your order.<br/>You can return to WhatsApp after paying.</p>
   <script>
+        var retryUrl = {retry_url};
+        function finishRedirect(status) {{
+            var q = "?status=" + encodeURIComponent(status || "unknown");
+            if (retryUrl) q += "&retry=" + encodeURIComponent(retryUrl);
+            window.location.href = "/payment/complete" + q;
+        }}
+
     var options = {{
       key: {key_id},
       order_id: {order_id},
@@ -873,13 +882,13 @@ def render_checkout_html(ctx: dict[str, Any]) -> str:
       }},
       modal: {{
         ondismiss: function() {{
-          window.location.href = "/payment/complete?status=cancelled";
+                    finishRedirect("cancelled");
         }}
       }}
     }};
     var rzp = new Razorpay(options);
     rzp.on("payment.failed", function() {{
-      window.location.href = "/payment/complete?status=failed";
+            finishRedirect("failed");
     }});
     rzp.open();
   </script>
