@@ -589,17 +589,39 @@
     const floatBar = $('floatBar');
     const waGuideOverlay = $('waGuideOverlay');
     const isDesktop = () => window.innerWidth >= 901;
-    const supportPhone = '7397222111';
+    const fallbackSupportPhone = '7397222111';
 
-    function sessionFallbackMessage() {
+    function prettySlugName(value) {
+      const raw = String(value || '').trim();
+      if (!raw) return 'our restaurant';
+      return raw
+        .replace(/[-_]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .split(' ')
+        .map((w) => w ? (w[0].toUpperCase() + w.slice(1)) : '')
+        .join(' ');
+    }
+
+    function sessionFallbackMessage({ restaurantName, supportPhone } = {}) {
+      const resolvedName = String(
+        restaurantName ||
+        (state.restaurant && state.restaurant.name) ||
+        prettySlugName(slug || hostSlug)
+      ).trim() || 'our restaurant';
+      const resolvedPhone = String(
+        supportPhone ||
+        (state.restaurant && state.restaurant.support_phone) ||
+        fallbackSupportPhone
+      ).replace(/\D/g, '');
       return [
-        '🙏 Thank you for reaching out to Geetham Veg!',
+        `🙏 Thank you for reaching out to ${resolvedName}!`,
         '',
         "It looks like your session has expired or hasn't been started yet.",
         '',
         '---',
         'To place an order or check your queue, send Hi',
-        `To speak with customer care, call ${supportPhone}`,
+        `To speak with customer care, call ${resolvedPhone || fallbackSupportPhone}`,
       ].join('\n');
     }
 
@@ -1036,7 +1058,13 @@ $('subtotal').textContent = money(subtotal);
         const data = await res.json();
 
         if (!res.ok || !data.valid) {
-          showStatus(sessionFallbackMessage(), 'err');
+          showStatus(
+            sessionFallbackMessage({
+              restaurantName: data && (data.restaurant_name || data.restaurant || data.name),
+              supportPhone: data && data.support_phone,
+            }),
+            'err',
+          );
           return;
         }
 

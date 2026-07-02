@@ -808,6 +808,39 @@ async def payment_complete(request: Request):
 
     retry_url = params.get("retry", "")
     support_phone = "7397222111"
+    restaurant_name = "our restaurant"
+
+    booking_id_hint = (
+        params.get("booking_id")
+        or params.get("reference_id")
+        or params.get("razorpay_payment_link_reference_id")
+        or ""
+    )
+    if not booking_id_hint and retry_url:
+        import re
+        m = re.search(r"/pay/([0-9a-fA-F-]{36})", retry_url)
+        if m:
+            booking_id_hint = m.group(1)
+
+    if booking_id_hint:
+        try:
+            from tools.db_tools import get_booking_with_customer
+            from tools.booking_mechanisms import fetch_restaurant_info
+
+            booking = await get_booking_with_customer(str(booking_id_hint))
+            if booking and booking.get("restaurant_id"):
+                info = await fetch_restaurant_info(str(booking["restaurant_id"]))
+                restaurant_name = (
+                    (info.get("display_name") or "").strip()
+                    or (info.get("name") or "").strip()
+                    or restaurant_name
+                )
+
+                digits = "".join(ch for ch in str(info.get("whatsapp_number") or info.get("phone") or "") if ch.isdigit())
+                if digits:
+                    support_phone = digits
+        except Exception as _meta_err:
+            logger.debug(f"[payment-complete] metadata resolve failed: {_meta_err}")
 
     title = "Payment status"
     message = "Return to WhatsApp and reply <em>pay</em> to get a new payment link."
@@ -936,6 +969,7 @@ async def payment_complete(request: Request):
             <button class="btn btn-primary" type="button" onclick="goToWhatsApp()">Return to WhatsApp</button>
             {retry_btn}
         </div>
+        <p class="help">🙏 Thank you for reaching out to <strong>{escape(restaurant_name)}</strong>.</p>
         <p class="help">To place an order or check your queue, send <strong>Hi</strong> on WhatsApp.</p>
         <p class="help">To speak with customer care, call <strong>{support_phone}</strong>.</p>
         <p class="help">Works for dine-in, takeaway, and delivery prepay flows.</p>

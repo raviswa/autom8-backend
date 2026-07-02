@@ -88,6 +88,7 @@ function buildExpiredPayload(restaurant) {
     valid: false,
     code: 'SESSION_EXPIRED',
     message: lines.join(' '),
+    restaurant_name: name,
     support_phone: supportPhone || null,
   };
 }
