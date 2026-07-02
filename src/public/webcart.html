@@ -1073,7 +1073,11 @@ $('subtotal').textContent = money(subtotal);
         return `<button class="chip ${active ? 'active' : ''}" data-tab="${tab}">${label}</button>`;
       }).join('');
       tabChips.querySelectorAll('button[data-tab]').forEach(btn => {
-        btn.addEventListener('click', () => { state.activeTab = btn.dataset.tab; renderMenuList(); });
+        btn.addEventListener('click', () => {
+          state.activeTab = btn.dataset.tab;
+          renderChips();
+          renderMenuList();
+        });
       });
     }
 
