@@ -30,6 +30,7 @@
       background: var(--bg);
       padding-bottom: 64px; /* room for bottom nav */
     }
+    body.wa-guide-open { overflow: hidden; }
     img { -webkit-user-drag: none; }
     button { font-family: inherit; }
 
@@ -227,39 +228,51 @@
       display: none;
       align-items: center;
       justify-content: center;
-      padding: 24px;
+      padding: 24px 20px calc(24px + env(safe-area-inset-bottom));
     }
     .wa-guide-overlay.show { display: flex; }
     .wa-guide-card {
-      width: min(480px, 100%);
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 22px;
-      box-shadow: 0 10px 28px rgba(0,0,0,0.08);
+      width: min(520px, 100%);
+      border-radius: 20px;
+      padding: 12px 4px;
       text-align: center;
       background: #fff;
     }
+    .wa-guide-kicker {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #8b5e3c;
+      background: #fff3e8;
+      border: 1px solid #ffd7b7;
+      border-radius: 999px;
+      padding: 6px 10px;
+      margin-bottom: 12px;
+    }
     .wa-guide-title {
-      font-size: 24px;
+      font-size: 30px;
       font-weight: 800;
       color: var(--ink);
-      margin: 0 0 8px;
+      letter-spacing: -0.02em;
+      margin: 0 0 10px;
     }
     .wa-guide-sub {
       margin: 0;
       color: var(--muted);
-      font-size: 14px;
-      line-height: 1.45;
+      font-size: 15px;
+      line-height: 1.6;
     }
     .wa-guide-actions {
-      margin-top: 16px;
+      margin-top: 20px;
       display: grid;
       gap: 10px;
     }
     .wa-primary,
     .wa-secondary {
       border-radius: 12px;
-      padding: 12px;
+      padding: 13px;
       font-weight: 700;
       font-size: 14px;
       cursor: pointer;
@@ -275,6 +288,18 @@
       background: #fff;
       color: var(--ink);
       border-color: var(--line);
+    }
+    @media (max-width: 520px) {
+      .wa-guide-overlay {
+        align-items: end;
+        padding: 16px 14px calc(18px + env(safe-area-inset-bottom));
+      }
+      .wa-guide-card {
+        width: 100%;
+        padding: 8px 2px;
+      }
+      .wa-guide-title { font-size: 25px; }
+      .wa-guide-sub { font-size: 14px; }
     }
 
     /* Floating "View Cart" bar */
@@ -404,14 +429,15 @@
 
   <div id="waGuideOverlay" class="wa-guide-overlay" aria-hidden="true">
     <div class="wa-guide-card">
+      <div class="wa-guide-kicker">WhatsApp Checkout</div>
       <h2 class="wa-guide-title">Payment Link Sent</h2>
       <p class="wa-guide-sub">
-        We sent your Confirm &amp; Pay link on WhatsApp.<br>
-        Please switch to WhatsApp and tap the button to complete payment.
+        We sent your <strong>Confirm &amp; Pay</strong> link on WhatsApp.<br>
+        Switch to WhatsApp now and tap the button to complete payment.
       </p>
       <div class="wa-guide-actions">
-        <button id="waOpenBtn" class="wa-primary" type="button">Open WhatsApp</button>
-        <button id="waCloseBtn" class="wa-secondary" type="button">I'll do this now</button>
+        <button id="waOpenBtn" class="wa-primary" type="button">Go to WhatsApp</button>
+        <button id="waCloseBtn" class="wa-secondary" type="button">I will pay now</button>
       </div>
     </div>
   </div>
@@ -745,12 +771,14 @@ $('subtotal').textContent = money(subtotal);
       if (!waGuideOverlay) return;
       waGuideOverlay.classList.add('show');
       waGuideOverlay.setAttribute('aria-hidden', 'false');
+      document.body.classList.add('wa-guide-open');
     }
 
     function hideWhatsAppGuide() {
       if (!waGuideOverlay) return;
       waGuideOverlay.classList.remove('show');
       waGuideOverlay.setAttribute('aria-hidden', 'true');
+      document.body.classList.remove('wa-guide-open');
     }
 
     function openWhatsApp() {
@@ -776,6 +804,7 @@ $('subtotal').textContent = money(subtotal);
         if (!res.ok || !data.ok) return;
 
         if (data.paid) {
+          hideWhatsAppGuide();
           clearCartLocal();
           clearLastSubmitLocal();
           state.cart = new Map();
@@ -966,9 +995,8 @@ $('subtotal').textContent = money(subtotal);
         // returning from the WhatsApp redirect) so steppers show correctly.
         loadCartLocal();
 
-        if (data.theme && data.theme.primary_color) {
-          document.documentElement.style.setProperty('--brand', data.theme.primary_color);
-        }
+        // Keep CTA/accent color fixed per current brand requirement.
+        document.documentElement.style.setProperty('--brand', '#E36D26');
         if (data.theme && data.theme.accent_color) {
           document.documentElement.style.setProperty('--header', data.theme.accent_color);
         }
