@@ -120,6 +120,11 @@ def build_checkout_page_url(booking_id: str) -> str:
     return f"{base}/pay/{booking_id}?t={quote(token)}"
 
 
+def build_hosted_checkout_url(booking_id: str) -> str:
+    """Backward-compatible alias used by older checkout call sites."""
+    return build_checkout_page_url(booking_id)
+
+
 def _get_client():
     """Fresh client per call — picks up Railway env vars after redeploy."""
     if not razorpay_configured():
@@ -860,16 +865,26 @@ def render_checkout_html(ctx: dict[str, Any]) -> str:
         var bookingId = {booking_id};
 
         function sendFailureEvent(kind, details) {{
+            var payload = JSON.stringify({{
+                kind: kind,
+                booking_id: bookingId,
+                order_id: {order_id},
+                details: details || {{}}
+            }});
+            try {{
+                if (navigator && typeof navigator.sendBeacon === "function") {{
+                    var blob = new Blob([payload], {{ type: "application/json" }});
+                    navigator.sendBeacon("/pay/failure-event", blob);
+                    return;
+                }}
+            }} catch (_e) {{}}
+
             try {{
                 fetch("/pay/failure-event", {{
                     method: "POST",
                     headers: {{ "Content-Type": "application/json" }},
-                    body: JSON.stringify({{
-                        kind: kind,
-                        booking_id: bookingId,
-                        order_id: {order_id},
-                        details: details || {{}}
-                    }})
+                    body: payload,
+                    keepalive: true
                 }});
             }} catch (_e) {{}}
         }}
@@ -878,7 +893,9 @@ def render_checkout_html(ctx: dict[str, Any]) -> str:
             var q = "?status=" + encodeURIComponent(status || "unknown");
             if (reason) q += "&reason=" + encodeURIComponent(reason);
             if (retryUrl) q += "&retry=" + encodeURIComponent(retryUrl);
-            window.location.href = "/payment/complete" + q;
+            setTimeout(function() {{
+                window.location.href = "/payment/complete" + q;
+            }}, 180);
         }}
 
     var options = {{
