@@ -839,6 +839,7 @@ def render_checkout_html(ctx: dict[str, Any]) -> str:
     customer_name = json.dumps(ctx["customer_name"])
     contact = json.dumps(ctx.get("contact") or "")
     retry_url = json.dumps(ctx.get("retry_url") or "")
+    booking_id = json.dumps(ctx.get("booking_id") or "")
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -856,8 +857,26 @@ def render_checkout_html(ctx: dict[str, Any]) -> str:
   <p class="muted">Complete payment to confirm your order.<br/>You can return to WhatsApp after paying.</p>
   <script>
         var retryUrl = {retry_url};
-        function finishRedirect(status) {{
+        var bookingId = {booking_id};
+
+        function sendFailureEvent(kind, details) {{
+            try {{
+                fetch("/pay/failure-event", {{
+                    method: "POST",
+                    headers: {{ "Content-Type": "application/json" }},
+                    body: JSON.stringify({{
+                        kind: kind,
+                        booking_id: bookingId,
+                        order_id: {order_id},
+                        details: details || {{}}
+                    }})
+                }});
+            }} catch (_e) {{}}
+        }}
+
+        function finishRedirect(status, reason) {{
             var q = "?status=" + encodeURIComponent(status || "unknown");
+            if (reason) q += "&reason=" + encodeURIComponent(reason);
             if (retryUrl) q += "&retry=" + encodeURIComponent(retryUrl);
             window.location.href = "/payment/complete" + q;
         }}
@@ -882,13 +901,25 @@ def render_checkout_html(ctx: dict[str, Any]) -> str:
       }},
       modal: {{
         ondismiss: function() {{
-                    finishRedirect("cancelled");
+                    sendFailureEvent("checkout_dismissed", {{ source: "modal" }});
+                    finishRedirect("cancelled", "checkout_dismissed");
         }}
       }}
     }};
     var rzp = new Razorpay(options);
-    rzp.on("payment.failed", function() {{
-            finishRedirect("failed");
+        rzp.on("payment.failed", function(response) {{
+            var err = (response && response.error) || {{}};
+            var reason = err.reason || err.code || "payment_failed";
+            sendFailureEvent("payment_failed", {{
+                reason: reason,
+                code: err.code || "",
+                description: err.description || "",
+                source: err.source || "",
+                step: err.step || "",
+                payment_id: err.metadata && err.metadata.payment_id || "",
+                order_id: err.metadata && err.metadata.order_id || ""
+            }});
+            finishRedirect("failed", reason);
     }});
     rzp.open();
   </script>

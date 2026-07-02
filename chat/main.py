@@ -822,6 +822,15 @@ async def payment_complete(request: Request):
         if m:
             booking_id_hint = m.group(1)
 
+    if status in ("failed", "cancelled", "expired"):
+        logger.info(
+            "[payment-complete] status=%s reason=%s booking_hint=%s has_retry=%s",
+            status,
+            str(params.get("reason") or ""),
+            booking_id_hint or "",
+            bool(retry_url),
+        )
+
     if booking_id_hint:
         try:
             from tools.db_tools import get_booking_with_customer
@@ -941,6 +950,17 @@ async def payment_complete(request: Request):
         .btn-primary {{ background: var(--cta); color: #fff; border-color: var(--cta); }}
         .btn-secondary {{ background: #fff; color: var(--ink); border-color: var(--line); }}
         .help {{ margin-top: 10px; font-size: 13px; color: #64748b; }}
+        .support-row {{ margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap; }}
+        .support-link {{
+            text-decoration: none;
+            border-radius: 999px;
+            border: 1px solid var(--line);
+            color: var(--ink);
+            padding: 8px 12px;
+            font-size: 12px;
+            font-weight: 700;
+            background: #fff;
+        }}
     </style>
     <script>
         function goToWhatsApp() {{
@@ -972,6 +992,10 @@ async def payment_complete(request: Request):
         <p class="help">🙏 Thank you for reaching out to <strong>{escape(restaurant_name)}</strong>.</p>
         <p class="help">To place an order or check your queue, send <strong>Hi</strong> on WhatsApp.</p>
         <p class="help">To speak with customer care, call <strong>{support_phone}</strong>.</p>
+        <div class="support-row">
+            <a class="support-link" href="tel:{support_phone}">Call Support</a>
+            <a class="support-link" href="https://wa.me/{support_phone}">WhatsApp Support</a>
+        </div>
         <p class="help">Works for dine-in, takeaway, and delivery prepay flows.</p>
     </main>
 </body>
@@ -1010,6 +1034,33 @@ async def pay_verify(request: Request):
     result = await verify_checkout_payment(body)
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(status_code=status_code, content=result)
+
+
+@app.post("/pay/failure-event")
+async def pay_failure_event(request: Request):
+    """Client-side Razorpay failure telemetry from hosted checkout page."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    kind = str(body.get("kind") or "unknown")
+    booking_id = str(body.get("booking_id") or "")
+    order_id = str(body.get("order_id") or "")
+    details = body.get("details") if isinstance(body.get("details"), dict) else {}
+
+    logger.warning(
+        "[razorpay][client-failure] kind=%s booking_id=%s order_id=%s reason=%s code=%s source=%s step=%s desc=%s",
+        kind,
+        booking_id,
+        order_id,
+        str(details.get("reason") or ""),
+        str(details.get("code") or ""),
+        str(details.get("source") or ""),
+        str(details.get("step") or ""),
+        str(details.get("description") or "")[:180],
+    )
+    return JSONResponse(status_code=200, content={"ok": True})
 
 
 @app.get("/webhook/razorpay")
