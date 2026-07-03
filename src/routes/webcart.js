@@ -293,7 +293,6 @@ async function fetchMenuItems(restaurantId) {
       .from('menu_items')
       .select('id, retailer_id, name, price, category, description, image_url, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked, is_available')
       .eq('restaurant_id', restaurantId)
-      .eq('is_stocked', true)
       .order('category', { ascending: true })
       .order('name', { ascending: true }),
     supabaseAdmin
@@ -311,6 +310,9 @@ async function fetchMenuItems(restaurantId) {
 
   const items = (itemsRes.data || []).map(item => ({
     ...item,
+    is_available: !!item.is_available,
+    is_stocked: !!item.is_stocked,
+    is_publicly_available: !!(item.is_available && item.is_stocked),
     effective_slots: normalizeSlots(item.applicable_slots || categorySlotMap[item.category] || ['anytime']),
     is_todays_special: !!(item.is_todays_special || item.is_special_today),
   }));
