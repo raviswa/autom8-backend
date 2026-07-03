@@ -11,6 +11,15 @@
 // PUT    /api/tokens/:id/reject  Reject large-party request
 // DELETE /api/tokens/:id         Dismiss token
 // PUT    /api/tokens/:id/complete Mark visit complete + free table
+//
+// FIX (token sequencing, Issue 1): generateTokenId() previously fell back to a
+// non-atomic "SELECT max(...) then check-then-INSERT" scan when the fast RPC
+// (allocate_portal_token_seq) was unavailable. That fallback raced against the
+// Python chat service's independent fallback (tools/db_tools.py), which could
+// allocate the same token id to two different bookings. Both fallbacks now call
+// the same Postgres-advisory-locked function (allocate_portal_token_seq_legacy_locked,
+// see migrations/20260703_token_seq_locked_fallback.sql), so the two services
+// serialize against one shared lock instead of racing each other.
 // ============================================================================
 
 'use strict';
@@ -73,7 +82,16 @@ function requireOutlet(req, res, next) {
 const outletAuth = [authenticateToken, getRestaurantId, requireOutlet];
 
 // ── generateTokenId ───────────────────────────────────────────────────────────
-// Returns the next T-001 style sequential ID (collision-safe).
+// Returns the next T-YYMM-001 style sequential ID (collision-safe).
+//
+// Allocation order:
+//   1. Fast path: allocate_portal_token_seq() RPC — atomic single UPDATE...RETURNING
+//      on the restaurants row, safe under concurrency by Postgres row-lock semantics.
+//   2. Fallback: allocate_portal_token_seq_legacy_locked() RPC — advisory-locked scan,
+//      shared with the Python chat service's fallback so both services serialize
+//      against the same Postgres lock instead of independently racing each other.
+//   3. Last-resort: timestamp-suffixed id, logged as an error (should never happen
+//      once step 1 or 2 succeeds).
 
 async function generateTokenId(restaurantId) {
   try {
@@ -81,35 +99,43 @@ async function generateTokenId(restaurantId) {
       p_restaurant_id: restaurantId,
     });
     if (!error && seq != null) {
-      return buildPortalTokenId(seq);
+      const tokenId = buildPortalTokenId(seq);
+      console.log(`[token-alloc] rpc seq=${seq} -> ${tokenId} restaurant=${restaurantId}`);
+      return tokenId;
     }
     if (error) {
-      console.warn('[tokens] allocate_portal_token_seq RPC failed, using legacy max+1:', error.message);
+      console.warn('[token-alloc] fast RPC (allocate_portal_token_seq) failed, using locked fallback:', error.message);
     }
   } catch (err) {
-    console.warn('[tokens] allocate_portal_token_seq unavailable, using legacy max+1:', err.message);
+    console.warn('[token-alloc] fast RPC (allocate_portal_token_seq) unavailable, using locked fallback:', err.message);
   }
 
-  const yymm = portalTokenMonthKey();
-  const { data: allTokens } = await supabaseAdmin
-    .from('walk_in_tokens').select('id').eq('restaurant_id', restaurantId);
-
-  let maxSeq = 0;
-  for (const row of allTokens ?? []) {
-    const monthly = parseMonthlyTokenId(row.id);
-    if (monthly && monthly.yymm === yymm) {
-      maxSeq = Math.max(maxSeq, monthly.seq);
-      continue;
+  // Cross-process-safe fallback — same SQL function the Python chat service calls
+  // (tools/db_tools.py::_next_portal_token_id), so Node and Python serialize
+  // against one shared Postgres advisory lock instead of racing each other.
+  try {
+    const { data: lockedId, error: lockedErr } = await supabaseAdmin.rpc(
+      'allocate_portal_token_seq_legacy_locked',
+      { p_restaurant_id: restaurantId },
+    );
+    if (!lockedErr && lockedId) {
+      console.warn(`[token-alloc] locked-fallback id=${lockedId} restaurant=${restaurantId}`);
+      return lockedId;
     }
-    const legacy = String(row.id).match(/^T-(\d+)$/);
-    if (legacy) maxSeq = Math.max(maxSeq, parseInt(legacy[1], 10));
+    if (lockedErr) {
+      console.error('[token-alloc] locked fallback RPC failed:', lockedErr.message);
+    }
+  } catch (err) {
+    console.error('[token-alloc] locked fallback RPC threw:', err.message);
   }
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const candidate = buildPortalTokenId(maxSeq + 1 + attempt);
-    const { data: existing } = await supabaseAdmin
-      .from('walk_in_tokens').select('id').eq('id', candidate).maybeSingle();
-    if (!existing) return candidate;
-  }
+
+  console.error(
+    `[token-alloc] BOTH allocation paths failed for restaurant=${restaurantId} — ` +
+    `falling back to timestamp id. This should be investigated; run migrations/` +
+    `20260703_token_seq_locked_fallback.sql if allocate_portal_token_seq_legacy_locked ` +
+    `is missing.`
+  );
+  const yymm = portalTokenMonthKey();
   return `T-${yymm}-${Date.now().toString().slice(-6)}`;
 }
 
@@ -309,6 +335,7 @@ async function approveScheduledDeliveryToken(tokenId, restaurantId, token) {
     meta,
   });
 
+  console.log(`[token-approval] scheduled_delivery token=${token.id} restaurant=${restaurantId} approved -> status=takeaway`);
   await triggerChatScheduledPayment(restaurantId, updatedToken);
 
   broadcastToRestaurant(restaurantId, {
@@ -420,6 +447,7 @@ async function approveScheduledTakeawayToken(tokenId, restaurantId, token) {
     meta,
   });
 
+  console.log(`[token-approval] scheduled_takeaway token=${token.id} restaurant=${restaurantId} approved -> status=takeaway`);
   await triggerChatScheduledPayment(restaurantId, updatedToken);
 
   broadcastToRestaurant(restaurantId, {
@@ -560,8 +588,21 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
       meta:        resolvedMeta,
     };
 
-    const { data: token, error: insertError } = await supabaseAdmin
+    // Defense in depth: even though generateTokenId() should now be collision-free,
+    // guard the insert itself against a PK conflict rather than letting it 500.
+    let { data: token, error: insertError } = await supabaseAdmin
       .from('walk_in_tokens').insert(tokenRecord).select().single();
+
+    if (insertError && String(insertError.message || '').includes('duplicate key')) {
+      console.error(
+        `[token-alloc] PK COLLISION on insert for id=${tokenId} restaurant=${restaurant_id} — ` +
+        `this should not happen post-fix; retrying allocation once.`
+      );
+      tokenRecord.id = await generateTokenId(restaurant_id);
+      ({ data: token, error: insertError } = await supabaseAdmin
+        .from('walk_in_tokens').insert(tokenRecord).select().single());
+    }
+
     if (insertError) {
       const detail = insertError.message || String(insertError);
       if (detail.includes('walk_in_tokens_type_check')) {
