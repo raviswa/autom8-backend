@@ -1,4 +1,18 @@
-"""Defer KDS, receipt, and staff alerts until Razorpay prepay succeeds."""
+"""Defer KDS, receipt, and staff alerts until Razorpay prepay succeeds.
+
+FIX (scheduled-order-leaks-to-live, Issue 2): _dispatch_to_kds() is the function that
+actually creates kds_items for prepay/scheduled orders reached via the webhook
+fulfillment path. Previously it trusted the caller's defer/dispatch decision
+(_should_defer_kds_for_scheduled), which is computed off session_hints — a dict
+snapshotted into the persisted prepay_fulfillment_payload at submission time. If
+kitchen_start_at never made it into that snapshot (e.g. a swallowed exception during
+schedule computation), the defer check could return False even for a booking whose
+real kitchen_start_at (the DB row) is hours in the future, and the order would be
+dispatched to Live immediately. _dispatch_to_kds() now re-checks the persisted
+booking row directly, right before writing anything, and refuses to dispatch if that
+fresh read says the slot hasn't arrived yet — regardless of what the caller believed.
+See matching Node-side fix in src/helpers/scheduledJobs.js::dispatchBookingToKds.
+"""
 
 from __future__ import annotations
 
@@ -19,6 +33,7 @@ from tools.db_tools import (
     save_prepay_fulfillment_payload,
     load_prepay_fulfillment_payload,
     clear_prepay_fulfillment_payload,
+    enqueue_scheduled_jobs,
 )
 from tools.scheduled_kds import (
     is_deferred_scheduled_order,
@@ -332,6 +347,68 @@ async def _should_defer_kds_for_scheduled(
     return True, format_kds_defer_customer_note(scheduled_at, release_at)
 
 
+async def _refuse_and_reenqueue_if_still_future(
+    *,
+    booking_id: str | None,
+    restaurant_id: str,
+    token: str,
+    customer_name: str,
+    customer_phone: str,
+    service_type: str,
+) -> bool:
+    """
+    Hard release-gate re-check, independent of session_hints / the earlier defer
+    decision. Reads kitchen_start_at fresh from the bookings row and refuses to let
+    dispatch proceed if it's still in the future — closing the gap where a stale or
+    lost in-memory hint could otherwise send a scheduled order live too early.
+
+    Returns True if dispatch was refused (caller must not proceed to notify_kds).
+    """
+    if not booking_id:
+        return False
+    try:
+        fresh = await get_booking_with_customer(booking_id)
+    except Exception as exc:
+        logger.warning(f"[scheduled-release] fresh booking read failed for {booking_id}: {exc}")
+        return False
+
+    ks_raw = fresh.get("kitchen_start_at") if fresh else None
+    if not ks_raw:
+        return False
+
+    from datetime import datetime
+    from tools.kitchen_scheduler import parse_slot_datetime
+
+    ks_dt = parse_slot_datetime(ks_raw)
+    if not ks_dt or ks_dt <= datetime.now(tz=ks_dt.tzinfo):
+        return False
+
+    logger.warning(
+        f"[scheduled-release] REFUSED early dispatch booking={booking_id} "
+        f"kitchen_start_at={ks_raw} (still future, source=fresh DB read) — "
+        f"re-enqueuing instead of live-dispatching"
+    )
+    try:
+        await enqueue_scheduled_jobs(
+            restaurant_id,
+            booking_id,
+            token,
+            ks_dt.isoformat(),
+            {
+                "customer_name": customer_name,
+                "customer_phone": customer_phone,
+                "token_number": token,
+                "service_type": service_type,
+                "items": [],
+                "slot_label": "",
+                "kitchen_start_label": "",
+            },
+        )
+    except Exception as exc:
+        logger.error(f"[scheduled-release] re-enqueue failed for {booking_id}: {exc}")
+    return True
+
+
 async def _dispatch_to_kds(
     *,
     restaurant_id: str,
@@ -344,7 +421,23 @@ async def _dispatch_to_kds(
     booking_id: str | None = None,
     special_notes: str | None = None,
 ) -> str | None:
-    """Push order to KDS; return order_id only when items were created."""
+    """Push order to KDS; return order_id only when items were created.
+
+    Hard chokepoint (see module docstring): re-checks the persisted booking row's
+    kitchen_start_at right before writing anything, regardless of what the caller's
+    defer decision concluded. This is the single enforced gate on the Python side —
+    every caller (webhook fulfillment, manual retry) funnels through here.
+    """
+    if await _refuse_and_reenqueue_if_still_future(
+        booking_id=booking_id,
+        restaurant_id=restaurant_id,
+        token=token,
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        service_type=service_type,
+    ):
+        return None
+
     cart_copy = _normalize_cart_snapshot(cart or {})
     if cart_copy:
         from tools.cart_tools import enrich_cart_titles
@@ -368,8 +461,8 @@ async def _dispatch_to_kds(
             if booking_id:
                 await mark_booking_kds_sent(booking_id)
             logger.info(
-                f"[prepay-kds] Dispatched {service_type} token {token} "
-                f"booking={booking_id} order_id={order_id}"
+                f"[scheduled-release] booking={booking_id} released to KDS "
+                f"service={service_type} token={token} order_id={order_id}"
             )
             return order_id
         if attempt < 2:
@@ -521,6 +614,13 @@ async def _finalize_kds_for_scheduled_order(
     """
     Push to KDS now or defer until scheduled_kds_lead_minutes before the slot.
     Returns True when dispatch happened immediately.
+
+    Note: even when this function's own defer check says "go ahead", the actual
+    write in _dispatch_to_kds() re-verifies against the persisted booking row and
+    will refuse/re-enqueue if that fresh read disagrees. This function's defer
+    check remains the primary decision (for correct customer messaging / manager
+    alerts), but is no longer the only gate standing between a request and a
+    live KDS write.
     """
     defer, defer_note = await _should_defer_kds_for_scheduled(
         session_hints, restaurant_id=restaurant_id,
@@ -786,6 +886,10 @@ async def _ensure_scheduled_schedule_persisted(payload: dict[str, Any]) -> dict[
         payload["session_hints"] = hints
         logger.info(f"[prepay-fulfill] Recovered schedule for booking {booking_id}")
     except Exception as exc:
+        # Deliberately non-fatal here (unlike the submit-time computation, see
+        # takeaway_flow.py / delivery_flow.py): this is the last recovery chance
+        # before the webhook path's own hard release-gate in _dispatch_to_kds()
+        # takes over as the final safety net if hints still end up incomplete.
         logger.error(f"[prepay-fulfill] schedule recovery failed for {booking_id}: {exc}")
 
     return hints
@@ -1494,6 +1598,11 @@ async def fulfill_from_webhook(booking_id: str) -> bool:
 
     payload = _hydrate_schedule_hints_from_booking(payload, booking)
 
+    logger.info(
+        f"[prepay-fulfill] webhook fulfilling booking={booking_id} "
+        f"service_type={payload.get('service_type')} "
+        f"kitchen_start_at={payload.get('session_hints', {}).get('kitchen_start_at')}"
+    )
     success = await fulfill_after_payment(payload)
     if success:
         await clear_prepay_payload(
