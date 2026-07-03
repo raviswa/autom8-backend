@@ -688,7 +688,7 @@ router.post('/api/webcart/submit', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Total amount is too low to process payment.' });
     }
 
-    const orderRef = `${session.id}-${Date.now().toString().slice(-6)}`;
+    const orderRef = `${(session?.id || safeToken)}-${Date.now().toString().slice(-6)}`;
     const submissionFingerprint = buildSubmissionFingerprint({
       items: normalizedItems,
       promo_code,
@@ -795,9 +795,9 @@ router.post('/api/webcart/submit', async (req, res) => {
 });
 
 router.get(['/cart', '/menu'], (_req, res) => {
-  // Allow short-lived browser cache with revalidation to speed up reopen.
-  // Dynamic session/menu data is fetched via API endpoints, not from this HTML.
-  res.setHeader('Cache-Control', 'private, max-age=60, must-revalidate');
+  // Webcart behavior changes frequently during debugging and deployment.
+  // Disable browser reuse so refreshed pages always pick up the latest UI logic.
+  res.setHeader('Cache-Control', 'no-store, max-age=0, must-revalidate');
   res.sendFile(path.join(__dirname, '..', 'public', 'webcart.html'));
 });
 
