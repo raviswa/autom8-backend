@@ -24,20 +24,20 @@ FEE_RATES: dict[str, float] = {
 
 _RAZORPAY_METHOD_CONFIG: dict[str, dict[str, int]] = {
     "upi": {
-        "netbanking": 0,
-        "card": 0,
-        "upi": 1,
-        "wallet": 0,
-        "paylater": 0,
-        "emi": 0,
+        "netbanking": False,
+        "card": False,
+        "upi": True,
+        "wallet": False,
+        "paylater": False,
+        "emi": False,
     },
     "card": {
-        "netbanking": 1,
-        "card": 1,
-        "upi": 0,
-        "wallet": 1,
-        "paylater": 0,
-        "emi": 0,
+        "netbanking": True,
+        "card": True,
+        "upi": False,
+        "wallet": True,
+        "paylater": False,
+        "emi": False,
     },
 }
 
@@ -917,6 +917,7 @@ async def resolve_checkout_context(booking_id: str, token: str) -> dict[str, Any
         "token": token,
         "subtotal": round(subtotal, 2),
         "token_label": booking.get("token_number") or "",
+        "test_mode": razorpay_status_message() == "enabled_test",
     }
 
 
@@ -1036,10 +1037,10 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
             --muted: #5b6678;
             --line: #dbe7ff;
             --card: #ffffff;
-            --brand: #2563eb;
-            --brand-ink: #1e40af;
+            --brand: #3395ff;
+            --brand-ink: #0b72e7;
             --upi-bg: #f3f8ff;
-            --upi-line: #93c5fd;
+            --upi-line: #8ec5ff;
             --card-bg: #f8fafc;
             --card-line: #cbd5e1;
         }}
@@ -1051,8 +1052,8 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
             padding: 20px 14px;
             color: var(--ink);
             background:
-                radial-gradient(circle at 10% 10%, rgba(37,99,235,0.13), transparent 46%),
-                radial-gradient(circle at 90% 85%, rgba(59,130,246,0.11), transparent 42%),
+                radial-gradient(circle at 10% 10%, rgba(51,149,255,0.14), transparent 46%),
+                radial-gradient(circle at 90% 85%, rgba(51,149,255,0.10), transparent 42%),
                 linear-gradient(165deg, var(--bg-0), var(--bg-1));
             display: grid;
             align-items: start;
@@ -1100,9 +1101,9 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
             align-items: center;
             gap: 8px;
             font-size: 11px;
-            color: #1e40af;
+            color: #0b72e7;
             background: #eff6ff;
-            border: 1px solid #bfdbfe;
+            border: 1px solid #b8deff;
             border-radius: 999px;
             padding: 4px 10px;
             margin: 0 0 10px;
@@ -1114,17 +1115,17 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
             display: none;
             margin-top: 12px;
             padding: 10px 12px;
-            border: 1px dashed #93c5fd;
+            border: 1px dashed #8ec5ff;
             border-radius: 12px;
             background: #eff6ff;
         }}
-        .test-tools p {{ margin: 0 0 8px; color: #1e3a8a; font-size: 12px; line-height: 1.4; }}
+        .test-tools p {{ margin: 0 0 8px; color: #0b72e7; font-size: 12px; line-height: 1.4; }}
         .test-btn {{
             appearance: none;
             border: 0;
             border-radius: 10px;
             padding: 10px 12px;
-            background: #2563eb;
+            background: #3395ff;
             color: #fff;
             font-weight: 700;
             cursor: pointer;
@@ -1240,7 +1241,7 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
                 description: ctx.description,
                 prefill: {{ name: ctx.customer_name, contact: ctx.contact }},
                 method: ctx.method_config,
-                theme: {{ color: "#2563eb" }},
+                theme: {{ color: "#3395ff" }},
                 handler: function (response) {{
                     fetch("/pay/verify", {{
                         method: "POST",
