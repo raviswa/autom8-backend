@@ -1017,6 +1017,7 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
     amount_display = f"INR {subtotal:.0f}" if subtotal == int(subtotal) else f"INR {subtotal:.2f}"
     token_label = str(ctx.get("token_label") or "").strip()
     token_html = f'<p class="muted">Order {token_label}</p>' if token_label else ""
+    retry_url = json.dumps(build_checkout_page_url(str(ctx["booking_id"])))
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1026,42 +1027,115 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
     <title>Choose payment method</title>
     <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
     <style>
+        :root {{
+            --bg-0: #fff8f2;
+            --bg-1: #ffe8d6;
+            --ink: #111827;
+            --muted: #5b6678;
+            --line: #f3d9c6;
+            --card: #ffffff;
+            --brand: #e36d26;
+            --brand-ink: #7a3412;
+            --upi-bg: #f0f9ff;
+            --upi-line: #bae6fd;
+            --card-bg: #fff7ed;
+            --card-line: #fed7aa;
+        }}
         * {{ box-sizing: border-box; }}
-        body {{ font-family: system-ui, sans-serif; margin: 0; padding: 20px; background: #f8fafc; color: #0f172a; }}
-        .card {{ max-width: 440px; margin: 0 auto; background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 20px; }}
-        h1 {{ margin: 0 0 6px; font-size: 26px; }}
-        .amount {{ margin: 0 0 16px; font-size: 30px; font-weight: 700; }}
-        .tile {{ width: 100%; text-align: left; display: block; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; margin-bottom: 10px; background: #fff; cursor: pointer; }}
-        .tile strong {{ display: block; font-size: 16px; margin-bottom: 4px; }}
-        .tile span {{ display: block; color: #475569; font-size: 13px; }}
-        .tile:disabled {{ opacity: 0.55; cursor: not-allowed; }}
-        .spinner {{ display: none; margin-top: 12px; color: #475569; font-size: 13px; }}
-        .muted {{ color: #64748b; font-size: 12px; margin: 0; }}
+        body {{
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            min-height: 100vh;
+            padding: 20px 14px;
+            color: var(--ink);
+            background:
+                radial-gradient(circle at 10% 10%, rgba(227,109,38,0.16), transparent 46%),
+                radial-gradient(circle at 90% 85%, rgba(37,99,235,0.10), transparent 42%),
+                linear-gradient(165deg, var(--bg-0), var(--bg-1));
+            display: grid;
+            align-items: start;
+        }}
+        .card {{
+            width: min(480px, 100%);
+            margin: 0 auto;
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            padding: 20px 16px 16px;
+            box-shadow: 0 14px 34px rgba(138, 92, 63, 0.15);
+            animation: rise 280ms ease-out;
+        }}
+        @keyframes rise {{
+            from {{ opacity: 0; transform: translateY(8px); }}
+            to {{ opacity: 1; transform: translateY(0); }}
+        }}
+        h1 {{ margin: 0 0 4px; font-size: clamp(34px, 8vw, 54px); line-height: 1.02; letter-spacing: -0.03em; }}
+        .amount {{ margin: 0 0 6px; font-size: clamp(26px, 6vw, 38px); font-weight: 800; color: var(--brand-ink); }}
+        .muted {{ color: var(--muted); font-size: 15px; margin: 0 0 14px; }}
+        .tile {{
+            width: 100%;
+            text-align: left;
+            display: block;
+            border: 1px solid #e2e8f0;
+            border-radius: 14px;
+            padding: 14px 14px;
+            margin-bottom: 12px;
+            background: #fff;
+            cursor: pointer;
+            transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+        }}
+        .tile strong {{ display: block; font-size: 22px; line-height: 1.12; margin-bottom: 5px; letter-spacing: -0.02em; }}
+        .tile span {{ display: block; color: #475569; font-size: 14px; }}
+        .tile-upi {{ background: var(--upi-bg); border-color: var(--upi-line); }}
+        .tile-card {{ background: var(--card-bg); border-color: var(--card-line); }}
+        .tile:active {{ transform: translateY(1px); }}
+        .tile:hover {{ box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08); border-color: #cbd5e1; }}
+        .tile:disabled {{ opacity: 0.58; cursor: not-allowed; box-shadow: none; }}
+        .spinner {{ display: none; margin: 6px 0 10px; color: #475569; font-size: 13px; }}
+        .legal {{ margin: 4px 0 0; color: #6b7280; font-size: 12px; line-height: 1.45; }}
+        .label {{
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 11px;
+            color: #7c2d12;
+            background: #ffedd5;
+            border: 1px solid #fed7aa;
+            border-radius: 999px;
+            padding: 4px 10px;
+            margin: 0 0 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }}
     </style>
 </head>
 <body>
     <main class="card">
+        <p class="label">Secure checkout</p>
         <h1>Choose payment method</h1>
         <p class="amount">{amount_display}</p>
         {token_html}
 
-        <button class="tile" id="tile-upi" onclick="pay('upi')">
+        <button class="tile tile-upi" id="tile-upi" onclick="pay('upi')">
             <strong>Pay via UPI</strong>
             <span>Google Pay, PhonePe, Paytm, BHIM</span>
         </button>
 
-        <button class="tile" id="tile-card" onclick="pay('card')">
+        <button class="tile tile-card" id="tile-card" onclick="pay('card')">
             <strong>Card / Netbanking / Wallet</strong>
             <span>Credit or debit card, netbanking, wallets</span>
         </button>
 
         <p class="spinner" id="spinner">Preparing secure payment...</p>
-        <p class="muted">Payment cannot be reversed once completed.</p>
+        <p class="legal">Processing fee is accounted in merchant settlement: UPI 1% and cards/netbanking/wallets 2.8%. Customer pays the amount shown above.</p>
+        <p class="legal">Payment cannot be reversed once completed.</p>
     </main>
 
     <script>
         var bookingId = {booking_id};
         var token = {token};
+        var retryUrl = {retry_url};
 
         function lockTiles(lock) {{
             document.getElementById("tile-upi").disabled = lock;
@@ -1073,6 +1147,7 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
             var q = "?status=failed";
             if (bookingId) q += "&booking_id=" + encodeURIComponent(bookingId);
             if (reason) q += "&reason=" + encodeURIComponent(reason);
+            if (retryUrl) q += "&retry=" + encodeURIComponent(retryUrl);
             window.location.href = "/payment/complete" + q;
         }}
 

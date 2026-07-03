@@ -893,7 +893,7 @@ $('subtotal').textContent = money(subtotal);
       const isIOS = /iphone|ipad|ipod/.test(ua);
       const supportDigits = String((state.restaurant && state.restaurant.support_phone) || fallbackSupportPhone || '').replace(/\D/g, '');
       const chatUrl = supportDigits
-        ? `https://wa.me/${supportDigits}?text=${encodeURIComponent('Hi')}`
+        ? `https://wa.me/${supportDigits}`
         : 'https://api.whatsapp.com/';
       let movedAway = false;
 

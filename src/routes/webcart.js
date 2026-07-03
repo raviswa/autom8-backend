@@ -55,7 +55,7 @@ function readHostSlug(req) {
 
 function pickSupportPhone(restaurant) {
   return digitsOnly(
-    restaurant?.contact_phone || restaurant?.manager_phone || restaurant?.whatsapp_number || ''
+    restaurant?.whatsapp_number || restaurant?.contact_phone || restaurant?.manager_phone || ''
   );
 }
 
@@ -522,7 +522,7 @@ router.get('/api/webcart/payment-status', async (req, res) => {
 
     const { data: booking, error: bookingErr } = await supabaseAdmin
       .from('bookings')
-      .select('id, status, payment_status, updated_at')
+      .select('id, status, payment_status')
       .eq('restaurant_id', restaurant.id)
       .eq('id', bookingId)
       .limit(1)
@@ -541,7 +541,7 @@ router.get('/api/webcart/payment-status', async (req, res) => {
       paid,
       booking_status: bookingStatus || null,
       payment_status: paymentStatus || null,
-      updated_at: booking?.updated_at || null,
+      updated_at: null,
     });
   } catch (err) {
     console.error('[webcart/payment-status]', err.message);

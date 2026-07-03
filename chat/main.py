@@ -931,12 +931,22 @@ async def payment_complete(request: Request):
         cause_block = f'<p class="help">{cause_hint}</p>'
 
     support_actions = ""
-    if support_phone:
+    support_digits = "".join(ch for ch in support_phone if ch.isdigit())
+    has_support_call = len(support_digits) >= 10
+    call_line = ""
+    call_btn = ""
+    wa_btn = ""
+    if has_support_call:
+        call_line = f'<p class="help">To speak with customer care, call <strong>{safe_support_phone}</strong>.</p>'
+        call_btn = f'<a class="support-link" href="tel:{safe_support_phone}">Call Support</a>'
+    if chat_phone:
+        wa_btn = f'<a class="support-link" href="https://wa.me/{safe_chat_phone}">WhatsApp Support</a>'
+    if call_btn or wa_btn:
         support_actions = f"""
-        <p class=\"help\">To speak with customer care, call <strong>{safe_support_phone}</strong>.</p>
+        {call_line}
         <div class=\"support-row\">
-            <a class=\"support-link\" href=\"tel:{safe_support_phone}\">Call Support</a>
-            <a class=\"support-link\" href=\"https://wa.me/{safe_support_phone}\">WhatsApp Support</a>
+            {call_btn}
+            {wa_btn}
         </div>
         """
 
