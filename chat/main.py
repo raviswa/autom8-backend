@@ -841,12 +841,6 @@ async def internal_webcart_confirm_pay(request: Request):
     )
 
 
-            content={
-                "ok": True,
-                "booking_id": booking_id,
-                "order_ref": order_ref,
-                "payment_link": payment_link,
-            },
 async def payment_complete(request: Request):
     """Customer redirect after Razorpay checkout (Orders API or legacy payment links)."""
     from html import escape
