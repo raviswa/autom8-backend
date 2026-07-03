@@ -1,4 +1,16 @@
-"""Database tools - ADK-compatible async database operations"""
+"""Database tools - ADK-compatible async database operations
+
+FIX (token sequencing, Issue 1): _next_portal_token_id() previously fell back to a
+non-atomic "SELECT max(id) then check-then-INSERT" scan when the fast RPC
+(allocate_portal_token_seq) was unavailable. That fallback raced independently
+against the Node service's own fallback (src/routes/tokens.js::generateTokenId),
+since both processes could read the same "current max" before either had committed
+an insert, producing duplicate token labels (e.g. two different bookings both
+allocated "T-10"). The fallback now calls allocate_portal_token_seq_legacy_locked(),
+a Postgres-advisory-locked SQL function shared with the Node service (see
+migrations/20260703_token_seq_locked_fallback.sql), so both services serialize
+against the same lock instead of racing each other.
+"""
 
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
@@ -2298,8 +2310,40 @@ async def _ensure_portal_token_sequence_schema(session) -> bool:
                         END;
                         $$
                 """))
+                # Also bootstrap the cross-process-safe locked fallback used by both
+                # this service and the Node API (src/routes/tokens.js::generateTokenId)
+                # when the fast RPC above is unavailable. Keeping both functions'
+                # creation together means a single migration failure/retry covers
+                # the whole allocation path, not just the fast one.
+                await session.execute(text("""
+                        CREATE OR REPLACE FUNCTION public.allocate_portal_token_seq_legacy_locked(p_restaurant_id uuid)
+                        RETURNS text
+                        LANGUAGE plpgsql
+                        AS $$
+                        DECLARE
+                            lock_key   bigint;
+                            v_month    text := to_char((now() AT TIME ZONE 'Asia/Kolkata'), 'YYMM');
+                            v_max      int  := 0;
+                            v_id       text;
+                        BEGIN
+                            lock_key := ('x' || substr(md5(p_restaurant_id::text || ':token_seq'), 1, 15))::bit(60)::bigint;
+                            PERFORM pg_advisory_xact_lock(lock_key);
+
+                            SELECT COALESCE(MAX(
+                                CASE WHEN id ~ ('^T-' || v_month || '-[0-9]+$')
+                                     THEN substring(id FROM '[0-9]+$')::int
+                                     ELSE 0 END
+                            ), 0) INTO v_max
+                            FROM public.walk_in_tokens
+                            WHERE restaurant_id = p_restaurant_id;
+
+                            v_id := 'T-' || v_month || '-' || lpad((v_max + 1)::text, 3, '0');
+                            RETURN v_id;
+                        END;
+                        $$
+                """))
                 await session.commit()
-                logger.info("[portal-token] ✅ auto-created portal token sequence schema/function")
+                logger.info("[portal-token] ✅ auto-created portal token sequence schema/function(s)")
                 return True
         except Exception as e:
                 await session.rollback()
@@ -2308,7 +2352,18 @@ async def _ensure_portal_token_sequence_schema(session) -> bool:
 
 
 async def _next_portal_token_id(session, restaurant_id: str) -> str:
-    """Sequential T-YYMM-001 style ID — monthly reset via allocate_portal_token_seq."""
+    """
+    Sequential T-YYMM-001 style ID — monthly reset via allocate_portal_token_seq.
+
+    FIX (Issue 1): the fallback path used to run its own in-process
+    "SELECT id FROM walk_in_tokens ... then scan for max ... then check-then-INSERT"
+    loop. That was not atomic across processes and raced against the Node service's
+    independent fallback (src/routes/tokens.js::generateTokenId), occasionally
+    allocating the same token id to two different bookings. Both fallbacks now call
+    the same Postgres-advisory-locked SQL function
+    (allocate_portal_token_seq_legacy_locked), so this service and the Node service
+    serialize against one shared lock instead of racing each other.
+    """
     global _PORTAL_SEQ_RPC_AVAILABLE
     if _PORTAL_SEQ_RPC_AVAILABLE is not False:
         try:
@@ -2319,7 +2374,9 @@ async def _next_portal_token_id(session, restaurant_id: str) -> str:
             seq = result.scalar_one()
             if seq is not None:
                 _PORTAL_SEQ_RPC_AVAILABLE = True
-                return _build_portal_token_id(int(seq))
+                token_id = _build_portal_token_id(int(seq))
+                logger.info(f"[token-alloc] rpc seq={seq} -> {token_id} restaurant={restaurant_id}")
+                return token_id
         except Exception as e:
             await session.rollback()
             msg = str(e)
@@ -2332,7 +2389,7 @@ async def _next_portal_token_id(session, restaurant_id: str) -> str:
             )
             if missing_rpc:
                 logger.warning(
-                    "[portal-token] allocate_portal_token_seq missing; attempting one-time auto-bootstrap"
+                    "[token-alloc] allocate_portal_token_seq missing; attempting one-time auto-bootstrap"
                 )
                 created = await _ensure_portal_token_sequence_schema(session)
                 if created:
@@ -2344,42 +2401,37 @@ async def _next_portal_token_id(session, restaurant_id: str) -> str:
                         seq = result.scalar_one()
                         if seq is not None:
                             _PORTAL_SEQ_RPC_AVAILABLE = True
-                            return _build_portal_token_id(int(seq))
+                            token_id = _build_portal_token_id(int(seq))
+                            logger.info(f"[token-alloc] rpc(bootstrapped) seq={seq} -> {token_id} restaurant={restaurant_id}")
+                            return token_id
                     except Exception as retry_err:
                         await session.rollback()
                         logger.warning(
-                            f"[portal-token] allocate_portal_token_seq retry failed; using fallback: {retry_err}"
+                            f"[token-alloc] allocate_portal_token_seq retry failed; using locked fallback: {retry_err}"
                         )
                 _PORTAL_SEQ_RPC_AVAILABLE = False
             else:
-                logger.warning(f"[portal-token] allocate_portal_token_seq failed, falling back: {e}")
+                logger.warning(f"[token-alloc] allocate_portal_token_seq failed, using locked fallback: {e}")
 
-    yymm = _portal_token_month_key()
-    result = await session.execute(
-        text("SELECT id FROM walk_in_tokens WHERE restaurant_id = CAST(:rid AS uuid)"),
-        {"rid": restaurant_id},
-    )
-    max_seq = 0
-    monthly_re = re.compile(rf"^T-{re.escape(yymm)}-(\d+)$", re.I)
-    legacy_re = re.compile(r"^T-(\d+)$")
-    for row in result:
-        tid = str(row[0])
-        m = monthly_re.match(tid)
-        if m:
-            max_seq = max(max_seq, int(m.group(1)))
-            continue
-        m = legacy_re.match(tid)
-        if m:
-            max_seq = max(max_seq, int(m.group(1)))
-    for attempt in range(20):
-        candidate = _build_portal_token_id(max_seq + 1 + attempt)
-        exists = await session.execute(
-            text("SELECT 1 FROM walk_in_tokens WHERE id = :tid"),
-            {"tid": candidate},
+    # Cross-process-safe fallback — identical SQL function the Node service calls.
+    # No more independent in-Python max-scan; this is now the single fallback path
+    # shared by both services.
+    try:
+        result = await session.execute(
+            text("SELECT allocate_portal_token_seq_legacy_locked(CAST(:rid AS uuid))"),
+            {"rid": restaurant_id},
         )
-        if not exists.first():
-            return candidate
-    return f"T-{yymm}-{str(int(time.time()) % 1_000_000).zfill(6)}"
+        token_id = result.scalar_one()
+        logger.warning(f"[token-alloc] locked-fallback -> {token_id} restaurant={restaurant_id}")
+        return token_id
+    except Exception as e:
+        await session.rollback()
+        logger.error(
+            f"[token-alloc] locked-fallback RPC failed for restaurant={restaurant_id}: {e} "
+            f"— run migrations/20260703_token_seq_locked_fallback.sql. Using timestamp id."
+        )
+        yymm = _portal_token_month_key()
+        return f"T-{yymm}-{str(int(time.time()) % 1_000_000).zfill(6)}"
 
 
 async def supersede_walk_in_token(
@@ -2660,13 +2712,17 @@ async def create_walk_in_token_direct(
     try:
         async with AsyncSessionLocal() as session:
             token_id = await _next_portal_token_id(session, restaurant_id)
-            await session.execute(
+            # Defense in depth: even though _next_portal_token_id() should now be
+            # collision-free, guard the INSERT itself so a rare collision (e.g. a
+            # legacy un-migrated row) surfaces as a loud retry, not a silent overwrite.
+            insert_result = await session.execute(
                 text("""
                     INSERT INTO walk_in_tokens
                       (id, restaurant_id, name, phone, type, pax, status, arrived_at, meta)
                     VALUES
                       (:id, CAST(:rid AS uuid), :name, :phone, :type, :pax, :status,
                        NOW(), CAST(:meta AS jsonb))
+                    ON CONFLICT (id) DO NOTHING
                 """),
                 {
                     "id":     token_id,
@@ -2679,7 +2735,37 @@ async def create_walk_in_token_direct(
                     "meta":   json.dumps(meta or {}),
                 },
             )
-            await session.commit()
+            if insert_result.rowcount == 0:
+                await session.rollback()
+                logger.error(
+                    f"[token-alloc] PK COLLISION on insert for id={token_id} "
+                    f"restaurant={restaurant_id} — should not happen post-fix; retrying once."
+                )
+                async with AsyncSessionLocal() as retry_session:
+                    token_id = await _next_portal_token_id(retry_session, restaurant_id)
+                    await retry_session.execute(
+                        text("""
+                            INSERT INTO walk_in_tokens
+                              (id, restaurant_id, name, phone, type, pax, status, arrived_at, meta)
+                            VALUES
+                              (:id, CAST(:rid AS uuid), :name, :phone, :type, :pax, :status,
+                               NOW(), CAST(:meta AS jsonb))
+                            ON CONFLICT (id) DO NOTHING
+                        """),
+                        {
+                            "id":     token_id,
+                            "rid":    restaurant_id,
+                            "name":   name.strip(),
+                            "phone":  clean_phone,
+                            "type":   token_type,
+                            "pax":    actual_pax,
+                            "status": status,
+                            "meta":   json.dumps(meta or {}),
+                        },
+                    )
+                    await retry_session.commit()
+            else:
+                await session.commit()
             logger.info(
                 f"[walk-in-token] ✅ Direct DB token {token_id} for {name} "
                 f"(restaurant={restaurant_id})"
