@@ -581,6 +581,7 @@
       phone: phone || '',
       restaurant: null,
       session: null,
+      sessionExpired: false,
       categories: [],
       activeTab: 'all',
       searchQuery: '',
@@ -591,6 +592,7 @@
       lastSubmittedFingerprint: null,
       lastSubmittedAt: 0,
       lastSubmittedOrderRef: null,
+      lastSubmittedBookingId: null,
       paymentPollTimer: null,
       paymentPollInFlight: false,
     };
@@ -886,9 +888,9 @@ $('subtotal').textContent = money(subtotal);
         state.lastSubmittedFingerprint &&
         state.lastSubmittedFingerprint === cartFingerprint() &&
         now - Number(state.lastSubmittedAt || 0) < 20 * 60 * 1000;
-      submitBtn.disabled = count === 0 || state.submitting || sameAsLast || state.orderingEnabled === false;
+      submitBtn.disabled = count === 0 || state.submitting || sameAsLast;
       if (state.submitting) submitBtn.textContent = 'Submitting…';
-      else if (state.orderingEnabled === false) submitBtn.textContent = 'Browse Only';
+      else if (state.sessionExpired) submitBtn.textContent = 'Checkout Now';
       else if (sameAsLast) submitBtn.textContent = 'Payment Link Sent';
       else submitBtn.textContent = 'Continue to WhatsApp';
 
@@ -957,11 +959,17 @@ $('subtotal').textContent = money(subtotal);
 
     async function checkPaymentStatus() {
       if (state.paymentPollInFlight) return;
-      if (!token || !state.phone || !state.lastSubmittedOrderRef) return;
+      if (!state.lastSubmittedOrderRef && !state.lastSubmittedBookingId) return;
 
       state.paymentPollInFlight = true;
       try {
-        const q = new URLSearchParams({ token, phone: state.phone, order_ref: state.lastSubmittedOrderRef });
+        const q = new URLSearchParams();
+        if (token && state.phone) {
+          q.set('token', token);
+          q.set('phone', state.phone);
+        }
+        if (state.lastSubmittedOrderRef) q.set('order_ref', state.lastSubmittedOrderRef);
+        if (state.lastSubmittedBookingId) q.set('booking_id', state.lastSubmittedBookingId);
         if (slug) q.set('slug', slug);
         const res = await fetch(`/api/webcart/payment-status?${q.toString()}`);
         const data = await res.json();
@@ -975,6 +983,7 @@ $('subtotal').textContent = money(subtotal);
           state.cart = new Map();
           $('promo').value = '';
           $('notes').value = '';
+          state.lastSubmittedBookingId = null;
           renderCart();
           showStatus('Payment confirmed. Your order is now being processed.', 'ok');
           stopPaymentPolling();
@@ -992,7 +1001,7 @@ $('subtotal').textContent = money(subtotal);
     }
 
     function startPaymentPolling() {
-      if (!state.lastSubmittedOrderRef) return;
+      if (!state.lastSubmittedOrderRef && !state.lastSubmittedBookingId) return;
       if (state.paymentPollTimer) return;
       checkPaymentStatus();
       state.paymentPollTimer = setInterval(checkPaymentStatus, 12000);
@@ -1127,9 +1136,10 @@ $('subtotal').textContent = money(subtotal);
     function applySessionPayload(data) {
       state.restaurant = data.restaurant;
       state.session = data.session;
+      state.sessionExpired = !!data.session_expired;
       state.phone = (data.session && data.session.phone) ? data.session.phone : (phone || '');
       phone = state.phone || phone;
-      state.orderingEnabled = data.ordering_enabled !== false;
+      state.orderingEnabled = true;
       persistLinkContext();
       syncUrlWithContext();
       state.menu = data.menu_items || [];
@@ -1177,14 +1187,14 @@ $('subtotal').textContent = money(subtotal);
       if (data.slot_banner) { banner.style.display = 'block'; banner.textContent = data.slot_banner; }
       else banner.style.display = 'none';
 
+      if (data.session_expired && data.session_message) {
+        showStatus(data.session_message, 'ok');
+      }
+
       renderTopSections();
       renderChips();
       renderMenuList();
       renderCart();
-
-      if (data.session_expired && data.session_message) {
-        showStatus(data.session_message, 'ok');
-      }
 
       if (isDesktop()) openCart();
     }
@@ -1278,16 +1288,19 @@ $('subtotal').textContent = money(subtotal);
         }
 
         showStatus(
-          `Order placed! Ref: ${data.order_ref}. Check WhatsApp for the Confirm & Pay button to complete payment.`,
+          `Checkout ready. Ref: ${data.order_ref}. Opening the payment page now.`,
           'ok',
         );
 
-        // Keep cart visible after Continue to WhatsApp to prevent accidental
+        // Keep cart visible after checkout starts to prevent accidental
         // reordering when the customer returns before payment completion.
         saveLastSubmitLocal(fingerprint, data.order_ref || null);
+        state.lastSubmittedBookingId = data.booking_id || null;
         state.submitting = false;
         renderCart();
-        showWhatsAppGuide();
+        if (data.payment_link) {
+          window.location.href = data.payment_link;
+        }
         startPaymentPolling();
       } catch (_e) {
         showStatus('Order submission failed. Please try again.', 'err');

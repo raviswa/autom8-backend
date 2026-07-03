@@ -435,7 +435,7 @@ router.get('/api/webcart/session', async (req, res) => {
           type: 'takeaway',
         };
 
-    const orderingEnabled = !!session;
+    const orderingEnabled = true;
 
     return res.json({
       valid: true,
@@ -485,24 +485,54 @@ router.get('/api/webcart/payment-status', async (req, res) => {
     const token = String(req.query.token || '').trim();
     const phone = String(req.query.phone || '').trim();
     const orderRefFilter = String(req.query.order_ref || '').trim();
+    const bookingIdFilter = String(req.query.booking_id || '').trim();
 
-    if (!token || !phone) {
-      return res.status(400).json({ ok: false, error: 'token and phone are required.' });
+    if ((!token || !phone) && !bookingIdFilter) {
+      return res.status(400).json({ ok: false, error: 'token/phone or booking_id is required.' });
     }
 
     const restaurant = await resolveRestaurantBySlug(req);
     if (!restaurant) return res.status(404).json({ ok: false, error: 'Restaurant not found.' });
 
-    const session = await resolveSession({
-      restaurantId: restaurant.id,
-      token,
-      phone,
-    });
-    if (!session) {
-      return res.status(410).json(buildExpiredPayload(restaurant));
+    let bookingId = bookingIdFilter;
+    let submission = null;
+
+    if (token && phone) {
+      const session = await resolveSession({
+        restaurantId: restaurant.id,
+        token,
+        phone,
+      });
+
+      if (session) {
+        submission = session?.meta?.web_cart_submission || null;
+        bookingId = bookingId || String(submission?.booking_id || '').trim();
+      }
     }
 
-    const submission = session?.meta?.web_cart_submission || null;
+    if (!submission && bookingId) {
+      const { data: bookingRow, error: bookingErr } = await supabaseAdmin
+        .from('bookings')
+        .select('id, meta, status, payment_status')
+        .eq('restaurant_id', restaurant.id)
+        .eq('id', bookingId)
+        .limit(1)
+        .maybeSingle();
+      if (bookingErr) throw bookingErr;
+
+      const meta = bookingRow?.meta || {};
+      submission = meta?.web_cart_submission || null;
+      if (!submission) {
+        return res.json({
+          ok: true,
+          has_active_submission: false,
+          paid: String(bookingRow?.payment_status || '').toLowerCase() === 'paid' || String(bookingRow?.status || '').toLowerCase() === 'confirmed',
+          status: 'booking_lookup_only',
+          booking_id: bookingId,
+        });
+      }
+    }
+
     if (!submission) {
       return res.json({
         ok: true,
@@ -522,7 +552,7 @@ router.get('/api/webcart/payment-status', async (req, res) => {
       });
     }
 
-    const bookingId = String(submission.booking_id || '').trim();
+    bookingId = String(submission.booking_id || bookingId || '').trim();
     if (!bookingId) {
       return res.json({
         ok: true,
@@ -581,10 +611,6 @@ router.post('/api/webcart/submit', async (req, res) => {
       phone: safePhone,
     });
 
-    if (!session) {
-      return res.status(410).json(buildExpiredPayload(restaurant));
-    }
-
     const { data: liveItems, error: liveErr } = await supabaseAdmin
       .from('menu_items')
       .select('id, retailer_id, name, price')
@@ -637,7 +663,7 @@ router.post('/api/webcart/submit', async (req, res) => {
     }
 
     const subtotal = normalizedItems.reduce((sum, line) => sum + Number(line.line_total || 0), 0);
-    const serviceType = String(session.type || 'takeaway').toLowerCase();
+    const serviceType = String(session?.type || 'takeaway').toLowerCase();
     const parcelPerItem = parseFloat(restaurant.parcel_charge_per_item || 0);
     const gstRate = parseFloat(restaurant.gst_rate || 5.0);
 
@@ -687,8 +713,9 @@ router.post('/api/webcart/submit', async (req, res) => {
       });
     }
 
+    const sessionMeta = session?.meta || {};
     const nextMeta = {
-      ...(session.meta || {}),
+      ...sessionMeta,
       web_cart_submission: {
         submitted_at: new Date().toISOString(),
         promo_code: promo_code ? String(promo_code).trim().slice(0, 40) : null,
@@ -700,58 +727,66 @@ router.post('/api/webcart/submit', async (req, res) => {
         gst_rate: gstRate,
         gst_amount: gstAmount,
         pre_gst_total: preGst,
-        total: totalAmount,   // ← this is the correct grand total
+        total: totalAmount,
         order_ref: orderRef,
         submission_fingerprint: submissionFingerprint,
         payment_cta_sent: false,
       },
     };
 
-    const { error } = await supabaseAdmin
-      .from('walk_in_tokens')
-      .update({ meta: nextMeta })
-      .eq('restaurant_id', restaurant.id)
-      .eq('id', session.id)
-      .eq('phone', session.phone);
+    if (session) {
+      const { error } = await supabaseAdmin
+        .from('walk_in_tokens')
+        .update({ meta: nextMeta })
+        .eq('restaurant_id', restaurant.id)
+        .eq('id', session.id)
+        .eq('phone', session.phone);
 
-    if (error) throw error;
+      if (error) throw error;
+    }
 
     const confirmResult = await triggerConfirmAndPay({
       restaurant_id: restaurant.id,
-      customer_phone: session.phone,
+      customer_phone: session?.phone || safePhone,
       customer_name:
-        String(session.meta?.customer_name || session.meta?.name || '').trim() ||
+        String(sessionMeta?.customer_name || sessionMeta?.name || '').trim() ||
         'Guest',
-      token: String(session.id),
+      token: String(session?.id || safeToken),
       order_ref: orderRef,
-      service_type: String(session.type || 'takeaway'),
+      service_type: String(session?.type || 'takeaway'),
       total: totalAmount,
       items: normalizedItems,
       promo_code: promo_code ? String(promo_code).trim().slice(0, 40) : null,
       special_request: special_request ? String(special_request).trim().slice(0, 500) : null,
     });
 
-    const confirmedMeta = {
-      ...(nextMeta || {}),
-      web_cart_submission: {
-        ...(nextMeta.web_cart_submission || {}),
-        payment_cta_sent: true,
-        booking_id: confirmResult?.booking_id || null,
-        payment_link: confirmResult?.payment_link || null,
-      },
-    };
+    if (session) {
+      const confirmedMeta = {
+        ...(nextMeta || {}),
+        web_cart_submission: {
+          ...(nextMeta.web_cart_submission || {}),
+          payment_cta_sent: true,
+          booking_id: confirmResult?.booking_id || null,
+          payment_link: confirmResult?.payment_link || null,
+        },
+      };
 
-    await supabaseAdmin
-      .from('walk_in_tokens')
-      .update({ meta: confirmedMeta })
-      .eq('restaurant_id', restaurant.id)
-      .eq('id', session.id)
-      .eq('phone', session.phone);
+      await supabaseAdmin
+        .from('walk_in_tokens')
+        .update({ meta: confirmedMeta })
+        .eq('restaurant_id', restaurant.id)
+        .eq('id', session.id)
+        .eq('phone', session.phone);
+    }
 
     return res.json({
       ok: true,
       order_ref: orderRef,
-      message: 'Confirm & Pay has been sent to your WhatsApp.',
+      booking_id: confirmResult?.booking_id || null,
+      payment_link: confirmResult?.payment_link || null,
+      message: confirmResult?.payment_link
+        ? 'Hosted checkout ready.'
+        : 'Confirm & Pay has been sent to your WhatsApp.',
     });
   } catch (err) {
     console.error('[webcart/submit]', err.message);

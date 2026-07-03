@@ -700,7 +700,12 @@ async def internal_webcart_confirm_pay(request: Request):
             )
         return JSONResponse(
             status_code=500,
-            content={"ok": False, "error": "payment_link_unavailable", "booking_id": booking_id},
+            content={
+                "ok": True,
+                "booking_id": booking_id,
+                "order_ref": order_ref,
+                "payment_link": payment_link,
+            },
         )
 
     # Durable persistence — mirrors every other booking flow (takeaway_flow,
@@ -836,7 +841,12 @@ async def internal_webcart_confirm_pay(request: Request):
     )
 
 
-@app.get("/payment/complete")
+            content={
+                "ok": True,
+                "booking_id": booking_id,
+                "order_ref": order_ref,
+                "payment_link": payment_link,
+            },
 async def payment_complete(request: Request):
     """Customer redirect after Razorpay checkout (Orders API or legacy payment links)."""
     from html import escape
