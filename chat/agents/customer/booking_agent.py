@@ -598,13 +598,20 @@ async def handle_booking_flow(
                 touch_session_activity(session_state)
                 return result
             from tools.whatsapp_tools import send_location_request
-            sent = await send_location_request(customer_phone, restaurant_id)
+            await send_whatsapp_message(
+                customer_phone,
+                "🚚 *Delivery Order*\nWe need your delivery address.",
+                restaurant_id,
+            )
+            sent = await send_location_request(
+                customer_phone,
+                restaurant_id,
+                body_text="📍 Please share your delivery location",
+            )
             if not sent:
                 await send_whatsapp_message(
                     customer_phone,
-                    "Great! You've selected *Deliver Now* 🛵\n\n"
-                    "Please *share your location pin* on WhatsApp (tap 📎 → Location) so we can calculate delivery charge accurately.\n"
-                    "You can also type your full address if needed.",
+                    "Please share your location pin on WhatsApp (tap 📎 -> Location) or type your full delivery address.",
                     restaurant_id,
                 )
             session_state["booking_step"] = "awaiting_address"

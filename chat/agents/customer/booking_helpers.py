@@ -836,17 +836,23 @@ async def send_service_menu(
                 )
                 return
             from tools.whatsapp_tools import send_location_request
-            sent = await send_location_request(customer_phone, restaurant_id)
+            await send_whatsapp_message(
+                customer_phone,
+                "🚚 *Delivery Order*\nWe need your delivery address.",
+                restaurant_id,
+            )
+            sent = await send_location_request(
+                customer_phone,
+                restaurant_id,
+                body_text="📍 Please share your delivery location",
+            )
             if not sent:
                 await send_whatsapp_message(
                     customer_phone,
-                    "Great! You've selected *Deliver Now* 🛵\n\n"
-                    "Please share your address so we can check if we deliver to your area.",
+                    "Please share your location pin or type your full delivery address.",
                     restaurant_id,
                 )
-                state["booking_step"] = "awaiting_address_or_location"
-            else:
-                state["booking_step"] = "awaiting_location_only"
+            state["booking_step"] = "awaiting_address"
             return
 
         elif service_type == "reserve_table":

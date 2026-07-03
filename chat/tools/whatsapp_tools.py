@@ -105,6 +105,44 @@ async def send_whatsapp_message(
         return False
 
 
+def send_location_request_message(
+    to: str,
+    phone_number_id: str,
+    access_token: str,
+    body_text: str = "📍 Please share your delivery location",
+) -> dict:
+    """
+    Sends WhatsApp's native location_request_message interactive type.
+    On the customer's device this opens the 'Choose Address' sheet
+    (saved Google Maps addresses / current location / type manually).
+    Supported on Graph API v22.0+.
+    """
+    import requests
+
+    url = f"https://graph.facebook.com/v22.0/{phone_number_id}/messages"
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "location_request_message",
+            "body": {
+                "text": body_text,
+            },
+            "action": {
+                "name": "send_location",
+            },
+        },
+    }
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+    resp = requests.post(url, json=payload, headers=headers, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
 # ---------------------------------------------------------------------------
 # Outbound: template
 # ---------------------------------------------------------------------------
@@ -338,6 +376,7 @@ async def send_location_request(
     *,
     purpose: str = "immediate",
     scheduled_label: str | None = None,
+    body_text: str | None = None,
 ) -> bool:
     """Send a native WhatsApp location-request message."""
     try:
@@ -353,7 +392,8 @@ async def send_location_request(
             "interactive": {
                 "type": "location_request_message",
                 "body": {
-                    "text": _location_request_body(
+                    "text": body_text
+                    or _location_request_body(
                         purpose=purpose,
                         scheduled_label=scheduled_label,
                     ),

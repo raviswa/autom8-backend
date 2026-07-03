@@ -406,19 +406,21 @@ async def _advance_after_delivery_time_set(
 
     if not session_state.get("delivery_address"):
         loc_purpose = "scheduled" if scheduled is not None else "immediate"
+        await send_whatsapp_message(
+            customer_phone,
+            "🚚 *Delivery Order*\nWe need your delivery address.",
+            restaurant_id,
+        )
         sent = await send_location_request(
             customer_phone, restaurant_id,
             purpose=loc_purpose,
             scheduled_label=when_label,
+            body_text="📍 Please share your delivery location",
         )
         if not sent:
-            from tools.whatsapp_tools import _location_request_body
             await send_whatsapp_message(
                 customer_phone,
-                _location_request_body(
-                    purpose=loc_purpose,
-                    scheduled_label=when_label,
-                ),
+                "Please share your location pin or type your full delivery address.",
                 restaurant_id,
             )
         session_state["booking_step"] = "awaiting_address"
@@ -834,6 +836,8 @@ async def handle_delivery_flow(
     # ── awaiting_address ──────────────────────────────────────────────────────
     if booking_step == "awaiting_address":
         raw = message.strip()
+        location_shared = False
+        maps_link = ""
         if raw.startswith("LOCATION:"):
             try:
                 coords_part, label = raw[len("LOCATION:"):].split("|", 1)
@@ -842,12 +846,19 @@ async def handle_delivery_flow(
                 session_state["delivery_lng"] = float(lng.strip())
                 maps_link = f"https://maps.google.com/?q={lat.strip()},{lng.strip()}"
                 delivery_address = f"{label.strip()} ({maps_link})"
+                location_shared = True
             except Exception:
                 delivery_address = raw
         else:
             delivery_address = raw
 
         session_state["delivery_address"] = delivery_address
+        if location_shared:
+            await send_whatsapp_message(
+                customer_phone,
+                f"📍 Location received:\n{delivery_address}\n\nIf this is not correct, share location again or type your full address.",
+                restaurant_id,
+            )
         await cache_restaurant_pricing(session_state, restaurant_id)
 
         addr_result = await finalize_delivery_address(

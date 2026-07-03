@@ -612,13 +612,21 @@ async def handle_booking_flow(
             await _send_menu(customer_phone, restaurant_id, session_state)
 
         elif service_type == "delivery":
-            sent = await send_location_request(customer_phone, restaurant_id)
+            await send_whatsapp_message(
+                customer_phone,
+                "🚚 *Delivery Order*\nWe need your delivery address.",
+                restaurant_id,
+            )
+            sent = await send_location_request(
+                customer_phone,
+                restaurant_id,
+                body_text="📍 Please share your delivery location",
+            )
             if not sent:
                 # Fallback to plain text if location_request_message is not supported
                 await send_whatsapp_message(
                     customer_phone,
-                    "Great! You've selected Delivery now 🛵\n\n"
-                    "Please share your delivery address.",
+                    "Please share your location pin or type your full delivery address.",
                     restaurant_id,
                 )
             session_state["booking_step"] = "awaiting_address"
