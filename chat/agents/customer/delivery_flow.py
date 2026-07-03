@@ -837,15 +837,13 @@ async def handle_delivery_flow(
     if booking_step == "awaiting_address":
         raw = message.strip()
         location_shared = False
-        maps_link = ""
         if raw.startswith("LOCATION:"):
             try:
                 coords_part, label = raw[len("LOCATION:"):].split("|", 1)
                 lat, lng = coords_part.split(",", 1)
                 session_state["delivery_lat"] = float(lat.strip())
                 session_state["delivery_lng"] = float(lng.strip())
-                maps_link = f"https://maps.google.com/?q={lat.strip()},{lng.strip()}"
-                delivery_address = f"{label.strip()} ({maps_link})"
+                delivery_address = label.strip() or f"{lat.strip()},{lng.strip()}"
                 location_shared = True
             except Exception:
                 delivery_address = raw
@@ -856,7 +854,7 @@ async def handle_delivery_flow(
         if location_shared:
             await send_whatsapp_message(
                 customer_phone,
-                f"📍 Location received:\n{delivery_address}\n\nIf this is not correct, share location again or type your full address.",
+                "📍 Location received. If this is not correct, share location again or type your full address.",
                 restaurant_id,
             )
         await cache_restaurant_pricing(session_state, restaurant_id)

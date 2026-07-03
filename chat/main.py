@@ -125,6 +125,20 @@ _processed_message_ids: OrderedDict[str, int] = OrderedDict()
 _processed_message_ids_lock = asyncio.Lock()
 
 
+def _compact_location_label(name: str, address: str, lat: str, lng: str) -> str:
+    n = str(name or "").strip()
+    a = str(address or "").strip()
+    if a and n and (n.lower() in a.lower() or a.lower() in n.lower()):
+        return a if len(a) >= len(n) else n
+    if a and n:
+        return f"{n} - {a}"
+    if a:
+        return a
+    if n:
+        return n
+    return f"{lat}, {lng}"
+
+
 def _normalize_whatsapp_phone(raw: str | None) -> str:
     digits = "".join(ch for ch in str(raw or "") if ch.isdigit())
     if len(digits) == 10:
@@ -224,7 +238,7 @@ def _extract_message_body(message_obj: dict) -> str:
         lng     = loc.get("longitude", "")
         name    = loc.get("name", "")
         address = loc.get("address", "")
-        label   = f"{name} {address}".strip() or f"{lat}, {lng}"
+        label = _compact_location_label(str(name), str(address), str(lat), str(lng))
         return f"LOCATION:{lat},{lng}|{label}"
 
     # order, reaction, image, sticker, etc. — caller handles these separately

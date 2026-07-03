@@ -19,6 +19,20 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _compact_location_label(name: str, address: str, lat: str, lng: str) -> str:
+    n = str(name or "").strip()
+    a = str(address or "").strip()
+    if a and n and (n.lower() in a.lower() or a.lower() in n.lower()):
+        return a if len(a) >= len(n) else n
+    if a and n:
+        return f"{n} - {a}"
+    if a:
+        return a
+    if n:
+        return n
+    return f"{lat}, {lng}"
+
 # ─── Shared HTTP client ───────────────────────────────────────────────────────
 _http_client: httpx.AsyncClient | None = None
 
@@ -493,7 +507,7 @@ async def parse_incoming(payload: dict) -> Dict[str, Any]:
             lng     = loc.get("longitude", "")
             name    = loc.get("name", "")
             address = loc.get("address", "")
-            label   = f"{name} {address}".strip() or f"{lat}, {lng}"
+            label = _compact_location_label(str(name), str(address), str(lat), str(lng))
             message_text = f"LOCATION:{lat},{lng}|{label}"
 
         else:
