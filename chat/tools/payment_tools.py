@@ -1508,8 +1508,24 @@ async def mark_test_checkout_paid(booking_id: str, order_id: str) -> dict[str, A
     """Test-mode only: simulate a successful checkout for QA when Razorpay sandbox is flaky."""
     if razorpay_status_message() != "enabled_test":
         return {"ok": False, "reason": "not_test_mode"}
-    if not booking_id or not order_id:
-        return {"ok": False, "reason": "missing_fields"}
+    if not booking_id:
+        return {"ok": False, "reason": "missing_booking_id"}
+
+    # Method-picker mock success may not have an order_id yet.
+    # In test mode, allow booking-level simulation for QA determinism.
+    if not order_id:
+        try:
+            result = await _mark_paid_and_fulfill(str(booking_id), source="test_checkout")
+            return {
+                **result,
+                "redirect": (
+                    f"{settings.chat_public_url.rstrip('/')}/payment/complete"
+                    f"?status=paid&booking_id={quote(str(booking_id))}"
+                ),
+            }
+        except Exception as exc:
+            logger.error(f"[razorpay] test checkout fulfillment failed for {booking_id}: {exc}")
+            return {"ok": False, "reason": "fulfillment_failed", "error": str(exc)}
 
     client = _get_client()
     if not client:
