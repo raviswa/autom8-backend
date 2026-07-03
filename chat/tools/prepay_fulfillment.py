@@ -1419,6 +1419,44 @@ async def fulfill_from_webhook(booking_id: str) -> bool:
         )
         return False
 
+    # Rehydrate scheduling hints from durable booking fields.
+    # This prevents scheduled takeaway/delivery from being pushed to live KDS
+    # immediately when session-scoped hints are missing in the saved payload.
+    payload.setdefault("service_type", booking.get("service_type"))
+    hints = dict(payload.get("session_hints") or {})
+    schedule_meta = booking.get("schedule_meta") or {}
+    if not isinstance(schedule_meta, dict):
+        schedule_meta = {}
+
+    has_scheduled_context = bool(
+        booking.get("kitchen_start_at")
+        or booking.get("scheduled_slot_at")
+        or booking.get("booking_datetime")
+        or schedule_meta.get("scheduled_at")
+        or schedule_meta.get("kitchen_start_at")
+    )
+    if booking.get("service_type") in ("takeaway", "delivery") and has_scheduled_context:
+        hints.setdefault("order_mode", "scheduled")
+        hints.setdefault("service_type", booking.get("service_type"))
+        hints.setdefault(
+            "scheduled_at",
+            booking.get("scheduled_slot_at")
+            or booking.get("booking_datetime")
+            or schedule_meta.get("scheduled_at"),
+        )
+        hints.setdefault(
+            "kitchen_start_at",
+            booking.get("kitchen_start_at")
+            or schedule_meta.get("kitchen_start_at"),
+        )
+        hints.setdefault("scheduled_at_label", schedule_meta.get("scheduled_at_label"))
+        hints.setdefault("kitchen_start_at_label", schedule_meta.get("kitchen_start_at_label"))
+        if schedule_meta.get("delivery_travel_minutes") is not None:
+            hints.setdefault("delivery_travel_minutes", schedule_meta.get("delivery_travel_minutes"))
+        if schedule_meta.get("transit_minutes") is not None:
+            hints.setdefault("transit_minutes", schedule_meta.get("transit_minutes"))
+        payload["session_hints"] = hints
+
     if payload.get("service_type") == "dine_in":
         state = await get_session_state(booking["restaurant_id"], booking["customer_phone"])
         restore_dine_in_kitchen_from_prepay(state, payload)
