@@ -255,15 +255,8 @@ async function findReusableTokenForPhone(restaurantId, phone, type, meta = {}) {
     return null;
   }
 
-  // Immediate dine-in / takeaway / large_party: reuse same type only
-  if (existing.type === type) {
-    console.log(
-      `[tokens] Reusing active token ${existing.id} for ${phone} ` +
-      `(status=${existing.status}, deduplicated)`,
-    );
-    return { token: existing, deduplicated: true };
-  }
-
+  // Immediate flows: always allocate a fresh sequential token.
+  // Reuse by phone/type caused duplicate token labels across distinct orders.
   return null;
 }
 

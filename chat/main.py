@@ -860,6 +860,7 @@ async def payment_complete(request: Request):
     support_phone = ""
     waba_phone = ""
     restaurant_name = "your restaurant"
+    booking_paid = False
 
     booking_id_hint = (
         params.get("booking_id")
@@ -889,6 +890,7 @@ async def payment_complete(request: Request):
 
             booking = await get_booking_with_customer(str(booking_id_hint))
             if booking and booking.get("restaurant_id"):
+                booking_paid = str(booking.get("payment_status") or "").lower() == "paid"
                 info = await fetch_restaurant_info(str(booking["restaurant_id"]))
                 restaurant_name = (
                     (info.get("display_name") or "").strip()
@@ -905,6 +907,15 @@ async def payment_complete(request: Request):
                     waba_phone = str(rest.get("whatsapp_number"))
         except Exception as _meta_err:
             logger.debug(f"[payment-complete] metadata resolve failed: {_meta_err}")
+
+    if status in ("failed", "cancelled", "expired") and booking_paid:
+        logger.info(
+            "[payment-complete] overriding %s to paid (booking already paid) booking_hint=%s",
+            status,
+            booking_id_hint or "",
+        )
+        status = "paid"
+        result = {"ok": True, "fulfilled": True, "source": "paid_override"}
 
     title = "Payment status"
     message = "Return to WhatsApp and reply <em>pay</em> to get a new payment link."

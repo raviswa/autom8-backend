@@ -1393,6 +1393,36 @@ async def fulfill_after_payment(payload: dict[str, Any]) -> bool:
     return await handler(payload)
 
 
+def _hydrate_schedule_hints_from_booking(
+    payload: dict[str, Any],
+    booking: dict[str, Any],
+) -> dict[str, Any]:
+    """Backfill schedule hints from booking row to keep scheduled orders off Live before release."""
+    hints = dict(payload.get("session_hints") or {})
+
+    kitchen_start = booking.get("kitchen_start_at")
+    slot_at = booking.get("scheduled_slot_at") or booking.get("booking_datetime")
+    service_type = booking.get("service_type") or payload.get("service_type")
+
+    if kitchen_start and not hints.get("kitchen_start_at"):
+        hints["kitchen_start_at"] = kitchen_start
+    if slot_at and not hints.get("scheduled_at"):
+        hints["scheduled_at"] = slot_at
+    if service_type and not hints.get("service_type"):
+        hints["service_type"] = service_type
+
+    # If schedule times exist, force scheduled mode so defer checks are applied.
+    if (kitchen_start or slot_at) and not hints.get("order_mode"):
+        hints["order_mode"] = "scheduled"
+
+    payload["session_hints"] = hints
+    if service_type and not payload.get("service_type"):
+        payload["service_type"] = service_type
+    if booking.get("token_number") and not payload.get("token"):
+        payload["token"] = str(booking.get("token_number"))
+    return payload
+
+
 async def fulfill_from_webhook(booking_id: str) -> bool:
     booking = await get_booking_with_customer(booking_id)
     if not booking:
@@ -1461,6 +1491,8 @@ async def fulfill_from_webhook(booking_id: str) -> bool:
         state = await get_session_state(booking["restaurant_id"], booking["customer_phone"])
         restore_dine_in_kitchen_from_prepay(state, payload)
         await save_session_state(booking["restaurant_id"], booking["customer_phone"], state)
+
+    payload = _hydrate_schedule_hints_from_booking(payload, booking)
 
     success = await fulfill_after_payment(payload)
     if success:

@@ -2528,25 +2528,31 @@ def _should_reuse_walk_in_token(
     meta: dict | None,
 ) -> bool:
     """True only for idempotent retries — not new orders on the same phone."""
+    incoming_bid = (meta or {}).get("booking_id")
+    existing_meta = existing.get("meta") or {}
+    if isinstance(existing_meta, str):
+        try:
+            existing_meta = json.loads(existing_meta)
+        except Exception:
+            existing_meta = {}
+    existing_bid = existing_meta.get("booking_id")
+
+    # Global guard: only reuse when this is clearly the same booking retry.
+    if incoming_bid and incoming_bid == existing_bid:
+        return True
+
     scheduled = {"scheduled_delivery", "scheduled_takeaway"}
     if token_type in scheduled:
         if existing.get("type") not in scheduled:
             return False
-        incoming_bid = (meta or {}).get("booking_id")
-        existing_meta = existing.get("meta") or {}
-        if isinstance(existing_meta, str):
-            try:
-                existing_meta = json.loads(existing_meta)
-            except Exception:
-                existing_meta = {}
-        existing_bid = existing_meta.get("booking_id")
         return bool(
             incoming_bid
             and incoming_bid == existing_bid
             and existing.get("status") == "pending_approval"
             and existing.get("type") == token_type
         )
-    return existing.get("type") == token_type
+    # For immediate flows never reuse by phone/type; allocate a fresh sequential token.
+    return False
 
 
 async def _walk_in_token_is_paid_scheduled(existing: dict) -> bool:
