@@ -2,6 +2,20 @@
 
 /**
  * DB-persisted scheduled jobs — KDS dispatch + prep-start WhatsApp.
+ *
+ * FIX (scheduled-order-leaks-to-live, Issue 2): dispatchBookingToKds() is the single
+ * function that actually writes kds_items for a scheduled booking, and it is called
+ * from four different places — the job queue (runDueScheduledJobs*), reconciliation
+ * (reconcileMissedKdsDispatches), the KDS "present" bucket poll (src/routes/pos.js),
+ * and indirectly via the Python webhook fulfillment path retrying through here. Three
+ * of those four callers already re-check kitchen_start_at against a fresh DB read
+ * before calling in; the Python webhook path was found to rely on a possibly-stale
+ * in-memory session snapshot instead. Rather than trying to audit every current and
+ * future caller, dispatchBookingToKds() now refuses to dispatch anything whose
+ * kitchen_start_at is still in the future, regardless of who called it. This makes
+ * it the single enforced chokepoint for "is it actually time to go live" — see
+ * matching change in tools/prepay_fulfillment.py::_dispatch_to_kds for the Python
+ * side of the same guarantee.
  */
 
 const { supabaseAdmin } = require('../config/supabase');
@@ -246,8 +260,30 @@ async function executePrepStartWhatsappJob(job) {
   );
 }
 
-/** Push one paid scheduled booking to KDS — one ribbon (kds_item) per cart line. */
+/**
+ * Push one paid scheduled booking to KDS — one ribbon (kds_item) per cart line.
+ *
+ * This is the single enforced chokepoint for "may this booking go live right now".
+ * Every caller — the job queue, reconciliation, the /kds/scheduled "present" bucket
+ * poll, and manual retries — funnels through here, and it refuses to write kds_items
+ * if the booking's own kitchen_start_at is still in the future, regardless of what
+ * the caller believed. See module header comment for why this exists.
+ */
 async function dispatchBookingToKds(restaurantId, order) {
+  // Hard release gate — re-checked here regardless of caller, so a stale or
+  // incorrect upstream defer decision can never result in an early live dispatch.
+  if (order.kitchen_start_at) {
+    const ks = new Date(order.kitchen_start_at).getTime();
+    if (Number.isFinite(ks) && ks > Date.now()) {
+      console.warn(
+        `[scheduled-release] REFUSED early dispatch booking=${order.booking_id} ` +
+        `token=${order.token_number} kitchen_start_at=${order.kitchen_start_at} ` +
+        `(${Math.round((ks - Date.now()) / 60000)} min in the future) — not writing kds_items`
+      );
+      return false;
+    }
+  }
+
   const cart = order.cart || order.schedule_meta?.cart || {};
   const items = buildItemsFromCart(cart);
   if (!items.length) {
@@ -271,7 +307,10 @@ async function dispatchBookingToKds(restaurantId, order) {
 
   try {
     await executeKdsDispatchJob(job);
-    console.log(`[scheduled-dispatch] ✅ ${order.token_number} → KDS (${items.length} ribbon(s))`);
+    console.log(
+      `[scheduled-release] booking=${order.booking_id} released to KDS ` +
+      `token=${order.token_number} (${items.length} ribbon(s), kitchen_start_at=${order.kitchen_start_at || 'n/a'})`
+    );
     return true;
   } catch (err) {
     console.error(`[scheduled-dispatch] ${order.booking_id} failed:`, err.message);
@@ -382,6 +421,7 @@ async function reconcileMissedKdsDispatches(restaurantId) {
       service_type: b.service_type,
       cart: meta.cart || {},
       schedule_meta: meta,
+      kitchen_start_at: b.kitchen_start_at,
     };
     if (await dispatchBookingToKds(restaurantId, order)) dispatched += 1;
   }
