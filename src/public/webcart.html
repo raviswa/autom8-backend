@@ -587,6 +587,7 @@
       todaysSpecial: [],
       availableNow: [],
       submitting: false,
+      orderingEnabled: true,
       lastSubmittedFingerprint: null,
       lastSubmittedAt: 0,
       lastSubmittedOrderRef: null,
@@ -885,8 +886,9 @@ $('subtotal').textContent = money(subtotal);
         state.lastSubmittedFingerprint &&
         state.lastSubmittedFingerprint === cartFingerprint() &&
         now - Number(state.lastSubmittedAt || 0) < 20 * 60 * 1000;
-      submitBtn.disabled = count === 0 || state.submitting || sameAsLast;
+      submitBtn.disabled = count === 0 || state.submitting || sameAsLast || state.orderingEnabled === false;
       if (state.submitting) submitBtn.textContent = 'Submitting…';
+      else if (state.orderingEnabled === false) submitBtn.textContent = 'Browse Only';
       else if (sameAsLast) submitBtn.textContent = 'Payment Link Sent';
       else submitBtn.textContent = 'Continue to WhatsApp';
 
@@ -1127,6 +1129,7 @@ $('subtotal').textContent = money(subtotal);
       state.session = data.session;
       state.phone = (data.session && data.session.phone) ? data.session.phone : (phone || '');
       phone = state.phone || phone;
+      state.orderingEnabled = data.ordering_enabled !== false;
       persistLinkContext();
       syncUrlWithContext();
       state.menu = data.menu_items || [];
@@ -1178,6 +1181,10 @@ $('subtotal').textContent = money(subtotal);
       renderChips();
       renderMenuList();
       renderCart();
+
+      if (data.session_expired && data.session_message) {
+        showStatus(data.session_message, 'ok');
+      }
 
       if (isDesktop()) openCart();
     }

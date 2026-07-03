@@ -378,10 +378,6 @@ router.get('/api/webcart/session', async (req, res) => {
       phone,
     });
 
-    if (!session) {
-      return res.status(410).json(buildExpiredPayload(restaurant));
-    }
-
     const { items: menuItems, categorySlotMap } = await fetchMenuItems(restaurant.id);
     let slotInfo = resolveCurrentSlot(restaurant);
 
@@ -427,8 +423,24 @@ router.get('/api/webcart/session', async (req, res) => {
       })[0];
     if (top) primaryCategory = top[0];
 
+    const sessionPayload = session
+      ? {
+          token: session.id,
+          phone: session.phone,
+          type: session.type,
+        }
+      : {
+          token,
+          phone,
+          type: 'takeaway',
+        };
+
+    const orderingEnabled = !!session;
+
     return res.json({
       valid: true,
+      ordering_enabled: orderingEnabled,
+      session_expired: !session,
       restaurant: {
         id: restaurant.id,
         name: restaurant.display_name || restaurant.name,
@@ -442,11 +454,7 @@ router.get('/api/webcart/session', async (req, res) => {
       },
       
       theme: DEFAULT_THEME,
-      session: {
-        token: session.id,
-        phone: session.phone,
-        type: session.type,
-      },
+      session: sessionPayload,
       menu_items: menuItems,
       todays_special: todaysSpecial,
       available_now: availableNow,
@@ -462,6 +470,9 @@ router.get('/api/webcart/session', async (req, res) => {
       primary_category: primaryCategory,
       category_slots: categorySlotMap,
       promotions: [],
+      session_message: session
+        ? null
+        : 'Your WhatsApp session expired, but the menu is still available to browse. Please request a fresh link to submit an order.',
     });
   } catch (err) {
     console.error('[webcart/session]', err.message);
