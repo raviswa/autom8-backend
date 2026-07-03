@@ -134,8 +134,11 @@ async def start_scheduler():
     )
 
     if cleanup_expired_receipts is not None:
+        def _run_receipt_cleanup_job() -> None:
+            asyncio.run(cleanup_expired_receipts())
+
         scheduler.add_job(
-            lambda: asyncio.create_task(cleanup_expired_receipts()),
+            _run_receipt_cleanup_job,
             trigger="cron",
             hour="3",
             minute="0",

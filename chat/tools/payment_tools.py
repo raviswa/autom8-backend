@@ -1004,6 +1004,7 @@ async def create_order_for_method(booking_id: str, token: str, method: str) -> d
         "booking_id": booking_id,
         "method": method,
         "method_config": _RAZORPAY_METHOD_CONFIG[method],
+        "test_mode": razorpay_status_message() == "enabled_test",
     }
 
 
@@ -1018,6 +1019,7 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
     token_label = str(ctx.get("token_label") or "").strip()
     token_html = f'<p class="muted">Order {token_label}</p>' if token_label else ""
     retry_url = json.dumps(build_checkout_page_url(str(ctx["booking_id"])))
+    test_mode = "true" if ctx.get("test_mode") else "false"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1028,18 +1030,18 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
     <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
     <style>
         :root {{
-            --bg-0: #fff8f2;
-            --bg-1: #ffe8d6;
-            --ink: #111827;
+            --bg-0: #f5f9ff;
+            --bg-1: #e9f0ff;
+            --ink: #0f172a;
             --muted: #5b6678;
-            --line: #f3d9c6;
+            --line: #dbe7ff;
             --card: #ffffff;
-            --brand: #e36d26;
-            --brand-ink: #7a3412;
-            --upi-bg: #f0f9ff;
-            --upi-line: #bae6fd;
-            --card-bg: #fff7ed;
-            --card-line: #fed7aa;
+            --brand: #2563eb;
+            --brand-ink: #1e40af;
+            --upi-bg: #f3f8ff;
+            --upi-line: #93c5fd;
+            --card-bg: #f8fafc;
+            --card-line: #cbd5e1;
         }}
         * {{ box-sizing: border-box; }}
         body {{
@@ -1049,8 +1051,8 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
             padding: 20px 14px;
             color: var(--ink);
             background:
-                radial-gradient(circle at 10% 10%, rgba(227,109,38,0.16), transparent 46%),
-                radial-gradient(circle at 90% 85%, rgba(37,99,235,0.10), transparent 42%),
+                radial-gradient(circle at 10% 10%, rgba(37,99,235,0.13), transparent 46%),
+                radial-gradient(circle at 90% 85%, rgba(59,130,246,0.11), transparent 42%),
                 linear-gradient(165deg, var(--bg-0), var(--bg-1));
             display: grid;
             align-items: start;
@@ -1062,7 +1064,7 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
             border: 1px solid var(--line);
             border-radius: 18px;
             padding: 20px 16px 16px;
-            box-shadow: 0 14px 34px rgba(138, 92, 63, 0.15);
+            box-shadow: 0 14px 34px rgba(30, 64, 175, 0.12);
             animation: rise 280ms ease-out;
         }}
         @keyframes rise {{
@@ -1098,15 +1100,36 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
             align-items: center;
             gap: 8px;
             font-size: 11px;
-            color: #7c2d12;
-            background: #ffedd5;
-            border: 1px solid #fed7aa;
+            color: #1e40af;
+            background: #eff6ff;
+            border: 1px solid #bfdbfe;
             border-radius: 999px;
             padding: 4px 10px;
             margin: 0 0 10px;
             font-weight: 700;
             text-transform: uppercase;
             letter-spacing: 0.06em;
+        }}
+        .test-tools {{
+            display: none;
+            margin-top: 12px;
+            padding: 10px 12px;
+            border: 1px dashed #93c5fd;
+            border-radius: 12px;
+            background: #eff6ff;
+        }}
+        .test-tools p {{ margin: 0 0 8px; color: #1e3a8a; font-size: 12px; line-height: 1.4; }}
+        .test-btn {{
+            appearance: none;
+            border: 0;
+            border-radius: 10px;
+            padding: 10px 12px;
+            background: #2563eb;
+            color: #fff;
+            font-weight: 700;
+            cursor: pointer;
+            width: 100%;
+            text-align: center;
         }}
     </style>
 </head>
@@ -1128,6 +1151,10 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
         </button>
 
         <p class="spinner" id="spinner">Preparing secure payment...</p>
+        <div class="test-tools" id="testTools">
+            <p>Test mode detected. If sandbox rails keep failing, use this button to simulate a successful payment for QA validation.</p>
+            <button class="test-btn" id="mockSuccessBtn" type="button">Simulate Test Payment Success</button>
+        </div>
         <p class="legal">Processing fee is accounted in merchant settlement: UPI 1% and cards/netbanking/wallets 2.8%. Customer pays the amount shown above.</p>
         <p class="legal">Payment cannot be reversed once completed.</p>
     </main>
@@ -1136,6 +1163,7 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
         var bookingId = {booking_id};
         var token = {token};
         var retryUrl = {retry_url};
+        var testMode = {test_mode};
 
         function lockTiles(lock) {{
             document.getElementById("tile-upi").disabled = lock;
@@ -1151,6 +1179,29 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
             window.location.href = "/payment/complete" + q;
         }}
 
+        function sendFailureEvent(kind, details) {{
+            var payload = JSON.stringify({{
+                kind: kind,
+                booking_id: bookingId,
+                details: details || {{}}
+            }});
+            try {{
+                if (navigator && typeof navigator.sendBeacon === "function") {{
+                    var blob = new Blob([payload], {{ type: "application/json" }});
+                    navigator.sendBeacon("/pay/failure-event", blob);
+                    return;
+                }}
+            }} catch (_e) {{}}
+            try {{
+                fetch("/pay/failure-event", {{
+                    method: "POST",
+                    headers: {{ "Content-Type": "application/json" }},
+                    body: payload,
+                    keepalive: true
+                }});
+            }} catch (_e) {{}}
+        }}
+
         function pay(method) {{
             lockTiles(true);
             var url = "/pay/" + bookingId + "/create-order?t=" + encodeURIComponent(token) + "&method=" + encodeURIComponent(method);
@@ -1164,6 +1215,22 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
             .catch(function() {{ lockTiles(false); failBack("create_order_failed"); }});
         }}
 
+        function simulateSuccess() {{
+            fetch("/pay/mock-success", {{
+                method: "POST",
+                headers: {{ "Content-Type": "application/json" }},
+                body: JSON.stringify({{ booking_id: bookingId }})
+            }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+                if (data && data.ok && data.redirect) {{
+                    window.location.href = data.redirect;
+                    return;
+                }}
+                failBack((data && data.reason) || "mock_success_failed");
+            }}).catch(function() {{
+                failBack("mock_success_failed");
+            }});
+        }}
+
         function openRazorpay(ctx) {{
             var options = {{
                 key: ctx.key_id,
@@ -1173,7 +1240,7 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
                 description: ctx.description,
                 prefill: {{ name: ctx.customer_name, contact: ctx.contact }},
                 method: ctx.method_config,
-                theme: {{ color: "#e36d26" }},
+                theme: {{ color: "#2563eb" }},
                 handler: function (response) {{
                     fetch("/pay/verify", {{
                         method: "POST",
@@ -1187,6 +1254,7 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
                 }},
                 modal: {{
                     ondismiss: function() {{
+                        sendFailureEvent("checkout_dismissed", {{ source: "modal" }});
                         lockTiles(false);
                         failBack("checkout_dismissed");
                     }}
@@ -1196,9 +1264,24 @@ def render_method_selection_html(ctx: dict[str, Any]) -> str:
             var rzp = new Razorpay(options);
             rzp.on("payment.failed", function(response) {{
                 var err = (response && response.error) || {{}};
+                sendFailureEvent("payment_failed", {{
+                    code: err.code || "",
+                    reason: err.reason || "",
+                    source: err.source || "",
+                    step: err.step || "",
+                    description: err.description || "",
+                    metadata: err.metadata || {{}}
+                }});
                 failBack(err.reason || err.code || "payment_failed");
             }});
             rzp.open();
+        }}
+
+        if (testMode) {{
+            var testTools = document.getElementById("testTools");
+            var mockSuccessBtn = document.getElementById("mockSuccessBtn");
+            if (testTools) testTools.style.display = "block";
+            if (mockSuccessBtn) mockSuccessBtn.addEventListener("click", simulateSuccess);
         }}
     </script>
 </body>

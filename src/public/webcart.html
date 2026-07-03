@@ -677,6 +677,8 @@
     // and every item appears to lose its "already added" stepper state.
     const cartStorageKey = () => `munafe_cart:${token}`;
     const lastSubmitStorageKey = () => `munafe_last_submit:${token}`;
+    const sessionCacheStorageKey = () => `munafe_session:${slug || hostSlug}:${token}:${phone || state.phone || ''}`;
+    const SESSION_CACHE_TTL_MS = 2 * 60 * 1000;
     function saveCartLocal() {
       try {
         sessionStorage.setItem(cartStorageKey(), JSON.stringify([...state.cart.entries()]));
@@ -690,6 +692,24 @@
     }
     function clearCartLocal() {
       try { sessionStorage.removeItem(cartStorageKey()); } catch (_e) {}
+    }
+    function loadSessionCache() {
+      try {
+        const raw = sessionStorage.getItem(sessionCacheStorageKey());
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return null;
+        const age = Date.now() - Number(parsed.ts || 0);
+        if (age > SESSION_CACHE_TTL_MS) return null;
+        return parsed.payload || null;
+      } catch (_e) {
+        return null;
+      }
+    }
+    function saveSessionCache(payload) {
+      try {
+        sessionStorage.setItem(sessionCacheStorageKey(), JSON.stringify({ ts: Date.now(), payload }));
+      } catch (_e) { /* storage unavailable */ }
     }
     function loadLastSubmitLocal() {
       try {
@@ -1102,6 +1122,66 @@ $('subtotal').textContent = money(subtotal);
       renderMenuList();
     });
 
+    function applySessionPayload(data) {
+      state.restaurant = data.restaurant;
+      state.session = data.session;
+      state.phone = (data.session && data.session.phone) ? data.session.phone : (phone || '');
+      phone = state.phone || phone;
+      persistLinkContext();
+      syncUrlWithContext();
+      state.menu = data.menu_items || [];
+      state.pricingConfig = data.pricing_config || {};
+      state.todaysSpecial = data.todays_special || [];
+      state.availableNow = data.available_now || [];
+      state.activeTab = data.primary_category || 'all';
+
+      loadCartLocal();
+      document.documentElement.style.setProperty('--brand', '#E36D26');
+      document.documentElement.style.setProperty('--header', '#000000');
+
+      $('brandName').textContent = data.restaurant.name || 'Munafe';
+      $('sessionMeta').textContent = `Token ${data.session.token} • ${data.session.phone}`;
+
+      const logo = $('brandLogo');
+      const fallback = $('brandLogoFallback');
+      const initial = (data.restaurant.name || 'M').trim().charAt(0).toUpperCase() || 'M';
+      fallback.textContent = initial;
+      if (data.restaurant.logo_url) {
+        logo.onerror = () => {
+          logo.style.display = 'none';
+          fallback.style.display = 'flex';
+        };
+        logo.onload = () => {
+          logo.style.display = 'block';
+          fallback.style.display = 'none';
+        };
+        logo.src = data.restaurant.logo_url;
+      } else {
+        logo.style.display = 'none';
+        fallback.style.display = 'flex';
+      }
+
+      const pill = $('slotPill');
+      if (data.current_slot) {
+        pill.textContent = `${data.current_slot[0].toUpperCase()}${data.current_slot.slice(1)} • Open`;
+        pill.classList.add('open');
+      } else {
+        pill.textContent = data.slot_state === 'closed' ? 'Closed' : 'Browse menu';
+        pill.classList.remove('open');
+      }
+
+      const banner = $('slotBanner');
+      if (data.slot_banner) { banner.style.display = 'block'; banner.textContent = data.slot_banner; }
+      else banner.style.display = 'none';
+
+      renderTopSections();
+      renderChips();
+      renderMenuList();
+      renderCart();
+
+      if (isDesktop()) openCart();
+    }
+
     async function loadSession() {
       if (isFilePreview) {
         showStatus(
@@ -1114,6 +1194,12 @@ $('subtotal').textContent = money(subtotal);
         showSessionFallbackStatus();
         return;
       }
+
+      const cached = loadSessionCache();
+      if (cached && cached.valid && cached.restaurant && cached.session) {
+        applySessionPayload(cached);
+      }
+
       try {
         const q = new URLSearchParams({ token });
         if (state.phone) q.set('phone', state.phone);
@@ -1128,75 +1214,12 @@ $('subtotal').textContent = money(subtotal);
           });
           return;
         }
-
-        state.restaurant = data.restaurant;
-        state.session = data.session;
-        state.phone = (data.session && data.session.phone) ? data.session.phone : (phone || '');
-        phone = state.phone || phone;
-        persistLinkContext();
-        syncUrlWithContext();
-        state.menu = data.menu_items || [];
-        state.pricingConfig = data.pricing_config || {};
-        state.todaysSpecial = data.todays_special || [];
-        state.availableNow = data.available_now || [];
-        state.activeTab = data.primary_category || 'all';
-
-        // FIX (4): restore any cart saved before this page load (reload, or
-        // returning from the WhatsApp redirect) so steppers show correctly.
-        loadCartLocal();
-
-        // Keep CTA/accent color fixed per current brand requirement.
-        document.documentElement.style.setProperty('--brand', '#E36D26');
-        // Keep header fixed to black across all flows.
-        document.documentElement.style.setProperty('--header', '#000000');
-
-        $('brandName').textContent = data.restaurant.name || 'Munafe';
-        $('sessionMeta').textContent = `Token ${data.session.token} • ${data.session.phone}`;
-
-        // FIX (1): robust logo handling — show fallback immediately if no
-        // logo_url, and fall back gracefully if the URL fails to load
-        // (broken link, CORS-blocked host, etc.) instead of leaving a
-        // broken-image icon or a permanently empty slot.
-        const logo = $('brandLogo');
-        const fallback = $('brandLogoFallback');
-        const initial = (data.restaurant.name || 'M').trim().charAt(0).toUpperCase() || 'M';
-        fallback.textContent = initial;
-        if (data.restaurant.logo_url) {
-          logo.onerror = () => {
-            logo.style.display = 'none';
-            fallback.style.display = 'flex';
-          };
-          logo.onload = () => {
-            logo.style.display = 'block';
-            fallback.style.display = 'none';
-          };
-          logo.src = data.restaurant.logo_url;
-        } else {
-          logo.style.display = 'none';
-          fallback.style.display = 'flex';
-        }
-
-        const pill = $('slotPill');
-        if (data.current_slot) {
-          pill.textContent = `${data.current_slot[0].toUpperCase()}${data.current_slot.slice(1)} • Open`;
-          pill.classList.add('open');
-        } else {
-          pill.textContent = data.slot_state === 'closed' ? 'Closed' : 'Browse menu';
-          pill.classList.remove('open');
-        }
-
-        const banner = $('slotBanner');
-        if (data.slot_banner) { banner.style.display = 'block'; banner.textContent = data.slot_banner; }
-        else banner.style.display = 'none';
-
-        renderTopSections();
-        renderChips();
-        renderMenuList();
-        renderCart();
-
-        if (isDesktop()) openCart();
+        saveSessionCache(data);
+        applySessionPayload(data);
       } catch (_e) {
-        showStatus('Unable to load the cart session right now. Please try again.', 'err');
+        if (!cached) {
+          showStatus('Unable to load the cart session right now. Please try again.', 'err');
+        }
       }
     }
 

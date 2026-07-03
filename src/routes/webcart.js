@@ -17,7 +17,7 @@ const CHAT_SERVICE_URL = (process.env.CHAT_SERVICE_URL || 'http://localhost:8001
 // Webcart APIs are polled frequently by the frontend. Keep tiny in-memory caches
 // to avoid repeated identical DB reads during launch/refresh loops.
 const RESTAURANT_CACHE_TTL_MS = 60 * 1000;
-const MENU_CACHE_TTL_MS = 5 * 1000;
+const MENU_CACHE_TTL_MS = 45 * 1000;
 let _restaurantCache = { rows: null, fetchedAt: 0 };
 const _menuCache = new Map(); // restaurantId -> { items, categorySlotMap, fetchedAt }
 

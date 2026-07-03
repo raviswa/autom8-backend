@@ -127,9 +127,13 @@ _processed_message_ids_lock = asyncio.Lock()
 
 def _normalize_whatsapp_phone(raw: str | None) -> str:
     digits = "".join(ch for ch in str(raw or "") if ch.isdigit())
+    if len(digits) == 10:
+        return f"91{digits}"
     if len(digits) == 12 and digits.startswith("91"):
-        return digits[2:]
-    return digits
+        return digits
+    if len(digits) >= 11:
+        return digits
+    return ""
 
 
 # ─────────────────────────────────────────────
