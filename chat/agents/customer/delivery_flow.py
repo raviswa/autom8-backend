@@ -691,6 +691,14 @@ async def _submit_scheduled_delivery_for_approval(
         session_state["kitchen_start_at_label"] = kitchen_label
     except Exception as exc:
         logger.error(f"[delivery] schedule compute failed for {booking_id}: {exc}")
+        await send_whatsapp_message(
+            customer_phone,
+            "We could not lock your scheduled delivery slot right now. "
+            "Please tap *Select Date & Time* and choose your slot again." + _HOME_HINT,
+            restaurant_id,
+        )
+        session_state["booking_step"] = "awaiting_scheduled_flow"
+        raise RuntimeError(f"scheduled delivery schedule compute failed for booking {booking_id}") from exc
 
     sched_label = _scheduled_delivery_label(session_state)
     session_state["scheduled_at_label"] = sched_label

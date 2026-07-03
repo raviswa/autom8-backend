@@ -12,11 +12,13 @@ from tools.db_tools import (
     save_session_state,
     get_scheduled_takeaway_token,
     get_scheduled_delivery_token,
+    customer_lock,
 )
 from tools.booking_mechanisms import cache_restaurant_pricing
 from tools.payment_tools import scheduled_payment_already_delivered
 from tools.restaurant_config import get_manager_phone
 from tools.db_tools import parse_walk_in_meta
+from tools.payment_gate import PaymentGateError, assert_token_approved_for_payment
 from agents.customer.booking_helpers import touch_session_activity
 
 logger = logging.getLogger(__name__)
@@ -125,73 +127,92 @@ async def trigger_scheduled_payment_after_approval(
     if not customer_phone:
         return {"ok": False, "error": "token missing customer phone"}
 
-    session_state, stored_phone = await _load_session_for_phone(restaurant_id, customer_phone)
-    if scheduled_payment_already_delivered(session_state):
-        logger.info(
-            f"[scheduled-payment] skip {token.get('id')} — payment already sent"
-        )
-        return {"ok": True, "skipped": "already_sent"}
+    booking_id = parse_walk_in_meta((token or {}).get("meta")).get("booking_id")
 
-    service_type = "takeaway" if token_type == "scheduled_takeaway" else "delivery"
-    _merge_token_meta_into_session(session_state, token, service_type=service_type)
-    session_state["restaurant_id"] = restaurant_id
-
-    await cache_restaurant_pricing(session_state, restaurant_id)
-
-    customer = await get_customer(restaurant_id, stored_phone)
-    customer_id = str((customer or {}).get("id") or session_state.get("customer_id") or "")
-    customer_name = (
-        (customer or {}).get("name")
-        or session_state.get("customer_name")
-        or token.get("name")
-        or "Guest"
-    )
-    if customer_id:
-        session_state["customer_id"] = customer_id
-    session_state["customer_name"] = customer_name
-
-    mgr = (
-        manager_phone
-        or session_state.get("manager_phone")
-        or ""
-    )
-    if not mgr:
+    # Serialize all send attempts for this customer across internal trigger and PAY-reply trigger.
+    async with customer_lock(restaurant_id, customer_phone):
         try:
-            mgr = (await get_manager_phone(restaurant_id) or "").strip()
-        except Exception:
-            mgr = ""
-    if mgr:
-        session_state["manager_phone"] = mgr
-
-    try:
-        if service_type == "takeaway":
-            from agents.customer.takeaway_flow import _complete_scheduled_takeaway_after_approval
-
-            result = await _complete_scheduled_takeaway_after_approval(
-                restaurant_id, customer_id, customer_name, stored_phone, session_state,
+            await assert_token_approved_for_payment(restaurant_id, token, booking_id)
+        except PaymentGateError as gate_err:
+            logger.warning(
+                f"[scheduled-payment] gate-blocked token={token.get('id')} "
+                f"reason={gate_err.reason} detail={gate_err.detail}"
             )
-        else:
-            from agents.customer.delivery_flow import _complete_scheduled_delivery_after_approval
+            if gate_err.reason == "already_paid":
+                return {"ok": True, "skipped": "already_paid"}
+            return {
+                "ok": False,
+                "error": gate_err.reason,
+                "detail": gate_err.detail or gate_err.reason,
+            }
 
-            result = await _complete_scheduled_delivery_after_approval(
-                restaurant_id, customer_id, customer_name, stored_phone,
-                mgr, session_state,
+        session_state, stored_phone = await _load_session_for_phone(restaurant_id, customer_phone)
+        if scheduled_payment_already_delivered(session_state):
+            logger.info(
+                f"[scheduled-payment] skip {token.get('id')} — payment already sent"
             )
-    except Exception as exc:
-        logger.error(f"[scheduled-payment] failed for {token.get('id')}: {exc}")
-        return {"ok": False, "error": str(exc)}
+            return {"ok": True, "skipped": "already_sent"}
 
-    touch_session_activity(session_state)
-    session_state["current_state"] = "booking"
-    await save_session_state(restaurant_id, stored_phone, session_state)
-    if caller_session is not None:
-        caller_session.clear()
-        caller_session.update(session_state)
-    logger.info(
-        f"[scheduled-payment] sent payment for {token.get('id')} → {stored_phone} "
-        f"status={result.get('status')}"
-    )
-    return {"ok": True, "result": result}
+        service_type = "takeaway" if token_type == "scheduled_takeaway" else "delivery"
+        _merge_token_meta_into_session(session_state, token, service_type=service_type)
+        session_state["restaurant_id"] = restaurant_id
+
+        await cache_restaurant_pricing(session_state, restaurant_id)
+
+        customer = await get_customer(restaurant_id, stored_phone)
+        customer_id = str((customer or {}).get("id") or session_state.get("customer_id") or "")
+        customer_name = (
+            (customer or {}).get("name")
+            or session_state.get("customer_name")
+            or token.get("name")
+            or "Guest"
+        )
+        if customer_id:
+            session_state["customer_id"] = customer_id
+        session_state["customer_name"] = customer_name
+
+        mgr = (
+            manager_phone
+            or session_state.get("manager_phone")
+            or ""
+        )
+        if not mgr:
+            try:
+                mgr = (await get_manager_phone(restaurant_id) or "").strip()
+            except Exception:
+                mgr = ""
+        if mgr:
+            session_state["manager_phone"] = mgr
+
+        try:
+            if service_type == "takeaway":
+                from agents.customer.takeaway_flow import _complete_scheduled_takeaway_after_approval
+
+                result = await _complete_scheduled_takeaway_after_approval(
+                    restaurant_id, customer_id, customer_name, stored_phone, session_state,
+                )
+            else:
+                from agents.customer.delivery_flow import _complete_scheduled_delivery_after_approval
+
+                result = await _complete_scheduled_delivery_after_approval(
+                    restaurant_id, customer_id, customer_name, stored_phone,
+                    mgr, session_state,
+                )
+        except Exception as exc:
+            logger.error(f"[scheduled-payment] failed for {token.get('id')}: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+        touch_session_activity(session_state)
+        session_state["current_state"] = "booking"
+        await save_session_state(restaurant_id, stored_phone, session_state)
+        if caller_session is not None:
+            caller_session.clear()
+            caller_session.update(session_state)
+        logger.info(
+            f"[scheduled-payment] sent payment for {token.get('id')} → {stored_phone} "
+            f"status={result.get('status')}"
+        )
+        return {"ok": True, "result": result}
 
 
 async def try_trigger_scheduled_payment_on_pay(
