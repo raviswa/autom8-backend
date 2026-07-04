@@ -41,6 +41,7 @@ from tools.prepay_fulfillment import (
     build_prepay_payload,
     stash_and_persist_prepay_payload,
     PREPAY_PENDING_FOOTER,
+    _finalize_kds_for_scheduled_order,
 )
 from tools.whatsapp_tools import send_whatsapp_message, send_whatsapp_flow
 from tools.cart_tools import cart_to_order_text, clear_cart
@@ -60,7 +61,6 @@ from tools.booking_mechanisms import (
     _LineItem,
     KDS_SECRET,
     get_http,
-    notify_kds,
     sync_token_to_portal,
     fetch_restaurant_info,
     upload_and_send_receipt,
@@ -875,34 +875,47 @@ async def handle_takeaway_flow(
             if cart_snapshot:
                 await enrich_cart_titles(cart_snapshot, restaurant_id)
 
-            kds_order_id = await notify_kds(
-                customer_name=customer_name, customer_phone=customer_phone,
-                order_text=order_text_display, cart=cart_snapshot, table_number=None,
-                token_number=display_token, service_type="takeaway",
+            hints = {k: session_state.get(k) for k in (
+                "scheduled_at", "scheduled_at_label", "order_mode", "service_type",
+                "scheduled_kds_lead_minutes", "kitchen_start_at", "kitchen_start_at_label",
+            )}
+            dispatched_now = await _finalize_kds_for_scheduled_order(
+                booking_id=booking_id,
                 restaurant_id=restaurant_id,
+                customer_phone=customer_phone,
+                customer_name=customer_name,
+                token=str(display_token),
+                order_text=order_text_display,
+                cart=cart_snapshot,
+                service_type="takeaway",
+                session_hints=hints,
+                manager_phone="",
+                booking_time=booking_time,
+                total=total,
             )
-            if not kds_order_id:
-                logger.error(
-                    f"[takeaway] KDS dispatch failed for token {display_token} "
-                    f"(cart_lines={len(cart_snapshot or {})})"
+            if not dispatched_now:
+                logger.warning(
+                    f"[takeaway] deferred KDS dispatch for token {display_token} "
+                    f"(booking_id={booking_id})"
                 )
 
             # Fix 38: feedback queue — mirrors dine-in behaviour
-            try:
-                await get_http().post(
-                    "https://api.autom8.works/api/feedback/queue",
-                    json={
-                        "restaurant_id":  restaurant_id,
-                        "customer_phone": customer_phone,
-                        "customer_name":  customer_name,
-                        "token_number":   display_token,
-                        "table_number":   None,
-                    },
-                    headers={"Authorization": f"Bearer {KDS_SECRET}"},
-                    timeout=aiohttp.ClientTimeout(total=5),
-                )
-            except Exception as fb_err:
-                logger.warning(f"[feedback-queue] Non-fatal: {fb_err}")
+            if dispatched_now:
+                try:
+                    await get_http().post(
+                        "https://api.autom8.works/api/feedback/queue",
+                        json={
+                            "restaurant_id":  restaurant_id,
+                            "customer_phone": customer_phone,
+                            "customer_name":  customer_name,
+                            "token_number":   display_token,
+                            "table_number":   None,
+                        },
+                        headers={"Authorization": f"Bearer {KDS_SECRET}"},
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    )
+                except Exception as fb_err:
+                    logger.warning(f"[feedback-queue] Non-fatal: {fb_err}")
 
             if RECEIPT_AVAILABLE:
                 try:

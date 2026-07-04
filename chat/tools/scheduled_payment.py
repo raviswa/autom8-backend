@@ -1,4 +1,26 @@
-"""Send Razorpay payment links after scheduled order manager approval."""
+"""Send Razorpay payment links after scheduled order manager approval.
+
+FIX (Issue 3, payment approval gating + concurrent-trigger race):
+trigger_scheduled_payment_after_approval() can be reached from two independent
+triggers that can fire close together — the manager-approval webhook
+(triggerChatScheduledPayment in src/routes/tokens.js, called right after the
+pending_approval -> takeaway transition) and the customer replying "PAY"
+(try_trigger_scheduled_payment_on_pay below). Previously neither trigger held any
+lock and neither re-validated token/booking state beyond the
+scheduled_payment_already_delivered() idempotency flag, so two near-simultaneous
+callers could both pass that check (neither had written the flag yet) and both
+build/send a Razorpay link. trigger_scheduled_payment_after_approval() now:
+
+  1. Serializes on the same per-(restaurant, phone) advisory lock already used
+     elsewhere in this codebase (tools.db_tools.customer_lock), so a concurrent
+     second caller waits, then observes scheduled_payment_already_delivered() ==
+     True and no-ops instead of racing.
+  2. Calls tools.payment_gate.assert_token_approved_for_payment() before doing
+     anything else, per the explicit constraint: never send a payment link unless
+     the token has made the pending_approval -> approved transition and the
+     linked booking's status is validated server-side (not already paid,
+     cancelled, or rejected).
+"""
 
 from __future__ import annotations
 
@@ -16,9 +38,9 @@ from tools.db_tools import (
 )
 from tools.booking_mechanisms import cache_restaurant_pricing
 from tools.payment_tools import scheduled_payment_already_delivered
+from tools.payment_gate import assert_token_approved_for_payment, PaymentGateError
 from tools.restaurant_config import get_manager_phone
 from tools.db_tools import parse_walk_in_meta
-from tools.payment_gate import PaymentGateError, assert_token_approved_for_payment
 from agents.customer.booking_helpers import touch_session_activity
 
 logger = logging.getLogger(__name__)
@@ -119,6 +141,12 @@ async def trigger_scheduled_payment_after_approval(
     """
     After manager approves a scheduled takeaway/delivery token, send the Razorpay
     payment link to the customer and persist session for prepay fulfillment.
+
+    Serialized per (restaurant_id, customer_phone) so the manager-approval trigger
+    and a concurrent customer "PAY"-reply trigger can't both pass the
+    already-delivered idempotency check and both send a link. Also runs the hard
+    approval gate (tools.payment_gate.assert_token_approved_for_payment) before
+    doing anything else — see module docstring.
     """
     token_type = (token or {}).get("type") or ""
     customer_phone = (token or {}).get("phone") or ""
@@ -127,31 +155,30 @@ async def trigger_scheduled_payment_after_approval(
     if not customer_phone:
         return {"ok": False, "error": "token missing customer phone"}
 
-    booking_id = parse_walk_in_meta((token or {}).get("meta")).get("booking_id")
-
-    # Serialize all send attempts for this customer across internal trigger and PAY-reply trigger.
     async with customer_lock(restaurant_id, customer_phone):
-        try:
-            await assert_token_approved_for_payment(restaurant_id, token, booking_id)
-        except PaymentGateError as gate_err:
-            logger.warning(
-                f"[scheduled-payment] gate-blocked token={token.get('id')} "
-                f"reason={gate_err.reason} detail={gate_err.detail}"
-            )
-            if gate_err.reason == "already_paid":
-                return {"ok": True, "skipped": "already_paid"}
-            return {
-                "ok": False,
-                "error": gate_err.reason,
-                "detail": gate_err.detail or gate_err.reason,
-            }
-
         session_state, stored_phone = await _load_session_for_phone(restaurant_id, customer_phone)
         if scheduled_payment_already_delivered(session_state):
             logger.info(
-                f"[scheduled-payment] skip {token.get('id')} — payment already sent"
+                f"[scheduled-payment] skip {token.get('id')} — payment already sent "
+                f"(idempotency check inside lock)"
             )
             return {"ok": True, "skipped": "already_sent"}
+
+        try:
+            await assert_token_approved_for_payment(
+                restaurant_id, token, session_state.get("booking_id"),
+            )
+        except PaymentGateError as gate_err:
+            logger.warning(
+                f"[scheduled-payment] gate rejected token={token.get('id')}: "
+                f"{gate_err.reason} — {gate_err.detail}"
+            )
+            if gate_err.reason == "already_paid":
+                # Not an error from the customer's point of view — surface as
+                # already-delivered so callers show success messaging instead of
+                # a generic failure.
+                return {"ok": True, "skipped": "already_paid"}
+            return {"ok": False, "error": gate_err.reason}
 
         service_type = "takeaway" if token_type == "scheduled_takeaway" else "delivery"
         _merge_token_meta_into_session(session_state, token, service_type=service_type)
@@ -226,6 +253,13 @@ async def try_trigger_scheduled_payment_on_pay(
     """
     When customer replies PAY — resend link if they have an approved scheduled order.
     Returns a flow result dict, or None if this handler does not apply.
+
+    Note: this can race with the manager-approval trigger
+    (triggerChatScheduledPayment -> trigger_scheduled_payment_after_approval) firing
+    at nearly the same moment. Both paths that end up calling
+    trigger_scheduled_payment_after_approval() are protected by the same
+    per-(restaurant, phone) advisory lock and the same approval gate — see that
+    function's docstring — so this handler doesn't need its own additional locking.
     """
     step = session_state.get("booking_step") or ""
 

@@ -58,7 +58,6 @@ from tools.booking_mechanisms import (
     _LineItem,
     KDS_SECRET,
     get_http,
-    notify_kds,
     fetch_restaurant_info,
     upload_and_send_receipt,
     receipt_qr_url,
@@ -1165,28 +1164,49 @@ async def handle_delivery_flow(
             session_state["booking_step"] = "visit_complete"
             clear_cart(session_state)
 
-            await notify_kds(
-                customer_name=customer_name, customer_phone=customer_phone,
-                order_text=order_text, cart=cart_snapshot, table_number=None,
-                token_number=token, service_type="delivery",
+            hints = {k: session_state.get(k) for k in (
+                "scheduled_at", "scheduled_at_label", "order_mode", "service_type",
+                "scheduled_kds_lead_minutes", "kitchen_start_at", "kitchen_start_at_label",
+                "delivery_address", "delivery_distance_km", "delivery_distance_method",
+                "delivery_travel_minutes",
+            )}
+            dispatched_now = await _finalize_kds_for_scheduled_order(
+                booking_id=booking_id,
                 restaurant_id=restaurant_id,
+                customer_phone=customer_phone,
+                customer_name=customer_name,
+                token=str(token),
+                order_text=order_text,
+                cart=cart_snapshot,
+                service_type="delivery",
+                session_hints=hints,
+                manager_phone="",
+                delivery_address=session_state.get("delivery_address", ""),
+                booking_time=booking_time,
+                total=total,
             )
-
-            try:
-                await get_http().post(
-                    "https://api.autom8.works/api/feedback/queue",
-                    json={
-                        "restaurant_id":  restaurant_id,
-                        "customer_phone": customer_phone,
-                        "customer_name":  customer_name,
-                        "token_number":   token,
-                        "table_number":   None,
-                    },
-                    headers={"Authorization": f"Bearer {KDS_SECRET}"},
-                    timeout=aiohttp.ClientTimeout(total=5),
+            if not dispatched_now:
+                logger.warning(
+                    f"[delivery] deferred KDS dispatch for token {token} "
+                    f"(booking_id={booking_id})"
                 )
-            except Exception as fb_err:
-                logger.warning(f"[feedback-queue] Non-fatal: {fb_err}")
+
+            if dispatched_now:
+                try:
+                    await get_http().post(
+                        "https://api.autom8.works/api/feedback/queue",
+                        json={
+                            "restaurant_id":  restaurant_id,
+                            "customer_phone": customer_phone,
+                            "customer_name":  customer_name,
+                            "token_number":   token,
+                            "table_number":   None,
+                        },
+                        headers={"Authorization": f"Bearer {KDS_SECRET}"},
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    )
+                except Exception as fb_err:
+                    logger.warning(f"[feedback-queue] Non-fatal: {fb_err}")
 
             if RECEIPT_AVAILABLE:
                 try:
