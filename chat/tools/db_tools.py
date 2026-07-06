@@ -1,16 +1,4 @@
-"""Database tools - ADK-compatible async database operations
-
-FIX (token sequencing, Issue 1): _next_portal_token_id() previously fell back to a
-non-atomic "SELECT max(id) then check-then-INSERT" scan when the fast RPC
-(allocate_portal_token_seq) was unavailable. That fallback raced independently
-against the Node service's own fallback (src/routes/tokens.js::generateTokenId),
-since both processes could read the same "current max" before either had committed
-an insert, producing duplicate token labels (e.g. two different bookings both
-allocated "T-10"). The fallback now calls allocate_portal_token_seq_legacy_locked(),
-a Postgres-advisory-locked SQL function shared with the Node service (see
-migrations/20260703_token_seq_locked_fallback.sql), so both services serialize
-against the same lock instead of racing each other.
-"""
+"""Database tools - ADK-compatible async database operations"""
 
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
@@ -31,6 +19,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db.models import (
+    RestaurantPhonePin,
     Restaurant,
     RestaurantIntegration,
     Customer,
@@ -133,11 +122,6 @@ _INTEGRATION_TTL = 300
 _MENU_TTL = 300
 _TABLES_TTL = 30    # tables change frequently during service
 
-# Portal token sequence RPC capability cache.
-# None -> unknown, True -> usable, False -> unavailable (use SQL fallback path).
-_PORTAL_SEQ_RPC_AVAILABLE: bool | None = None
-_PORTAL_SEQ_SCHEMA_ATTEMPTED = False
-
 
 # ─── Advisory lock helpers ────────────────────────────────────────────────────
 
@@ -236,36 +220,63 @@ async def save_session_state(
 
 # ─── Restaurant tools ─────────────────────────────────────────────────────────
 
+
+# ─── Shared restaurant dict serialiser ───────────────────────────────────────
+
+def _build_restaurant_dict(r) -> Dict[str, Any]:
+    """Single serialiser used by all lookup paths — guarantees identical shapes."""
+    return {
+        "id":                   str(r.id),
+        "name":                 r.name,
+        "display_name":         getattr(r, "display_name", None) or r.name,
+        "whatsapp_number":      r.whatsapp_number,
+        "manager_phone":        r.manager_phone,
+        "timezone":             r.timezone,
+        "dining_duration_minutes": r.dining_duration_minutes,
+        "payment_mode":         r.payment_mode,
+        "is_active":            r.is_active,
+        "meta_catalog_id":      getattr(r, "meta_catalog_id", None),
+        "short_code":           getattr(r, "short_code", None),
+        "lob_type":             getattr(r, "lob_type", None) or "restaurant",
+        "is_default_for_number": getattr(r, "is_default_for_number", False),
+        "sort_order":           getattr(r, "sort_order", 0),
+    }
+
+
+# ─── Core restaurant lookups (all use _build_restaurant_dict) ────────────────
+
 async def get_restaurant_by_whatsapp_number(whatsapp_number: str) -> Dict[str, Any] | None:
+    """
+    Fallback lookup: returns the is_default_for_number=True tenant on this WABA,
+    or the lowest sort_order row if none is explicitly flagged.
+    Preserves full backward compatibility for single-tenant deployments.
+    """
     now = time.monotonic()
     cached, ts = _RESTAURANT_CACHE.get(whatsapp_number, (None, 0.0))
     if cached is not None and now - ts < _RESTAURANT_TTL:
         return cached
-
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                select(Restaurant).where(Restaurant.whatsapp_number == whatsapp_number)
+                select(Restaurant)
+                .where(
+                    and_(
+                        Restaurant.whatsapp_number == whatsapp_number,
+                        Restaurant.is_active == True,
+                    )
+                )
+                .order_by(
+                    Restaurant.is_default_for_number.desc(),   # explicit default first
+                    Restaurant.sort_order.asc().nullsfirst(),  # then by sort order
+                )
+                .limit(1)
             )
             restaurant = result.scalar_one_or_none()
-            if restaurant:
-                data = {
-                    "id": str(restaurant.id),
-                    "name": restaurant.name,
-                    "whatsapp_number": restaurant.whatsapp_number,
-                    "manager_phone": restaurant.manager_phone,
-                    "timezone": restaurant.timezone,
-                    "dining_duration_minutes": restaurant.dining_duration_minutes,
-                    "payment_mode": restaurant.payment_mode,
-                    "is_active": restaurant.is_active,
-                    "meta_catalog_id": getattr(restaurant, "meta_catalog_id", None),
-                }
-                _RESTAURANT_CACHE[whatsapp_number] = (data, now)
-                return data
-            _RESTAURANT_CACHE[whatsapp_number] = (None, now)
-            return None
+            data = _build_restaurant_dict(restaurant) if restaurant else None
+            _RESTAURANT_CACHE[whatsapp_number] = (data, now)
+            return data
     except Exception as e:
-        logger.error(f"Failed to look up restaurant {whatsapp_number}: {e}")
+        logger.error(f"get_restaurant_by_whatsapp_number failed [{whatsapp_number}]: {e}")
         return cached
 
 
@@ -276,29 +287,17 @@ async def get_restaurant_by_id(restaurant_id: str) -> Dict[str, Any] | None:
     cached, ts = _RESTAURANT_CACHE.get(cache_key, (None, 0.0))
     if cached is not None and now - ts < _RESTAURANT_TTL:
         return cached
-
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
                 select(Restaurant).where(Restaurant.id == UUID(restaurant_id))
             )
             restaurant = result.scalar_one_or_none()
-            if restaurant:
-                data = {
-                    "id":              str(restaurant.id),
-                    "name":            restaurant.name,
-                    "whatsapp_number": restaurant.whatsapp_number,
-                    "manager_phone":   restaurant.manager_phone,
-                    "timezone":        restaurant.timezone,
-                    "is_active":       restaurant.is_active,
-                    "meta_catalog_id": getattr(restaurant, "meta_catalog_id", None),
-                }
-                _RESTAURANT_CACHE[cache_key] = (data, now)
-                return data
-            _RESTAURANT_CACHE[cache_key] = (None, now)
-            return None
+            data = _build_restaurant_dict(restaurant) if restaurant else None
+            _RESTAURANT_CACHE[cache_key] = (data, now)
+            return data
     except Exception as e:
-        logger.error(f"Failed to look up restaurant {restaurant_id}: {e}")
+        logger.error(f"get_restaurant_by_id failed [{restaurant_id}]: {e}")
         return cached
 
 
@@ -961,44 +960,6 @@ async def save_prepay_fulfillment_payload(booking_id: str, payload: dict[str, An
         logger.warning(f"[prepay] save_prepay_fulfillment_payload failed for {booking_id}: {e}")
 
 
-async def save_booking_payment_meta(
-    booking_id: str,
-    *,
-    payment_method: str,
-    fee_pct: float,
-    fee_amount: float,
-    order_subtotal: float,
-    restaurant_payout: float,
-) -> None:
-    """Persist payment-method and fee breakdown on the booking row."""
-    if AsyncSessionLocal is None:
-        return
-    try:
-        async with AsyncSessionLocal() as session:
-            await session.execute(
-                text("""
-                    UPDATE bookings
-                    SET payment_method = :payment_method,
-                        munafe_fee_pct = :fee_pct,
-                        munafe_fee_amount = :fee_amount,
-                        order_subtotal = :order_subtotal,
-                        restaurant_payout = :restaurant_payout
-                    WHERE id = CAST(:bid AS uuid)
-                """),
-                {
-                    "bid": booking_id,
-                    "payment_method": payment_method,
-                    "fee_pct": fee_pct,
-                    "fee_amount": fee_amount,
-                    "order_subtotal": order_subtotal,
-                    "restaurant_payout": restaurant_payout,
-                },
-            )
-            await session.commit()
-    except Exception as e:
-        logger.warning(f"[payment] save_booking_payment_meta failed for {booking_id}: {e}")
-
-
 async def load_prepay_fulfillment_payload(booking_id: str) -> dict[str, Any] | None:
     """Load persisted prepay payload from booking row."""
     if AsyncSessionLocal is None:
@@ -1046,7 +1007,6 @@ async def get_pending_prepay_reminder_candidates(
     min_age_minutes: int = 15,
     max_age_hours: int = 24,
     max_reminders: int = 3,
-    cooldown_minutes: int = 60,
 ) -> list[dict[str, Any]]:
     """Bookings awaiting Razorpay prepay that may need a WhatsApp payment reminder."""
     if AsyncSessionLocal is None:
@@ -1075,10 +1035,6 @@ async def get_pending_prepay_reminder_candidates(
                       AND COALESCE(
                             (b.prepay_fulfillment_payload->>'reminder_count')::int, 0
                           ) < :max_reminders
-                                            AND COALESCE(
-                                                        NULLIF(b.prepay_fulfillment_payload->>'last_reminder_at', '')::timestamptz,
-                                                        b.created_at
-                                                    ) < NOW() - (:cooldown || ' minutes')::interval
                     ORDER BY b.created_at ASC
                     LIMIT 30
                 """),
@@ -1086,7 +1042,6 @@ async def get_pending_prepay_reminder_candidates(
                     "min_age": str(min_age_minutes),
                     "max_age": str(max_age_hours),
                     "max_reminders": max_reminders,
-                                        "cooldown": str(cooldown_minutes),
                 },
             )
             rows = result.mappings().all()
@@ -1097,7 +1052,7 @@ async def get_pending_prepay_reminder_candidates(
 
 
 async def increment_prepay_reminder_count(booking_id: str) -> None:
-    """Bump reminder_count and record last_reminder_at inside prepay_fulfillment_payload."""
+    """Bump reminder_count inside prepay_fulfillment_payload."""
     if AsyncSessionLocal is None:
         return
     try:
@@ -1106,17 +1061,12 @@ async def increment_prepay_reminder_count(booking_id: str) -> None:
                 text("""
                     UPDATE bookings
                     SET prepay_fulfillment_payload = jsonb_set(
-                        jsonb_set(
-                            COALESCE(prepay_fulfillment_payload, '{}'::jsonb),
-                            '{reminder_count}',
-                            to_jsonb(
-                                COALESCE((prepay_fulfillment_payload->>'reminder_count')::int, 0) + 1
-                            ),
-                            true
-                        ),
-                        '{last_reminder_at}',
-                        to_jsonb(to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')),
-                        true
+                      COALESCE(prepay_fulfillment_payload, '{}'::jsonb),
+                      '{reminder_count}',
+                      to_jsonb(
+                        COALESCE((prepay_fulfillment_payload->>'reminder_count')::int, 0) + 1
+                      ),
+                      true
                     )
                     WHERE id = CAST(:bid AS uuid)
                 """),
@@ -2265,173 +2215,49 @@ def _build_portal_token_id(seq: int) -> str:
     return f"T-{_portal_token_month_key()}-{str(int(seq)).zfill(3)}"
 
 
-async def _ensure_portal_token_sequence_schema(session) -> bool:
-        """Best-effort runtime bootstrap for missing portal token sequence schema."""
-        global _PORTAL_SEQ_SCHEMA_ATTEMPTED
-        if _PORTAL_SEQ_SCHEMA_ATTEMPTED:
-                return False
-        _PORTAL_SEQ_SCHEMA_ATTEMPTED = True
-
-        try:
-                await session.execute(text("""
-                        ALTER TABLE public.restaurants
-                        ADD COLUMN IF NOT EXISTS portal_token_seq integer NOT NULL DEFAULT 0
-                """))
-                await session.execute(text("""
-                        ALTER TABLE public.restaurants
-                        ADD COLUMN IF NOT EXISTS portal_token_seq_month text
-                """))
-                await session.execute(text("""
-                        CREATE OR REPLACE FUNCTION public.allocate_portal_token_seq(p_restaurant_id uuid)
-                        RETURNS integer
-                        LANGUAGE plpgsql
-                        AS $$
-                        DECLARE
-                            v_month text;
-                            v_next integer;
-                        BEGIN
-                            v_month := to_char((now() AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM');
-
-                            UPDATE public.restaurants
-                            SET
-                                portal_token_seq = CASE
-                                    WHEN portal_token_seq_month IS DISTINCT FROM v_month THEN 1
-                                    ELSE portal_token_seq + 1
-                                END,
-                                portal_token_seq_month = v_month
-                            WHERE id = p_restaurant_id
-                            RETURNING portal_token_seq INTO v_next;
-
-                            IF v_next IS NULL THEN
-                                RAISE EXCEPTION 'restaurant % not found', p_restaurant_id;
-                            END IF;
-
-                            RETURN v_next;
-                        END;
-                        $$
-                """))
-                # Also bootstrap the cross-process-safe locked fallback used by both
-                # this service and the Node API (src/routes/tokens.js::generateTokenId)
-                # when the fast RPC above is unavailable. Keeping both functions'
-                # creation together means a single migration failure/retry covers
-                # the whole allocation path, not just the fast one.
-                await session.execute(text("""
-                        CREATE OR REPLACE FUNCTION public.allocate_portal_token_seq_legacy_locked(p_restaurant_id uuid)
-                        RETURNS text
-                        LANGUAGE plpgsql
-                        AS $$
-                        DECLARE
-                            lock_key   bigint;
-                            v_month    text := to_char((now() AT TIME ZONE 'Asia/Kolkata'), 'YYMM');
-                            v_max      int  := 0;
-                            v_id       text;
-                        BEGIN
-                            lock_key := ('x' || substr(md5(p_restaurant_id::text || ':token_seq'), 1, 15))::bit(60)::bigint;
-                            PERFORM pg_advisory_xact_lock(lock_key);
-
-                            SELECT COALESCE(MAX(
-                                CASE WHEN id ~ ('^T-' || v_month || '-[0-9]+$')
-                                     THEN substring(id FROM '[0-9]+$')::int
-                                     ELSE 0 END
-                            ), 0) INTO v_max
-                            FROM public.walk_in_tokens
-                            WHERE restaurant_id = p_restaurant_id;
-
-                            v_id := 'T-' || v_month || '-' || lpad((v_max + 1)::text, 3, '0');
-                            RETURN v_id;
-                        END;
-                        $$
-                """))
-                await session.commit()
-                logger.info("[portal-token] ✅ auto-created portal token sequence schema/function(s)")
-                return True
-        except Exception as e:
-                await session.rollback()
-                logger.warning(f"[portal-token] auto-bootstrap unavailable, using SQL fallback: {e}")
-                return False
-
-
 async def _next_portal_token_id(session, restaurant_id: str) -> str:
-    """
-    Sequential T-YYMM-001 style ID — monthly reset via allocate_portal_token_seq.
-
-    FIX (Issue 1): the fallback path used to run its own in-process
-    "SELECT id FROM walk_in_tokens ... then scan for max ... then check-then-INSERT"
-    loop. That was not atomic across processes and raced against the Node service's
-    independent fallback (src/routes/tokens.js::generateTokenId), occasionally
-    allocating the same token id to two different bookings. Both fallbacks now call
-    the same Postgres-advisory-locked SQL function
-    (allocate_portal_token_seq_legacy_locked), so this service and the Node service
-    serialize against one shared lock instead of racing each other.
-    """
-    global _PORTAL_SEQ_RPC_AVAILABLE
-    if _PORTAL_SEQ_RPC_AVAILABLE is not False:
-        try:
-            result = await session.execute(
-                text("SELECT allocate_portal_token_seq(CAST(:rid AS uuid))"),
-                {"rid": restaurant_id},
-            )
-            seq = result.scalar_one()
-            if seq is not None:
-                _PORTAL_SEQ_RPC_AVAILABLE = True
-                token_id = _build_portal_token_id(int(seq))
-                logger.info(f"[token-alloc] rpc seq={seq} -> {token_id} restaurant={restaurant_id}")
-                return token_id
-        except Exception as e:
-            await session.rollback()
-            msg = str(e)
-            missing_rpc = (
-                "allocate_portal_token_seq" in msg
-                or "UndefinedColumnError" in msg
-                or "UndefinedFunction" in msg
-                or "column \"portal_token_seq\" does not exist" in msg
-                or "function allocate_portal_token_seq" in msg
-            )
-            if missing_rpc:
-                logger.warning(
-                    "[token-alloc] allocate_portal_token_seq missing; attempting one-time auto-bootstrap"
-                )
-                created = await _ensure_portal_token_sequence_schema(session)
-                if created:
-                    try:
-                        result = await session.execute(
-                            text("SELECT allocate_portal_token_seq(CAST(:rid AS uuid))"),
-                            {"rid": restaurant_id},
-                        )
-                        seq = result.scalar_one()
-                        if seq is not None:
-                            _PORTAL_SEQ_RPC_AVAILABLE = True
-                            token_id = _build_portal_token_id(int(seq))
-                            logger.info(f"[token-alloc] rpc(bootstrapped) seq={seq} -> {token_id} restaurant={restaurant_id}")
-                            return token_id
-                    except Exception as retry_err:
-                        await session.rollback()
-                        logger.warning(
-                            f"[token-alloc] allocate_portal_token_seq retry failed; using locked fallback: {retry_err}"
-                        )
-                _PORTAL_SEQ_RPC_AVAILABLE = False
-            else:
-                logger.warning(f"[token-alloc] allocate_portal_token_seq failed, using locked fallback: {e}")
-
-    # Cross-process-safe fallback — identical SQL function the Node service calls.
-    # No more independent in-Python max-scan; this is now the single fallback path
-    # shared by both services.
+    """Sequential T-YYMM-001 style ID — monthly reset via allocate_portal_token_seq."""
     try:
         result = await session.execute(
-            text("SELECT allocate_portal_token_seq_legacy_locked(CAST(:rid AS uuid))"),
+            text("SELECT allocate_portal_token_seq(CAST(:rid AS uuid))"),
             {"rid": restaurant_id},
         )
-        token_id = result.scalar_one()
-        logger.warning(f"[token-alloc] locked-fallback -> {token_id} restaurant={restaurant_id}")
-        return token_id
+        seq = result.scalar_one()
+        if seq is not None:
+            return _build_portal_token_id(int(seq))
     except Exception as e:
+        logger.warning(f"[portal-token] allocate_portal_token_seq failed, falling back: {e}")
+        # IMPORTANT: a failed statement poisons the rest of this transaction
+        # in Postgres — every subsequent query on this session will raise
+        # InFailedSQLTransactionError until we roll back.
         await session.rollback()
-        logger.error(
-            f"[token-alloc] locked-fallback RPC failed for restaurant={restaurant_id}: {e} "
-            f"— run migrations/20260703_token_seq_locked_fallback.sql. Using timestamp id."
+
+    yymm = _portal_token_month_key()
+    result = await session.execute(
+        text("SELECT id FROM walk_in_tokens WHERE restaurant_id = CAST(:rid AS uuid)"),
+        {"rid": restaurant_id},
+    )
+    max_seq = 0
+    monthly_re = re.compile(rf"^T-{re.escape(yymm)}-(\d+)$", re.I)
+    legacy_re = re.compile(r"^T-(\d+)$")
+    for row in result:
+        tid = str(row[0])
+        m = monthly_re.match(tid)
+        if m:
+            max_seq = max(max_seq, int(m.group(1)))
+            continue
+        m = legacy_re.match(tid)
+        if m:
+            max_seq = max(max_seq, int(m.group(1)))
+    for attempt in range(20):
+        candidate = _build_portal_token_id(max_seq + 1 + attempt)
+        exists = await session.execute(
+            text("SELECT 1 FROM walk_in_tokens WHERE id = :tid"),
+            {"tid": candidate},
         )
-        yymm = _portal_token_month_key()
-        return f"T-{yymm}-{str(int(time.time()) % 1_000_000).zfill(6)}"
+        if not exists.first():
+            return candidate
+    return f"T-{yymm}-{str(int(time.time()) % 1_000_000).zfill(6)}"
 
 
 async def supersede_walk_in_token(
@@ -2580,31 +2406,25 @@ def _should_reuse_walk_in_token(
     meta: dict | None,
 ) -> bool:
     """True only for idempotent retries — not new orders on the same phone."""
-    incoming_bid = (meta or {}).get("booking_id")
-    existing_meta = existing.get("meta") or {}
-    if isinstance(existing_meta, str):
-        try:
-            existing_meta = json.loads(existing_meta)
-        except Exception:
-            existing_meta = {}
-    existing_bid = existing_meta.get("booking_id")
-
-    # Global guard: only reuse when this is clearly the same booking retry.
-    if incoming_bid and incoming_bid == existing_bid:
-        return True
-
     scheduled = {"scheduled_delivery", "scheduled_takeaway"}
     if token_type in scheduled:
         if existing.get("type") not in scheduled:
             return False
+        incoming_bid = (meta or {}).get("booking_id")
+        existing_meta = existing.get("meta") or {}
+        if isinstance(existing_meta, str):
+            try:
+                existing_meta = json.loads(existing_meta)
+            except Exception:
+                existing_meta = {}
+        existing_bid = existing_meta.get("booking_id")
         return bool(
             incoming_bid
             and incoming_bid == existing_bid
             and existing.get("status") == "pending_approval"
             and existing.get("type") == token_type
         )
-    # For immediate flows never reuse by phone/type; allocate a fresh sequential token.
-    return False
+    return existing.get("type") == token_type
 
 
 async def _walk_in_token_is_paid_scheduled(existing: dict) -> bool:
@@ -2712,17 +2532,13 @@ async def create_walk_in_token_direct(
     try:
         async with AsyncSessionLocal() as session:
             token_id = await _next_portal_token_id(session, restaurant_id)
-            # Defense in depth: even though _next_portal_token_id() should now be
-            # collision-free, guard the INSERT itself so a rare collision (e.g. a
-            # legacy un-migrated row) surfaces as a loud retry, not a silent overwrite.
-            insert_result = await session.execute(
+            await session.execute(
                 text("""
                     INSERT INTO walk_in_tokens
                       (id, restaurant_id, name, phone, type, pax, status, arrived_at, meta)
                     VALUES
                       (:id, CAST(:rid AS uuid), :name, :phone, :type, :pax, :status,
                        NOW(), CAST(:meta AS jsonb))
-                    ON CONFLICT (id) DO NOTHING
                 """),
                 {
                     "id":     token_id,
@@ -2735,37 +2551,7 @@ async def create_walk_in_token_direct(
                     "meta":   json.dumps(meta or {}),
                 },
             )
-            if insert_result.rowcount == 0:
-                await session.rollback()
-                logger.error(
-                    f"[token-alloc] PK COLLISION on insert for id={token_id} "
-                    f"restaurant={restaurant_id} — should not happen post-fix; retrying once."
-                )
-                async with AsyncSessionLocal() as retry_session:
-                    token_id = await _next_portal_token_id(retry_session, restaurant_id)
-                    await retry_session.execute(
-                        text("""
-                            INSERT INTO walk_in_tokens
-                              (id, restaurant_id, name, phone, type, pax, status, arrived_at, meta)
-                            VALUES
-                              (:id, CAST(:rid AS uuid), :name, :phone, :type, :pax, :status,
-                               NOW(), CAST(:meta AS jsonb))
-                            ON CONFLICT (id) DO NOTHING
-                        """),
-                        {
-                            "id":     token_id,
-                            "rid":    restaurant_id,
-                            "name":   name.strip(),
-                            "phone":  clean_phone,
-                            "type":   token_type,
-                            "pax":    actual_pax,
-                            "status": status,
-                            "meta":   json.dumps(meta or {}),
-                        },
-                    )
-                    await retry_session.commit()
-            else:
-                await session.commit()
+            await session.commit()
             logger.info(
                 f"[walk-in-token] ✅ Direct DB token {token_id} for {name} "
                 f"(restaurant={restaurant_id})"
@@ -3405,3 +3191,193 @@ async def get_walk_in_token_by_id(restaurant_id: str, token_id: str) -> dict | N
         )
         row = result.mappings().first()
         return dict(row) if row else None
+
+
+# =============================================================================
+# Multi-tenant WABA routing — pin table approach
+# =============================================================================
+
+_PIN_TTL_HOURS = 24   # stale pin → keyword routing re-evaluated on next message
+
+_KEYWORD_GREETING_WORDS: set[str] = {
+    "hi", "hey", "hello", "hlo", "hii", "hai", "hola",
+    "namaste", "namaskar", "vanakkam",
+    "good", "morning", "evening", "afternoon", "night", "noon",
+    "dear", "sir", "madam", "team",
+}
+
+
+def extract_short_code(message: str) -> str | None:
+    """
+    Extract a restaurant short_code from an opening greeting.
+
+    "Hi Munafe"          → "munafe"
+    "Hi psl"             → "psl"
+    "Good morning PSL"   → "psl"
+    "Hi"                 → None   (plain greeting — use default tenant)
+    "Hi, I want biryani" → None   (2+ tokens — treat as normal message, not a keyword)
+    """
+    cleaned = re.sub(r"[^\w\s]", "", (message or "").lower()).strip()
+    tokens  = [t for t in cleaned.split() if t and t not in _KEYWORD_GREETING_WORDS]
+    return tokens[0] if len(tokens) == 1 else None
+
+
+async def get_restaurant_by_short_code(
+    whatsapp_number: str,
+    short_code: str,
+) -> Dict[str, Any] | None:
+    """Resolve a tenant on a shared WABA number by its keyword short_code."""
+    if not whatsapp_number or not short_code or AsyncSessionLocal is None:
+        return None
+    code      = short_code.strip().lower()
+    cache_key = f"sc:{whatsapp_number}:{code}"
+    now = time.monotonic()
+    cached, ts = _RESTAURANT_CACHE.get(cache_key, (None, 0.0))
+    if cached is not None and now - ts < _RESTAURANT_TTL:
+        return cached
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Restaurant).where(
+                    and_(
+                        Restaurant.whatsapp_number == whatsapp_number,
+                        func.lower(Restaurant.short_code) == code,
+                        Restaurant.is_active == True,
+                    )
+                )
+            )
+            restaurant = result.scalar_one_or_none()
+            data = _build_restaurant_dict(restaurant) if restaurant else None
+            _RESTAURANT_CACHE[cache_key] = (data, now)
+            return data
+    except Exception as e:
+        logger.error(f"[short-code] lookup failed for {whatsapp_number}/{code}: {e}")
+        return cached
+
+
+async def get_active_short_codes_for_waba(whatsapp_number: str) -> list[str]:
+    """
+    Returns all registered short_codes for active tenants on this WABA number,
+    sorted by sort_order. Used to build the 'not found' hint reply.
+    e.g. ["munafe", "psl", "fnbneeds"]
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Restaurant.short_code)
+                .where(
+                    and_(
+                        Restaurant.whatsapp_number == whatsapp_number,
+                        Restaurant.is_active == True,
+                        Restaurant.short_code.isnot(None),
+                    )
+                )
+                .order_by(Restaurant.sort_order.asc().nullsfirst())
+            )
+            return [row[0] for row in result.all() if row[0]]
+    except Exception as e:
+        logger.error(f"get_active_short_codes_for_waba failed: {e}")
+        return []
+
+
+# ── Pin table operations ──────────────────────────────────────────────────────
+
+async def get_active_restaurant_for_phone(
+    whatsapp_number: str,
+    customer_phone: str,
+) -> str | None:
+    """
+    Returns the restaurant_id this phone is currently pinned to on this WABA,
+    or None if unpinned / pin is older than _PIN_TTL_HOURS.
+    Called first on every inbound message — skips keyword parsing when pinned.
+    """
+    if AsyncSessionLocal is None or not whatsapp_number or not customer_phone:
+        return None
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    SELECT restaurant_id::text AS restaurant_id, updated_at
+                    FROM restaurant_phone_pins
+                    WHERE whatsapp_number = :wn AND customer_phone = :phone
+                    LIMIT 1
+                """),
+                {"wn": whatsapp_number, "phone": customer_phone},
+            )
+            row = result.mappings().first()
+            if not row:
+                return None
+            updated_at = row["updated_at"]
+            if updated_at and (
+                datetime.utcnow() - updated_at.replace(tzinfo=None)
+            ) > timedelta(hours=_PIN_TTL_HOURS):
+                logger.debug(
+                    f"[pin] stale pin for {customer_phone} on {whatsapp_number} — re-routing"
+                )
+                return None
+            return row["restaurant_id"]
+    except Exception as e:
+        logger.error(f"[pin] lookup failed for {whatsapp_number}/{customer_phone}: {e}")
+        return None
+
+
+async def pin_active_restaurant_for_phone(
+    whatsapp_number: str,
+    customer_phone: str,
+    restaurant_id: str,
+) -> None:
+    """
+    Upsert the active restaurant pin for this phone + WABA.
+    Called on every inbound message after restaurant is resolved so subsequent
+    turns skip keyword parsing entirely.
+    """
+    if AsyncSessionLocal is None or not all([whatsapp_number, customer_phone, restaurant_id]):
+        return
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                pg_insert(RestaurantPhonePin)
+                .values(
+                    whatsapp_number = whatsapp_number,
+                    customer_phone  = customer_phone,
+                    restaurant_id   = UUID(restaurant_id),
+                    updated_at      = datetime.utcnow(),
+                )
+                .on_conflict_do_update(
+                    index_elements = ["whatsapp_number", "customer_phone"],
+                    set_            = {
+                        "restaurant_id": UUID(restaurant_id),
+                        "updated_at":    datetime.utcnow(),
+                    },
+                )
+            )
+            await session.commit()
+    except Exception as e:
+        logger.error(f"[pin] save failed for {whatsapp_number}/{customer_phone}: {e}")
+
+
+async def clear_active_restaurant_pin(
+    whatsapp_number: str,
+    customer_phone: str,
+) -> None:
+    """
+    Drop the pin so the phone's next keyword greeting can route to a different tenant.
+    Called by: test utilities, future SWITCH:<code> command handler.
+    NOT called by 'Start over' — resetting a conversation should not change which
+    restaurant the customer is talking to.
+    """
+    if AsyncSessionLocal is None:
+        return
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text(
+                    "DELETE FROM restaurant_phone_pins "
+                    "WHERE whatsapp_number = :wn AND customer_phone = :phone"
+                ),
+                {"wn": whatsapp_number, "phone": customer_phone},
+            )
+            await session.commit()
+        logger.info(f"[pin] cleared for {customer_phone} on {whatsapp_number}")
+    except Exception as e:
+        logger.error(f"[pin] clear failed for {whatsapp_number}/{customer_phone}: {e}")
