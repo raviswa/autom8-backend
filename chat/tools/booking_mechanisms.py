@@ -212,7 +212,7 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict | None:
         last_status: int | None = None
         for select_clause in select_attempts:
             resp = await get_http().get(
-                f"{base}/rest/v1/restaurants",
+                f"{base}/rest/v1/tenants",
                 params={
                     "select": select_clause,
                     "id":     f"eq.{restaurant_id}",
