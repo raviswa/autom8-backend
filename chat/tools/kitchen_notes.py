@@ -12,8 +12,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from tools.catalog_tools import fetch_menu_items
-
 _SIDE_CATEGORY_RE = re.compile(
     r"\b(sides?|accompaniments?|extras?|add[\s-]?ons?|condiments?|chutneys?)\b",
     re.I,
