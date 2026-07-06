@@ -35,6 +35,22 @@ Configuration
       "timeout_seconds":  30,
       "log_mechanism":    True,
   }
+
+FIX LOG
+───────
+  DEFECT FIX (2026-07-06): fetch_restaurant_info() previously returned {} on
+  BOTH "restaurant genuinely has no services configured" AND "the fetch call
+  itself failed / timed out / errored". build_service_menu_rows() couldn't
+  tell these apart, so a transient 3s timeout or a brief Supabase hiccup was
+  silently equated with "restaurant has zero services enabled", and
+  customers were told "We're not accepting orders right now" — even while
+  the separate kitchen-hours check correctly said the kitchen was open.
+  fetch_restaurant_info() now returns None (not {}) when the fetch itself
+  failed, so callers can distinguish "no services" from "couldn't check".
+  All existing callers that assumed a dict (cache_restaurant_pricing,
+  _send_web_menu_message) now guard with `info = info or {}` to preserve
+  their prior graceful-degradation behavior — only build_service_menu_rows
+  needs to treat the two cases differently.
 """
 
 from __future__ import annotations
@@ -155,16 +171,29 @@ def receipt_qr_url(token_number: str) -> str:
     return f"{_RECEIPT_REDIRECT_BASE}/{clean}"
 
 
-async def fetch_restaurant_info(restaurant_id: str) -> dict:
+async def fetch_restaurant_info(restaurant_id: str) -> dict | None:
     """
-    Best-effort fetch of restaurant metadata for receipt generation.
-    Returns an empty dict on any failure — receipt degrades gracefully.
+    Fetch restaurant metadata (services, pricing, receipt fields, etc).
+
+    DEFECT FIX (2026-07-06): Returns None when the fetch itself failed
+    (missing env vars, timeout, non-200 response, exception) — NOT {}.
+    Returns {} only when Supabase responded 200 with zero matching rows
+    (restaurant_id genuinely not found). This lets callers like
+    build_service_menu_rows() distinguish "couldn't check right now"
+    from "this restaurant really has nothing configured", instead of a
+    transient network blip being silently read as "no services enabled"
+    and customers being told the restaurant is closed.
+
+    Callers that want the old best-effort/graceful-degradation behavior
+    (e.g. receipt generation, pricing cache) should do `info = info or {}`
+    after calling this.
     """
     try:
         base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
         key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
         if not (base and key):
-            return {}
+            logger.error("[restaurant-info] Supabase env vars not set — cannot fetch restaurant info")
+            return None
         base_select = (
             "name,display_name,receipt_tagline,cuisine_type,timezone,"
             "whatsapp_number,address,phone,gstin,fssai_license,sac_code,website,city,state,"
@@ -180,6 +209,7 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict:
             f"{base_select},subscribed_features",
         ]
 
+        last_status: int | None = None
         for select_clause in select_attempts:
             resp = await get_http().get(
                 f"{base}/rest/v1/restaurants",
@@ -191,17 +221,30 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict:
                 headers={"apikey": key, "Authorization": f"Bearer {key}"},
                 timeout=aiohttp.ClientTimeout(total=3),
             )
+            last_status = resp.status
             if resp.status == 200:
                 rows = await resp.json()
                 return rows[0] if rows else {}
+
+        # All select attempts failed (non-200) — this is a fetch failure,
+        # not "restaurant has no rows". Surface None so callers don't treat
+        # it as "no services enabled".
+        logger.error(
+            f"[restaurant-info] fetch failed for restaurant_id={restaurant_id} "
+            f"— last status={last_status}"
+        )
+        return None
     except Exception as e:
-        logger.debug(f"[receipt] restaurant info fetch failed (non-fatal): {e}")
-    return {}
+        logger.warning(f"[restaurant-info] fetch errored for restaurant_id={restaurant_id}: {e}")
+        return None
 
 
 async def cache_restaurant_pricing(session_state: dict, restaurant_id: str) -> None:
     """Store parcel rate, delivery tiers, pickup location, and timing in session."""
-    info = await fetch_restaurant_info(restaurant_id)
+    # DEFECT FIX (2026-07-06): fetch_restaurant_info() can now return None on
+    # fetch failure (previously always returned {}). Guard here so pricing
+    # just falls back to defaults on a failed fetch, same as before.
+    info = await fetch_restaurant_info(restaurant_id) or {}
     try:
         session_state["parcel_charge_per_item"] = float(info.get("parcel_charge_per_item") or 0)
     except (TypeError, ValueError):
