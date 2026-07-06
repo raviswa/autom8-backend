@@ -118,13 +118,18 @@ async def ensure_restaurant_greeting_context(
         return
     from tools.booking_mechanisms import fetch_restaurant_info
 
-    info = await fetch_restaurant_info(restaurant_id)
-    session_state["_restaurant_display_name"] = (
-        (info.get("display_name") or info.get("name") or "our restaurant").strip()
-    )
+    info = await fetch_restaurant_info(restaurant_id) or {}
+    name = (info.get("display_name") or info.get("name") or "").strip()
+
+    session_state["_restaurant_display_name"] = name or "our restaurant"
     session_state["_restaurant_timezone"] = (info.get("timezone") or "Asia/Kolkata").strip()
     session_state["_restaurant_cuisine"] = parse_cuisine_tags(info.get("cuisine_type"))
-    session_state["_greeting_ctx_loaded"] = True
+
+    # Only latch the "loaded" flag when we got a real name. On fetch failure,
+    # leave it unset so the next message retries instead of permanently
+    # caching the "our restaurant" fallback into this customer's session.
+    if name:
+        session_state["_greeting_ctx_loaded"] = True
 
 
 async def resolve_is_new_customer(
