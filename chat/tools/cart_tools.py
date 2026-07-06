@@ -120,8 +120,6 @@ from typing import Any
 
 import httpx
 
-from tools.catalog_tools import MENU_ITEMS, items_for_category, fetch_menu_items
-
 # Lazy import to avoid circular import at module load time.
 # whatsapp_tools._get_http_client() returns the module-level shared AsyncClient.
 def _shared_http_client() -> httpx.AsyncClient:
