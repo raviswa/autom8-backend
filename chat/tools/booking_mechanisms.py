@@ -30,7 +30,7 @@ Backend helpers (added)
 Configuration
 ─────────────
   BOOKING_MECHANISM_CONFIG = {
-      "primary":          "catalog",
+      "primary":          "log",
       "fallback":         "cart",
       "timeout_seconds":  30,
       "log_mechanism":    True,
@@ -48,7 +48,6 @@ from uuid import uuid4
 
 import aiohttp
 
-from tools.catalog_tools import parse_whatsapp_order
 from tools.whatsapp_tools import send_whatsapp_message, send_whatsapp_cta_url
 from tools.db_tools import (
     get_available_tables,
