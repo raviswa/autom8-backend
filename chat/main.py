@@ -31,6 +31,7 @@ from tools.db_tools import (
     get_session_state,
     save_session_state,
     customer_lock,
+    get_restaurant_by_id,
 )
 from tools.whatsapp_tools import parse_incoming, send_whatsapp_message, send_whatsapp_cta_url
 from agents.customer.booking_helpers import touch_session_activity, is_reset_keyword, mark_session_visit_complete
