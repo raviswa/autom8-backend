@@ -35,7 +35,7 @@ class Feature:
 class Restaurant(Base):
     """Core tenant record for each restaurant."""
 
-    __tablename__ = "restaurants"
+    __tablename__ = "tenants"
 
     id                      = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     name                    = Column(String(255), nullable=False)
@@ -82,6 +82,25 @@ class Restaurant(Base):
 
     restaurant_type = Column(String, nullable=True)
 
+    # ── Multi-tenant WABA routing ──────────────────────────────────────────────
+    # short_code: keyword customers type after "Hi" to reach this tenant.
+    #   e.g. "munafe", "psl", "fnbneeds", "gold", "retail"
+    #   NULL = this tenant is the default fallback for its WABA number.
+    # NULL = this tenant is the default fallback for its WABA number.
+    short_code = Column(String(20), nullable=True, index=True)
+
+    # is_default_for_number: True on exactly one row per WABA number.
+    # Plain "Hi" with no keyword routes here. More explicit than sort_order.
+    # Hotel Munafe = True; all other tenants on same number = False.
+    is_default_for_number = Column(Boolean, nullable=False, default=False)
+
+    # lob_type: which agent handles this tenant's conversations.
+    #   "restaurant" → booking_agent (default for all existing rows)
+    #   "supply"     → supply_agent
+    #   "retail"     → future retail_agent
+    #   "jewellery"  → future jewellery_agent
+    lob_type = Column(String(50), nullable=True, default="restaurant")
+
     @property
     def effective_services_enabled(self) -> list[str]:
         raw = self.subscribed_features or []
@@ -117,10 +136,10 @@ class RestaurantSubscription(Base):
     operational record and can be updated independently.
     """
 
-    __tablename__ = "restaurant_subscriptions"
+    __tablename__ = "tenant_subscriptions"
 
     id            = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    restaurant_id = Column(UUID(as_uuid=True), ForeignKey("restaurants.id"), unique=True, nullable=False, index=True)
+    restaurant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), unique=True, nullable=False, index=True)
 
     # Which features are active — mirrors restaurants.subscribed_features
     # but also carries billing metadata so finance can audit independently.
@@ -158,10 +177,10 @@ class RestaurantSubscription(Base):
 class RestaurantIntegration(Base):
     """Per-restaurant provider credentials and channel configuration."""
 
-    __tablename__ = "restaurant_integrations"
+    __tablename__ = "tenant_integrations"
 
     id                   = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    restaurant_id        = Column(UUID(as_uuid=True), ForeignKey("restaurants.id"), nullable=False, index=True)
+    restaurant_id        = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
     provider             = Column(String(50), nullable=False)
     channel              = Column(String(50), nullable=False)
     external_account_id  = Column(String(255))
@@ -178,7 +197,7 @@ class RestaurantIntegration(Base):
 
     __table_args__ = (
         UniqueConstraint("restaurant_id", "provider", "channel", name="uix_restaurant_provider_channel"),
-        Index("ix_restaurant_integrations_lookup", "restaurant_id", "provider", "channel", "is_active"),
+        Index("ix_tenant_integrations_lookup", "restaurant_id", "provider", "channel", "is_active"),
     )
 
     restaurant = relationship("Restaurant", back_populates="integrations")
@@ -190,7 +209,7 @@ class Customer(Base):
     __tablename__ = "customers"
 
     id                    = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    restaurant_id         = Column(UUID(as_uuid=True), ForeignKey("restaurants.id"), nullable=False, index=True)
+    restaurant_id         = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
     phone                 = Column(String(20), nullable=False)
     name                  = Column(String(255), nullable=False)
     whatsapp_profile_name = Column(String(255))
@@ -217,7 +236,7 @@ class ConversationState(Base):
     __tablename__ = "conversation_states"
 
     id             = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    restaurant_id  = Column(UUID(as_uuid=True), ForeignKey("restaurants.id"), nullable=False, index=True)
+    restaurant_id  = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
     customer_phone = Column(String(20), nullable=False)
     adk_session_id = Column(String(255), nullable=False)
     current_state  = Column(String(100), nullable=False)
@@ -231,7 +250,7 @@ class Booking(Base):
     __tablename__ = "bookings"
 
     id               = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    restaurant_id    = Column(UUID(as_uuid=True), ForeignKey("restaurants.id"), nullable=False, index=True)
+    restaurant_id    = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
     customer_id      = Column(UUID(as_uuid=True), ForeignKey("customers.id"),   nullable=False, index=True)
     service_type     = Column(Enum("dine_in","takeaway","delivery","reserve_table", name="service_type_enum"), nullable=False)
     table_number     = Column(Integer)
@@ -243,11 +262,6 @@ class Booking(Base):
     token_advance    = Column(Numeric(12, 2))
     payment_status   = Column(Enum("pending","paid","refunded","na", name="payment_status_enum"), nullable=False, default="pending")
     razorpay_order_id     = Column(String(255))
-    payment_method        = Column(String(20))   # 'upi' | 'card'
-    munafe_fee_pct        = Column(Numeric(6, 4))
-    munafe_fee_amount     = Column(Numeric(12, 2))
-    order_subtotal        = Column(Numeric(12, 2))
-    restaurant_payout     = Column(Numeric(12, 2))
     kitchen_start_at      = Column(DateTime(timezone=True))
     scheduled_slot_at     = Column(DateTime(timezone=True))
     total_cook_minutes    = Column(Integer)
@@ -272,7 +286,7 @@ class TableStatus(Base):
     __tablename__ = "table_status"
 
     id                 = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    restaurant_id      = Column(UUID(as_uuid=True), ForeignKey("restaurants.id"), nullable=False, index=True)
+    restaurant_id      = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
     table_number       = Column(Integer, nullable=False)
     status             = Column(Enum("free","occupied", name="table_status_enum"), nullable=False, default="free")
     current_booking_id = Column(UUID(as_uuid=True), ForeignKey("bookings.id"))
@@ -289,7 +303,7 @@ class MenuItem(Base):
     __tablename__ = "menu_items"
 
     id            = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    restaurant_id = Column(UUID(as_uuid=True), ForeignKey("restaurants.id"), nullable=False, index=True)
+    restaurant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
     name          = Column(String(255), nullable=False)
     price         = Column(Numeric(10, 2), nullable=False)
     category      = Column(String(100), nullable=False)
@@ -316,7 +330,7 @@ class BlockedSlot(Base):
     __tablename__ = "blocked_slots"
 
     id            = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    restaurant_id = Column(UUID(as_uuid=True), ForeignKey("restaurants.id"), nullable=False, index=True)
+    restaurant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
     date          = Column(String(10), nullable=False)
     slot          = Column(Enum("full","lunch","dinner", name="slot_enum"), nullable=False)
     reason        = Column(String(255))
@@ -330,7 +344,7 @@ class Feedback(Base):
     id            = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     booking_id    = Column(UUID(as_uuid=True), ForeignKey("bookings.id"),    nullable=False, index=True)
     customer_id   = Column(UUID(as_uuid=True), ForeignKey("customers.id"),   nullable=False)
-    restaurant_id = Column(UUID(as_uuid=True), ForeignKey("restaurants.id"), nullable=False)
+    restaurant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     rating        = Column(Integer, nullable=False)
     created_at    = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -357,7 +371,7 @@ class CustomerProfile(Base):
 
     id               = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     customer_id      = Column(UUID(as_uuid=True), ForeignKey("customers.id"),   unique=True, nullable=False, index=True)
-    restaurant_id    = Column(UUID(as_uuid=True), ForeignKey("restaurants.id"), nullable=False, index=True)
+    restaurant_id    = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
     rfm_segment      = Column(String(50), default="new_customer", nullable=False)
     favourite_items  = Column(JSON)
     preferred_service= Column(String(50))
@@ -377,7 +391,7 @@ class ConversationEvent(Base):
     __tablename__ = "conversation_events"
 
     id            = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    restaurant_id = Column(UUID(as_uuid=True), ForeignKey("restaurants.id"), nullable=False, index=True)
+    restaurant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
     customer_id   = Column(UUID(as_uuid=True), ForeignKey("customers.id"),   nullable=False, index=True)
     session_id    = Column(String(100), nullable=False)
     event_type    = Column(String(50),  nullable=False)
@@ -394,7 +408,7 @@ class Campaign(Base):
     __tablename__ = "campaigns"
 
     id               = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    restaurant_id    = Column(UUID(as_uuid=True), ForeignKey("restaurants.id"), nullable=False, index=True)
+    restaurant_id    = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
     name             = Column(String(100), nullable=False)
     message_template = Column(Text, nullable=False)
     campaign_type    = Column(String(50), nullable=False)
@@ -412,7 +426,7 @@ class CampaignEvent(Base):
     id                 = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     campaign_id        = Column(UUID(as_uuid=True), ForeignKey("campaigns.id"),    nullable=False, index=True)
     customer_id        = Column(UUID(as_uuid=True), ForeignKey("customers.id"),    nullable=False, index=True)
-    restaurant_id      = Column(UUID(as_uuid=True), ForeignKey("restaurants.id"),  nullable=False, index=True)
+    restaurant_id      = Column(UUID(as_uuid=True), ForeignKey("tenants.id"),  nullable=False, index=True)
     sent_at            = Column(DateTime(timezone=True))
     delivered          = Column(Boolean, default=False, nullable=False)
     response_text      = Column(Text)
@@ -424,3 +438,20 @@ class CampaignEvent(Base):
     campaign   = relationship("Campaign",    back_populates="events")
     customer   = relationship("Customer",    back_populates="campaign_events")
     restaurant = relationship("Restaurant",  back_populates="campaign_events")
+
+
+class RestaurantPhonePin(Base):
+    """
+    Tracks which tenant a customer phone is currently talking to on a shared WABA number.
+    Updated on every inbound message — acts as a fast routing cache so keyword parsing
+    only happens once per conversation, not on every message.
+
+    TTL: 24 hours from updated_at. Stale pins fall back to keyword routing.
+    Composite PK on (whatsapp_number, customer_phone) — one active pin per phone per WABA.
+    """
+    __tablename__ = "restaurant_phone_pins"
+
+    whatsapp_number = Column(String(20),  primary_key=True, nullable=False)
+    customer_phone  = Column(String(20),  primary_key=True, nullable=False)
+    restaurant_id   = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
+    updated_at      = Column(DateTime(timezone=True), nullable=False)
