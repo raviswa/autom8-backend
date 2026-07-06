@@ -87,7 +87,7 @@ async def calculate_wait_estimate(
 
     async with AsyncSessionLocal() as session:
         rest = await session.execute(
-            text("SELECT dining_duration_minutes FROM restaurants WHERE id = CAST(:rid AS uuid)"),
+            text("SELECT dining_duration_minutes FROM tenants WHERE id = CAST(:rid AS uuid)"),
             {"rid": restaurant_id},
         )
         row = rest.mappings().first()
