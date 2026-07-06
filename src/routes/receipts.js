@@ -60,7 +60,7 @@ router.get('/verify/:orderId', async (req, res) => {
       }
 
       const { data: restaurant } = await supabaseAdmin
-        .from('restaurants').select('id, name, gstin, brand_id')
+        .from('tenants').select('id, name, gstin, brand_id')
         .eq('id', order.restaurant_id).maybeSingle();
 
       p = buildInvoicePayload(order, restaurant ?? {}, GST_RATES.default);

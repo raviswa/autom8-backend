@@ -918,7 +918,7 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
     // ── Validate service toggles against paid plan ───────────────────────────
     if (updates.subscribed_features !== undefined || updates.enabled_services !== undefined) {
       const { data: sub } = await supabaseAdmin
-        .from('restaurant_subscriptions')
+        .from('tenant_subscriptions')
         .select('features')
         .eq('restaurant_id', req.restaurant_id)
         .maybeSingle();
@@ -955,7 +955,7 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
     );
     if (needsPickupResolve) {
       const { data: current } = await supabaseAdmin
-        .from('restaurants')
+        .from('tenants')
         .select('city, state, pickup_address, restaurant_type')
         .eq('id', req.restaurant_id)
         .maybeSingle();
@@ -996,7 +996,7 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
 
     updates.updated_at = new Date().toISOString();
     let { data, error } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .update(updates)
       .eq('id', req.restaurant_id)
       .select().single();
@@ -1009,7 +1009,7 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
       const skippedKitchen = Object.keys(updates).filter(k => kitchenKeys.includes(k));
       if (Object.keys(stripped).length > 1) {
         ({ data, error } = await supabaseAdmin
-          .from('restaurants')
+          .from('tenants')
           .update(stripped)
           .eq('id', req.restaurant_id)
           .select().single());
@@ -1047,7 +1047,7 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
 router.get('/restaurants/integration', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const { data } = await supabaseAdmin
-      .from('restaurant_integrations')
+      .from('tenant_integrations')
       .select('id,provider,channel,phone_number_id,access_token,webhook_secret,webhook_verify_token,config,is_active')
       .eq('restaurant_id', req.restaurant_id)
       .eq('provider', 'meta').eq('channel', 'whatsapp')
@@ -1069,20 +1069,20 @@ router.put('/restaurants/integration', authenticateToken, getRestaurantId, requi
     if (webhook_verify_token!== undefined) updates.webhook_verify_token= webhook_verify_token;
 
     const { data: existing } = await supabaseAdmin
-      .from('restaurant_integrations')
+      .from('tenant_integrations')
       .select('id').eq('restaurant_id', req.restaurant_id)
       .eq('provider', provider).eq('channel', channel).maybeSingle();
 
     let result;
     if (existing) {
       const { data, error } = await supabaseAdmin
-        .from('restaurant_integrations').update(updates)
+        .from('tenant_integrations').update(updates)
         .eq('id', existing.id).select().single();
       if (error) throw error;
       result = data;
     } else {
       const { data, error } = await supabaseAdmin
-        .from('restaurant_integrations')
+        .from('tenant_integrations')
         .insert({ restaurant_id: req.restaurant_id, provider, channel, is_active: true, ...updates })
         .select().single();
       if (error) throw error;

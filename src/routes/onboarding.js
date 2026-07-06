@@ -104,7 +104,7 @@ async function registerStandalone(req, res, opts) {
   try {
     // 1. Create restaurant row
     const { data: restaurant, error: restError } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .insert({
         name,
         email:                  email.trim().toLowerCase(),
@@ -132,7 +132,7 @@ async function registerStandalone(req, res, opts) {
 
     // 2. Create restaurant_integrations if phone_number_id provided
     if (phone_number_id) {
-      await supabaseAdmin.from('restaurant_integrations').insert({
+      await supabaseAdmin.from('tenant_integrations').insert({
         restaurant_id:   restaurantId,
         provider:        'meta',
         channel:         'whatsapp',
@@ -149,7 +149,7 @@ async function registerStandalone(req, res, opts) {
       email_confirm: true,
     });
     if (authError) {
-      await supabaseAdmin.from('restaurants').delete().eq('id', restaurantId);
+      await supabaseAdmin.from('tenants').delete().eq('id', restaurantId);
       throw authError;
     }
     authUserId = authData.user.id;
@@ -205,7 +205,7 @@ async function registerStandalone(req, res, opts) {
 
   } catch (err) {
     if (authUserId)    supabaseAdmin.auth.admin.deleteUser(authUserId).catch(() => {});
-    if (restaurantId)  supabaseAdmin.from('restaurants').delete().eq('id', restaurantId).catch(() => {});
+    if (restaurantId)  supabaseAdmin.from('tenants').delete().eq('id', restaurantId).catch(() => {});
     console.error('[onboarding/standalone]', err.message);
     if (err.message?.includes('duplicate') || err.message?.includes('already exists'))
       return res.status(409).json({ error: 'A restaurant or user with this email already exists.' });
@@ -279,7 +279,7 @@ async function registerChain(req, res, opts) {
 
     if (first_outlet?.name) {
       const { data: restaurant, error: restErr } = await supabaseAdmin
-        .from('restaurants')
+        .from('tenants')
         .insert({
           brand_id:               brandId,
           name:                   first_outlet.name.trim(),
@@ -309,7 +309,7 @@ async function registerChain(req, res, opts) {
 
       // Integration row for first outlet
       if (first_outlet.phone_number_id) {
-        await supabaseAdmin.from('restaurant_integrations').insert({
+        await supabaseAdmin.from('tenant_integrations').insert({
           restaurant_id:   restaurantId,
           provider:        'meta',
           channel:         'whatsapp',

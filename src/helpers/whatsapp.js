@@ -202,7 +202,7 @@ function buildProductListSections(items, category = null) {
 
 async function getRestaurantLabel(restaurantId) {
   const { data: restaurant } = await supabaseAdmin
-    .from('restaurants')
+    .from('tenants')
     .select('name')
     .eq('id', restaurantId)
     .maybeSingle();

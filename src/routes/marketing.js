@@ -112,7 +112,7 @@ router.get('/templates', async (req, res) => {
     const auth = await requireAuth(req, res);
     if (!auth) return;
     const { data: rest } = await supabaseAdmin
-      .from('restaurants').select('waba_id').eq('id', auth.restaurantId).single();
+      .from('tenants').select('waba_id').eq('id', auth.restaurantId).single();
     const wabaId = rest?.waba_id;
     if (!wabaId || !META_TOKEN) return res.json({ success: true, templates: [] });
     const r = await fetch(
@@ -137,7 +137,7 @@ router.post('/templates/create', async (req, res) => {
     const { name, category, language, components } = req.body;
     if (!name || !components) return res.status(400).json({ error: 'name and components are required' });
     const { data: rest } = await supabaseAdmin
-      .from('restaurants').select('waba_id').eq('id', auth.restaurantId).single();
+      .from('tenants').select('waba_id').eq('id', auth.restaurantId).single();
     const wabaId = rest?.waba_id;
     if (!wabaId || !META_TOKEN) return res.status(400).json({ error: 'WhatsApp Business Account not configured' });
     const sanitizedComponents = (components || []).map(comp => {
@@ -581,7 +581,7 @@ router.get('/restaurants/:id/waba', async (req, res) => {
     if (!auth) return;
     if (req.params.id !== auth.restaurantId) return res.status(403).json({ error: 'Access denied' });
     const { data, error } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select('id, name, waba_id, whatsapp_number, display_name')
       .eq('id', auth.restaurantId).single();
     if (error || !data) return res.status(404).json({ error: 'Restaurant not found' });
@@ -599,7 +599,7 @@ router.get('/restaurants/:id/waba', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select('id, name, waba_id, whatsapp_number, display_name, is_active')
       .eq('id', req.params.id).maybeSingle();
     if (error) return res.status(500).json({ error: error.message });
@@ -613,7 +613,7 @@ router.get('/:id', async (req, res) => {
 router.get('/', async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select('id, name, waba_id, whatsapp_number, is_active')
       .eq('is_active', true);
     if (error) return res.status(500).json({ error: error.message });

@@ -57,7 +57,7 @@ router.post('/scan', authenticateToken, getRestaurantId, async (req, res) => {
 
   try {
     const { data: restaurant } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select('takeaway_fulfillment_mode')
       .eq('id', req.restaurant_id)
       .single();

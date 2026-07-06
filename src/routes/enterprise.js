@@ -34,7 +34,7 @@ async function enforceHierarchyAccess(userId, requestedScope, storeId = null) {
       return { allowed: false, reason: 'Brand-level access requires brand_owner or brand_manager role' };
 
     const { data: allRestaurants } = await supabaseAdmin
-      .from('restaurants').select('id, name')
+      .from('tenants').select('id, name')
       .eq('brand_id', userData.brand_id).eq('is_active', true);
 
     return {

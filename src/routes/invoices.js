@@ -162,7 +162,7 @@ router.post('/generate', authenticateToken, getRestaurantId, async (req, res) =>
     if (orderErr || !order) return res.status(404).json({ error: 'Order not found' });
 
     const { data: restaurant } = await supabaseAdmin
-      .from('restaurants').select('id, name, gstin, brand_id').eq('id', req.restaurant_id).single();
+      .from('tenants').select('id, name, gstin, brand_id').eq('id', req.restaurant_id).single();
 
     const gstRate = gst_rate ?? GST_RATES.default;
     const payload = buildInvoicePayload(order, restaurant ?? {}, gstRate);
@@ -207,7 +207,7 @@ router.post('/webhook', async (req, res) => {
     if (!order) { console.warn(`[invoice-webhook] Order ${order_id} not found`); return; }
 
     const { data: restaurant } = await supabaseAdmin
-      .from('restaurants').select('id, name, gstin, brand_id').eq('id', order.restaurant_id).single();
+      .from('tenants').select('id, name, gstin, brand_id').eq('id', order.restaurant_id).single();
 
     const payload = buildInvoicePayload(order, restaurant ?? {}, GST_RATES.default);
 

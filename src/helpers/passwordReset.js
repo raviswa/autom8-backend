@@ -168,7 +168,7 @@ async function getManagerOwnerEmails(restaurantId) {
       .in('role', ['owner', 'manager'])
       .eq('is_active', true),
     supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select('contact_email, name')
       .eq('id', restaurantId)
       .maybeSingle(),

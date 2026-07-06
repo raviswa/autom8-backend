@@ -26,7 +26,7 @@ async function ensureRestaurantSubscription(supabaseAdmin, restaurantId, options
   }
 
   const { data: existing } = await supabaseAdmin
-    .from('restaurant_subscriptions')
+    .from('tenant_subscriptions')
     .select('id')
     .eq('restaurant_id', restaurantId)
     .maybeSingle();
@@ -35,7 +35,7 @@ async function ensureRestaurantSubscription(supabaseAdmin, restaurantId, options
     const trialEnds = new Date();
     trialEnds.setDate(trialEnds.getDate() + 30);
 
-    const { error: subErr } = await supabaseAdmin.from('restaurant_subscriptions').insert({
+    const { error: subErr } = await supabaseAdmin.from('tenant_subscriptions').insert({
       restaurant_id: restaurantId,
       features:      paidPlan,
       status:        'trial',
@@ -50,7 +50,7 @@ async function ensureRestaurantSubscription(supabaseAdmin, restaurantId, options
     }
   }
 
-  await supabaseAdmin.from('restaurants')
+  await supabaseAdmin.from('tenants')
     .update({ subscribed_features: enabledFeatures, updated_at: new Date().toISOString() })
     .eq('id', restaurantId);
 

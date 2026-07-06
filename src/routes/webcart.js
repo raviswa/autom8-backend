@@ -107,7 +107,7 @@ async function resolveRestaurantBySlug(req) {
   let rows = _restaurantCache.rows;
   if (!rows || (now - _restaurantCache.fetchedAt) > RESTAURANT_CACHE_TTL_MS) {
     const { data, error } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category, parcel_charge_per_item, delivery_charge_default, delivery_charge_tiers, gst_rate, kitchen_busy')
       .eq('is_active', true)
       .limit(500);

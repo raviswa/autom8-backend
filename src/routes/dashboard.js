@@ -45,7 +45,7 @@ const RESTAURANT_SELECT_BASE = [
 
 async function fetchRestaurantRow(restaurantId) {
   const { data, error } = await supabaseAdmin
-    .from('restaurants')
+    .from('tenants')
     .select(RESTAURANT_SELECT_FULL)
     .eq('id', restaurantId)
     .maybeSingle();
@@ -54,7 +54,7 @@ async function fetchRestaurantRow(restaurantId) {
 
   if (/kitchen_workflow|kot_printer|meta_catalog_id|parcel_charge_per_item|takeaway_ready_range|delivery_ready_range|kitchen_busy|restaurant_type|delivery_charge|scheduled_delivery|scheduled_takeaway|max_delivery_radius/i.test(error.message)) {
     const fallback = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select(RESTAURANT_SELECT_BASE)
       .eq('id', restaurantId)
       .maybeSingle();

@@ -19,7 +19,7 @@ async function resolveBrandOutletId(brandId, req) {
   const headerId = req.headers['x-restaurant-id'];
   if (headerId) {
     const { data: outlet } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select('id')
       .eq('id', headerId)
       .eq('brand_id', brandId)
@@ -29,7 +29,7 @@ async function resolveBrandOutletId(brandId, req) {
   }
 
   const { data: outlets } = await supabaseAdmin
-    .from('restaurants')
+    .from('tenants')
     .select('id')
     .eq('brand_id', brandId)
     .eq('is_active', true)
@@ -116,7 +116,7 @@ const getRestaurantId = async (req, res, next) => {
 
     // ── Fallback: single active outlet ────────────────────────────────────────
     const { data: restaurants } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select('id')
       .eq('is_active', true)
       .limit(2);
@@ -133,7 +133,7 @@ const getRestaurantId = async (req, res, next) => {
     if (data.phone) {
       const digits = String(data.phone).replace(/\D/g, '');
       const { data: outlets } = await supabaseAdmin
-        .from('restaurants')
+        .from('tenants')
         .select('id, manager_phone, whatsapp_number')
         .eq('is_active', true);
 

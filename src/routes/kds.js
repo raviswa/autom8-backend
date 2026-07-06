@@ -451,7 +451,7 @@ router.post('/notify', async (req, res) => {
     let restaurantName = '';
     try {
       const { data: restRow, error: restErr } = await supabaseAdmin
-        .from('restaurants')
+        .from('tenants')
         .select('kitchen_workflow, kot_printer_ip, kot_printer_port, kot_printer_enabled, name')
         .eq('id', restaurant_id)
         .single();
@@ -463,7 +463,7 @@ router.post('/notify', async (req, res) => {
         restaurantName = restRow.name || '';
       } else if (restErr && /kitchen_workflow/i.test(restErr.message)) {
         const { data: baseRow } = await supabaseAdmin
-          .from('restaurants').select('name').eq('id', restaurant_id).single();
+          .from('tenants').select('name').eq('id', restaurant_id).single();
         restaurantName = baseRow?.name || '';
       }
     } catch (_) {}
@@ -513,7 +513,7 @@ router.post('/notify', async (req, res) => {
     if (isTA) {
       try {
         const { data: rest } = await supabaseAdmin
-          .from('restaurants').select('takeaway_fulfillment_mode').eq('id', restaurant_id).single();
+          .from('tenants').select('takeaway_fulfillment_mode').eq('id', restaurant_id).single();
 
         if (rest?.takeaway_fulfillment_mode === 'multi_counter') {
           const { data: groupResult } = await supabaseAdmin.rpc(

@@ -87,7 +87,7 @@ async function sendRiderAssignedNotification({ orderId, deliveryPartner, riderNa
     if (!customerPhone) { console.warn(`[rider-notify] No customer phone for order ${orderId}`); return; }
 
     const { data: restaurant } = await supabaseAdmin
-      .from('restaurants').select('name').eq('id', restaurantId).maybeSingle();
+      .from('tenants').select('name').eq('id', restaurantId).maybeSingle();
     const storeName = restaurant?.name ?? 'our restaurant';
 
     const partnerKey  = String(deliveryPartner || '').toLowerCase().replace(/\s+/g, '-');

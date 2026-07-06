@@ -85,7 +85,7 @@ async function calculateWaitEstimate(
   const now = new Date();
 
   const { data: restaurant } = await supabaseAdmin
-    .from('restaurants')
+    .from('tenants')
     .select('dining_duration_minutes')
     .eq('id', restaurantId)
     .maybeSingle();

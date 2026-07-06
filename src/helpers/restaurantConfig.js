@@ -18,7 +18,7 @@ async function _loadRow(restaurantId) {
   if (cached && Date.now() < cached.expires_at) return cached.data;
 
   const { data, error } = await supabaseAdmin
-    .from('restaurants')
+    .from('tenants')
     .select('id, name, manager_phone, whatsapp_number, waba_id, meta_catalog_id')
     .eq('id', restaurantId)
     .maybeSingle();
@@ -112,7 +112,7 @@ async function getWhatsAppIntegration(restaurantId) {
   if (!restaurantId) return null;
 
   const { data, error } = await supabaseAdmin
-    .from('restaurant_integrations')
+    .from('tenant_integrations')
     .select('access_token, phone_number_id, api_endpoint, provider')
     .eq('restaurant_id', restaurantId)
     .eq('channel', 'whatsapp')
@@ -130,7 +130,7 @@ async function getWhatsAppIntegration(restaurantId) {
   }
 
   const { data: botbiz } = await supabaseAdmin
-    .from('restaurant_integrations')
+    .from('tenant_integrations')
     .select('access_token, phone_number_id, api_endpoint, provider')
     .eq('restaurant_id', restaurantId)
     .eq('channel', 'whatsapp')

@@ -59,7 +59,7 @@ function startSlotScheduler() {
   setInterval(async () => {
     try {
       const { data: restaurants } = await supabaseAdmin
-        .from('restaurants')
+        .from('tenants')
         .select('id, dining_duration_minutes')
         .eq('is_active', true);
 
@@ -147,7 +147,7 @@ function startSlotScheduler() {
         console.log(`🔄 Slot changed: ${String(lastAppliedSlot)} → ${currentSlot}`);
         if (lastAppliedSlot !== Symbol('init') && currentSlot && !lastAppliedSlot) {
           const { data: restaurants } = await supabaseAdmin
-            .from('restaurants')
+            .from('tenants')
             .select('id')
             .eq('is_active', true);
           for (const r of restaurants ?? []) {

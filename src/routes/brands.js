@@ -194,7 +194,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
     if (error || !brand) return res.status(404).json({ error: 'Brand not found' });
 
     const { count: outletCount } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select('id', { count: 'exact', head: true })
       .eq('brand_id', req.params.id)
       .eq('is_active', true);
@@ -244,7 +244,7 @@ router.get('/:id/outlets', authenticateToken, async (req, res) => {
     assertBrandRole(emp, req.params.id);
 
     const { data: outlets, error } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select(`
         id, name, outlet_code, sort_order, city, address,
         whatsapp_number, manager_phone, timezone, is_active,
@@ -319,7 +319,7 @@ router.put('/:id/outlets/:oid', authenticateToken, async (req, res) => {
 
     // Confirm outlet belongs to this brand
     const { data: outlet } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select('id, brand_id')
       .eq('id', req.params.oid)
       .eq('brand_id', req.params.id)
@@ -337,7 +337,7 @@ router.put('/:id/outlets/:oid', authenticateToken, async (req, res) => {
     updates.updated_at = new Date().toISOString();
 
     const { data, error } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .update(updates)
       .eq('id', req.params.oid)
       .select()
@@ -357,18 +357,18 @@ router.delete('/:id/outlets/:oid', authenticateToken, async (req, res) => {
     assertBrandRole(emp, req.params.id, /* ownerOnly */ true);
 
     const { data: outlet } = await supabaseAdmin
-      .from('restaurants').select('id, name, brand_id').eq('id', req.params.oid).eq('brand_id', req.params.id).single();
+      .from('tenants').select('id, name, brand_id').eq('id', req.params.oid).eq('brand_id', req.params.id).single();
     if (!outlet) return res.status(404).json({ error: 'Outlet not found in this brand' });
 
     // Count active outlets — prevent deactivating the last one
     const { count } = await supabaseAdmin
-      .from('restaurants').select('id', { count: 'exact', head: true })
+      .from('tenants').select('id', { count: 'exact', head: true })
       .eq('brand_id', req.params.id).eq('is_active', true);
 
     if ((count ?? 0) <= 1)
       return res.status(400).json({ error: 'Cannot deactivate the last active outlet.' });
 
-    await supabaseAdmin.from('restaurants')
+    await supabaseAdmin.from('tenants')
       .update({ is_active: false, updated_at: new Date().toISOString() })
       .eq('id', req.params.oid);
 
@@ -395,7 +395,7 @@ router.get('/:id/dashboard', authenticateToken, async (req, res) => {
 
     // All active outlet IDs under this brand
     const { data: outletRows } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select('id, name, outlet_code')
       .eq('brand_id', req.params.id)
       .eq('is_active', true);
@@ -510,7 +510,7 @@ router.post('/:id/menu/push', authenticateToken, async (req, res) => {
     let targetIds = [];
     if (outlet_ids === 'all') {
       const { data: outlets } = await supabaseAdmin
-        .from('restaurants').select('id').eq('brand_id', req.params.id).eq('is_active', true);
+        .from('tenants').select('id').eq('brand_id', req.params.id).eq('is_active', true);
       targetIds = (outlets ?? []).map(o => o.id);
     } else {
       targetIds = Array.isArray(outlet_ids) ? outlet_ids : [outlet_ids];
@@ -601,7 +601,7 @@ router.post('/:id/campaigns/send', authenticateToken, async (req, res) => {
     let targetIds = [];
     if (outlet_ids === 'all') {
       const { data: outlets } = await supabaseAdmin
-        .from('restaurants').select('id').eq('brand_id', req.params.id).eq('is_active', true);
+        .from('tenants').select('id').eq('brand_id', req.params.id).eq('is_active', true);
       targetIds = (outlets ?? []).map(o => o.id);
     } else {
       targetIds = Array.isArray(outlet_ids) ? outlet_ids : [outlet_ids];
@@ -659,7 +659,7 @@ async function createOutlet(brandId, opts) {
 
   // Create restaurant row
   const { data: restaurant, error: restErr } = await supabaseAdmin
-    .from('restaurants')
+    .from('tenants')
     .insert({
       brand_id:            brandId,
       name:                name.trim(),
@@ -688,7 +688,7 @@ async function createOutlet(brandId, opts) {
   let integrationId = null;
   if (phone_number_id) {
     const { data: integration, error: intErr } = await supabaseAdmin
-      .from('restaurant_integrations')
+      .from('tenant_integrations')
       .insert({
         restaurant_id:     restaurantId,
         provider:          'meta',

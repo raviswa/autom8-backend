@@ -33,13 +33,13 @@ const {
 router.get('/', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const { data: restaurant } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select('subscribed_features, name')
       .eq('id', req.restaurant_id)
       .single();
 
     const { data: sub } = await supabaseAdmin
-      .from('restaurant_subscriptions')
+      .from('tenant_subscriptions')
       .select('plan, status, trial_ends_at, renews_at, base_price, final_price, billing_cycle, features')
       .eq('restaurant_id', req.restaurant_id)
       .maybeSingle();
@@ -111,7 +111,7 @@ router.put('/paid-features', requireKdsSecret, async (req, res) => {
     }
 
     const { data: restaurant } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select('subscribed_features')
       .eq('id', restaurant_id)
       .single();
@@ -129,20 +129,20 @@ router.put('/paid-features', requireKdsSecret, async (req, res) => {
     if (!check.ok) return res.status(400).json({ error: check.error });
 
     const { data: sub } = await supabaseAdmin
-      .from('restaurant_subscriptions')
+      .from('tenant_subscriptions')
       .select('id')
       .eq('restaurant_id', restaurant_id)
       .maybeSingle();
 
     if (sub) {
       await supabaseAdmin
-        .from('restaurant_subscriptions')
+        .from('tenant_subscriptions')
         .update({ features: paid_features, updated_at: new Date().toISOString() })
         .eq('restaurant_id', restaurant_id);
     } else {
       const trialEnds = new Date();
       trialEnds.setDate(trialEnds.getDate() + 30);
-      await supabaseAdmin.from('restaurant_subscriptions').insert({
+      await supabaseAdmin.from('tenant_subscriptions').insert({
         restaurant_id,
         features:      paid_features,
         status:        'active',
@@ -155,7 +155,7 @@ router.put('/paid-features', requireKdsSecret, async (req, res) => {
     }
 
     await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .update({ subscribed_features: nextEnabled, updated_at: new Date().toISOString() })
       .eq('id', restaurant_id);
 

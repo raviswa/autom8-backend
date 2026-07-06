@@ -36,7 +36,7 @@ async function resolveRestaurantByPhone(phoneNumberId) {
 
   try {
     const { data, error } = await supabaseAdmin
-      .from('restaurant_integrations')
+      .from('tenant_integrations')
       .select('restaurant_id')
       .eq('phone_number_id', String(phoneNumberId).trim())
       .eq('is_active', true)

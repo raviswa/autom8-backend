@@ -400,8 +400,8 @@ async def send_daily_summary():
     logger.info("Running send_daily_summary job")
     
     try:
-        # TODO: Get all restaurants
-        # For each restaurant:
+        # TODO: Get all tenants
+        # For each tenant:
         # - Aggregate: bookings count by type, total covers, revenue, no-shows, cancellations
         # - Calculate for today
         # - Send to manager_phone:
@@ -470,7 +470,7 @@ async def update_customer_profiles():
 
 
 async def calculate_customer_segments():
-    """Calculate RFM segments for all restaurants."""
+    """Calculate RFM segments for all tenants."""
     logger.info("Running calculate_customer_segments job")
     
     try:

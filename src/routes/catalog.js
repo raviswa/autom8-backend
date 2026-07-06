@@ -359,7 +359,7 @@ router.post('/webhook', async (req, res) => {
   res.status(200).send('EVENT_RECEIVED');
   try {
     if (req.body.object !== 'product_catalog') return;
-    const { data: restaurants } = await supabaseAdmin.from('restaurants').select('id').eq('is_active', true);
+    const { data: restaurants } = await supabaseAdmin.from('tenants').select('id').eq('is_active', true);
     for (const r of restaurants ?? [])
       syncCatalogFromMeta(r.id).catch(err => console.error(`[catalog-webhook] Sync failed for ${r.id}:`, err.message));
   } catch (err) {
@@ -378,7 +378,7 @@ router.get('/kitchen-status', authenticateToken, getRestaurantId, async (req, re
         .eq('restaurant_id', req.restaurant_id)
         .eq('is_available', true)
         .eq('is_stocked', true),
-      supabaseAdmin.from('restaurants')
+      supabaseAdmin.from('tenants')
         .select('kitchen_busy, takeaway_ready_range, delivery_ready_range')
         .eq('id', req.restaurant_id)
         .maybeSingle(),
@@ -463,7 +463,7 @@ router.post('/kitchen-busy-toggle', authenticateToken, getRestaurantId, async (r
     if (typeof busy !== 'boolean')
       return res.status(400).json({ error: 'busy (boolean) required' });
 
-    const { data, error } = await supabaseAdmin.from('restaurants').update({
+    const { data, error } = await supabaseAdmin.from('tenants').update({
       kitchen_busy: busy,
       updated_at: new Date().toISOString(),
     }).eq('id', req.restaurant_id).select('kitchen_busy').single();
@@ -1007,7 +1007,7 @@ module.exports.nextOpenSlotDescriptionIST = nextOpenSlotDescriptionIST;
 module.exports.currentSlotLabelIST = currentSlotLabelIST;
 module.exports.applySlotForAllRestaurants = async function() {
   const slot = getCurrentSlotIST();
-  const { data: restaurants } = await supabaseAdmin.from('restaurants').select('id').eq('is_active', true);
+  const { data: restaurants } = await supabaseAdmin.from('tenants').select('id').eq('is_active', true);
   for (const r of restaurants ?? []) {
     if (!slot && MANUAL_KITCHEN_OPEN_OVERRIDES.has(r.id)) {
       console.log(`[slot] Keeping manual-open override for restaurant ${r.id} while slot is CLOSED`);

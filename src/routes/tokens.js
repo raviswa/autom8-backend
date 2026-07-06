@@ -521,7 +521,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
       restaurant_id = emp?.restaurant_id ?? null;
       if (!restaurant_id) {
         const { data: restaurants } = await supabaseAdmin
-          .from('restaurants').select('id').eq('is_active', true).limit(2);
+          .from('tenants').select('id').eq('is_active', true).limit(2);
         if (restaurants?.length === 1) restaurant_id = restaurants[0].id;
       }
     }

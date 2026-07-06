@@ -75,7 +75,7 @@ router.post('/login', async (req, res) => {
     if (isBrandEmployee && emp.brand_id) {
       // Fetch all active outlets for this brand
       const { data: outletRows } = await supabaseAdmin
-        .from('restaurants')
+        .from('tenants')
         .select('id, name, outlet_code, sort_order, whatsapp_number, city, is_active')
         .eq('brand_id', emp.brand_id)
         .eq('is_active', true)
@@ -98,7 +98,7 @@ router.post('/login', async (req, res) => {
     let effectiveRestaurantId = emp.restaurant_id ?? null;
     if (!effectiveRestaurantId && isBrandEmployee && emp.brand_id) {
       const { data: brandOutlets } = await supabaseAdmin
-        .from('restaurants')
+        .from('tenants')
         .select('id')
         .eq('brand_id', emp.brand_id)
         .eq('is_active', true)
@@ -107,7 +107,7 @@ router.post('/login', async (req, res) => {
     }
     if (!effectiveRestaurantId && !isBrandEmployee) {
       const { data: restaurants } = await supabaseAdmin
-        .from('restaurants')
+        .from('tenants')
         .select('id')
         .eq('is_active', true)
         .limit(2);
@@ -116,7 +116,7 @@ router.post('/login', async (req, res) => {
     if (!effectiveRestaurantId && !isBrandEmployee && emp.phone) {
       const digits = String(emp.phone).replace(/\D/g, '');
       const { data: outlets } = await supabaseAdmin
-        .from('restaurants')
+        .from('tenants')
         .select('id, manager_phone, whatsapp_number')
         .eq('is_active', true);
       const match = (outlets ?? []).filter((r) => {

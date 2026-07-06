@@ -701,7 +701,7 @@ async function handleWhatsAppOrder(message, metadata, preResolvedRestaurantId = 
     try {
       const [{ data: restaurant }, { data: orderWithItems }] = await Promise.all([
         supabaseAdmin
-          .from('restaurants')
+          .from('tenants')
           .select('id, name, gstin, brand_id')
           .eq('id', restaurantId)
           .maybeSingle(),

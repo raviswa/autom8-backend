@@ -1025,7 +1025,7 @@ async def get_pending_prepay_reminder_candidates(
                       c.name AS customer_name
                     FROM bookings b
                     JOIN customers c ON c.id = b.customer_id
-                    JOIN restaurants r ON r.id = b.restaurant_id
+                    JOIN tenants r ON r.id = b.restaurant_id
                     WHERE b.payment_status = 'pending'
                       AND b.status = 'pending'
                       AND COALESCE(r.payment_mode, 'prepay') = 'prepay'
@@ -1385,7 +1385,7 @@ async def get_bookings_due_for_kds() -> list[dict]:
                   wt.meta AS token_meta
                 FROM bookings b
                 JOIN customers c ON c.id = b.customer_id
-                JOIN restaurants r ON r.id = b.restaurant_id
+                JOIN tenants r ON r.id = b.restaurant_id
                 LEFT JOIN walk_in_tokens wt
                   ON wt.meta->>'booking_id' = b.id::text
                 WHERE b.status IN ('confirmed', 'pending')

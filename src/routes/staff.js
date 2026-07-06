@@ -362,7 +362,7 @@ router.put('/:id/terminate', authenticateToken, getRestaurantId, async (req, res
       return res.status(400).json({ error: 'You cannot terminate your own account' });
 
     const { data: restaurant } = await supabaseAdmin
-      .from('restaurants')
+      .from('tenants')
       .select('manager_phone')
       .eq('id', req.restaurant_id)
       .maybeSingle();
@@ -371,7 +371,7 @@ router.put('/:id/terminate', authenticateToken, getRestaurantId, async (req, res
     const empWa = target.whatsapp_number || target.phone || '';
     if (restaurant?.manager_phone && phoneDigitsMatch(empWa, restaurant.manager_phone)) {
       await supabaseAdmin
-        .from('restaurants')
+        .from('tenants')
         .update({ manager_phone: null, updated_at: new Date().toISOString() })
         .eq('id', req.restaurant_id);
       invalidateRestaurantConfigCache(req.restaurant_id);
