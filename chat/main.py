@@ -346,13 +346,18 @@ async def _process_meta_payload(payload: dict):
             )
             return
 
-        # 3. Restaurant / LOB resolution — pin-first approach
+# 3. Restaurant / LOB resolution — keyword-first, pin-second approach
         #
         #    Priority order:
-        #    a. Pin table      — phone already mid-conversation with a specific tenant
-        #    b. phone_number_id — Meta webhook metadata (dedicated WABA numbers)
-        #    c. Keyword        — "Hi psl", "Hi munafe" etc. on first contact
-        #    d. Default        — is_default_for_number=True fallback (Hotel Munafe)
+        #    a. Explicit keyword — resolves to a real tenant → always wins,
+        #       even mid-conversation (customer stating intent to switch
+        #       outlets, e.g. "Hi psl"). An unrecognized single word is NOT
+        #       treated as an error when a pin already exists — it's just
+        #       an ordinary reply (party size, address text, etc.).
+        #    b. Pin table       — phone already mid-conversation with a tenant.
+        #    c. phone_number_id — ONLY for a genuinely dedicated (single-tenant)
+        #       WABA number. Returns None on Munafe's shared number by design.
+        #    d. Default         — is_default_for_number=True fallback.
         parsed = await parse_incoming(payload)
         phone  = message_obj.get("from")
         metadata = value.get("metadata", {})
@@ -362,44 +367,46 @@ async def _process_meta_payload(payload: dict):
         )
         phone_number_id = metadata.get("phone_number_id")
         restaurant      = None
+        keyword         = extract_short_code(message_body or "")
 
-        # 3a. Pin table — fastest path, skips keyword parsing for mid-conversation messages
-        pinned_id = await get_active_restaurant_for_phone(restaurant_whatsapp, phone)
-        if pinned_id:
-            restaurant = await get_restaurant_by_id(pinned_id)
-            if restaurant:
-                logger.debug(f"[routing] pin hit: {phone} → {restaurant['name']}")
+        # 3a. Explicit keyword — only acts when it resolves to a real, active tenant
+        if keyword:
+            candidate = await get_restaurant_by_short_code(restaurant_whatsapp, keyword)
+            if candidate:
+                restaurant = candidate
+                logger.info(f"[routing] keyword '{keyword}' → {restaurant['name']}")
 
-        # 3b. Meta phone_number_id (dedicated numbers bypass pin/keyword entirely)
+        # 3b. Pin table — mid-conversation continuation
+        if not restaurant:
+            pinned_id = await get_active_restaurant_for_phone(restaurant_whatsapp, phone)
+            if pinned_id:
+                restaurant = await get_restaurant_by_id(pinned_id)
+                if restaurant:
+                    logger.debug(f"[routing] pin hit: {phone} → {restaurant['name']}")
+
+        # 3c. Unrecognized keyword AND no pin — genuinely fresh, unknown-outlet contact
+        if not restaurant and keyword:
+            codes = await get_active_short_codes_for_waba(restaurant_whatsapp)
+            hint  = ", ".join(f"*Hi {c}*" for c in codes) if codes else "*Hi* (to start)"
+            await send_whatsapp_message(
+                phone,
+                f"Sorry, we couldn't find that outlet. 🙏\n\n"
+                f"Available options on this number:\n{hint}\n\n"
+                f"Please try again with one of the above.",
+                None,
+            )
+            logger.warning(
+                f"[routing] unknown keyword '{keyword}' from {phone} on {restaurant_whatsapp}"
+            )
+            return
+
+        # 3d. Dedicated phone_number_id — only unambiguous single-tenant numbers
         if not restaurant and phone_number_id:
             restaurant = await get_restaurant_by_phone_number_id(str(phone_number_id))
             if restaurant:
                 logger.debug(f"[routing] phone_number_id hit: {phone_number_id}")
 
-        # 3c. Keyword routing — new conversation on shared WABA number
-        if not restaurant:
-            keyword = extract_short_code(message_body or "")
-            if keyword:
-                restaurant = await get_restaurant_by_short_code(restaurant_whatsapp, keyword)
-                if restaurant:
-                    logger.info(f"[routing] keyword '{keyword}' → {restaurant['name']}")
-                else:
-                    # Keyword found but no tenant matched — send helpful hint and drop
-                    codes = await get_active_short_codes_for_waba(restaurant_whatsapp)
-                    hint  = ", ".join(f"*Hi {c}*" for c in codes) if codes else "*Hi* (to start)"
-                    await send_whatsapp_message(
-                        phone,
-                        f"Sorry, we couldn't find that outlet. 🙏\n\n"
-                        f"Available options on this number:\n{hint}\n\n"
-                        f"Please try again with one of the above.",
-                        None,
-                    )
-                    logger.warning(
-                        f"[routing] unknown keyword '{keyword}' from {phone} on {restaurant_whatsapp}"
-                    )
-                    return
-
-        # 3d. Default fallback — plain "Hi" routes to is_default_for_number=True tenant
+        # 3e. Default fallback — plain "Hi" routes to is_default_for_number=True tenant
         if not restaurant:
             restaurant = await get_restaurant_by_whatsapp_number(restaurant_whatsapp)
 
@@ -412,7 +419,7 @@ async def _process_meta_payload(payload: dict):
 
         # Refresh pin on every message — keeps subsequent turns fast
         await pin_active_restaurant_for_phone(restaurant_whatsapp, phone, restaurant["id"])
-
+        
         # 3e. LOB dispatch — non-restaurant tenants go to their own agent
         lob_type = restaurant.get("lob_type") or "restaurant"
         if lob_type != "restaurant":
