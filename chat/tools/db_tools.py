@@ -302,7 +302,16 @@ async def get_restaurant_by_id(restaurant_id: str) -> Dict[str, Any] | None:
 
 
 async def get_restaurant_by_phone_number_id(phone_number_id: str) -> Dict[str, Any] | None:
-    """Resolve outlet from Meta webhook metadata.phone_number_id."""
+    """
+    Resolve outlet from Meta webhook metadata.phone_number_id.
+
+    Only returns a match when phone_number_id maps to exactly ONE active
+    tenant — i.e. a genuinely dedicated WABA number. On a shared number
+    (multiple tenants registered against the same phone_number_id, as with
+    Munafe's short-code multi-tenant setup) this returns None, so routing
+    falls through to keyword/pin/default instead of arbitrarily picking
+    whichever integration row the query happens to return first.
+    """
     if not phone_number_id or AsyncSessionLocal is None:
         return None
 
@@ -326,29 +335,36 @@ async def get_restaurant_by_phone_number_id(phone_number_id: str) -> Dict[str, A
                     RestaurantIntegration.is_active == True,
                     Restaurant.is_active == True,
                 )
-                .limit(1)
+                .limit(2)  # only need to know if there's more than one
             )
-            restaurant = result.scalar_one_or_none()
-            if restaurant:
-                data = {
-                    "id": str(restaurant.id),
-                    "name": restaurant.name,
-                    "whatsapp_number": restaurant.whatsapp_number,
-                    "manager_phone": restaurant.manager_phone,
-                    "timezone": restaurant.timezone,
-                    "dining_duration_minutes": restaurant.dining_duration_minutes,
-                    "payment_mode": restaurant.payment_mode,
-                    "is_active": restaurant.is_active,
-                    "meta_catalog_id": getattr(restaurant, "meta_catalog_id", None),
-                }
-                _RESTAURANT_CACHE[cache_key] = (data, now)
-                return data
-            _RESTAURANT_CACHE[cache_key] = (None, now)
-            return None
+            rows = result.scalars().all()
+
+            if len(rows) != 1:
+                if len(rows) > 1:
+                    logger.debug(
+                        f"[routing] phone_number_id {phone_number_id} is shared across "
+                        f"2+ tenants — skipping dedicated-number shortcut"
+                    )
+                _RESTAURANT_CACHE[cache_key] = (None, now)
+                return None
+
+            restaurant = rows[0]
+            data = {
+                "id": str(restaurant.id),
+                "name": restaurant.name,
+                "whatsapp_number": restaurant.whatsapp_number,
+                "manager_phone": restaurant.manager_phone,
+                "timezone": restaurant.timezone,
+                "dining_duration_minutes": restaurant.dining_duration_minutes,
+                "payment_mode": restaurant.payment_mode,
+                "is_active": restaurant.is_active,
+                "meta_catalog_id": getattr(restaurant, "meta_catalog_id", None),
+            }
+            _RESTAURANT_CACHE[cache_key] = (data, now)
+            return data
     except Exception as e:
         logger.error(f"Failed to look up restaurant by phone_number_id {phone_number_id}: {e}")
         return cached
-
 
 async def get_restaurant_integration(
     restaurant_id: str,
