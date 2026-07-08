@@ -255,7 +255,7 @@ async def dispatch_deferred_scheduled_kds():
                 continue
 
             try:
-                await notify_kds(
+                order_id = await notify_kds(
                     customer_name=row.get("customer_name") or "Guest",
                     customer_phone=row.get("customer_phone") or "",
                     order_text=order_text,
@@ -266,12 +266,19 @@ async def dispatch_deferred_scheduled_kds():
                     restaurant_id=row["restaurant_id"],
                     booking_id=row.get("booking_id"),
                 )
-                await mark_booking_kds_sent(row["booking_id"])
-                dispatched += 1
-                logger.info(
-                    f"[scheduled-kds] Dispatched booking {row['booking_id']} "
-                    f"to KDS (token={token})"
-                )
+                if order_id:
+                    await mark_booking_kds_sent(row["booking_id"])
+                    dispatched += 1
+                    logger.info(
+                        f"[scheduled-kds] Dispatched booking {row['booking_id']} "
+                        f"to KDS (token={token})"
+                    )
+                else:
+                    logger.error(
+                        f"[scheduled-kds] KDS dispatch FAILED for booking "
+                        f"{row.get('booking_id')} (token={token}) — kds_sent_at left "
+                        f"null, will retry next run"
+                    )
             except Exception as row_err:
                 logger.error(
                     f"[scheduled-kds] Failed booking {row.get('booking_id')}: {row_err}"
