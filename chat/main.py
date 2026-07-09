@@ -767,6 +767,7 @@ async def internal_webcart_confirm_pay(request: Request):
     session_state: dict = {
         "payment_mode": "prepay",
         "service_type": service_type,
+        "order_total": total,    # ← add this: prepare_checkout_page reads this key directly
     }
     payment_link = await ensure_prepay_payment_link(
         booking_id,
@@ -782,6 +783,9 @@ async def internal_webcart_confirm_pay(request: Request):
             content={"ok": False, "error": "payment_link_unavailable", "booking_id": booking_id},
         )
 
+    # ← add this: persist so /pay/{booking_id} can find order_total + razorpay_order_id later    
+    await save_session_state(restaurant_id, canonical_phone, session_state)
+    
     preview_lines = []
     for row in items[:6]:
         try:
