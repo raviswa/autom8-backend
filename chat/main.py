@@ -32,6 +32,7 @@ from tools.db_tools import (
     save_session_state,
     customer_lock,
     get_restaurant_by_id,
+    get_booking_with_customer,
 )
 from tools.whatsapp_tools import parse_incoming, send_whatsapp_message, send_whatsapp_cta_url
 from agents.customer.booking_helpers import touch_session_activity, is_reset_keyword, mark_session_visit_complete
@@ -43,9 +44,13 @@ from tools.payment_tools import (
     handle_payment_link_callback,
     prepare_checkout_page,
     render_checkout_html,
+    resolve_checkout_context,
+    create_order_for_method,
+    render_method_selection_html,
     verify_checkout_payment,
     ensure_prepay_payment_link,
 )
+from tools.booking_mechanisms import notify_manager_order_alert
 from tools.auto_reply_filter import is_whatsapp_auto_reply
 from tools.booking_mechanisms import (
     is_catalog_order,
@@ -931,11 +936,70 @@ async def payment_complete(request: Request):
     return HTMLResponse(html, status_code=200)
 
 
+@app.post("/pay/failure-event")
+async def pay_failure_event(request: Request):
+    """Capture hosted checkout failures for observability and manager awareness."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    booking_id = str(body.get("booking_id") or "").strip()
+    kind = str(body.get("kind") or "").strip() or "unknown"
+    details = body.get("details") or {}
+
+    logger.warning(
+        f"[pay-failure-event] booking_id={booking_id or 'unknown'} kind={kind} details={details}"
+    )
+
+    if booking_id:
+        try:
+            booking = await get_booking_with_customer(booking_id)
+            if booking:
+                restaurant_id = str(booking.get("restaurant_id") or "").strip()
+                token_number = str(booking.get("token_number") or booking_id[-8:]).strip() or booking_id[-8:]
+                customer_name = str(booking.get("customer_name") or "Guest").strip() or "Guest"
+                customer_phone = str(booking.get("customer_phone") or "").strip()
+                service_type = str(booking.get("service_type") or "takeaway").strip() or "takeaway"
+                total = float(booking.get("order_total") or 0)
+
+                detail_reason = ""
+                if isinstance(details, dict):
+                    detail_reason = str(
+                        details.get("reason")
+                        or details.get("code")
+                        or details.get("description")
+                        or ""
+                    ).strip()
+
+                reason_text = f"Payment issue detected ({kind})"
+                if detail_reason:
+                    reason_text += f": {detail_reason}"
+
+                if restaurant_id and customer_phone:
+                    await notify_manager_order_alert(
+                        restaurant_id,
+                        token_number=token_number,
+                        customer_name=customer_name,
+                        customer_phone=customer_phone,
+                        order_text=reason_text,
+                        total=total,
+                        table_number=booking.get("table_number"),
+                        party_size=booking.get("party_size"),
+                        booking_time=datetime.utcnow().isoformat(),
+                        service_type=service_type,
+                    )
+        except Exception as exc:
+            logger.warning(f"[pay-failure-event] manager alert skipped for {booking_id}: {exc}")
+
+    return JSONResponse(status_code=200, content={"ok": True})
+
+
 @app.get("/pay/{booking_id}")
 async def pay_checkout(booking_id: str, request: Request):
-    """Hosted Razorpay Checkout page (Orders API — unlimited test checkouts)."""
+    """Hosted Razorpay method picker page (click-first to avoid WebView popup blocking)."""
     token = request.query_params.get("t", "")
-    ctx = await prepare_checkout_page(booking_id, token)
+    ctx = await resolve_checkout_context(booking_id, token)
     if ctx.get("error") == "invalid_token":
         return HTMLResponse("<h1>Invalid or expired payment link</h1>", status_code=403)
     if ctx.get("error") == "booking_not_found":
@@ -947,7 +1011,33 @@ async def pay_checkout(booking_id: str, request: Request):
         )
     if ctx.get("error"):
         return HTMLResponse(f"<h1>Payment unavailable</h1><p>{ctx['error']}</p>", status_code=400)
-    return HTMLResponse(render_checkout_html(ctx), status_code=200)
+    return HTMLResponse(render_method_selection_html(ctx), status_code=200)
+
+
+@app.post("/pay/{booking_id}/create-order")
+async def pay_create_order_for_method(booking_id: str, request: Request):
+    """Create a Razorpay order after customer chooses payment method."""
+    token = request.query_params.get("t", "")
+    method = request.query_params.get("method", "")
+    logger.info(
+        f"[checkout-create-order] booking_id={booking_id} method={method or 'missing'} token_present={bool(token)}"
+    )
+    result = await create_order_for_method(booking_id, token, method)
+
+    logger.info(
+        "[checkout-create-order] "
+        f"booking_id={booking_id} ok={not bool(result.get('error'))} "
+        f"error={result.get('error') or 'none'} already_paid={bool(result.get('already_paid'))} "
+        f"order_id={result.get('order_id') or 'none'}"
+    )
+
+    if result.get("error") == "invalid_token":
+        return JSONResponse(status_code=403, content=result)
+
+    if result.get("error"):
+        return JSONResponse(status_code=400, content=result)
+
+    return JSONResponse(status_code=200, content=result)
 
 
 @app.post("/pay/verify")
@@ -957,7 +1047,18 @@ async def pay_verify(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
+    logger.info(
+        "[checkout-verify] "
+        f"order_id={body.get('razorpay_order_id') or 'missing'} "
+        f"payment_id={body.get('razorpay_payment_id') or 'missing'} "
+        f"signature_present={bool(body.get('razorpay_signature'))}"
+    )
     result = await verify_checkout_payment(body)
+    logger.info(
+        "[checkout-verify] "
+        f"ok={bool(result.get('ok'))} booking_id={result.get('booking_id') or 'unknown'} "
+        f"fulfilled={result.get('fulfilled')} reason={result.get('reason') or result.get('error') or 'none'}"
+    )
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(status_code=status_code, content=result)
 
