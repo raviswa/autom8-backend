@@ -764,6 +764,26 @@ async def internal_webcart_confirm_pay(request: Request):
     if not booking_id:
         raise HTTPException(status_code=500, detail="Booking creation failed")
 
+
+
+
+    # Build cart_snapshot from webcart items in the shape prepay_fulfillment expects
+    cart_snapshot = {}
+    order_text_lines = []
+    for row in items:
+        item_id = str(row.get("id") or row.get("name") or "").strip()
+        if not item_id:
+            continue
+        qty = int(row.get("qty") or 0)
+        if qty <= 0:
+            continue
+        name = str(row.get("name") or "Item").strip()
+        price = float(row.get("price") or 0)
+        cart_snapshot[item_id] = {"title": name, "name": name, "qty": qty, "unit_price": price}
+        order_text_lines.append(f"{qty}x {name}")
+    order_text_display = ", ".join(order_text_lines)
+
+    
     session_state: dict = {
         "payment_mode": "prepay",
         "service_type": service_type,
@@ -784,6 +804,26 @@ async def internal_webcart_confirm_pay(request: Request):
         )
 
     # ← add this: persist so /pay/{booking_id} can find order_total + razorpay_order_id later    
+    
+    # Persist the prepay payload so fulfill_from_webhook() has something to dispatch to KDS with
+    from tools.prepay_fulfillment import build_prepay_payload, persist_prepay_payload
+    prepay_payload = build_prepay_payload(
+        service_type=service_type,
+        session_state=session_state,
+        restaurant_id=restaurant_id,
+        customer_id=customer_id,
+        customer_name=customer_name,
+        customer_phone=canonical_phone,
+        booking_id=booking_id,
+        token=str(token_label or token_number),
+        total=total,
+        booking_time=datetime.utcnow().isoformat(),
+        order_text_display=order_text_display,
+        cart_snapshot=cart_snapshot,
+        totals={"total": total},
+    )
+    await persist_prepay_payload(booking_id, prepay_payload)
+    
     await save_session_state(restaurant_id, canonical_phone, session_state)
     
     preview_lines = []
