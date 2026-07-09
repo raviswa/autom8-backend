@@ -232,6 +232,7 @@ async def build_notes_hint(
     catalog_side_names: list[str] = []
 
     if restaurant_id:
+        from tools.catalog_tools import fetch_menu_items
         menu = await fetch_menu_items(restaurant_id)
         if menu:
             for item in _ordered_catalog_items(cart, menu):

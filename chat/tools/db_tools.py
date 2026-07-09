@@ -957,6 +957,91 @@ async def update_booking_payment_status(booking_id: str, payment_status: str) ->
         return {"id": str(booking.id), "payment_status": booking.payment_status}
 
 
+async def save_booking_payment_meta(
+    booking_id: str,
+    *,
+    payment_method: str,
+    fee_pct: float,
+    fee_amount: float,
+    order_subtotal: float,
+    restaurant_payout: float,
+) -> bool:
+    """Best-effort persistence for checkout method/fee metadata on bookings.
+
+    Some deployments may not yet have all payment meta columns. In that case we
+    skip silently (with a warning) instead of breaking checkout.
+    """
+    if AsyncSessionLocal is None:
+        return False
+
+    try:
+        async with AsyncSessionLocal() as session:
+            cols_result = await session.execute(
+                text(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'bookings'
+                      AND column_name = ANY(:cols)
+                    """
+                ),
+                {
+                    "cols": [
+                        "payment_method",
+                        "fee_pct",
+                        "fee_amount",
+                        "order_subtotal",
+                        "restaurant_payout",
+                    ]
+                },
+            )
+            present = {row[0] for row in cols_result.fetchall()}
+            if not present:
+                logger.warning(
+                    f"[payment-meta] No payment meta columns present on bookings; skipping for {booking_id}"
+                )
+                return False
+
+            set_parts: list[str] = []
+            params: dict[str, Any] = {"bid": booking_id}
+
+            if "payment_method" in present:
+                set_parts.append("payment_method = :payment_method")
+                params["payment_method"] = str(payment_method or "")
+            if "fee_pct" in present:
+                set_parts.append("fee_pct = :fee_pct")
+                params["fee_pct"] = float(fee_pct or 0)
+            if "fee_amount" in present:
+                set_parts.append("fee_amount = :fee_amount")
+                params["fee_amount"] = float(fee_amount or 0)
+            if "order_subtotal" in present:
+                set_parts.append("order_subtotal = :order_subtotal")
+                params["order_subtotal"] = float(order_subtotal or 0)
+            if "restaurant_payout" in present:
+                set_parts.append("restaurant_payout = :restaurant_payout")
+                params["restaurant_payout"] = float(restaurant_payout or 0)
+
+            if not set_parts:
+                return False
+
+            await session.execute(
+                text(
+                    f"""
+                    UPDATE bookings
+                    SET {', '.join(set_parts)}
+                    WHERE id = CAST(:bid AS uuid)
+                    """
+                ),
+                params,
+            )
+            await session.commit()
+            return True
+    except Exception as e:
+        logger.warning(f"[payment-meta] save_booking_payment_meta failed for {booking_id}: {e}")
+        return False
+
+
 async def save_prepay_fulfillment_payload(booking_id: str, payload: dict[str, Any]) -> None:
     """Persist prepay fulfillment payload on the booking row (survives session loss)."""
     if AsyncSessionLocal is None:
