@@ -373,6 +373,7 @@ router.post('/notify', async (req, res) => {
         continue;
       }
 
+
       // 3e: Stage kds_item for bulk insert
       kdsInserts.push({
         restaurant_id,
@@ -387,6 +388,37 @@ router.post('/notify', async (req, res) => {
         item_category:        item.category || '',
       });
     }
+
+    // ── Step 3.5: Recompute + persist order total ─────────────────────────────
+    // Sums across ALL order_items on this order (not just the items in this
+    // call), so reorder rounds (ORD-xxx-R2 etc.) always reflect the true
+    // cumulative total rather than only the latest round's items.
+    try {
+      const { data: allItemRows, error: totalsErr } = await supabaseAdmin
+        .from('order_items')
+        .select('quantity, unit_price')
+        .eq('order_id', orderRow.id);
+
+      if (totalsErr) {
+        console.warn(`[kds-notify] total_amount recompute failed for ${orderRow.order_number}:`, totalsErr.message);
+      } else {
+        const orderSubtotal = (allItemRows ?? []).reduce(
+          (sum, r) => sum + (Number(r.quantity) || 0) * (Number(r.unit_price) || 0),
+          0
+        );
+        const { error: updateTotalErr } = await supabaseAdmin
+          .from('orders')
+          .update({ subtotal: orderSubtotal, total_amount: orderSubtotal })
+          .eq('id', orderRow.id)
+          .eq('restaurant_id', restaurant_id);
+        if (updateTotalErr) {
+          console.warn(`[kds-notify] total_amount write failed for ${orderRow.order_number}:`, updateTotalErr.message);
+        }
+      }
+    } catch (totalsEx) {
+      console.warn(`[kds-notify] total_amount step failed (non-fatal): ${totalsEx.message}`);
+    }
+
 
     // ── Step 4: Bulk-insert kds_items ─────────────────────────────────────────
     const kdsItemsAdded = kdsInserts.length;
