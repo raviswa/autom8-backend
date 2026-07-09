@@ -921,6 +921,23 @@ async def pay_verify(request: Request):
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(status_code=status_code, content=result)
 
+@app.post("/pay/mock-success")
+async def pay_mock_success(request: Request):
+    """Test-mode only: simulate a successful checkout, bypassing flaky Razorpay sandbox rails."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    booking_id = str(body.get("booking_id") or "").strip()
+    order_id = str(body.get("order_id") or "").strip()
+    if not booking_id:
+        raise HTTPException(status_code=400, detail="booking_id is required")
+
+    from tools.payment_tools import mark_test_checkout_paid
+    result = await mark_test_checkout_paid(booking_id, order_id)
+    status_code = 200 if result.get("ok") else 400
+    return JSONResponse(status_code=status_code, content=result)
 
 @app.get("/webhook/razorpay")
 async def razorpay_webhook_probe():
