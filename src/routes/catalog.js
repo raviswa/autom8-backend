@@ -124,6 +124,7 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
   const { data: activated,   error: e1 } = await supabaseAdmin.from('menu_items')
     .update({ is_available: true,  updated_at: new Date().toISOString() })
     .eq('restaurant_id', restaurantId).eq('is_stocked', true)
+    .is('archived_at', null)
     .in('time_slot', activeSlots).select('id');
   if (e1) throw e1;
   const inList = activeSlots.map(s => `"${s}"`).join(',');
@@ -135,6 +136,7 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
   await supabaseAdmin.from('menu_items')
     .update({ is_available: false, updated_at: new Date().toISOString() })
     .eq('restaurant_id', restaurantId).eq('is_stocked', false)
+    .is('archived_at', null)
     .in('time_slot', activeSlots);
   console.log(`  ✅ Activated: ${activated?.length ?? 0} | Deactivated: ${deactivated?.length ?? 0}`);
   return { slot: slotDbValue, available: activated?.length ?? 0, unavailable: deactivated?.length ?? 0 };
@@ -518,6 +520,7 @@ router.get('/feed', async (req, res) => {
       .from('menu_items')
       .select('retailer_id, name, description, price, image_url, time_slot, is_stocked, is_available, category')
       .eq('restaurant_id', restaurantId).not('retailer_id', 'is', null)
+      .is('archived_at', null)
       .order('time_slot', { ascending: true }).order('name', { ascending: true });
 
     if (error) throw error;
@@ -592,6 +595,7 @@ router.get('/feed/template', authenticateToken, getRestaurantId, async (req, res
       `)
       .eq('restaurant_id', restaurantId).not('retailer_id', 'is', null)
       .eq('is_stocked', true)
+      .is('archived_at', null)
       .order('category', { ascending: true }).order('name', { ascending: true });
 
     if (error) throw error;
@@ -642,6 +646,7 @@ async function handleInternalMenuItems(req, res) {
       .select('id, name, description, price, image_url, time_slot, retailer_id, is_available, is_stocked, category, is_special_today, is_todays_special, special_note, applicable_slots')
       .eq('restaurant_id', restaurantId)
       .eq('is_available', true)
+      .is('archived_at', null)
       .order('time_slot', { ascending: true }).order('name', { ascending: true });
 
     if (error) throw error;
@@ -672,7 +677,9 @@ async function handleMenuUpload(req, res) {
     try {
       const { data: allRows } = await supabaseAdmin.from('menu_items')
         .select('id, retailer_id, updated_at').eq('restaurant_id', restaurantId)
-        .not('retailer_id', 'is', null).order('updated_at', { ascending: false });
+        .not('retailer_id', 'is', null).order('updated_at', { ascending: false })
+        .is('archived_at', null)
+        .order('updated_at', { ascending: false });
       const seen = new Map(), dupIds = [];
       for (const row of allRows ?? []) {
         if (seen.has(row.retailer_id)) dupIds.push(row.id);
