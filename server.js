@@ -52,7 +52,7 @@ app.use(cors({
 app.options('*', cors());
 
 // ── Body parser ───────────────────────────────────────────────────────────────
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 // ── Region middleware ─────────────────────────────────────────────────────────
 app.use(require('./src/middleware/region'));
