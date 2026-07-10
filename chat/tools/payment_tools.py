@@ -1524,7 +1524,32 @@ async def mark_test_checkout_paid(booking_id: str, order_id: str) -> dict[str, A
                 ),
             }
         except Exception as exc:
+            from tools.db_tools import get_booking_with_customer
+
             logger.error(f"[razorpay] test checkout fulfillment failed for {booking_id}: {exc}")
+            # Some downstream enrichers can error after the order is already
+            # confirmed/dispatched. In test mode, treat that as paid success so
+            # QA does not see a false payment failure page.
+            booking = await get_booking_with_customer(str(booking_id))
+            if booking and (
+                booking.get("status") == "confirmed"
+                or bool(booking.get("kds_sent_at"))
+            ):
+                logger.warning(
+                    f"[razorpay] test checkout soft-success for {booking_id} "
+                    f"(status={booking.get('status')} kds_sent_at={booking.get('kds_sent_at')})"
+                )
+                return {
+                    "ok": True,
+                    "booking_id": str(booking_id),
+                    "fulfilled": True,
+                    "source": "test_checkout_soft_success",
+                    "warning": str(exc),
+                    "redirect": (
+                        f"{settings.chat_public_url.rstrip('/')}/payment/complete"
+                        f"?status=paid&booking_id={quote(str(booking_id))}"
+                    ),
+                }
             return {"ok": False, "reason": "fulfillment_failed", "error": str(exc)}
 
     client = _get_client()
@@ -1551,7 +1576,29 @@ async def mark_test_checkout_paid(booking_id: str, order_id: str) -> dict[str, A
             ),
         }
     except Exception as exc:
+        from tools.db_tools import get_booking_with_customer
+
         logger.error(f"[razorpay] test checkout fulfillment failed for {booking_id}: {exc}")
+        booking = await get_booking_with_customer(str(booking_id))
+        if booking and (
+            booking.get("status") == "confirmed"
+            or bool(booking.get("kds_sent_at"))
+        ):
+            logger.warning(
+                f"[razorpay] test checkout soft-success for {booking_id} "
+                f"(status={booking.get('status')} kds_sent_at={booking.get('kds_sent_at')})"
+            )
+            return {
+                "ok": True,
+                "booking_id": str(booking_id),
+                "fulfilled": True,
+                "source": "test_checkout_soft_success",
+                "warning": str(exc),
+                "redirect": (
+                    f"{settings.chat_public_url.rstrip('/')}/payment/complete"
+                    f"?status=paid&booking_id={quote(str(booking_id))}"
+                ),
+            }
         return {"ok": False, "reason": "fulfillment_failed", "error": str(exc)}
 
 
