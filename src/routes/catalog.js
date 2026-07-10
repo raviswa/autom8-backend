@@ -731,21 +731,24 @@ async function handleMenuUpload(req, res) {
     if (!validRows.length) return res.status(400).json({ error: 'No valid rows found', skipped, errors });
 
     // Phase 2: full catalog replace — remove every existing item for this outlet
-    try {
-      const { data: existing } = await supabaseAdmin.from('menu_items')
-        .select('id').eq('restaurant_id', restaurantId);
-      const existingIds = (existing ?? []).map((r) => r.id);
-      if (existingIds.length > 0) {
-        const { error: wipeErr } = await supabaseAdmin.from('menu_items')
-          .delete().in('id', existingIds);
-        if (wipeErr) throw wipeErr;
-        purged = existingIds.length;
-        console.log(`[menu/upload] 🗑️ Replaced catalog — removed ${purged} previous items`);
-      }
-    } catch (wipeErr) {
-      console.error('[menu/upload] Full catalog replace failed:', wipeErr.message);
-      return res.status(500).json({ error: `Could not replace existing catalog: ${wipeErr.message}` });
-    }
+// Phase 2: soft-replace — archive everything currently active for this outlet.
+// (A hard DELETE here fails atomically if any row is referenced by order_items,
+//  which silently aborts the whole upload — this is what was letting stale
+//  items and stale categories survive re-uploads.)
+try {
+  const nowIso = new Date().toISOString();
+  const { data: archived, error: archiveErr } = await supabaseAdmin.from('menu_items')
+    .update({ is_stocked: false, is_available: false, archived_at: nowIso, updated_at: nowIso })
+    .eq('restaurant_id', restaurantId)
+    .is('archived_at', null)
+    .select('id');
+  if (archiveErr) throw archiveErr;
+  purged = archived?.length ?? 0;
+  console.log(`[menu/upload] 🗄️ Archived ${purged} previous items (soft-replace)`);
+} catch (archiveErr) {
+  console.error('[menu/upload] Archive step failed:', archiveErr.message);
+  return res.status(500).json({ error: `Could not archive existing catalog: ${archiveErr.message}` });
+}
 
     // Phase 3: insert fresh rows
     for (const row of validRows) {
