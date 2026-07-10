@@ -35,12 +35,14 @@ const RESTAURANT_SELECT_FULL = [
   'delivery_charge_default', 'delivery_charge_tiers',
   'min_delivery_order_amount', 'min_takeaway_order_amount',
   'scheduled_delivery_enabled', 'scheduled_takeaway_enabled', 'scheduled_kds_lead_minutes', 'max_delivery_radius_km',
+  'lob_type',   // ← add this
 ].join(', ');
 
 const RESTAURANT_SELECT_BASE = [
   'id', 'name', 'waba_id', 'whatsapp_number', 'display_name', 'manager_phone', 'meta_catalog_id',
   'timezone', 'dining_duration_minutes', 'payment_mode',
   'takeaway_fulfillment_mode', 'fulfillment_sections', 'opening_hours',
+  'lob_type',   // ← add this
 ].join(', ');
 
 async function fetchRestaurantRow(restaurantId) {
