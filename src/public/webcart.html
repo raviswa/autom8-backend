@@ -23,12 +23,20 @@
     }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html, body { height: 100%; }
+    html {
+      /* FIX (scroll): some in-app webviews (notably WhatsApp's in-app browser)
+         silently clip scroll on long pages without momentum scrolling enabled
+         explicitly. This is required for the item list to scroll top-to-bottom
+         reliably in that environment. */
+      -webkit-overflow-scrolling: touch;
+    }
     body {
       margin: 0;
       font-family: "Poppins", "Segoe UI", system-ui, sans-serif;
       color: var(--ink);
       background: var(--bg);
       padding-bottom: 64px; /* room for bottom nav */
+      -webkit-overflow-scrolling: touch;
     }
     body.wa-guide-open { overflow: hidden; }
     img { -webkit-user-drag: none; }
@@ -118,6 +126,18 @@
 
     .section-title { font-weight: 700; font-size: 14px; margin: 4px 0 8px; display: flex; align-items: center; gap: 6px; }
 
+    /* FIX (chips scroll): wrapper provides a right-edge fade so it's visually
+       obvious there's more to scroll sideways, plus we now support mouse-wheel
+       horizontal scroll (see JS) since the scrollbar itself stays hidden for
+       aesthetic reasons on both mobile and desktop. */
+    .chip-row-wrap { position: relative; }
+    .chip-row-wrap::after {
+      content: '';
+      position: absolute;
+      top: 0; right: 0; bottom: 12px; width: 32px;
+      background: linear-gradient(to right, rgba(255,249,239,0), var(--bg));
+      pointer-events: none;
+    }
     .chips { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 12px; scrollbar-width: none; }
     .chips::-webkit-scrollbar { display: none; }
     .chip {
@@ -199,7 +219,7 @@
     }
     .cart-head strong { font-size: 16px; font-weight: 700; }
     .icon-btn { border: none; background: #f3f4f6; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; font-size: 16px; }
-    .cart-body { padding: 12px 16px; overflow-y: auto; display: grid; gap: 10px; }
+    .cart-body { padding: 12px 16px; overflow-y: auto; display: grid; gap: 10px; -webkit-overflow-scrolling: touch; }
     .cart-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .cart-line .cl-name { font-size: 13.5px; font-weight: 600; }
     .cart-line .cl-price { color: var(--muted); font-size: 11.5px; }
@@ -430,7 +450,9 @@
           <div id="availableNowGrid" class="hscroll"></div>
         </div>
 
-        <div id="tabChips" class="chips"></div>
+        <div class="chip-row-wrap">
+          <div id="tabChips" class="chips"></div>
+        </div>
         <div id="menuList" class="menu-list"></div>
       </section>
 
@@ -583,6 +605,8 @@
       session: null,
       sessionExpired: false,
       categories: [],
+      categorySlots: {},
+      currentSlotForSort: null,
       activeTab: 'all',
       searchQuery: '',
       todaysSpecial: [],
@@ -612,6 +636,16 @@
     const waOpenLink = $('waOpenLink');
     const isDesktop = () => window.innerWidth >= 901;
     const fallbackSupportPhone = '7397222111';
+
+    // FIX (chips scroll): let mouse-wheel scroll the category chip row
+    // horizontally, since we intentionally hide the scrollbar for aesthetics
+    // and a vertical wheel gesture would otherwise do nothing over the chips.
+    tabChips.addEventListener('wheel', (e) => {
+      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+        e.preventDefault();
+        tabChips.scrollLeft += e.deltaY;
+      }
+    }, { passive: false });
 
     function prettySlugName(value) {
       const raw = String(value || '').trim();
@@ -1095,8 +1129,26 @@ $('subtotal').textContent = money(subtotal);
       bindRowHandlers(availableNowGrid);
     }
 
+    // FIX (category sort): categories that match the current meal slot
+    // (e.g. "tiffin" in the morning, "lunch" midday, "dinner" at night) are
+    // ranked first, "anytime" categories next, everything else last. Falls
+    // back to plain alphabetical when there's no active slot (kitchen closed
+    // / gap window) so behavior is unchanged in that case.
+    function categorySortRank(cat) {
+      const slot = state.currentSlotForSort;
+      if (!slot) return 1;
+      const slots = state.categorySlots[cat] || ['anytime'];
+      if (slots.includes(slot)) return 0;
+      if (slots.includes('anytime')) return 1;
+      return 2;
+    }
+
     function renderChips() {
-      state.categories = [...new Set(state.menu.map(i => i.category || 'General'))].sort((a, b) => a.localeCompare(b));
+      state.categories = [...new Set(state.menu.map(i => i.category || 'General'))];
+      state.categories.sort((a, b) => {
+        const rankDiff = categorySortRank(a) - categorySortRank(b);
+        return rankDiff !== 0 ? rankDiff : a.localeCompare(b);
+      });
       const tabs = ['all', ...state.categories];
       tabChips.innerHTML = tabs.map(tab => {
         const active = state.activeTab === tab;
@@ -1146,6 +1198,8 @@ $('subtotal').textContent = money(subtotal);
       state.pricingConfig = data.pricing_config || {};
       state.todaysSpecial = data.todays_special || [];
       state.availableNow = data.available_now || [];
+      state.categorySlots = data.category_slots || {};
+      state.currentSlotForSort = data.current_slot || null;
       state.activeTab = data.primary_category || 'all';
 
       loadCartLocal();
