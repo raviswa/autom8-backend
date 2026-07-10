@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import logging
+import os
 import re
 import time
 from typing import Any
@@ -40,6 +41,13 @@ _RAZORPAY_METHOD_CONFIG: dict[str, dict[str, int]] = {
         "emi": False,
     },
 }
+
+
+def _mock_success_enabled() -> bool:
+    """Explicit opt-in for QA mock success button/endpoints in test mode."""
+    return str(os.getenv("RAZORPAY_ENABLE_MOCK_SUCCESS", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 
 def compute_fee_inclusive_total(subtotal: float, method: str) -> dict[str, float]:
@@ -917,7 +925,10 @@ async def resolve_checkout_context(booking_id: str, token: str) -> dict[str, Any
         "token": token,
         "subtotal": round(subtotal, 2),
         "token_label": booking.get("token_number") or "",
-        "test_mode": razorpay_status_message() == "enabled_test",
+        "test_mode": (
+            razorpay_status_message() == "enabled_test"
+            and _mock_success_enabled()
+        ),
     }
 
 
@@ -1005,7 +1016,10 @@ async def create_order_for_method(booking_id: str, token: str, method: str) -> d
         "booking_id": booking_id,
         "method": method,
         "method_config": _RAZORPAY_METHOD_CONFIG[method],
-        "test_mode": razorpay_status_message() == "enabled_test",
+        "test_mode": (
+            razorpay_status_message() == "enabled_test"
+            and _mock_success_enabled()
+        ),
     }
 
 
@@ -1508,6 +1522,8 @@ async def mark_test_checkout_paid(booking_id: str, order_id: str) -> dict[str, A
     """Test-mode only: simulate a successful checkout for QA when Razorpay sandbox is flaky."""
     if razorpay_status_message() != "enabled_test":
         return {"ok": False, "reason": "not_test_mode"}
+    if not _mock_success_enabled():
+        return {"ok": False, "reason": "mock_disabled"}
     if not booking_id:
         return {"ok": False, "reason": "missing_booking_id"}
 

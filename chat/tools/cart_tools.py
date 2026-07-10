@@ -134,6 +134,48 @@ _PHONE_ID = os.getenv("WABA_PHONE_NUMBER_ID", "")
 _API_VER  = os.getenv("META_GRAPH_VERSION", "v20.0")
 _BASE_URL = f"https://graph.facebook.com/{_API_VER}"
 
+# In-memory menu cache used by cart selectors.
+# Keep this module-local so callers can safely reference MENU_ITEMS.
+MENU_ITEMS: list[dict[str, Any]] = []
+
+
+async def fetch_menu_items(restaurant_id: str | None) -> list[dict[str, Any]]:
+    """Load menu from DB tools and normalize it to cart picker shape."""
+    if not restaurant_id:
+        return MENU_ITEMS
+
+    from tools.db_tools import get_menu
+
+    rows = await get_menu(str(restaurant_id))
+    normalized: list[dict[str, Any]] = []
+    for row in rows or []:
+        try:
+            price_paise = int(round(float(row.get("price") or 0) * 100))
+        except Exception:
+            price_paise = 0
+        normalized.append(
+            {
+                "id": str(row.get("id") or "").strip(),
+                "title": str(row.get("name") or "Item").strip() or "Item",
+                "description": "",
+                "price": price_paise,
+                "category": str(row.get("category") or "General").strip() or "General",
+                "is_available": True,
+            }
+        )
+
+    MENU_ITEMS.clear()
+    MENU_ITEMS.extend([item for item in normalized if item.get("id")])
+    return MENU_ITEMS
+
+
+def items_for_category(category: str | None = None) -> list[dict[str, Any]]:
+    """Return available items in a category from the current MENU_ITEMS cache."""
+    items = [i for i in MENU_ITEMS if i.get("is_available", True)]
+    if not category:
+        return items
+    return [i for i in items if str(i.get("category") or "") == str(category)]
+
 # WhatsApp API hard limit for list-row description field
 _MAX_ROW_DESC = 72
 _MAX_ROW_TITLE = 24
