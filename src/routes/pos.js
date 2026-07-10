@@ -239,6 +239,7 @@ router.get('/menu-items', authenticateToken, getRestaurantId, async (req, res) =
 
     let query = supabaseAdmin.from('menu_items').select('*')
       .eq('restaurant_id', req.restaurant_id)
+      .is('archived_at', null)          // ← add this line
       .order('time_slot', { ascending: true })
       .order('name',      { ascending: true });
 
