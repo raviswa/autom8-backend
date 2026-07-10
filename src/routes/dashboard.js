@@ -75,6 +75,7 @@ async function fetchRestaurantRow(restaurantId) {
       fallback.data.delivery_charge_tiers = [];
       fallback.data.min_delivery_order_amount = 0;
       fallback.data.min_takeaway_order_amount = 0;
+      fallback.data.lob_type = fallback.data.lob_type || 'restaurant';
     }
     return fallback;
   }
