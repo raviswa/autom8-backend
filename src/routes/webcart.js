@@ -293,6 +293,7 @@ async function fetchMenuItems(restaurantId) {
       .from('menu_items')
       .select('id, retailer_id, name, price, category, description, image_url, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked, is_available')
       .eq('restaurant_id', restaurantId)
+      .is('archived_at', null)
       .order('category', { ascending: true })
       .order('name', { ascending: true }),
     supabaseAdmin
@@ -615,7 +616,8 @@ router.post('/api/webcart/submit', async (req, res) => {
       .from('menu_items')
       .select('id, retailer_id, name, price')
       .eq('restaurant_id', restaurant.id)
-      .eq('is_stocked', true);
+      .eq('is_stocked', true)
+      .is('archived_at', null);
 
     if (liveErr) throw liveErr;
 
