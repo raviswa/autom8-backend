@@ -1022,9 +1022,12 @@ async def pay_checkout(booking_id: str, request: Request):
     testing without redeploying.
     """
     token = request.query_params.get("t", "")
-    gateway = (request.query_params.get("gw") or settings.payment_gateway or "phonepe").lower()
 
-    if gateway == "phonepe":
+    from tools.phonepe_tools import phonepe_configured 
+    
+    gateway = (request.query_params.get("gw") or settings.payment_gateway or "phonepe").lower()
+ 
+    if gateway == "phonepe" and phonepe_configured():
         result = await prepare_phonepe_redirect(booking_id, token)
         if result.get("error") == "invalid_token":
             return HTMLResponse("<h1>Invalid or expired payment link</h1>", status_code=403)
