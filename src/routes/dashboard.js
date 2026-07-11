@@ -78,6 +78,8 @@ async function fetchRestaurantRow(restaurantId) {
       fallback.data.min_delivery_order_amount = 0;
       fallback.data.min_takeaway_order_amount = 0;
       fallback.data.lob_type = fallback.data.lob_type || 'restaurant';
+      fallback.data.allow_manager_menu_upload = fallback.data.allow_manager_menu_upload ?? false;
+
     }
     return fallback;
   }
