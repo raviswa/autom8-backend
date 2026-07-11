@@ -660,10 +660,30 @@ router.get('/internal-menu', handleInternalMenuItems);
 
 // ── POST /api/menu/upload (and /api/catalog/menu-upload) — Bulk menu upload ──
 
+// AFTER
 async function handleMenuUpload(req, res) {
   try {
-    if (!['owner', 'manager', 'brand_owner'].includes(req.user_role))
+    const OWNER_ROLES = ['owner', 'brand_owner'];
+    if (!OWNER_ROLES.includes(req.user_role) && req.user_role !== 'manager') {
       return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    if (req.user_role === 'manager') {
+      const { data: tenant, error: tenantErr } = await supabaseAdmin
+        .from('tenants')
+        .select('allow_manager_menu_upload')
+        .eq('id', req.restaurant_id)
+        .maybeSingle();
+      if (tenantErr) {
+        console.error('[menu/upload] permission lookup failed:', tenantErr.message);
+        return res.status(500).json({ error: 'Could not verify upload permission' });
+      }
+      if (!tenant?.allow_manager_menu_upload) {
+        return res.status(403).json({
+          error: 'Menu upload is restricted to the owner for this outlet. Ask your owner to enable manager upload access in Settings.',
+        });
+      }
+    }
 
     const { items } = req.body;
     if (!items || !Array.isArray(items) || !items.length)
