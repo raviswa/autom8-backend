@@ -517,6 +517,18 @@ async def ensure_prepay_payment_link(
     """
     if not booking_id:
         return None
+
+    checkout_url = build_checkout_page_url(str(booking_id))
+
+    # PhonePe order creation is lazy — it happens when the customer opens
+    # /pay/{booking_id} (see tools/phonepe_tools.prepare_phonepe_redirect),
+    # so there's nothing to pre-create here. Just hand back the hosted URL;
+    # it's the same URL regardless of which gateway ends up handling it.
+    if settings.payment_gateway == "phonepe":
+        if session_state is not None:
+            session_state["payment_link"] = checkout_url
+        return checkout_url
+
     if not razorpay_configured():
         logger.error(
             f"[razorpay] ensure_prepay_payment_link unavailable for {booking_id} "
@@ -524,7 +536,6 @@ async def ensure_prepay_payment_link(
         )
         return None
 
-    checkout_url = build_checkout_page_url(str(booking_id))
     existing = _reusable_payment_link(session_state)
     if existing:
         return existing
