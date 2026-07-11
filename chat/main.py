@@ -50,6 +50,13 @@ from tools.payment_tools import (
     verify_checkout_payment,
     ensure_prepay_payment_link,
 )
+from tools.phonepe_tools import (
+    phonepe_status_message,
+    prepare_phonepe_redirect,
+    confirm_phonepe_return,
+    verify_webhook_auth as verify_phonepe_webhook_auth,
+    handle_payment_webhook as handle_phonepe_webhook,
+)
 from tools.booking_mechanisms import notify_manager_order_alert
 from tools.auto_reply_filter import is_whatsapp_auto_reply
 from tools.booking_mechanisms import (
@@ -657,6 +664,16 @@ async def health_razorpay():
     return JSONResponse(payload)
 
 
+@app.get("/health/phonepe")
+async def health_phonepe():
+    """Diagnostic — confirms PhonePe keys loaded (no secrets exposed)."""
+    return JSONResponse({
+        "status": phonepe_status_message(),
+        "env": settings.phonepe_env,
+        "active_gateway": settings.payment_gateway,
+    })
+
+
 def _verify_internal_secret(request: Request) -> bool:
     from tools.booking_mechanisms import KDS_SECRET
     if not KDS_SECRET:
@@ -844,13 +861,14 @@ async def internal_webcart_confirm_pay(request: Request):
     if len(items) > 6:
         order_preview += f"\n- +{len(items) - 6} more item(s)"
 
+    gateway_label = "Razorpay" if settings.payment_gateway == "razorpay" else "PhonePe"
     body_text = (
         "Your order is almost confirmed.\n\n"
         f"Order ref: {order_ref or booking_id[-8:]}\n"
         f"Token: {token_label or token_number}\n"
         f"Total: INR {total:.0f}\n\n"
         f"{order_preview}\n\n"
-        "Tap Confirm & Pay to complete payment securely via Razorpay."
+        f"Tap Confirm & Pay to complete payment securely via {gateway_label}."
     ).strip()
 
     sent = await send_whatsapp_cta_url(
@@ -860,7 +878,7 @@ async def internal_webcart_confirm_pay(request: Request):
         button_text="Confirm & Pay",
         url=str(payment_link),
         header_text="Confirm Your Order",
-        footer_text="Secure payment powered by Razorpay",
+        footer_text=f"Secure payment powered by {gateway_label}",
     )
 
     if not sent:
@@ -997,8 +1015,39 @@ async def pay_failure_event(request: Request):
 
 @app.get("/pay/{booking_id}")
 async def pay_checkout(booking_id: str, request: Request):
-    """Hosted Razorpay method picker page (click-first to avoid WebView popup blocking)."""
+    """Hosted checkout entry point — routes to PhonePe or Razorpay.
+
+    Gateway is settings.payment_gateway ("phonepe" by default). Append
+    ?gw=razorpay or ?gw=phonepe to a link to force a specific gateway for
+    testing without redeploying.
+    """
     token = request.query_params.get("t", "")
+    gateway = (request.query_params.get("gw") or settings.payment_gateway or "phonepe").lower()
+
+    if gateway == "phonepe":
+        result = await prepare_phonepe_redirect(booking_id, token)
+        if result.get("error") == "invalid_token":
+            return HTMLResponse("<h1>Invalid or expired payment link</h1>", status_code=403)
+        if result.get("error") == "booking_not_found":
+            return HTMLResponse("<h1>Order not found</h1>", status_code=404)
+        if result.get("already_paid"):
+            return HTMLResponse(
+                "<h1>Already paid ✅</h1><p>Return to WhatsApp for your confirmation.</p>",
+                status_code=200,
+            )
+        if result.get("error") == "phonepe_not_configured":
+            logger.error(f"[pay-checkout] PhonePe not configured, booking={booking_id}")
+            return HTMLResponse(
+                "<h1>Payment unavailable</h1>"
+                "<p>Online payment isn't set up yet. Please contact the restaurant, "
+                "or reply <em>pay</em> on WhatsApp in a moment to try again.</p>",
+                status_code=503,
+            )
+        if result.get("error"):
+            return HTMLResponse(f"<h1>Payment unavailable</h1><p>{result['error']}</p>", status_code=400)
+        return RedirectResponse(result["redirect_url"], status_code=303)
+
+    # Razorpay — hosted method-picker page (click-first to avoid WebView popup blocking)
     ctx = await resolve_checkout_context(booking_id, token)
     if ctx.get("error") == "invalid_token":
         return HTMLResponse("<h1>Invalid or expired payment link</h1>", status_code=403)
@@ -1012,6 +1061,25 @@ async def pay_checkout(booking_id: str, request: Request):
     if ctx.get("error"):
         return HTMLResponse(f"<h1>Payment unavailable</h1><p>{ctx['error']}</p>", status_code=400)
     return HTMLResponse(render_method_selection_html(ctx), status_code=200)
+
+
+@app.get("/payment/phonepe/return")
+async def payment_phonepe_return(request: Request):
+    """PhonePe redirects the customer's browser here after the hosted checkout page."""
+    booking_id = request.query_params.get("booking_id", "")
+    token = request.query_params.get("t", "")
+    if not booking_id:
+        return HTMLResponse("<h1>Payment status unknown</h1>", status_code=400)
+
+    result = await confirm_phonepe_return(booking_id, token)
+    status = result.get("status", "pending")
+    simple_status = "paid" if status == "paid" else ("failed" if status in ("failed", "fulfillment_failed") else "unknown")
+
+    # Reuse the existing /payment/complete page for the actual HTML response.
+    return RedirectResponse(
+        f"/payment/complete?status={simple_status}&booking_id={booking_id}",
+        status_code=303,
+    )
 
 
 @app.post("/pay/{booking_id}/create-order")
@@ -1087,6 +1155,33 @@ async def razorpay_webhook_probe():
         "status": "ok",
         "message": "Razorpay webhook endpoint is live. Configure payment.captured and order.paid events here.",
     })
+
+
+@app.get("/webhook/phonepe")
+async def phonepe_webhook_probe():
+    """Browser/PhonePe URL check — real events must use POST."""
+    return JSONResponse({
+        "status": "ok",
+        "message": "PhonePe webhook endpoint is live. Configure it in PhonePe Dashboard → Webhooks.",
+    })
+
+
+@app.post("/webhook/phonepe")
+async def phonepe_webhook(request: Request):
+    """PhonePe checkout order events (configure in PhonePe Business Dashboard → Webhooks)."""
+    body_bytes = await request.body()
+    auth_header = request.headers.get("Authorization", "")
+
+    if not verify_phonepe_webhook_auth(auth_header):
+        raise HTTPException(status_code=400, detail="Invalid PhonePe webhook auth")
+
+    try:
+        payload = json.loads(body_bytes.decode("utf-8"))
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    result = await handle_phonepe_webhook(payload)
+    return JSONResponse(status_code=200, content=result)
 
 
 @app.post("/webhook/razorpay")
