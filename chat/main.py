@@ -956,7 +956,6 @@ async def payment_complete(request: Request):
 
 @app.post("/pay/failure-event")
 async def pay_failure_event(request: Request):
-    """Capture hosted checkout failures for observability and manager awareness."""
     try:
         body = await request.json()
     except Exception:
@@ -969,6 +968,41 @@ async def pay_failure_event(request: Request):
     logger.warning(
         f"[pay-failure-event] booking_id={booking_id or 'unknown'} kind={kind} details={details}"
     )
+
+    # Don't alert the manager for the customer simply closing the modal —
+    # that's not actionable and is the majority of these events.
+    NOTIFY_KINDS = {"payment_failed"}
+    if booking_id and kind in NOTIFY_KINDS:
+        try:
+            booking = await get_booking_with_customer(booking_id)
+            if booking and booking.get("payment_status") != "paid":
+                restaurant_id = str(booking.get("restaurant_id") or "").strip()
+                customer_phone = str(booking.get("customer_phone") or "").strip()
+                token_number = str(booking.get("token_number") or booking_id[-8:]).strip()
+
+                detail_reason = ""
+                if isinstance(details, dict):
+                    detail_reason = str(
+                        details.get("reason") or details.get("code")
+                        or details.get("description") or ""
+                    ).strip()
+
+                if restaurant_id:
+                    from tools.restaurant_config import get_manager_phone
+                    manager_phone = await get_manager_phone(restaurant_id)
+                    if manager_phone:
+                        await send_whatsapp_message(
+                            manager_phone,
+                            f"⚠️ Payment attempt failed — Token *{token_number}*\n"
+                            f"Customer: {customer_phone or 'unknown'}\n"
+                            f"Reason: {detail_reason or kind}\n\n"
+                            f"Order has NOT gone to kitchen. Customer may retry payment.",
+                            restaurant_id,
+                        )
+        except Exception as exc:
+            logger.warning(f"[pay-failure-event] manager alert skipped for {booking_id}: {exc}")
+
+    return JSONResponse(status_code=200, content={"ok": True})
 
     if booking_id:
         try:
