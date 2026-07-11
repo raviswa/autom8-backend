@@ -36,6 +36,7 @@ const RESTAURANT_SELECT_FULL = [
   'min_delivery_order_amount', 'min_takeaway_order_amount',
   'scheduled_delivery_enabled', 'scheduled_takeaway_enabled', 'scheduled_kds_lead_minutes', 'max_delivery_radius_km',
   'lob_type',   // ← add this
+  'allow_manager_menu_upload',    //expose allow_manager_menu_upload to the frontend
 ].join(', ');
 
 const RESTAURANT_SELECT_BASE = [
@@ -43,6 +44,7 @@ const RESTAURANT_SELECT_BASE = [
   'timezone', 'dining_duration_minutes', 'payment_mode',
   'takeaway_fulfillment_mode', 'fulfillment_sections', 'opening_hours',
   'lob_type',   // ← add this
+  'allow_manager_menu_upload',  //expose allow_manager_menu_upload to the frontend
 ].join(', ');
 
 async function fetchRestaurantRow(restaurantId) {
