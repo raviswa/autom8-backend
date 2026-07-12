@@ -703,9 +703,11 @@ async def handle_booking_flow(
         if action in ("CART:CONFIRM","CONFIRM","YES","Y","OK","OKAY"):
             cart = session_state.get("cart", {})
             if not cart:
-                await send_whatsapp_message(customer_phone, "Your cart is empty. Please add items first.", restaurant_id)
                 session_state["booking_step"] = "awaiting_order"
-                await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+                await send_catalog_with_fallback(
+                    customer_phone, restaurant_id, session_state,
+                    intro="Your cart is empty. Please add items first.",
+                )
                 return {"status": session_state.get("booking_step", "awaiting_order")}
             session_state["order_from_cart"] = True
             session_state["booking_step"]    = "awaiting_order"
@@ -727,9 +729,11 @@ async def handle_booking_flow(
             return {"status": session_state.get("booking_step", "awaiting_order")}
         elif action in ("CART:CLEAR","CLEAR","RESET CART"):
             clear_cart(session_state)
-            await send_whatsapp_message(customer_phone, "Cart cleared! 🗑️ Let's start fresh.", restaurant_id)
             session_state["booking_step"] = "awaiting_order"
-            await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+            await send_catalog_with_fallback(
+                customer_phone, restaurant_id, session_state,
+                intro="Cart cleared! 🗑️ Let's start fresh.",
+            )
             return {"status": session_state.get("booking_step", "awaiting_order")}
         else:
             await send_cart_summary_buttons(customer_phone, session_state)
@@ -743,9 +747,11 @@ async def handle_booking_flow(
         if text.upper() in ("DONE", "CONFIRM"):
             cart = session_state.get("cart", {})
             if not cart:
-                await send_whatsapp_message(customer_phone, "Your cart is empty. Retrying the menu for you...", restaurant_id)
                 session_state["booking_step"] = "awaiting_order"
-                await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+                await send_catalog_with_fallback(
+                    customer_phone, restaurant_id, session_state,
+                    intro="Your cart is empty. Retrying the menu for you...",
+                )
                 return {"status": session_state.get("booking_step", "awaiting_order")}
             session_state["order_from_cart"] = True
             session_state["booking_step"]    = "awaiting_order"
