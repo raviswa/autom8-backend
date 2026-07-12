@@ -819,10 +819,9 @@ async def _proceed_to_delivery_menu(
         )
     elif session_state.get("scheduled_at"):
         intro = "Thank you! Add items for your scheduled delivery below 🛒"
-    await send_whatsapp_message(customer_phone, intro, restaurant_id)
+    await send_catalog_with_fallback(customer_phone, restaurant_id, session_state, intro=intro)
     clear_cart(session_state)
     session_state["booking_step"] = "awaiting_order"
-    await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
     return {"status": session_state["booking_step"]}
 
 
