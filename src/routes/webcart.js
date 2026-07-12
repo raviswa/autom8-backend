@@ -803,4 +803,9 @@ router.get(['/cart', '/menu'], (_req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'webcart.html'));
 });
 
+router.get('/feedback', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, max-age=0, must-revalidate');
+  res.sendFile(path.join(__dirname, '..', 'public', 'feedback.html'));
+});
+
 module.exports = router;
