@@ -12,10 +12,16 @@
 
 const express = require('express');
 const router  = express.Router();
+const path    = require('path');
 
 const { supabaseAdmin }       = require('../config/supabase');
 const { queueFeedbackForTable } = require('../helpers/feedback');
-const { sendFeedbackInvite } = require('../helpers/feedbackFlow');
+const {
+  sendFeedbackInvite,
+  aspectsForRating,
+  resolveVisitContext,
+  completeFeedback,
+} = require('../helpers/feedbackFlow');
 const {
   wasInviteSentRecently,
   closeOpenFeedbackRows,
@@ -121,6 +127,124 @@ router.post('/dismiss', async (req, res) => {
     await closeOpenFeedbackRows(restaurant_id, variant).catch(() => {});
   }
   return res.json({ success: true });
+});
+
+// ── GET /api/feedback/form-session ──────────────────────────────────────────
+// Resolves a web-form session token to visit context (name, token/table,
+// whether it's already been submitted). Phone-bound + expiry-checked, same
+// pattern as webcart's menu_tokens session resolution.
+
+router.get('/form-session', async (req, res) => {
+  try {
+    const token = String(req.query.token || '').trim();
+    const phone = String(req.query.phone || '').replace(/\D/g, '');
+    if (!token || !phone) {
+      return res.status(400).json({ ok: false, error: 'token and phone are required.' });
+    }
+
+    const { phoneVariants } = require('../helpers/conversationState');
+    const variants = phoneVariants(phone);
+
+    const { data: record, error } = await supabaseAdmin
+      .from('feedback_pending')
+      .select('*')
+      .eq('web_session_token', token)
+      .in('customer_phone', variants.length ? variants : [phone])
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!record) {
+      return res.status(404).json({ ok: false, error: 'This feedback link is invalid.' });
+    }
+    if (record.web_token_expires_at && new Date(record.web_token_expires_at) < new Date()) {
+      return res.status(410).json({ ok: false, error: 'This feedback link has expired.' });
+    }
+    if (record.feedback_received_at || record.web_submitted_at) {
+      return res.json({
+        ok: true,
+        already_submitted: true,
+        customer_name: record.customer_name || 'Guest',
+      });
+    }
+
+    const { contextLine, thanksLine } = await resolveVisitContext(record);
+
+    return res.json({
+      ok: true,
+      already_submitted: false,
+      customer_name: record.customer_name || 'Guest',
+      context_line: contextLine,
+      thanks_line: thanksLine,
+      aspects: {
+        positive:    aspectsForRating(5)[0],
+        improvement: aspectsForRating(3)[0],
+        negative:    aspectsForRating(1)[0],
+      },
+    });
+  } catch (err) {
+    console.error('[feedback/form-session]', err.message);
+    return res.status(500).json({ ok: false, error: 'Failed to load feedback form.' });
+  }
+});
+
+// ── POST /api/feedback/submit-form ──────────────────────────────────────────
+// Single submission from the web form: rating + aspects + comment together,
+// replacing the 3-message WhatsApp back-and-forth. Reuses completeFeedback()
+// so the DB write, thank-you message, and manager alert stay identical to
+// the chat-based path.
+
+router.post('/submit-form', async (req, res) => {
+  try {
+    const { token, phone: rawPhone, rating: rawRating, aspects, comment } = req.body || {};
+    const token_ = String(token || '').trim();
+    const phone = String(rawPhone || '').replace(/\D/g, '');
+    const rating = Number(rawRating);
+
+    if (!token_ || !phone) {
+      return res.status(400).json({ ok: false, error: 'token and phone are required.' });
+    }
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({ ok: false, error: 'A rating between 1 and 5 is required.' });
+    }
+
+    const { phoneVariants } = require('../helpers/conversationState');
+    const variants = phoneVariants(phone);
+
+    const { data: record, error } = await supabaseAdmin
+      .from('feedback_pending')
+      .select('*')
+      .eq('web_session_token', token_)
+      .in('customer_phone', variants.length ? variants : [phone])
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!record) {
+      return res.status(404).json({ ok: false, error: 'This feedback link is invalid.' });
+    }
+    if (record.web_token_expires_at && new Date(record.web_token_expires_at) < new Date()) {
+      return res.status(410).json({ ok: false, error: 'This feedback link has expired.' });
+    }
+    if (record.feedback_received_at || record.web_submitted_at) {
+      return res.json({ ok: true, already_submitted: true });
+    }
+
+    const [validAspects] = aspectsForRating(rating);
+    const validIds = new Set(validAspects.map(([id]) => id));
+    const aspectIds = Array.isArray(aspects) ? aspects.filter(a => validIds.has(a)) : [];
+    const safeComment = comment ? String(comment).trim().slice(0, 500) || null : null;
+
+    await supabaseAdmin
+      .from('feedback_pending')
+      .update({ web_submitted_at: new Date().toISOString() })
+      .eq('id', record.id);
+
+    await completeFeedback(record, rating, aspectIds, safeComment, phone);
+
+    return res.json({ ok: true, already_submitted: false });
+  } catch (err) {
+    console.error('[feedback/submit-form]', err.message);
+    return res.status(500).json({ ok: false, error: 'Failed to submit feedback.' });
+  }
 });
 
 // ── Scheduler helpers ─────────────────────────────────────────────────────────
