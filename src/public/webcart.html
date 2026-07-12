@@ -415,6 +415,13 @@
       }
       .header { position: sticky; top: 0; border-radius: 0; }
     }
+
+    .size-pills { display: flex; gap: 6px; margin: 4px 0; flex-wrap: wrap; }
+    .size-pill {
+      border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px;
+      background: #fff; color: var(--ink); font-size: 11px; font-weight: 600; cursor: pointer;
+    }
+    .size-pill.active { background: var(--brand); border-color: var(--brand); color: #fff; }
   </style>
 </head>
 <body>
@@ -619,6 +626,7 @@
       lastSubmittedBookingId: null,
       paymentPollTimer: null,
       paymentPollInFlight: false,
+      selectedSize: {},
     };
 
     const $ = (id) => document.getElementById(id);
@@ -1101,6 +1109,56 @@ $('subtotal').textContent = money(subtotal);
         </div>`;
     }
 
+    function groupMenuForDisplay(menu) {
+      const standalone = [];
+      const groups = new Map(); // variant_group_id -> [rows]
+      for (const item of menu) {
+        if (item.variant_group_id) {
+          if (!groups.has(item.variant_group_id)) groups.set(item.variant_group_id, []);
+          groups.get(item.variant_group_id).push(item);
+        } else {
+          standalone.push(item);
+        }
+      }
+      // Keep sizes in a sensible order if possible (Small < Medium < Large by price)
+      for (const rows of groups.values()) rows.sort((a, b) => a.price - b.price);
+      return { standalone, groups };
+    }
+
+    function selectedRowFor(groupId, rows) {
+      const chosenId = state.selectedSize[groupId];
+      return rows.find(r => r.id === chosenId) || rows[0];
+    }
+
+    function variantCardHtml(rows) {
+      const groupId = rows[0].variant_group_id;
+      const base = rows[0]; // name/description/category/image shared across sizes by convention
+      const current = selectedRowFor(groupId, rows);
+      const qty = rowQty(current);
+
+      const sizePills = rows.map(r => `
+        <button class="size-pill ${r.id === current.id ? 'active' : ''}" data-group="${groupId}" data-row="${r.id}">
+          ${r.size_label || 'Size'}
+        </button>
+      `).join('');
+
+      const actions = qty > 0
+        ? `<div class="stepper"><button data-step="-1" data-id="${current.id}">−</button><span>${qty}</span><button data-step="1" data-id="${current.id}">+</button></div>`
+        : `<button class="btn-add" data-add="${current.id}">+</button>`;
+
+      return `
+        <div class="row-card" data-variant-group="${groupId}">
+          ${base.image_url ? `<img src="${base.image_url}" alt="" onerror="this.outerHTML='<div class=\\'img-fallback\\'>No image</div>'" />` : `<div class="img-fallback">No image</div>`}
+          <div class="row-info">
+            <div class="row-cat">${base.category || 'General'}</div>
+            <div class="row-name">${base.name}</div>
+            <div class="size-pills">${sizePills}</div>
+            <div class="row-price">${money(current.price)}</div>
+          </div>
+          <div class="add-zone">${actions}</div>
+        </div>`;
+    }
+
     function bindRowHandlers(root) {
       root.querySelectorAll('button[data-add]').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -1115,6 +1173,12 @@ $('subtotal').textContent = money(subtotal);
         card.addEventListener('click', () => {
           const item = state.menu.find(i => String(i.id) === card.dataset.id);
           if (item) addToCart(item);
+        });
+      });
+      root.querySelectorAll('.size-pill').forEach(pill => {
+        pill.addEventListener('click', () => {
+          state.selectedSize[pill.dataset.group] = pill.dataset.row;
+          renderMenuList(); // re-render so price/qty/active pill reflect the new size
         });
       });
     }
@@ -1174,8 +1238,24 @@ $('subtotal').textContent = money(subtotal);
           i.name.toLowerCase().includes(q) || (i.category || '').toLowerCase().includes(q)
         );
       }
-      menuList.innerHTML = visible.length
-        ? visible.map(rowCardHtml).join('')
+
+      const { groups } = groupMenuForDisplay(visible);
+      // De-dupe: a variant group should render once even though multiple size
+      // rows matched the same category/search filter above.
+      const seenGroups = new Set();
+      const cards = [];
+      for (const item of visible) {
+        if (item.variant_group_id) {
+          if (seenGroups.has(item.variant_group_id)) continue;
+          seenGroups.add(item.variant_group_id);
+          cards.push(variantCardHtml(groups.get(item.variant_group_id)));
+        } else {
+          cards.push(rowCardHtml(item));
+        }
+      }
+
+      menuList.innerHTML = cards.length
+        ? cards.join('')
         : '<div class="empty-state">No dishes match your search.</div>';
       bindRowHandlers(menuList);
     }
