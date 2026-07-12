@@ -690,4 +690,7 @@ module.exports = {
   sendWhatsAppCatalogWithSpecials,
   notifyOrderReady,
   CATALOG_PICKER_FULL_ID,
+  slugifySubdomain,
+  getRestaurantLabel,
+  normalizePhoneDigits,
 };
