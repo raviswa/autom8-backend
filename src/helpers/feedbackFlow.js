@@ -231,12 +231,76 @@ function aspectsPayload(record) {
   }
 }
 
-/** Send step-1 rating invite (interactive list + plain-text fallback). */
+/**
+ * Send the one-link feedback web form (replaces the old rating -> aspects ->
+ * comment WhatsApp Q&A, which cost up to 4 separate service messages per
+ * completed feedback). Falls back to the original interactive rating list
+ * — and the rest of the chat-based flow below — only if the CTA link send
+ * itself fails, so feedback collection still works even without it.
+ */
 async function sendFeedbackInvite(record) {
   const { contextLine, thanksLine } = await resolveVisitContext(record);
   const name = record.customer_name || 'Guest';
   const ctxSuffix = contextLine ? `\n_${contextLine}_` : '';
 
+  try {
+    const {
+      slugifySubdomain, getRestaurantLabel, normalizePhoneDigits,
+    } = require('./whatsapp');
+    const crypto = require('crypto');
+
+    const label = await getRestaurantLabel(record.restaurant_id);
+    const slug = slugifySubdomain(label);
+    const phoneDigits = normalizePhoneDigits(record.customer_phone) || String(record.customer_phone);
+    const sessionToken = crypto.randomBytes(18).toString('base64url');
+    const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+
+    const { error: tokenErr } = await supabaseAdmin
+      .from('feedback_pending')
+      .update({
+        web_session_token: sessionToken,
+        web_token_expires_at: expiresAt,
+      })
+      .eq('id', record.id);
+    if (tokenErr) throw tokenErr;
+
+    const base = (process.env.WEB_MENU_BASE_URL || 'https://api.autom8.works').replace(/\/$/, '');
+    const url = `${base}/feedback?token=${sessionToken}&phone=${phoneDigits}&slug=${slug}`;
+
+    const sent = await sendWhatsAppInteractive(
+      record.customer_phone,
+      {
+        type: 'cta_url',
+        header: { type: 'text', text: `Hi ${name}! 😊` },
+        body: {
+          text: `${thanksLine}${ctxSuffix}\n\nTap below to rate your visit — takes 10 seconds.`,
+        },
+        footer: { text: 'Your feedback helps us improve 🙏' },
+        action: {
+          name: 'cta_url',
+          parameters: { display_text: 'Rate your visit', url },
+        },
+      },
+      record.restaurant_id,
+    );
+    if (sent) return true;
+
+    const textOk = await sendWhatsAppMessage(
+      record.customer_phone,
+      `Hi ${name}! 😊\n\n${thanksLine}${ctxSuffix}\n\n` +
+      `Tap below to rate your visit — takes 10 seconds:\n${url}`,
+      record.restaurant_id,
+    );
+    if (textOk) return true;
+  } catch (err) {
+    console.error('[feedback-web-form] Link send failed, falling back to chat flow:', err.message);
+  }
+
+  return sendFeedbackInviteChatFallback(record, { name, contextLine, thanksLine, ctxSuffix });
+}
+
+/** Original interactive rating list — used only if the web-form link send fails above. */
+async function sendFeedbackInviteChatFallback(record, { name, ctxSuffix, thanksLine }) {
   const bodyText =
     `${thanksLine}${ctxSuffix}\n\n` +
     `*How was your experience?*\n\n` +
@@ -528,4 +592,5 @@ module.exports = {
   dismissActiveFeedback,
   resolveVisitContext,
   aspectsForRating,
+  completeFeedback,
 };
