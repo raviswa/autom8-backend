@@ -340,10 +340,9 @@ async def _advance_after_takeaway_time_set(
     intro = "Browse today's menu below and add items to your basket 🛒"
     if scheduled is not None:
         intro = "Add items for your scheduled pickup below 🛒"
-    await send_whatsapp_message(customer_phone, intro, restaurant_id)
     clear_cart(session_state)
     session_state["booking_step"] = "awaiting_order"
-    await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
+    await send_catalog_with_fallback(customer_phone, restaurant_id, session_state, intro=intro)
     return {"status": "awaiting_order"}
 
 
