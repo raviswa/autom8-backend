@@ -314,11 +314,11 @@ async def _finalise_new_customer(
     customer = await create_customer(restaurant_id, customer_phone, name, None)
     await update_last_visit(customer["id"])
 
-    await send_whatsapp_message(
-        customer_phone,
-        f"Thank you, {name}! 😊",
-        restaurant_id,
-    )
+    # NOTE: no standalone "Thank you, {name}!" message here — the very next
+    # turn (ask_service in booking_agent.py) sends the service-selection
+    # list, whose body already opens with a warm "Welcome to {restaurant}"
+    # greeting via build_greeting(). Sending both was two separate messages
+    # of pure duplicate warmth before the customer even picked a service.
 
     return {
         "status": "identified",
@@ -475,11 +475,10 @@ async def _finalise_returning_customer(
     else:
         await update_last_visit(customer["id"])
 
-    await send_whatsapp_message(
-        customer_phone,
-        f"Perfect, {final_name}! 😊",
-        restaurant_id,
-    )
+    # NOTE: no standalone "Perfect, {name}!" message here — same reasoning
+    # as _finalise_new_customer above. The next turn's service-menu greeting
+    # already opens with "Welcome back to {restaurant}", so this was a
+    # duplicate warmth message with no new information.
 
     return {
         "status": "identified",
