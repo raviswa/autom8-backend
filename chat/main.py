@@ -1060,7 +1060,11 @@ async def pay_checkout(booking_id: str, request: Request):
     from tools.phonepe_tools import phonepe_configured 
     
     gateway = (request.query_params.get("gw") or settings.payment_gateway or "phonepe").lower()
- 
+
+    if gateway == "phonepe" and not phonepe_configured():
+        logger.warning(f"[pay-checkout] PhonePe not configured, falling back to Razorpay, booking={booking_id}")
+        gateway = "razorpay"
+
     if gateway == "phonepe" and phonepe_configured():
         result = await prepare_phonepe_redirect(booking_id, token)
         if result.get("error") == "invalid_token":
