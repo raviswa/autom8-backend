@@ -750,8 +750,11 @@ async function handleMenuUpload(req, res) {
         packing_time:        Math.max(0, parseFloat(item.packing_time) || 1),
         holds_well:          parseBoolCell(item.holds_well, false),
         fulfillment_section: String(item.fulfillment_section || 'main').trim() || 'main',
+        item_type:           String(item.item_type || 'PRODUCT').trim().toUpperCase() || 'PRODUCT',
+        variant_group_id:    item.variant_group_id ? String(item.variant_group_id).trim() : null,
+        size_label:          item.size_label ? String(item.size_label).trim() : null,
         created_at:          now,
-        updated_at:          now,
+        updated_at:          now,      
       });
     }
 
