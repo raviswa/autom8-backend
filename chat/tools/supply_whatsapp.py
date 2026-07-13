@@ -134,6 +134,7 @@ async def _post(
             wamid = response.json().get('messages', [{}])[0].get('id')
         else:
             error_text = response.text[:300]
+            logger.error(f'[supply-wa] {template_name} → {response.status_code} body={error_text}')
         logger.info(f'[supply-wa] {template_name} → {response.status_code} to={phone}')
     except Exception as e:
         logger.error(f'[supply-wa] {template_name} send failed: {e}')
