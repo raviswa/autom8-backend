@@ -163,6 +163,30 @@ async def create_payment_claim(
     return None
 
 
+async def get_last_supply_order(supplier_id: str, client_id: str) -> Optional[dict]:
+    """
+    Return the most recent non-cancelled order for a client (order status intent).
+    """
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            _url("supply_orders"),
+            headers=_headers(),
+            params={
+                "supplier_id": f"eq.{supplier_id}",
+                "client_id":   f"eq.{client_id}",
+                "status":      "neq.cancelled",
+                "select":      "order_number,delivery_date,status,total_amount",
+                "order":       "created_at.desc",
+                "limit":       "1",
+            },
+        )
+    if resp.status_code == 200:
+        data = resp.json()
+        return data[0] if data else None
+    logger.error(f"[queries] get_last_supply_order HTTP {resp.status_code}: {resp.text[:200]}")
+    return None
+
+
 async def log_supply_notification(
     supplier_id: str,
     client_id: Optional[str],
