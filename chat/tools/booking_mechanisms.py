@@ -1439,8 +1439,15 @@ async def _send_web_menu_message(
     customer_phone: str,
     restaurant_id: str,
     session_state: dict[str, Any],
+    *,
+    intro: str | None = None,
 ) -> bool:
-    """Generate menu token + send branded web menu message; graceful no-link fallback on errors."""
+    """Generate menu token + send branded web menu message; graceful no-link fallback on errors.
+
+    `intro` lets a caller fold a short lead-in line (e.g. "Thank you! Browse
+    today's menu below 🛒") into the same message as the CTA button, instead
+    of sending it as a separate WhatsApp message beforehand.
+    """
     restaurant = await get_restaurant_by_id(restaurant_id)
     display_name = (restaurant or {}).get('name') or 'Munafe'
     slug = _slugify_subdomain(display_name)
@@ -1534,6 +1541,8 @@ async def _send_web_menu_message(
             "Tap the button below to browse our full menu with search "
             "and easy selection. Add items to your cart and submit when ready!"
         )
+        if intro and intro.strip():
+            body_text = f"{intro.strip()}\n\n{body_text}"
 
         cta_sent = await send_whatsapp_cta_url(
             customer_phone,
@@ -1557,6 +1566,8 @@ async def _send_web_menu_message(
             "👉 View Menu\n"
             f"{url}"
         )
+        if intro and intro.strip():
+            message = f"{intro.strip()}\n\n{message}"
         await send_whatsapp_message(customer_phone, message, restaurant_id)
         logger.info(f"[BOOKING] {customer_phone} → Web menu sent ({url})")
         return True
@@ -1584,13 +1595,19 @@ async def send_unified_booking_menu(
     customer_phone: str,
     restaurant_id: str,
     session_state: dict[str, Any],
+    *,
+    intro: str | None = None,
 ) -> MechanismType:
-    """Send deterministic web-menu message for all booking entry points."""
+    """Send deterministic web-menu message for all booking entry points.
+
+    Pass `intro` to fold a short lead-in line into the same message as the
+    menu CTA, instead of sending it as a separate message beforehand.
+    """
     logger.info(f"[BOOKING] send_unified_booking_menu called for {customer_phone}")
 
     session_state["restaurant_id"] = restaurant_id
 
-    sent = await _send_web_menu_message(customer_phone, restaurant_id, session_state)
+    sent = await _send_web_menu_message(customer_phone, restaurant_id, session_state, intro=intro)
     session_state["booking_mechanism"] = "web_menu"
     session_state["booking_mechanism_order_source"] = "web_menu"
     if session_state.get("service_type") in ("dine_in", "takeaway", "delivery", "reserve_table"):

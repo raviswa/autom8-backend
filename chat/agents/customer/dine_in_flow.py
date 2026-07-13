@@ -552,9 +552,6 @@ async def _confirm_dine_in_order(
     )
     if prepay_pending:
         confirmation += f"\n\n{PREPAY_PENDING_FOOTER}"
-    if suggestion:
-        confirmation += f"\n\n{suggestion}"
-    await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
 
     if prepay_pending:
         await stash_and_persist_prepay_payload(
@@ -592,16 +589,34 @@ async def _confirm_dine_in_order(
             table_num=table_num,
         )
 
+    # MERGED (was 2 messages): order confirmation + special-notes ask used to
+    # fire as two consecutive sends with zero customer input between them.
+    # WhatsApp interactive-button bodies allow up to 1024 chars, so we fold
+    # the confirmation into the same message as the notes question. Optional
+    # trailing content (order suggestion, notes hint) is appended only if it
+    # fits, in priority order, since the confirmation core and the ask itself
+    # must never be truncated.
     notes_hint = await build_notes_hint(order_text, cart_snapshot, restaurant_id)
+    ask_block = (
+        "Anything you'd like us to pass to the kitchen? (totally optional)\n\n"
+        "Just reply in your own words, or tap *No notes* if you're all set; "
+        "otherwise we'll send your order along in about 2 minutes."
+    )
+    merged_body = f"{confirmation}\n\n{ask_block}"
+    _BODY_LIMIT = 1024
+    for optional_block in (notes_hint, suggestion):
+        if not optional_block:
+            continue
+        candidate = f"{merged_body}\n\n{optional_block}"
+        if len(candidate) <= _BODY_LIMIT:
+            merged_body = candidate
+    if len(merged_body) > _BODY_LIMIT:
+        merged_body = merged_body[: _BODY_LIMIT - 1].rstrip() + "…"
+
     await _send_interactive(customer_phone, {
         "interactive": {
             "type": "button",
-            "body": {"text": (
-                "Anything you'd like us to pass to the kitchen? (totally optional)\n\n"
-                f"{notes_hint}\n\n"
-                "Just reply in your own words, or tap *No notes* if you're all set; "
-                "otherwise we'll send your order along in about 2 minutes."
-            )},
+            "body": {"text": merged_body},
             "footer": {"text": "No rush — take your time"},
             "action": {"buttons": [
                 {"type": "reply", "reply": {"id": "SKIP", "title": "No notes"}},

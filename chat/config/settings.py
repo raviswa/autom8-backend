@@ -50,6 +50,22 @@ class Settings(BaseSettings):
     razorpay_key_secret: str | None  = None
     razorpay_webhook_secret: str | None = None
     razorpay_callback_url: str | None = None
+
+    # PhonePe Standard Checkout (v2) — sandbox/UAT credentials from PhonePe
+    # Business Dashboard → Developer Settings. Leave blank until you have them;
+    # phonepe_configured() will report "keys_missing" and checkout falls back
+    # to whatever PAYMENT_GATEWAY resolves to.
+    phonepe_client_id: str | None       = None
+    phonepe_client_secret: str | None   = None
+    phonepe_client_version: int         = 1
+    phonepe_env: str                    = "sandbox"   # "sandbox" | "production"
+    phonepe_webhook_username: str | None = None
+    phonepe_webhook_password: str | None = None
+
+    # Which gateway powers the hosted /pay/{booking_id} checkout page.
+    # "phonepe" (default) | "razorpay"
+    payment_gateway: str               = "phonepe"
+
     chat_public_url: str              = "https://chat.autom8.works"
     log_level: str                   = "INFO"
     environment: str                 = "production"

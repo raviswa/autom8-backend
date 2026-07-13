@@ -907,6 +907,14 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
   'scheduled_slot_max_orders','schedule_buffer_minutes','schedule_rounding_minutes','schedule_early_start_max_minutes',
   'subscribed_features', 'enabled_services',
     ];
+
+    // These two fields are owner-governed only — a manager may have general
+// settings access (whitelisted above), but must not be able to change the
+// business type or grant themselves menu-upload rights via direct API call,
+// even though the UI already hides these controls from managers.
+const OWNER_ONLY_FIELDS = ['lob_type', 'allow_manager_menu_upload'];
+const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
+    
     const updates = Object.fromEntries(
       Object.entries(req.body).filter(([k]) => ALLOWED.includes(k))
     );

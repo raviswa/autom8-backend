@@ -275,7 +275,7 @@ router.post('/notify', async (req, res) => {
           source:         service_type || 'whatsapp_booking',
           customer_phone: cleanPhone,
           notes:          special_notes || null,
-          total_amount:    total_amount,
+          total_amount:    0, // recomputed from order_items in Step 3.5 below
         })
         .select('id, order_number')
         .single();
