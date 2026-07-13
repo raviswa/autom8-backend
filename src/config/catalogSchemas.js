@@ -370,3 +370,22 @@ export const LOB_SCHEMAS = {
 export function getSchemaForLob(lobType) {
   return LOB_SCHEMAS[lobType] || LOB_SCHEMAS.restaurant;
 }
+
+/** LOB types valid at tenant registration and in Settings → Business type. */
+export const REGISTER_LOB_TYPES = Object.freeze(Object.keys(LOB_SCHEMAS));
+
+export function normalizeLobType(value, fallback = 'restaurant') {
+  const raw = String(value ?? '').trim().toLowerCase();
+  return REGISTER_LOB_TYPES.includes(raw) ? raw : fallback;
+}
+
+/**
+ * Parse lob_type / org_type from registration payload.
+ * Returns { lob_type, invalid, attempted? } — invalid=true when a non-empty unknown value was sent.
+ */
+export function parseRegistrationLobType(value) {
+  const raw = String(value ?? '').trim().toLowerCase();
+  if (!raw) return { lob_type: 'restaurant', invalid: false };
+  if (REGISTER_LOB_TYPES.includes(raw)) return { lob_type: raw, invalid: false };
+  return { lob_type: null, invalid: true, attempted: raw };
+}

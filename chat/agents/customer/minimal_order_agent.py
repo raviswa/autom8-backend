@@ -14,7 +14,6 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from config.settings import settings
 from agents.customer.minimal_message_templates import (
     build_repeat_confirm_body,
     build_repeat_unavailable_message,
@@ -39,7 +38,7 @@ from tools.db_tools import (
     get_restaurant_by_id,
 )
 from tools.prepay_fulfillment import build_prepay_payload, persist_prepay_payload
-from tools.payment_tools import ensure_prepay_payment_link
+from tools.payment_tools import ensure_prepay_payment_link, checkout_gateway_label
 from tools.whatsapp_tools import send_whatsapp_cta_url, send_whatsapp_message
 
 logger = logging.getLogger(__name__)
@@ -357,7 +356,7 @@ async def _handle_repeat_order(
     if len(items) > 6:
         preview_lines.append(f"- +{len(items) - 6} more item(s)")
 
-    gateway_label = "Razorpay" if settings.payment_gateway == "razorpay" else "PhonePe"
+    gateway_label = checkout_gateway_label(pay_session.get("payment_gateway") or "phonepe")
     body_text = build_repeat_confirm_body(
         order_ref=booking_id[-8:],
         token_label=str(token_number),

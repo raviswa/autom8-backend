@@ -502,6 +502,38 @@ def _reusable_payment_link(session_state: dict[str, Any] | None) -> str | None:
 _OPEN_ORDER_STATUSES = frozenset({"created", "attempted"})
 
 
+def checkout_gateway_label(gateway: str) -> str:
+    return "PhonePe" if str(gateway or "").lower() == "phonepe" else "Razorpay"
+
+
+def _record_prepay_gateway(
+    session_state: dict[str, Any] | None,
+    booking_id: str,
+    gateway: str,
+    *,
+    reason: str = "",
+) -> None:
+    gw = str(gateway or "razorpay").lower()
+    detail = f" ({reason})" if reason else ""
+    logger.info(f"[prepay] booking={booking_id} checkout_gateway={gw}{detail}")
+    if session_state is not None:
+        session_state["payment_gateway"] = gw
+        session_state.setdefault("payment_link", build_checkout_page_url(str(booking_id)))
+
+
+async def phonepe_prepay_available() -> bool:
+    """True when PhonePe credentials exist and OAuth succeeds (runtime probe)."""
+    from tools.phonepe_tools import phonepe_configured, _get_auth_token
+
+    if not phonepe_configured():
+        return False
+    token = await _get_auth_token()
+    if not token:
+        logger.warning("[prepay] PhonePe configured but OAuth token fetch failed — will use Razorpay")
+        return False
+    return True
+
+
 async def ensure_prepay_payment_link(
     booking_id: str,
     amount: float,
@@ -512,22 +544,29 @@ async def ensure_prepay_payment_link(
     session_state: dict[str, Any] | None = None,
 ) -> str | None:
     """
-    Return hosted checkout URL (/pay/{booking_id}) backed by Razorpay Orders API.
-    Unlimited checkouts in test mode — no payment-link quota.
+    Return a hosted checkout URL for booking_id.
+
+    PhonePe-primary with runtime Razorpay fallback: probes PhonePe availability
+    (credentials + OAuth) before choosing a gateway. Generic over booking shape —
+    safe for restaurant / webcart / future multi-LOB checkout callers.
     """
     if not booking_id:
         return None
 
     checkout_url = build_checkout_page_url(str(booking_id))
 
-    # PhonePe order creation is lazy — it happens when the customer opens
-    # /pay/{booking_id} (see tools/phonepe_tools.prepare_phonepe_redirect),
-    # so there's nothing to pre-create here. Just hand back the hosted URL;
-    # it's the same URL regardless of which gateway ends up handling it.
-    if settings.payment_gateway == "phonepe":
+    if await phonepe_prepay_available():
+        _record_prepay_gateway(session_state, booking_id, "phonepe")
         if session_state is not None:
             session_state["payment_link"] = checkout_url
         return checkout_url
+
+    _record_prepay_gateway(
+        session_state,
+        booking_id,
+        "razorpay",
+        reason="phonepe_unavailable",
+    )
 
     if not razorpay_configured():
         logger.error(
@@ -548,8 +587,6 @@ async def ensure_prepay_payment_link(
         if existing:
             logger.info(f"[razorpay] Reusing open checkout for booking {booking_id}")
             return existing
-        # Session may be unavailable in scheduler/reminder contexts.
-        # Hosted checkout URL is deterministic for booking_id, so return it.
         return checkout_url
 
     try:

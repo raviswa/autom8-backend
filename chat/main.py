@@ -878,7 +878,9 @@ async def internal_webcart_confirm_pay(request: Request):
     if len(items) > 6:
         order_preview += f"\n- +{len(items) - 6} more item(s)"
 
-    gateway_label = "Razorpay" if settings.payment_gateway == "razorpay" else "PhonePe"
+    from tools.payment_tools import checkout_gateway_label
+
+    gateway_label = checkout_gateway_label(session_state.get("payment_gateway") or "phonepe")
     body_text = (
         "Your order is almost confirmed.\n\n"
         f"Order ref: {order_ref or booking_id[-8:]}\n"
@@ -1066,23 +1068,19 @@ async def pay_failure_event(request: Request):
 
 @app.get("/pay/{booking_id}")
 async def pay_checkout(booking_id: str, request: Request):
-    """Hosted checkout entry point — routes to PhonePe or Razorpay.
+    """Hosted checkout entry point — PhonePe-primary with Razorpay runtime fallback.
 
-    Gateway is settings.payment_gateway ("phonepe" by default). Append
-    ?gw=razorpay or ?gw=phonepe to a link to force a specific gateway for
-    testing without redeploying.
+    Append ?gw=razorpay or ?gw=phonepe to force a specific gateway for testing.
     """
     token = request.query_params.get("t", "")
 
-    from tools.phonepe_tools import phonepe_configured 
-    
-    gateway = (request.query_params.get("gw") or settings.payment_gateway or "phonepe").lower()
+    from tools.phonepe_tools import prepare_phonepe_redirect
+    from tools.payment_tools import phonepe_prepay_available
 
-    if gateway == "phonepe" and not phonepe_configured():
-        logger.warning(f"[pay-checkout] PhonePe not configured, falling back to Razorpay, booking={booking_id}")
-        gateway = "razorpay"
+    forced = (request.query_params.get("gw") or "").strip().lower()
+    use_phonepe = forced == "phonepe" or (forced != "razorpay" and await phonepe_prepay_available())
 
-    if gateway == "phonepe" and phonepe_configured():
+    if use_phonepe:
         result = await prepare_phonepe_redirect(booking_id, token)
         if result.get("error") == "invalid_token":
             return HTMLResponse("<h1>Invalid or expired payment link</h1>", status_code=403)
@@ -1093,17 +1091,15 @@ async def pay_checkout(booking_id: str, request: Request):
                 "<h1>Already paid ✅</h1><p>Return to WhatsApp for your confirmation.</p>",
                 status_code=200,
             )
-        if result.get("error") == "phonepe_not_configured":
-            logger.error(f"[pay-checkout] PhonePe not configured, booking={booking_id}")
-            return HTMLResponse(
-                "<h1>Payment unavailable</h1>"
-                "<p>Online payment isn't set up yet. Please contact the restaurant, "
-                "or reply <em>pay</em> on WhatsApp in a moment to try again.</p>",
-                status_code=503,
+        if result.get("redirect_url"):
+            logger.info(f"[pay-checkout] booking={booking_id} gateway=phonepe")
+            return RedirectResponse(result["redirect_url"], status_code=303)
+        if result.get("fallback") or result.get("error"):
+            logger.warning(
+                f"[pay-checkout] PhonePe failed for booking={booking_id} "
+                f"(error={result.get('error')}), falling back to Razorpay"
             )
-        if result.get("error"):
-            return HTMLResponse(f"<h1>Payment unavailable</h1><p>{result['error']}</p>", status_code=400)
-        return RedirectResponse(result["redirect_url"], status_code=303)
+            use_phonepe = False
 
     # Razorpay — hosted method-picker page (click-first to avoid WebView popup blocking)
     ctx = await resolve_checkout_context(booking_id, token)
@@ -1118,6 +1114,7 @@ async def pay_checkout(booking_id: str, request: Request):
         )
     if ctx.get("error"):
         return HTMLResponse(f"<h1>Payment unavailable</h1><p>{ctx['error']}</p>", status_code=400)
+    logger.info(f"[pay-checkout] booking={booking_id} gateway=razorpay")
     return HTMLResponse(render_method_selection_html(ctx), status_code=200)
 
 

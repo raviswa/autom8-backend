@@ -26,6 +26,11 @@ None of these are set yet — this module is a working scaffold. Until
 PHONEPE_CLIENT_ID / PHONEPE_CLIENT_SECRET are set, phonepe_configured() is
 False and prepare_phonepe_redirect() will return an error instead of crashing,
 so it's safe to deploy ahead of having real sandbox keys.
+
+SANDBOX VERIFICATION (still pending):
+  - Webhook payload shape and Order Status API path should be confirmed
+    against a live PhonePe sandbox account before going live as primary.
+  - Until verified, runtime fallback to Razorpay covers checkout failures.
 """
 
 from __future__ import annotations
@@ -293,9 +298,15 @@ async def prepare_phonepe_redirect(booking_id: str, token: str) -> dict[str, Any
     if amount < 1:
         return {"error": "amount_missing"}
 
+    # Reuse an order created earlier in the same session (e.g. ensure_prepay probe).
+    existing_redirect = session.get("payment_link")
+    existing_merchant = session.get("phonepe_merchant_order_id")
+    if existing_redirect and existing_merchant and session.get("payment_gateway") == "phonepe":
+        logger.info(f"[phonepe] Reusing existing redirect for booking {booking_id}")
+        return {"redirect_url": existing_redirect}
+
     if not phonepe_configured():
-        # No sandbox keys yet — surface a clear reason instead of a generic 500.
-        return {"error": "phonepe_not_configured"}
+        return {"error": "phonepe_not_configured", "fallback": True}
 
     description = f"Order {token_label}".strip() or f"Booking {booking_id[:8]}"
     order = await create_phonepe_order(
@@ -303,7 +314,7 @@ async def prepare_phonepe_redirect(booking_id: str, token: str) -> dict[str, Any
     )
     if not order.get("ok"):
         logger.error(f"[phonepe] redirect prep failed for {booking_id}: {order}")
-        return {"error": order.get("reason") or "phonepe_error"}
+        return {"error": order.get("reason") or "phonepe_error", "fallback": True}
 
     session["payment_gateway"] = "phonepe"
     session["phonepe_merchant_order_id"] = order["merchant_order_id"]

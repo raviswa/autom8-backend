@@ -16,6 +16,21 @@ const { writeAuditLog } = require('../helpers/auditLog');
 
 const DEFAULT_FEATURES = DEFAULT_SERVICES;
 
+// ESM schema module — single source of truth for allowed lob_type values.
+const lobSchemaModulePromise = import('../config/catalogSchemas.js');
+
+async function resolveRegistrationLobType(body) {
+  const mod = await lobSchemaModulePromise;
+  const raw = body?.lob_type ?? body?.org_type ?? null;
+  const parsed = mod.parseRegistrationLobType(raw);
+  if (parsed.invalid) {
+    return {
+      error: `Invalid lob_type "${parsed.attempted}". Allowed: ${mod.REGISTER_LOB_TYPES.join(', ')}`,
+    };
+  }
+  return { lob_type: parsed.lob_type };
+}
+
 // ── POST /api/onboarding/register ─────────────────────────────────────────────
 
 router.post('/register', async (req, res) => {
@@ -60,6 +75,10 @@ router.post('/register', async (req, res) => {
   if (!owner_name?.trim())    return res.status(400).json({ error: 'owner_name is required' });
   if (!owner_password)        return res.status(400).json({ error: 'owner_password is required' });
 
+  const lobResolved = await resolveRegistrationLobType(req.body);
+  if (lobResolved.error) return res.status(400).json({ error: lobResolved.error });
+  const lob_type = lobResolved.lob_type;
+
   const isChain = !!chain_name?.trim();
 
   // ── CHAIN MODE ────────────────────────────────────────────────────────────
@@ -70,7 +89,7 @@ router.post('/register', async (req, res) => {
       first_outlet: {
         name, phone, whatsapp_number, phone_number_id, access_token,
         timezone, dining_duration_minutes, payment_mode, manager_phone,
-        table_count, outlet_code,
+        table_count, outlet_code, lob_type,
       },
       outlet_owner_email:    outlet_owner_email    || null,
       outlet_owner_name:     outlet_owner_name     || null,
@@ -83,6 +102,7 @@ router.post('/register', async (req, res) => {
     name, email, phone, owner_name, owner_password,
     whatsapp_number, phone_number_id, access_token, waba_id,
     timezone, dining_duration_minutes, payment_mode, manager_phone, table_count,
+    meta_catalog_id, lob_type,
   });
 });
 
@@ -96,6 +116,7 @@ async function registerStandalone(req, res, opts) {
     name, email, phone, owner_name, owner_password,
     whatsapp_number, phone_number_id, access_token, waba_id,
     timezone, dining_duration_minutes, payment_mode, manager_phone, table_count,
+    meta_catalog_id, lob_type,
   } = opts;
 
   let restaurantId = null;
@@ -116,6 +137,7 @@ async function registerStandalone(req, res, opts) {
         payment_mode,
         manager_phone:          manager_phone    || null,
         meta_catalog_id:        meta_catalog_id  || null,
+        lob_type:               lob_type         || 'restaurant',
         is_active:              true,
         subscribed_features:    DEFAULT_FEATURES,
       })
@@ -190,7 +212,7 @@ async function registerStandalone(req, res, opts) {
       user_id:       authUserId,
       restaurant_id: restaurantId,
       action:        'Restaurant registered (standalone)',
-      details:       { name, email, whatsapp_number, source: 'onboarding' },
+      details:       { name, email, whatsapp_number, lob_type, source: 'onboarding' },
     });
 
     console.log(`[onboarding] ✅ Standalone: ${name} (${restaurantId}) — ${email}`);
@@ -293,6 +315,7 @@ async function registerChain(req, res, opts) {
           payment_mode:           first_outlet.payment_mode || 'prepay',
           manager_phone:          first_outlet.manager_phone || null,
           outlet_code:            first_outlet.outlet_code   || null,
+          lob_type:               first_outlet.lob_type      || 'restaurant',
           sort_order:             0,
           is_active:              true,
           subscribed_features:    DEFAULT_FEATURES,
