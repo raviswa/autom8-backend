@@ -14,6 +14,17 @@
 # State is stored in supply_conversation_states (same table as supply_agent.py
 # referenced in db/queries.py).  State is intentionally minimal — supply chat
 # is transactional, not conversational.
+#
+# FIX (button-reply routing): interactive button taps carry fixed IDs like
+# CHECK_BALANCE, ORDER_STATUS, RECORD_PAYMENT (set in _handle_fallback's
+# quick-reply menu). These IDs were previously falling through to the
+# free-text regex intent matchers (_BALANCE_RE, _ORDER_STATUS_RE, _PAYMENT_RE),
+# which use \b word-boundary matching — but underscore is a \w character in
+# Python regex, so e.g. \bbalance\b never matches inside "CHECK_BALANCE".
+# Every tap was silently missing all three regexes and landing in
+# _handle_fallback, which just re-sent the same button menu — looking like
+# the bot was doing nothing. These three IDs are now handled explicitly,
+# the same way CONFIRM_PAYMENT:*/CANCEL_PAYMENT already were.
 # ============================================================================
 
 import logging
@@ -119,6 +130,27 @@ async def handle_supply_message(
             await send_supply_text(
                 phone, "Payment claim cancelled. Let us know if you need anything else.",
                 supplier_id, client_id
+            )
+            await save_supply_session(supplier_id, phone, client_id, session)
+            return
+        # FIX: quick-reply menu buttons (from _handle_fallback) must be routed
+        # explicitly — their IDs (CHECK_BALANCE etc.) don't survive the
+        # free-text regex matchers below due to \b/underscore behavior.
+        if reply_id == 'CHECK_BALANCE':
+            await _handle_balance(phone, supplier_id, client_id, session)
+            await save_supply_session(supplier_id, phone, client_id, session)
+            return
+        if reply_id == 'ORDER_STATUS':
+            await _handle_order_status(phone, supplier_id, client_id, session)
+            await save_supply_session(supplier_id, phone, client_id, session)
+            return
+        if reply_id == 'RECORD_PAYMENT':
+            session['_state'] = 'awaiting_payment_details'
+            await send_supply_text(
+                phone,
+                "Sure — please share the amount and payment reference "
+                "(e.g. \"₹5000 GPay ref 123456789\").",
+                supplier_id, client_id,
             )
             await save_supply_session(supplier_id, phone, client_id, session)
             return
