@@ -955,7 +955,7 @@ async def internal_shipment_notify(request: Request):
         status=str(body.get("status") or "Shipped").strip(),
     )
     if not ok:
-        return JSONResponse(status_code=500, content={"ok": False, error": "whatsapp_send_failed"})
+        return JSONResponse(status_code=500, content={"ok": False, "error": "whatsapp_send_failed"})
     return JSONResponse(status_code=200, content={"ok": True})
 
 

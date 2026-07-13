@@ -16,16 +16,14 @@ const { writeAuditLog } = require('../helpers/auditLog');
 
 const DEFAULT_FEATURES = DEFAULT_SERVICES;
 
-// ESM schema module — single source of truth for allowed lob_type values.
-const lobSchemaModulePromise = import('../config/catalogSchemas.js');
+const { parseRegistrationLobType, REGISTER_LOB_TYPES } = require('../config/catalogSchemas');
 
-async function resolveRegistrationLobType(body) {
-  const mod = await lobSchemaModulePromise;
+function resolveRegistrationLobType(body) {
   const raw = body?.lob_type ?? body?.org_type ?? null;
-  const parsed = mod.parseRegistrationLobType(raw);
+  const parsed = parseRegistrationLobType(raw);
   if (parsed.invalid) {
     return {
-      error: `Invalid lob_type "${parsed.attempted}". Allowed: ${mod.REGISTER_LOB_TYPES.join(', ')}`,
+      error: `Invalid lob_type "${parsed.attempted}". Allowed: ${REGISTER_LOB_TYPES.join(', ')}`,
     };
   }
   return { lob_type: parsed.lob_type };
@@ -75,7 +73,7 @@ router.post('/register', async (req, res) => {
   if (!owner_name?.trim())    return res.status(400).json({ error: 'owner_name is required' });
   if (!owner_password)        return res.status(400).json({ error: 'owner_password is required' });
 
-  const lobResolved = await resolveRegistrationLobType(req.body);
+  const lobResolved = resolveRegistrationLobType(req.body);
   if (lobResolved.error) return res.status(400).json({ error: lobResolved.error });
   const lob_type = lobResolved.lob_type;
 
