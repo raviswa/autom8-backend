@@ -905,6 +905,8 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
   'min_delivery_order_amount','min_takeaway_order_amount',
   'scheduled_delivery_enabled','scheduled_takeaway_enabled','scheduled_kds_lead_minutes','max_delivery_radius_km',
   'scheduled_slot_max_orders','schedule_buffer_minutes','schedule_rounding_minutes','schedule_early_start_max_minutes',
+  'shiprocket_connected','shiprocket_api_key','intra_city_charge','outstation_charge','free_delivery_above',
+  'cod_enabled_city','cod_enabled_outstation',
   'subscribed_features', 'enabled_services',
     ];
 
@@ -912,7 +914,7 @@ router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSetting
 // settings access (whitelisted above), but must not be able to change the
 // business type or grant themselves menu-upload rights via direct API call,
 // even though the UI already hides these controls from managers.
-const OWNER_ONLY_FIELDS = ['lob_type', 'allow_manager_menu_upload'];
+const OWNER_ONLY_FIELDS = ['lob_type', 'allow_manager_menu_upload', 'shiprocket_api_key'];
 const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
     
     const updates = Object.fromEntries(
@@ -923,6 +925,10 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
     }
     if (Object.keys(updates).length === 0)
       return res.status(400).json({ error: 'No valid fields provided' });
+
+    if (!isOwnerLike) {
+      for (const key of OWNER_ONLY_FIELDS) delete updates[key];
+    }
 
     // ── Validate service toggles against paid plan ───────────────────────────
     if (updates.subscribed_features !== undefined || updates.enabled_services !== undefined) {

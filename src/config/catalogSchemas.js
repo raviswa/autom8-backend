@@ -174,57 +174,111 @@ export const LOB_SCHEMAS = {
   },
 
   // ══════════════════════════════════════════════════════════════════════
-  // food_products — flat PRODUCT rows. No new DB columns; extra
-  // pack-size/shelf-life/ingredients fields are NOT persisted in this pass
-  // (no live tenant on this LOB yet — add if/when one exists).
+  // food_products — flat PRODUCT rows with pack-size, shelf-life, allergens,
+  // and up to five gallery images (image_link + image_url_2 … image_url_5).
   // ══════════════════════════════════════════════════════════════════════
   food_products: {
     id: 'food_products',
     label: 'Packaged Food / Home Baker',
-    templateHeaders: BASE_TEMPLATE_HEADERS,
+    templateHeaders: [
+      ...BASE_TEMPLATE_HEADERS,
+      'pack_size_label', 'weight_grams', 'shelf_life_days', 'allergens',
+      'image_url_2', 'image_url_3', 'image_url_4', 'image_url_5',
+    ],
     templateColWidths: [
       { wch: 10 }, { wch: 26 }, { wch: 40 }, { wch: 8 }, { wch: 16 }, { wch: 48 }, { wch: 12 },
+      { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 20 },
+      { wch: 48 }, { wch: 48 }, { wch: 48 }, { wch: 48 },
     ],
     templateExamples: [
-      ['FP001', 'Homemade Chocolate Brownie (6 pcs)', 'Rich fudgy brownies, baked fresh', 249, 'Bakes', 'https://images.unsplash.com/photo-1606313564200-e75d5e30476c?w=800', 'TRUE'],
-      ['FP002', 'Mango Pickle (250g)', 'Traditional Andhra-style mango pickle', 150, 'Pickles', '', 'TRUE'],
+      ['FP001', 'Homemade Chocolate Brownie (6 pcs)', 'Rich fudgy brownies, baked fresh', 249, 'Bakes', 'https://images.unsplash.com/photo-1606313564200-e75d5e30476c?w=800', 'TRUE', '6 pcs', 300, 3, 'Contains nuts, dairy', '', '', '', ''],
+      ['FP002', 'Mango Pickle (250g)', 'Traditional Andhra-style mango pickle', 150, 'Pickles', '', 'TRUE', '250g', 250, 90, '', '', '', '', ''],
     ],
     columnHelp: [
       ['Column guide — Packaged Food / Home Baker'],
       [''],
       ['category — used as the customer-facing menu tab, e.g. Bakes, Pickles, Snacks'],
-      ['image_link — direct image URL; leave blank if you have no photo yet'],
+      ['image_link — primary image; image_url_2 … image_url_5 for extra gallery photos'],
+      ['pack_size_label — e.g. 250g, 6 pcs'],
+      ['weight_grams / shelf_life_days / allergens — shown in webcart product detail'],
       ['is_available — TRUE / FALSE. FALSE = greyed out, toggle anytime from Manager Portal'],
     ],
-    previewColumns: BASE_PREVIEW_COLUMNS,
+    previewColumns: [
+      ...BASE_PREVIEW_COLUMNS.slice(0, 3),
+      { key: 'pack_size_label', label: 'Pack', width: '10%' },
+      ...BASE_PREVIEW_COLUMNS.slice(3),
+    ],
     mapRow(row) {
-      return { ...baseFields(row), time_slot: 'all' };
+      return {
+        ...baseFields(row),
+        time_slot: 'all',
+        pack_size_label: strOrNull(row['pack_size_label'] ?? row['Pack Size']),
+        weight_grams: row['weight_grams'] != null && row['weight_grams'] !== ''
+          ? parseInt(String(row['weight_grams']).replace(/\D/g, ''), 10) || null
+          : null,
+        shelf_life_days: row['shelf_life_days'] != null && row['shelf_life_days'] !== ''
+          ? parseInt(String(row['shelf_life_days']).replace(/\D/g, ''), 10) || null
+          : null,
+        allergens: strOrNull(row['allergens'] ?? row['Allergens']),
+        image_url_2: strOrNull(row['image_url_2'] ?? row['Image URL 2']),
+        image_url_3: strOrNull(row['image_url_3'] ?? row['Image URL 3']),
+        image_url_4: strOrNull(row['image_url_4'] ?? row['Image URL 4']),
+        image_url_5: strOrNull(row['image_url_5'] ?? row['Image URL 5']),
+      };
     },
     validateRow: baseValidate,
   },
 
   // ══════════════════════════════════════════════════════════════════════
-  // retail — flat PRODUCT rows. Same reasoning as food_products.
+  // retail — flat PRODUCT rows with condition, MRP, warranty, colour, gallery.
   // ══════════════════════════════════════════════════════════════════════
   retail: {
     id: 'retail',
     label: 'Retail / Electronics',
-    templateHeaders: BASE_TEMPLATE_HEADERS,
+    templateHeaders: [
+      ...BASE_TEMPLATE_HEADERS,
+      'condition', 'original_mrp', 'warranty_days', 'colour',
+      'image_url_2', 'image_url_3', 'image_url_4', 'image_url_5',
+    ],
     templateColWidths: [
       { wch: 10 }, { wch: 26 }, { wch: 40 }, { wch: 8 }, { wch: 16 }, { wch: 48 }, { wch: 12 },
+      { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 12 },
+      { wch: 48 }, { wch: 48 }, { wch: 48 }, { wch: 48 },
     ],
     templateExamples: [
-      ['RT001', 'iPhone 12 (Refurbished, 64GB)', 'Grade A refurbished, 6-month warranty', 24999, 'Phones', 'https://images.unsplash.com/photo-1592286927505-1def25115558?w=800', 'TRUE'],
+      ['RT001', 'iPhone 12 (Refurbished, 64GB)', 'Grade A refurbished', 24999, 'Phones', 'https://images.unsplash.com/photo-1592286927505-1def25115558?w=800', 'TRUE', 'Refurbished', 32999, 180, 'Black', '', '', '', ''],
     ],
     columnHelp: [
       ['Column guide — Retail / Electronics'],
       [''],
       ['category — used as the customer-facing menu tab, e.g. Phones, Accessories'],
-      ['Include condition, warranty, and specs in the description for now'],
+      ['condition — New / Refurbished / Used (shown in webcart product detail)'],
+      ['original_mrp — optional; webcart shows a discount badge when higher than price'],
+      ['image_link — primary image; image_url_2 … image_url_5 for extra gallery photos'],
     ],
-    previewColumns: BASE_PREVIEW_COLUMNS,
+    previewColumns: [
+      ...BASE_PREVIEW_COLUMNS.slice(0, 3),
+      { key: 'condition', label: 'Condition', width: '12%' },
+      ...BASE_PREVIEW_COLUMNS.slice(3),
+    ],
     mapRow(row) {
-      return { ...baseFields(row), time_slot: 'all' };
+      const originalMrp = row['original_mrp'] != null && row['original_mrp'] !== ''
+        ? parsePrice(row['original_mrp'])
+        : null;
+      return {
+        ...baseFields(row),
+        time_slot: 'all',
+        condition: strOrNull(row['condition'] ?? row['Condition']),
+        original_mrp: originalMrp && originalMrp > 0 ? originalMrp : null,
+        warranty_days: row['warranty_days'] != null && row['warranty_days'] !== ''
+          ? parseInt(String(row['warranty_days']).replace(/\D/g, ''), 10) || null
+          : null,
+        colour: strOrNull(row['colour'] ?? row['Colour'] ?? row['color'] ?? row['Color']),
+        image_url_2: strOrNull(row['image_url_2'] ?? row['Image URL 2']),
+        image_url_3: strOrNull(row['image_url_3'] ?? row['Image URL 3']),
+        image_url_4: strOrNull(row['image_url_4'] ?? row['Image URL 4']),
+        image_url_5: strOrNull(row['image_url_5'] ?? row['Image URL 5']),
+      };
     },
     validateRow: baseValidate,
   },

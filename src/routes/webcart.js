@@ -108,7 +108,7 @@ async function resolveRestaurantBySlug(req) {
   if (!rows || (now - _restaurantCache.fetchedAt) > RESTAURANT_CACHE_TTL_MS) {
     const { data, error } = await supabaseAdmin
       .from('tenants')
-      .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category, parcel_charge_per_item, delivery_charge_default, delivery_charge_tiers, gst_rate, kitchen_busy')
+      .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category, parcel_charge_per_item, delivery_charge_default, delivery_charge_tiers, gst_rate, kitchen_busy, lob_type, postal_code, shiprocket_connected, shiprocket_api_key, intra_city_charge, outstation_charge, free_delivery_above, cod_enabled_city, cod_enabled_outstation')
       .eq('is_active', true)
       .limit(500);
     if (error) throw error;
@@ -153,6 +153,107 @@ function inWindow(minute, start, end) {
   if (start === end) return false;
   if (start < end) return minute >= start && minute < end;
   return minute >= start || minute < end;
+}
+
+function isRestaurantLob(lobType) {
+  return !lobType || lobType === 'restaurant';
+}
+
+function normalizePincode(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits.length >= 6 ? digits.slice(0, 6) : '';
+}
+
+function isSameCityPincode(tenantPincode, customerPincode) {
+  const tenant = normalizePincode(tenantPincode);
+  const customer = normalizePincode(customerPincode);
+  if (!tenant || !customer) return false;
+  if (tenant === customer) return true;
+  // India pincode: first 3 digits identify the sorting district / city area.
+  return tenant.slice(0, 3) === customer.slice(0, 3);
+}
+
+async function fetchShiprocketRate({ apiKey, pickupPincode, deliveryPincode, weightKg = 0.5 }) {
+  if (!apiKey || !pickupPincode || !deliveryPincode) return null;
+  try {
+    const url = new URL('https://apiv2.shiprocket.in/v1/external/courier/serviceability/');
+    url.searchParams.set('pickup_postcode', pickupPincode);
+    url.searchParams.set('delivery_postcode', deliveryPincode);
+    url.searchParams.set('weight', String(weightKg));
+    url.searchParams.set('cod', '0');
+
+    const rateRes = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    const data = await rateRes.json().catch(() => ({}));
+    if (!rateRes.ok) {
+      console.warn('[webcart/shiprocket]', data?.message || rateRes.status);
+      return null;
+    }
+    const couriers = data?.data?.available_courier_companies || data?.data || [];
+    const list = Array.isArray(couriers) ? couriers : [];
+    if (!list.length) return null;
+    const cheapest = list.reduce((min, row) => {
+      const charge = Number(row.rate || row.freight_charge || row.charge || 0);
+      return charge > 0 && charge < min ? charge : min;
+    }, Number.POSITIVE_INFINITY);
+    return Number.isFinite(cheapest) && cheapest < Number.POSITIVE_INFINITY ? cheapest : null;
+  } catch (err) {
+    console.warn('[webcart/shiprocket]', err.message);
+    return null;
+  }
+}
+
+async function calculateDelivery(restaurant, customerPincode, cartTotal) {
+  const tenantPincode = normalizePincode(restaurant?.postal_code);
+  const customer = normalizePincode(customerPincode);
+  const subtotal = Math.max(0, Number(cartTotal || 0));
+  const freeAbove = Number(restaurant?.free_delivery_above || 0);
+  const intraCity = isSameCityPincode(tenantPincode, customer);
+  const zone = intraCity ? 'intra_city' : 'outstation';
+
+  if (freeAbove > 0 && subtotal >= freeAbove) {
+    return {
+      zone,
+      charge: 0,
+      free_delivery_applied: true,
+      cod_enabled: intraCity ? !!restaurant?.cod_enabled_city : !!restaurant?.cod_enabled_outstation,
+      source: 'free_delivery_above',
+    };
+  }
+
+  if (intraCity) {
+    const charge = Number(restaurant?.intra_city_charge ?? restaurant?.delivery_charge_default ?? 0) || 0;
+    return {
+      zone,
+      charge: Math.round(charge * 100) / 100,
+      free_delivery_applied: false,
+      cod_enabled: !!restaurant?.cod_enabled_city,
+      source: 'intra_city_flat',
+    };
+  }
+
+  let charge = Number(restaurant?.outstation_charge || 0) || 0;
+  let source = 'outstation_flat';
+  if (restaurant?.shiprocket_connected && restaurant?.shiprocket_api_key && tenantPincode && customer) {
+    const shiprocketRate = await fetchShiprocketRate({
+      apiKey: restaurant.shiprocket_api_key,
+      pickupPincode: tenantPincode,
+      deliveryPincode: customer,
+    });
+    if (shiprocketRate != null) {
+      charge = shiprocketRate;
+      source = 'shiprocket';
+    }
+  }
+
+  return {
+    zone,
+    charge: Math.round(charge * 100) / 100,
+    free_delivery_applied: false,
+    cod_enabled: !!restaurant?.cod_enabled_outstation,
+    source,
+  };
 }
 
 function resolveCurrentSlot(restaurant) {
@@ -291,7 +392,7 @@ async function fetchMenuItems(restaurantId) {
   const [itemsRes, categoriesRes] = await Promise.all([
     supabaseAdmin
       .from('menu_items')
-      .select('id, retailer_id, name, price, category, description, image_url, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked, is_available, variant_group_id, size_label, item_type, flavour_group, scoop_count, crust_options, toppings_allowed, topping_extra_price')
+      .select('id, retailer_id, name, price, category, description, image_url, image_url_2, image_url_3, image_url_4, image_url_5, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked, is_available, variant_group_id, size_label, item_type, flavour_group, scoop_count, crust_options, toppings_allowed, topping_extra_price, pack_size_label, weight_grams, shelf_life_days, allergens, condition, original_mrp, warranty_days, colour')
       .eq('restaurant_id', restaurantId)
       .is('archived_at', null)
       .order('category', { ascending: true })
@@ -380,49 +481,66 @@ router.get('/api/webcart/session', async (req, res) => {
     });
 
     const { items: menuItems, categorySlotMap } = await fetchMenuItems(restaurant.id);
-    let slotInfo = resolveCurrentSlot(restaurant);
+    const lobType = restaurant.lob_type || 'restaurant';
+    const catalogLob = !isRestaurantLob(lobType);
 
-    // Manager portal "Kitchen: Open" override (POST /api/catalog/kitchen-toggle
-    // in src/routes/catalog.js) works by flipping menu_items.is_available — it
-    // never touches restaurant.opening_hours, which is all resolveCurrentSlot()
-    // above looks at. So outside scheduled hours the web menu kept showing
-    // "Kitchen is closed" even after the manager explicitly opened it, while
-    // the WhatsApp bot (chat/tools/kitchen_hours.py → has_manager_kitchen_override)
-    // already honored the same signal. Detect it here the same way so both
-    // channels agree.
-    const managerOverrideItems = menuItems.filter(i => i.is_available);
-    const managerOverrideActive = slotInfo.slot_state !== 'open' && managerOverrideItems.length > 0;
-    if (managerOverrideActive) {
-      slotInfo = { ...slotInfo, slot_state: 'open', manager_override: true, banner: null };
-    }
-
-    const availableNow = !slotInfo.current_slot && managerOverrideActive
-      ? managerOverrideItems
-      : slotInfo.current_slot
-        ? menuItems.filter(i => i.effective_slots.includes('anytime') || i.effective_slots.includes(slotInfo.current_slot))
-        : [];
-    const todaysSpecial = menuItems.filter(i => i.is_todays_special);
-
-    const countsByCategory = {};
-    if (slotInfo.slot_state === 'open') {
-      for (const item of availableNow) {
-        const cat = item.category || 'General';
-        countsByCategory[cat] = (countsByCategory[cat] || 0) + 1;
-      }
-    }
+    let slotInfo;
+    let availableNow;
     let primaryCategory = null;
-    const primarySlotMap = restaurant?.primary_slot_category || {};
-    const preferredForSlot = slotInfo.current_slot
-      ? String(primarySlotMap?.[slotInfo.current_slot] || '').trim()
-      : '';
-    const top = Object.entries(countsByCategory)
-      .sort((a, b) => {
-        if (b[1] !== a[1]) return b[1] - a[1];
-        if (preferredForSlot && a[0] === preferredForSlot) return -1;
-        if (preferredForSlot && b[0] === preferredForSlot) return 1;
-        return a[0].localeCompare(b[0]);
-      })[0];
-    if (top) primaryCategory = top[0];
+
+    if (catalogLob) {
+      slotInfo = {
+        current_slot: null,
+        slot_state: 'open',
+        banner: null,
+        catalog_lob: true,
+      };
+      availableNow = [];
+    } else {
+      slotInfo = resolveCurrentSlot(restaurant);
+
+      // Manager portal "Kitchen: Open" override (POST /api/catalog/kitchen-toggle
+      // in src/routes/catalog.js) works by flipping menu_items.is_available — it
+      // never touches restaurant.opening_hours, which is all resolveCurrentSlot()
+      // above looks at. So outside scheduled hours the web menu kept showing
+      // "Kitchen is closed" even after the manager explicitly opened it, while
+      // the WhatsApp bot (chat/tools/kitchen_hours.py → has_manager_kitchen_override)
+      // already honored the same signal. Detect it here the same way so both
+      // channels agree.
+      const managerOverrideItems = menuItems.filter(i => i.is_available);
+      const managerOverrideActive = slotInfo.slot_state !== 'open' && managerOverrideItems.length > 0;
+      if (managerOverrideActive) {
+        slotInfo = { ...slotInfo, slot_state: 'open', manager_override: true, banner: null };
+      }
+
+      availableNow = !slotInfo.current_slot && managerOverrideActive
+        ? managerOverrideItems
+        : slotInfo.current_slot
+          ? menuItems.filter(i => i.effective_slots.includes('anytime') || i.effective_slots.includes(slotInfo.current_slot))
+          : [];
+
+      const countsByCategory = {};
+      if (slotInfo.slot_state === 'open') {
+        for (const item of availableNow) {
+          const cat = item.category || 'General';
+          countsByCategory[cat] = (countsByCategory[cat] || 0) + 1;
+        }
+      }
+      const primarySlotMap = restaurant?.primary_slot_category || {};
+      const preferredForSlot = slotInfo.current_slot
+        ? String(primarySlotMap?.[slotInfo.current_slot] || '').trim()
+        : '';
+      const top = Object.entries(countsByCategory)
+        .sort((a, b) => {
+          if (b[1] !== a[1]) return b[1] - a[1];
+          if (preferredForSlot && a[0] === preferredForSlot) return -1;
+          if (preferredForSlot && b[0] === preferredForSlot) return 1;
+          return a[0].localeCompare(b[0]);
+        })[0];
+      if (top) primaryCategory = top[0];
+    }
+
+    const todaysSpecial = catalogLob ? [] : menuItems.filter(i => i.is_todays_special);
 
     const sessionPayload = session
       ? {
@@ -447,6 +565,7 @@ router.get('/api/webcart/session', async (req, res) => {
         name: restaurant.display_name || restaurant.name,
         logo_url: restaurant.logo_url || null,
         support_phone: pickSupportPhone(restaurant) || null,
+        lob_type: lobType,
       },
       pricing_config: {                                         // ← ADD THIS BLOCK
         parcel_charge_per_item: restaurant.parcel_charge_per_item || 0,
@@ -462,6 +581,7 @@ router.get('/api/webcart/session', async (req, res) => {
       current_slot: slotInfo.current_slot,
       slot_state: slotInfo.slot_state,
       slot_banner: slotInfo.banner || null,
+      catalog_lob: catalogLob,
       kitchen_manual_override: !!slotInfo.manager_override,
       // Informational only — the manager's "busy kitchen" rush-hour flag
       // (POST /api/catalog/kitchen-busy-toggle) intentionally does not block
@@ -793,6 +913,124 @@ router.post('/api/webcart/submit', async (req, res) => {
   } catch (err) {
     console.error('[webcart/submit]', err.message);
     return res.status(500).json({ ok: false, error: 'Failed to submit order.' });
+  }
+});
+
+router.post('/api/webcart/delivery-quote', async (req, res) => {
+  try {
+    const { pincode, cart_total } = req.body || {};
+    const customerPincode = normalizePincode(pincode);
+    if (!customerPincode) {
+      return res.status(400).json({ ok: false, error: 'A valid 6-digit pincode is required.' });
+    }
+
+    const restaurant = await resolveRestaurantBySlug(req);
+    if (!restaurant) return res.status(404).json({ ok: false, error: 'Restaurant not found.' });
+
+    const quote = await calculateDelivery(restaurant, customerPincode, cart_total);
+    return res.json({ ok: true, ...quote });
+  } catch (err) {
+    console.error('[webcart/delivery-quote]', err.message);
+    return res.status(500).json({ ok: false, error: 'Failed to calculate delivery charge.' });
+  }
+});
+
+const SHIPROCKET_STATUS_MAP = {
+  pickup_scheduled: 'Pickup scheduled',
+  in_transit: 'In transit',
+  out_for_delivery: 'Out for delivery',
+  delivered: 'Delivered',
+};
+
+async function triggerShipmentNotify(payload) {
+  const secret = getKdsSecret();
+  const response = await fetch(`${CHAT_SERVICE_URL}/internal/shipment-notify`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-internal-secret': secret,
+      Authorization: `Bearer ${secret}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  let data = {};
+  try {
+    data = await response.json();
+  } catch (_) {
+    data = {};
+  }
+  if (!response.ok || !data.ok) {
+    const err = new Error(data.error || `Chat service error (${response.status})`);
+    err.response = data;
+    throw err;
+  }
+  return data;
+}
+
+router.post('/api/webhooks/shiprocket', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const awb = String(body.awb || body.awb_code || '').trim();
+    const orderId = String(body.order_id || body.shipment_id || body.channel_order_id || '').trim();
+    const statusRaw = String(body.current_status || body.status || '').toLowerCase().replace(/\s+/g, '_');
+    const statusLabel = SHIPROCKET_STATUS_MAP[statusRaw] || body.current_status || body.status || 'Updated';
+
+    if (!awb && !orderId) {
+      return res.status(400).json({ ok: false, error: 'Missing shipment identifier.' });
+    }
+
+    let booking = null;
+    if (orderId) {
+      const { data: byRef, error: refErr } = await supabaseAdmin
+        .from('bookings')
+        .select('id, restaurant_id, customer_phone, order_ref, meta')
+        .eq('order_ref', orderId)
+        .maybeSingle();
+      if (refErr) throw refErr;
+      booking = byRef;
+      if (!booking) {
+        const { data: byMeta, error: metaErr } = await supabaseAdmin
+          .from('bookings')
+          .select('id, restaurant_id, customer_phone, order_ref, meta')
+          .filter('meta->>shiprocket_order_id', 'eq', orderId)
+          .maybeSingle();
+        if (metaErr) throw metaErr;
+        booking = byMeta;
+      }
+    } else {
+      const { data: byAwb, error: awbErr } = await supabaseAdmin
+        .from('bookings')
+        .select('id, restaurant_id, customer_phone, order_ref, meta')
+        .filter('meta->>awb', 'eq', awb)
+        .maybeSingle();
+      if (awbErr) throw awbErr;
+      booking = byAwb;
+    }
+    if (!booking) {
+      return res.json({ ok: true, skipped: true, reason: 'booking_not_found' });
+    }
+
+    const nextMeta = {
+      ...(booking.meta || {}),
+      shipment_status: statusRaw,
+      awb: awb || booking.meta?.awb || null,
+      courier_name: body.courier_name || body.courier || booking.meta?.courier_name || 'Shiprocket',
+    };
+    await supabaseAdmin.from('bookings').update({ meta: nextMeta }).eq('id', booking.id);
+
+    await triggerShipmentNotify({
+      restaurant_id: booking.restaurant_id,
+      customer_phone: booking.customer_phone,
+      order_ref: booking.order_ref || booking.id,
+      courier_name: nextMeta.courier_name,
+      awb: nextMeta.awb,
+      status: statusLabel,
+    });
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[webhooks/shiprocket]', err.message);
+    return res.status(500).json({ ok: false, error: 'Webhook processing failed.' });
   }
 });
 

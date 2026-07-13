@@ -475,6 +475,26 @@
     .ice-cream-card { cursor: pointer; }
     .row-hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
     .cl-detail { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .product-gallery { position: relative; margin-bottom: 12px; }
+    .product-gallery-track {
+      display: flex; overflow-x: auto; scroll-snap-type: x mandatory; gap: 0;
+      scrollbar-width: none; -webkit-overflow-scrolling: touch;
+    }
+    .product-gallery-track::-webkit-scrollbar { display: none; }
+    .product-gallery-track img {
+      width: 100%; flex: 0 0 100%; scroll-snap-align: start; object-fit: cover;
+      max-height: 220px; border-radius: 12px;
+    }
+    .product-gallery-dots { display: flex; justify-content: center; gap: 6px; margin-top: 8px; }
+    .product-gallery-dots span { width: 6px; height: 6px; border-radius: 50%; background: #d1d5db; }
+    .product-gallery-dots span.active { background: var(--brand); }
+    .product-detail-row { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; padding: 4px 0; }
+    .product-detail-row span:first-child { color: var(--muted); }
+    .discount-badge {
+      display: inline-block; font-size: 11px; font-weight: 700; color: #fff;
+      background: #16a34a; padding: 2px 8px; border-radius: 999px; margin-left: 6px; vertical-align: middle;
+    }
+    .row-card.catalog-product { cursor: pointer; }
   </style>
 </head>
 <body>
@@ -692,6 +712,9 @@
       paymentPollInFlight: false,
       selectedSize: {},
       pslModal: null,
+      lobType: 'restaurant',
+      catalogLob: false,
+      productGalleryIndex: 0,
     };
 
     const $ = (id) => document.getElementById(id);
@@ -1310,9 +1333,96 @@ $('subtotal').textContent = money(subtotal);
 
     function closePslModal() {
       state.pslModal = null;
+      state.productGalleryIndex = 0;
       pslModalOverlay.classList.remove('open');
       pslModalOverlay.setAttribute('aria-hidden', 'true');
       document.body.classList.remove('wa-guide-open');
+    }
+
+    function isCatalogProductLob() {
+      return state.catalogLob || ['food_products', 'retail'].includes(state.lobType);
+    }
+
+    function isFlatCatalogProduct(item) {
+      if (!isCatalogProductLob()) return false;
+      const type = (item.item_type || 'PRODUCT').toUpperCase();
+      return type === 'PRODUCT' && !item.variant_group_id;
+    }
+
+    function itemGalleryUrls(item) {
+      return [item.image_url, item.image_url_2, item.image_url_3, item.image_url_4, item.image_url_5].filter(Boolean);
+    }
+
+    function productDetailFieldsHtml(item) {
+      const lob = state.lobType;
+      const rows = [];
+      if (lob === 'food_products') {
+        if (item.pack_size_label) rows.push(['Pack', item.pack_size_label]);
+        if (item.weight_grams) rows.push(['Weight', `${item.weight_grams} g`]);
+        if (item.shelf_life_days) rows.push(['Shelf life', `${item.shelf_life_days} days`]);
+        if (item.allergens) rows.push(['Allergens', item.allergens]);
+      } else if (lob === 'retail') {
+        if (item.condition) rows.push(['Condition', item.condition]);
+        if (item.original_mrp && Number(item.original_mrp) > Number(item.price)) {
+          const pct = Math.round((1 - Number(item.price) / Number(item.original_mrp)) * 100);
+          rows.push(['MRP', money(item.original_mrp)]);
+          rows.push(['You save', `${pct}%`]);
+        }
+        if (item.warranty_days) rows.push(['Warranty', `${item.warranty_days} days`]);
+        if (item.colour) rows.push(['Colour', item.colour]);
+      }
+      if (!rows.length) return '';
+      return `<div class="modal-section"><div class="modal-section-title">Details</div>${rows.map(([k, v]) => `<div class="product-detail-row"><span>${k}</span><strong>${v}</strong></div>`).join('')}</div>`;
+    }
+
+    function galleryHtml(urls, groupId) {
+      if (!urls.length) return '';
+      if (urls.length === 1) {
+        return `<img src="${urls[0]}" alt="" style="width:100%;border-radius:12px;max-height:220px;object-fit:cover" />`;
+      }
+      const idx = state.productGalleryIndex || 0;
+      return `
+        <div class="product-gallery" data-gallery="${groupId}">
+          <div class="product-gallery-track" id="galleryTrack-${groupId}">
+            ${urls.map(u => `<img src="${u}" alt="" loading="lazy" />`).join('')}
+          </div>
+          <div class="product-gallery-dots">${urls.map((_, i) => `<span class="${i === idx ? 'active' : ''}" data-dot="${i}"></span>`).join('')}</div>
+        </div>`;
+    }
+
+    function bindProductGallery(groupId) {
+      const track = document.getElementById(`galleryTrack-${groupId}`);
+      if (!track) return;
+      track.addEventListener('scroll', () => {
+        const idx = Math.round(track.scrollLeft / Math.max(track.clientWidth, 1));
+        state.productGalleryIndex = idx;
+        track.parentElement.querySelectorAll('.product-gallery-dots span').forEach((dot, i) => {
+          dot.classList.toggle('active', i === idx);
+        });
+      }, { passive: true });
+    }
+
+    function openProductDetailModal(item) {
+      const urls = itemGalleryUrls(item);
+      const galleryId = `pd-${item.id}`;
+      state.productGalleryIndex = 0;
+      state.pslModal = { type: 'productDetail', item, galleryId };
+      pslModalTitle.textContent = item.name;
+      const discountBadge = (state.lobType === 'retail' && item.original_mrp && Number(item.original_mrp) > Number(item.price))
+        ? `<span class="discount-badge">${Math.round((1 - Number(item.price) / Number(item.original_mrp)) * 100)}% off</span>`
+        : '';
+      pslModalBody.innerHTML = `
+        ${galleryHtml(urls, galleryId)}
+        ${item.description ? `<p style="font-size:13px;color:var(--muted);margin:0 0 10px">${item.description}</p>` : ''}
+        ${productDetailFieldsHtml(item)}
+        <div class="modal-price">${money(item.price)}${discountBadge}</div>`;
+      pslModalFoot.innerHTML = `
+        <button class="modal-skip" type="button" id="productDetailClose">Close</button>
+        <button class="modal-confirm" type="button" id="productDetailAdd" ${item.is_publicly_available === false ? 'disabled' : ''}>Add to cart</button>`;
+      openPslModalShell(item.name);
+      bindProductGallery(galleryId);
+      $('productDetailClose').onclick = closePslModal;
+      $('productDetailAdd').onclick = () => { addToCart(item); closePslModal(); };
     }
 
     function openPslModalShell(title) {
@@ -1548,12 +1658,15 @@ $('subtotal').textContent = money(subtotal);
 
     function rowCardHtml(item) {
       const qty = rowQty(item);
+      const catalogProduct = isFlatCatalogProduct(item);
       const actions = qty > 0
         ? `<div class="stepper"><button data-step="-1" data-id="${item.id}">−</button><span>${qty}</span><button data-step="1" data-id="${item.id}">+</button></div>`
         : `<button class="btn-add" data-add="${item.id}">+</button>`;
+      const galleryUrls = itemGalleryUrls(item);
+      const thumb = galleryUrls[0];
       return `
-        <div class="row-card">
-          ${item.image_url ? `<img src="${item.image_url}" alt="" onerror="this.outerHTML='<div class=\\'img-fallback\\'>No image</div>'" />` : `<div class="img-fallback">No image</div>`}
+        <div class="row-card${catalogProduct ? ' catalog-product' : ''}"${catalogProduct ? ` data-product-detail="${item.id}"` : ''}>
+          ${thumb ? `<img src="${thumb}" alt="" onerror="this.outerHTML='<div class=\\'img-fallback\\'>No image</div>'" />` : `<div class="img-fallback">No image</div>`}
           <div class="row-info">
             <div class="row-cat">${item.category || 'General'}</div>
             <div class="row-name">${item.name}</div>
@@ -1692,6 +1805,13 @@ $('subtotal').textContent = money(subtotal);
           if (item) addToCart(item);
         });
       });
+      root.querySelectorAll('.row-card[data-product-detail]').forEach(card => {
+        card.addEventListener('click', (e) => {
+          if (e.target.closest('button')) return;
+          const item = state.menu.find(i => String(i.id) === card.dataset.productDetail);
+          if (item) openProductDetailModal(item);
+        });
+      });
       root.querySelectorAll('.size-pill').forEach(pill => {
         pill.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -1717,6 +1837,7 @@ $('subtotal').textContent = money(subtotal);
     // back to plain alphabetical when there's no active slot (kitchen closed
     // / gap window) so behavior is unchanged in that case.
     function categorySortRank(cat) {
+      if (state.catalogLob) return 0;
       const slot = state.currentSlotForSort;
       if (!slot) return 1;
       const slots = state.categorySlots[cat] || ['anytime'];
@@ -1759,6 +1880,9 @@ $('subtotal').textContent = money(subtotal);
         visible = state.menu.filter(i =>
           i.name.toLowerCase().includes(q) || (i.category || '').toLowerCase().includes(q)
         );
+      }
+      if (state.catalogLob) {
+        visible = visible.filter(i => i.is_publicly_available !== false);
       }
 
       const { variantGroups } = groupMenuForDisplay(visible);
@@ -1808,6 +1932,8 @@ $('subtotal').textContent = money(subtotal);
       state.categorySlots = data.category_slots || {};
       state.currentSlotForSort = data.current_slot || null;
       state.activeTab = data.primary_category || 'all';
+      state.lobType = data.restaurant?.lob_type || data.lob_type || 'restaurant';
+      state.catalogLob = !!data.catalog_lob || state.lobType !== 'restaurant';
 
       loadCartLocal();
       document.documentElement.style.setProperty('--brand', '#E36D26');
@@ -1836,17 +1962,22 @@ $('subtotal').textContent = money(subtotal);
       }
 
       const pill = $('slotPill');
-      if (data.current_slot) {
-        pill.textContent = `${data.current_slot[0].toUpperCase()}${data.current_slot.slice(1)} • Open`;
-        pill.classList.add('open');
-      } else {
-        pill.textContent = data.slot_state === 'closed' ? 'Closed' : 'Browse menu';
-        pill.classList.remove('open');
-      }
-
       const banner = $('slotBanner');
-      if (data.slot_banner) { banner.style.display = 'block'; banner.textContent = data.slot_banner; }
-      else banner.style.display = 'none';
+      if (state.catalogLob) {
+        pill.style.display = 'none';
+        banner.style.display = 'none';
+      } else {
+        pill.style.display = '';
+        if (data.current_slot) {
+          pill.textContent = `${data.current_slot[0].toUpperCase()}${data.current_slot.slice(1)} • Open`;
+          pill.classList.add('open');
+        } else {
+          pill.textContent = data.slot_state === 'closed' ? 'Closed' : 'Browse menu';
+          pill.classList.remove('open');
+        }
+        if (data.slot_banner) { banner.style.display = 'block'; banner.textContent = data.slot_banner; }
+        else banner.style.display = 'none';
+      }
 
       if (data.session_expired && data.session_message) {
         showStatus(data.session_message, 'ok');

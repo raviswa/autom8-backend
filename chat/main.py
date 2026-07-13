@@ -927,6 +927,38 @@ async def internal_webcart_confirm_pay(request: Request):
     )
 
 
+@app.post("/internal/shipment-notify")
+async def internal_shipment_notify(request: Request):
+    """Node API calls this after Shiprocket webhooks or manual AWB portal entry."""
+    if not _verify_internal_secret(request):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    from tools.shipment_notify import notify_shipment_update
+
+    restaurant_id = str(body.get("restaurant_id") or "").strip()
+    customer_phone = str(body.get("customer_phone") or "").strip()
+    order_ref = str(body.get("order_ref") or "").strip()
+    if not restaurant_id or not customer_phone or not order_ref:
+        raise HTTPException(status_code=400, detail="restaurant_id, customer_phone, and order_ref are required")
+
+    ok = await notify_shipment_update(
+        restaurant_id=restaurant_id,
+        customer_phone=customer_phone,
+        order_ref=order_ref,
+        courier_name=str(body.get("courier_name") or "").strip(),
+        awb=str(body.get("awb") or "").strip(),
+        status=str(body.get("status") or "Shipped").strip(),
+    )
+    if not ok:
+        return JSONResponse(status_code=500, content={"ok": False, error": "whatsapp_send_failed"})
+    return JSONResponse(status_code=200, content={"ok": True})
+
+
 @app.get("/payment/complete")
 async def payment_complete(request: Request):
     """Customer redirect after Razorpay checkout (Orders API or legacy payment links)."""

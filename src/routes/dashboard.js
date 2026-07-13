@@ -11,6 +11,9 @@ const router  = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
 const { computeDashboardInsights } = require('../helpers/dashboardAnalytics');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
+const { getKdsSecret } = require('../config/internalSecret');
+
+const CHAT_SERVICE_URL = (process.env.CHAT_SERVICE_URL || 'http://localhost:8001').replace(/\/$/, '');
 
 function normPhone(raw) {
   if (!raw) return null;
@@ -37,6 +40,8 @@ const RESTAURANT_SELECT_FULL = [
   'scheduled_delivery_enabled', 'scheduled_takeaway_enabled', 'scheduled_kds_lead_minutes', 'max_delivery_radius_km',
   'lob_type',   // ← add this
   'allow_manager_menu_upload',    //expose allow_manager_menu_upload to the frontend
+  'shiprocket_connected', 'intra_city_charge', 'outstation_charge', 'free_delivery_above',
+  'cod_enabled_city', 'cod_enabled_outstation',
 ].join(', ');
 
 const RESTAURANT_SELECT_BASE = [
@@ -266,6 +271,69 @@ router.get('/insights', authenticateToken, getRestaurantId, requireOutlet, async
     res.json({ success: true, ...insights });
   } catch (err) {
     console.error('[dashboard/insights]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/dashboard/shipment/manual — merchant enters courier + AWB ───────
+router.post('/shipment/manual', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
+  try {
+    const bookingId = String(req.body?.booking_id || '').trim();
+    const courierName = String(req.body?.courier_name || '').trim();
+    const awb = String(req.body?.awb || '').trim();
+    const status = String(req.body?.status || 'Shipped').trim() || 'Shipped';
+
+    if (!bookingId || !courierName || !awb) {
+      return res.status(400).json({ error: 'booking_id, courier_name, and awb are required' });
+    }
+
+    const { data: booking, error: bookingErr } = await supabaseAdmin
+      .from('bookings')
+      .select('id, restaurant_id, customer_phone, order_ref, meta')
+      .eq('restaurant_id', req.restaurant_id)
+      .eq('id', bookingId)
+      .maybeSingle();
+    if (bookingErr) throw bookingErr;
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+
+    const nextMeta = {
+      ...(booking.meta || {}),
+      courier_name: courierName,
+      awb,
+      shipment_status: 'manual',
+      shipment_mode: 'manual',
+    };
+    const { error: updateErr } = await supabaseAdmin
+      .from('bookings')
+      .update({ meta: nextMeta })
+      .eq('id', booking.id);
+    if (updateErr) throw updateErr;
+
+    const secret = getKdsSecret();
+    const notifyRes = await fetch(`${CHAT_SERVICE_URL}/internal/shipment-notify`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-internal-secret': secret,
+        Authorization: `Bearer ${secret}`,
+      },
+      body: JSON.stringify({
+        restaurant_id: booking.restaurant_id,
+        customer_phone: booking.customer_phone,
+        order_ref: booking.order_ref || booking.id,
+        courier_name: courierName,
+        awb,
+        status,
+      }),
+    });
+    const notifyData = await notifyRes.json().catch(() => ({}));
+    if (!notifyRes.ok || !notifyData.ok) {
+      return res.status(500).json({ error: notifyData.error || 'WhatsApp notification failed' });
+    }
+
+    res.json({ success: true, booking_id: booking.id });
+  } catch (err) {
+    console.error('[dashboard/shipment/manual]', err.message);
     res.status(500).json({ error: err.message });
   }
 });
