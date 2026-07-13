@@ -38,6 +38,7 @@ from db.queries import (
     get_client_outstanding,
     create_payment_claim,
     log_supply_notification,
+    get_last_supply_order,
 )
 from tools.supply_whatsapp import send_supply_text, send_supply_buttons
 
@@ -308,23 +309,10 @@ async def _handle_order_status(
     phone: str, supplier_id: str, client_id: str, session: dict
 ) -> None:
     """Return the last order's status and total."""
-    from db.queries import get_supabase
-
     session['_state'] = 'idle'
-    sb = await get_supabase()
 
     try:
-        res = await sb.table('supply_orders') \
-            .select('order_number, delivery_date, status, total_amount') \
-            .eq('supplier_id', supplier_id) \
-            .eq('client_id', client_id) \
-            .neq('status', 'cancelled') \
-            .order('created_at', desc=True) \
-            .limit(1) \
-            .maybe_single() \
-            .execute()
-
-        order = res.data
+        order = await get_last_supply_order(supplier_id, client_id)
     except Exception as e:
         logger.error(f'[supply-agent] order status fetch failed: {e}')
         order = None
