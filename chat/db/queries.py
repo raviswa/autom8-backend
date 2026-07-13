@@ -101,7 +101,7 @@ async def save_supply_session(
     }
     headers = _headers(prefer="resolution=merge-duplicates,return=minimal")
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(_url("supply_conversation_states"), headers=headers, params={"on_conflict": "supplier_id,phone"},   # ← add this,json=payload)
+        resp = await client.post(_url("supply_conversation_states"), headers=headers, params={"on_conflict": "supplier_id,phone"},json=payload)
     if resp.status_code not in (200, 201):
         logger.error(f"[queries] save_supply_session HTTP {resp.status_code}: {resp.text[:200]}")
 
