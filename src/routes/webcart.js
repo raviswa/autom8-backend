@@ -291,7 +291,7 @@ async function fetchMenuItems(restaurantId) {
   const [itemsRes, categoriesRes] = await Promise.all([
     supabaseAdmin
       .from('menu_items')
-      .select('id, retailer_id, name, price, category, description, image_url, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked, is_available')
+      .select('id, retailer_id, name, price, category, description, image_url, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked, is_available, variant_group_id, size_label, item_type, flavour_group, scoop_count, crust_options, toppings_allowed, topping_extra_price')
       .eq('restaurant_id', restaurantId)
       .is('archived_at', null)
       .order('category', { ascending: true })
@@ -801,6 +801,11 @@ router.get(['/cart', '/menu'], (_req, res) => {
   // Disable browser reuse so refreshed pages always pick up the latest UI logic.
   res.setHeader('Cache-Control', 'no-store, max-age=0, must-revalidate');
   res.sendFile(path.join(__dirname, '..', 'public', 'webcart.html'));
+});
+
+router.get('/feedback', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, max-age=0, must-revalidate');
+  res.sendFile(path.join(__dirname, '..', 'public', 'feedback.html'));
 });
 
 module.exports = router;

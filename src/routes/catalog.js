@@ -660,10 +660,30 @@ router.get('/internal-menu', handleInternalMenuItems);
 
 // ── POST /api/menu/upload (and /api/catalog/menu-upload) — Bulk menu upload ──
 
+// AFTER
 async function handleMenuUpload(req, res) {
   try {
-    if (!['owner', 'manager', 'brand_owner'].includes(req.user_role))
+    const OWNER_ROLES = ['owner', 'brand_owner'];
+    if (!OWNER_ROLES.includes(req.user_role) && req.user_role !== 'manager') {
       return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    if (req.user_role === 'manager') {
+      const { data: tenant, error: tenantErr } = await supabaseAdmin
+        .from('tenants')
+        .select('allow_manager_menu_upload')
+        .eq('id', req.restaurant_id)
+        .maybeSingle();
+      if (tenantErr) {
+        console.error('[menu/upload] permission lookup failed:', tenantErr.message);
+        return res.status(500).json({ error: 'Could not verify upload permission' });
+      }
+      if (!tenant?.allow_manager_menu_upload) {
+        return res.status(403).json({
+          error: 'Menu upload is restricted to the owner for this outlet. Ask your owner to enable manager upload access in Settings.',
+        });
+      }
+    }
 
     const { items } = req.body;
     if (!items || !Array.isArray(items) || !items.length)
@@ -730,8 +750,16 @@ async function handleMenuUpload(req, res) {
         packing_time:        Math.max(0, parseFloat(item.packing_time) || 1),
         holds_well:          parseBoolCell(item.holds_well, false),
         fulfillment_section: String(item.fulfillment_section || 'main').trim() || 'main',
+        item_type:           String(item.item_type || 'PRODUCT').trim().toUpperCase() || 'PRODUCT',
+        variant_group_id:    item.variant_group_id ? String(item.variant_group_id).trim() : null,
+        size_label:          item.size_label ? String(item.size_label).trim() : null,
+        flavour_group:       item.flavour_group ? String(item.flavour_group).trim() : null,
+        scoop_count:         Math.max(1, parseInt(item.scoop_count, 10) || 1),
+        crust_options:       item.crust_options ? String(item.crust_options).trim() : null,
+        toppings_allowed:    !!item.toppings_allowed,
+        topping_extra_price: item.topping_extra_price != null ? parseFloat(item.topping_extra_price) || null : null,
         created_at:          now,
-        updated_at:          now,
+        updated_at:          now,      
       });
     }
 

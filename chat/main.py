@@ -50,6 +50,13 @@ from tools.payment_tools import (
     verify_checkout_payment,
     ensure_prepay_payment_link,
 )
+from tools.phonepe_tools import (
+    phonepe_status_message,
+    prepare_phonepe_redirect,
+    confirm_phonepe_return,
+    verify_webhook_auth as verify_phonepe_webhook_auth,
+    handle_payment_webhook as handle_phonepe_webhook,
+)
 from tools.booking_mechanisms import notify_manager_order_alert
 from tools.auto_reply_filter import is_whatsapp_auto_reply
 from tools.booking_mechanisms import (
@@ -58,6 +65,7 @@ from tools.booking_mechanisms import (
 )
 from agents.root_agent import route_message
 from agents.supply_agent import handle_supply_message  # Module 11
+from agents.customer.minimal_order_agent import handle_minimal_order_flow
 
 import asyncio
 
@@ -258,10 +266,12 @@ async def _dispatch_to_lob(
 
     Current LOBs
     ------------
-    "restaurant"  → handled by caller (booking_agent / dine-in / takeaway / delivery)
-    "supply"      → handle_supply_message (B2B food supply, already live)
-    "retail"      → placeholder — will route to retail_agent when built
-    "jewellery"   → placeholder — will route to jewellery_agent when built
+    "restaurant"     → handled by caller (booking_agent / dine-in / takeaway / delivery)
+    "supply"         → handle_supply_message (B2B food supply, already live)
+    "psl"            → minimal_order_agent (webcart link only, ≤5 msgs/order)
+    "food_products"  → minimal_order_agent (same pattern)
+    "retail"         → minimal_order_agent (same pattern)
+    "jewellery"      → placeholder — will route to jewellery_agent when built
 
     Adding a new LOB
     ----------------
@@ -282,12 +292,6 @@ async def _dispatch_to_lob(
             message_type    = msg_type,
             raw_message_obj = message_obj,
         )
-
-    elif lob_type == "retail":
-        # Placeholder — import and call retail_agent when implemented
-        logger.info(f"[lob-dispatch] retail agent not yet implemented for {restaurant_id}")
-        from tools.whatsapp_tools import send_whatsapp_message as _send
-        await _send(phone, "Our retail ordering service is coming soon! 🛍️", restaurant_id)
 
     elif lob_type == "jewellery":
         # Placeholder
@@ -425,20 +429,40 @@ async def _process_meta_payload(payload: dict):
         # Refresh pin on every message — keeps subsequent turns fast
         await pin_active_restaurant_for_phone(restaurant_whatsapp, phone, restaurant["id"])
         
-        # 3e. LOB dispatch — non-restaurant tenants go to their own agent
+        # 3f. LOB dispatch — non-restaurant tenants go to their own agent
         lob_type = restaurant.get("lob_type") or "restaurant"
         if lob_type != "restaurant":
+            restaurant_id = restaurant["id"]
+            profile_name = (
+                value.get("contacts", [{}])[0].get("profile", {}).get("name", "")
+            )
+            if lob_type in ("psl", "food_products", "retail"):
+                logger.info(
+                    f"[routing] lob='{lob_type}' for {restaurant['name']} — minimal order agent"
+                )
+                async with customer_lock(restaurant_id, phone):
+                    session_state = await get_session_state(restaurant_id, phone)
+                    await handle_minimal_order_flow(
+                        restaurant=restaurant,
+                        phone=phone,
+                        message_body=message_body,
+                        session_state=session_state,
+                        profile_name=profile_name,
+                    )
+                    await save_session_state(restaurant_id, phone, session_state)
+                return
+
             logger.info(
                 f"[routing] lob='{lob_type}' for {restaurant['name']} — dispatching"
             )
             await _dispatch_to_lob(
-                lob_type    = lob_type,
-                restaurant  = restaurant,
-                phone       = phone,
-                message_body= message_body,
-                msg_type    = msg_type,
-                message_obj = message_obj,
-                payload     = payload,
+                lob_type=lob_type,
+                restaurant=restaurant,
+                phone=phone,
+                message_body=message_body,
+                msg_type=msg_type,
+                message_obj=message_obj,
+                payload=payload,
             )
             return
 
@@ -657,6 +681,16 @@ async def health_razorpay():
     return JSONResponse(payload)
 
 
+@app.get("/health/phonepe")
+async def health_phonepe():
+    """Diagnostic — confirms PhonePe keys loaded (no secrets exposed)."""
+    return JSONResponse({
+        "status": phonepe_status_message(),
+        "env": settings.phonepe_env,
+        "active_gateway": settings.payment_gateway,
+    })
+
+
 def _verify_internal_secret(request: Request) -> bool:
     from tools.booking_mechanisms import KDS_SECRET
     if not KDS_SECRET:
@@ -844,13 +878,14 @@ async def internal_webcart_confirm_pay(request: Request):
     if len(items) > 6:
         order_preview += f"\n- +{len(items) - 6} more item(s)"
 
+    gateway_label = "Razorpay" if settings.payment_gateway == "razorpay" else "PhonePe"
     body_text = (
         "Your order is almost confirmed.\n\n"
         f"Order ref: {order_ref or booking_id[-8:]}\n"
         f"Token: {token_label or token_number}\n"
         f"Total: INR {total:.0f}\n\n"
         f"{order_preview}\n\n"
-        "Tap Confirm & Pay to complete payment securely via Razorpay."
+        f"Tap Confirm & Pay to complete payment securely via {gateway_label}."
     ).strip()
 
     sent = await send_whatsapp_cta_url(
@@ -860,7 +895,7 @@ async def internal_webcart_confirm_pay(request: Request):
         button_text="Confirm & Pay",
         url=str(payment_link),
         header_text="Confirm Your Order",
-        footer_text="Secure payment powered by Razorpay",
+        footer_text=f"Secure payment powered by {gateway_label}",
     )
 
     if not sent:
@@ -938,7 +973,6 @@ async def payment_complete(request: Request):
 
 @app.post("/pay/failure-event")
 async def pay_failure_event(request: Request):
-    """Capture hosted checkout failures for observability and manager awareness."""
     try:
         body = await request.json()
     except Exception:
@@ -951,6 +985,41 @@ async def pay_failure_event(request: Request):
     logger.warning(
         f"[pay-failure-event] booking_id={booking_id or 'unknown'} kind={kind} details={details}"
     )
+
+    # Don't alert the manager for the customer simply closing the modal —
+    # that's not actionable and is the majority of these events.
+    NOTIFY_KINDS = {"payment_failed"}
+    if booking_id and kind in NOTIFY_KINDS:
+        try:
+            booking = await get_booking_with_customer(booking_id)
+            if booking and booking.get("payment_status") != "paid":
+                restaurant_id = str(booking.get("restaurant_id") or "").strip()
+                customer_phone = str(booking.get("customer_phone") or "").strip()
+                token_number = str(booking.get("token_number") or booking_id[-8:]).strip()
+
+                detail_reason = ""
+                if isinstance(details, dict):
+                    detail_reason = str(
+                        details.get("reason") or details.get("code")
+                        or details.get("description") or ""
+                    ).strip()
+
+                if restaurant_id:
+                    from tools.restaurant_config import get_manager_phone
+                    manager_phone = await get_manager_phone(restaurant_id)
+                    if manager_phone:
+                        await send_whatsapp_message(
+                            manager_phone,
+                            f"⚠️ Payment attempt failed — Token *{token_number}*\n"
+                            f"Customer: {customer_phone or 'unknown'}\n"
+                            f"Reason: {detail_reason or kind}\n\n"
+                            f"Order has NOT gone to kitchen. Customer may retry payment.",
+                            restaurant_id,
+                        )
+        except Exception as exc:
+            logger.warning(f"[pay-failure-event] manager alert skipped for {booking_id}: {exc}")
+
+    return JSONResponse(status_code=200, content={"ok": True})
 
     if booking_id:
         try:
@@ -997,8 +1066,46 @@ async def pay_failure_event(request: Request):
 
 @app.get("/pay/{booking_id}")
 async def pay_checkout(booking_id: str, request: Request):
-    """Hosted Razorpay method picker page (click-first to avoid WebView popup blocking)."""
+    """Hosted checkout entry point — routes to PhonePe or Razorpay.
+
+    Gateway is settings.payment_gateway ("phonepe" by default). Append
+    ?gw=razorpay or ?gw=phonepe to a link to force a specific gateway for
+    testing without redeploying.
+    """
     token = request.query_params.get("t", "")
+
+    from tools.phonepe_tools import phonepe_configured 
+    
+    gateway = (request.query_params.get("gw") or settings.payment_gateway or "phonepe").lower()
+
+    if gateway == "phonepe" and not phonepe_configured():
+        logger.warning(f"[pay-checkout] PhonePe not configured, falling back to Razorpay, booking={booking_id}")
+        gateway = "razorpay"
+
+    if gateway == "phonepe" and phonepe_configured():
+        result = await prepare_phonepe_redirect(booking_id, token)
+        if result.get("error") == "invalid_token":
+            return HTMLResponse("<h1>Invalid or expired payment link</h1>", status_code=403)
+        if result.get("error") == "booking_not_found":
+            return HTMLResponse("<h1>Order not found</h1>", status_code=404)
+        if result.get("already_paid"):
+            return HTMLResponse(
+                "<h1>Already paid ✅</h1><p>Return to WhatsApp for your confirmation.</p>",
+                status_code=200,
+            )
+        if result.get("error") == "phonepe_not_configured":
+            logger.error(f"[pay-checkout] PhonePe not configured, booking={booking_id}")
+            return HTMLResponse(
+                "<h1>Payment unavailable</h1>"
+                "<p>Online payment isn't set up yet. Please contact the restaurant, "
+                "or reply <em>pay</em> on WhatsApp in a moment to try again.</p>",
+                status_code=503,
+            )
+        if result.get("error"):
+            return HTMLResponse(f"<h1>Payment unavailable</h1><p>{result['error']}</p>", status_code=400)
+        return RedirectResponse(result["redirect_url"], status_code=303)
+
+    # Razorpay — hosted method-picker page (click-first to avoid WebView popup blocking)
     ctx = await resolve_checkout_context(booking_id, token)
     if ctx.get("error") == "invalid_token":
         return HTMLResponse("<h1>Invalid or expired payment link</h1>", status_code=403)
@@ -1012,6 +1119,25 @@ async def pay_checkout(booking_id: str, request: Request):
     if ctx.get("error"):
         return HTMLResponse(f"<h1>Payment unavailable</h1><p>{ctx['error']}</p>", status_code=400)
     return HTMLResponse(render_method_selection_html(ctx), status_code=200)
+
+
+@app.get("/payment/phonepe/return")
+async def payment_phonepe_return(request: Request):
+    """PhonePe redirects the customer's browser here after the hosted checkout page."""
+    booking_id = request.query_params.get("booking_id", "")
+    token = request.query_params.get("t", "")
+    if not booking_id:
+        return HTMLResponse("<h1>Payment status unknown</h1>", status_code=400)
+
+    result = await confirm_phonepe_return(booking_id, token)
+    status = result.get("status", "pending")
+    simple_status = "paid" if status == "paid" else ("failed" if status in ("failed", "fulfillment_failed") else "unknown")
+
+    # Reuse the existing /payment/complete page for the actual HTML response.
+    return RedirectResponse(
+        f"/payment/complete?status={simple_status}&booking_id={booking_id}",
+        status_code=303,
+    )
 
 
 @app.post("/pay/{booking_id}/create-order")
@@ -1087,6 +1213,33 @@ async def razorpay_webhook_probe():
         "status": "ok",
         "message": "Razorpay webhook endpoint is live. Configure payment.captured and order.paid events here.",
     })
+
+
+@app.get("/webhook/phonepe")
+async def phonepe_webhook_probe():
+    """Browser/PhonePe URL check — real events must use POST."""
+    return JSONResponse({
+        "status": "ok",
+        "message": "PhonePe webhook endpoint is live. Configure it in PhonePe Dashboard → Webhooks.",
+    })
+
+
+@app.post("/webhook/phonepe")
+async def phonepe_webhook(request: Request):
+    """PhonePe checkout order events (configure in PhonePe Business Dashboard → Webhooks)."""
+    body_bytes = await request.body()
+    auth_header = request.headers.get("Authorization", "")
+
+    if not verify_phonepe_webhook_auth(auth_header):
+        raise HTTPException(status_code=400, detail="Invalid PhonePe webhook auth")
+
+    try:
+        payload = json.loads(body_bytes.decode("utf-8"))
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    result = await handle_phonepe_webhook(payload)
+    return JSONResponse(status_code=200, content=result)
 
 
 @app.post("/webhook/razorpay")

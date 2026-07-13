@@ -1104,6 +1104,54 @@ async def clear_prepay_fulfillment_payload(booking_id: str) -> None:
         logger.warning(f"[prepay] clear_prepay_fulfillment_payload failed for {booking_id}: {e}")
 
 
+async def get_last_paid_booking_for_customer(
+    restaurant_id: str,
+    customer_id: str,
+) -> dict[str, Any] | None:
+    """Most recent paid booking with a prepay payload — used for REPEAT ordering."""
+    if AsyncSessionLocal is None:
+        return None
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    SELECT
+                      b.id,
+                      b.service_type,
+                      b.prepay_fulfillment_payload,
+                      b.created_at
+                    FROM bookings b
+                    WHERE b.restaurant_id = CAST(:rid AS uuid)
+                      AND b.customer_id = CAST(:cid AS uuid)
+                      AND b.payment_status = 'paid'
+                      AND b.prepay_fulfillment_payload IS NOT NULL
+                    ORDER BY b.created_at DESC
+                    LIMIT 1
+                """),
+                {"rid": restaurant_id, "cid": customer_id},
+            )
+            row = result.mappings().first()
+            if not row:
+                return None
+            payload = row.get("prepay_fulfillment_payload")
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if not isinstance(payload, dict):
+                return None
+            return {
+                "booking_id": str(row["id"]),
+                "service_type": row.get("service_type") or "takeaway",
+                "payload": payload,
+                "created_at": row.get("created_at"),
+            }
+    except Exception as e:
+        logger.warning(
+            f"[prepay] get_last_paid_booking_for_customer failed "
+            f"for restaurant={restaurant_id} customer={customer_id}: {e}"
+        )
+        return None
+
+
 async def get_pending_prepay_reminder_candidates(
     min_age_minutes: int = 15,
     max_age_hours: int = 24,

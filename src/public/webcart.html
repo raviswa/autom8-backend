@@ -415,6 +415,66 @@
       }
       .header { position: sticky; top: 0; border-radius: 0; }
     }
+
+    .size-pills { display: flex; gap: 6px; margin: 4px 0; flex-wrap: wrap; }
+    .size-pill {
+      border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px;
+      background: #fff; color: var(--ink); font-size: 11px; font-weight: 600; cursor: pointer;
+    }
+    .size-pill.active { background: var(--brand); border-color: var(--brand); color: #fff; }
+
+    .flavour-pill, .crust-pill, .topping-pill {
+      border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px;
+      background: #fff; color: var(--ink); font-size: 11px; font-weight: 600; cursor: pointer;
+    }
+    .flavour-pill.active, .crust-pill.active, .topping-pill.active {
+      background: var(--brand); border-color: var(--brand); color: #fff;
+    }
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 60;
+      display: none; align-items: flex-end; justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .customizer-modal {
+      background: var(--panel); width: 100%; max-width: 520px; max-height: 85vh;
+      border-radius: 18px 18px 0 0; overflow: hidden; display: flex; flex-direction: column;
+    }
+    @media (min-width: 901px) {
+      .modal-overlay { align-items: center; }
+      .customizer-modal { border-radius: var(--radius); max-height: 80vh; }
+    }
+    .modal-head {
+      padding: 14px 16px; border-bottom: 1px solid var(--line);
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    }
+    .modal-head strong { font-size: 15px; }
+    .modal-body { padding: 14px 16px; overflow-y: auto; flex: 1; }
+    .modal-foot {
+      padding: 12px 16px 16px; border-top: 1px solid var(--line);
+      display: flex; gap: 8px; flex-shrink: 0;
+    }
+    .modal-foot button { flex: 1; border-radius: 10px; padding: 11px; font-weight: 700; cursor: pointer; border: none; }
+    .modal-confirm { background: var(--brand); color: #fff; }
+    .modal-skip { background: #f3f4f6; color: var(--ink); }
+    .modal-section { margin-bottom: 14px; }
+    .modal-section-title { font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: .04em; }
+    .flavour-list { display: grid; gap: 8px; }
+    .flavour-checkbox {
+      display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+      border: 1px solid var(--line); border-radius: 10px; cursor: pointer;
+    }
+    .flavour-checkbox.disabled { opacity: 0.45; cursor: not-allowed; }
+    .flavour-checkbox input { width: 16px; height: 16px; accent-color: var(--brand); }
+    .modal-price { font-size: 18px; font-weight: 800; color: var(--brand); margin-top: 8px; }
+    .addon-upsell-list { display: grid; gap: 8px; }
+    .addon-upsell-item {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer;
+    }
+    .addon-upsell-item:active { background: #fff7ed; }
+    .ice-cream-card { cursor: pointer; }
+    .row-hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .cl-detail { font-size: 11px; color: var(--muted); margin-top: 2px; }
   </style>
 </head>
 <body>
@@ -509,6 +569,17 @@
       <div id="waOpenHelp" class="wa-open-help">
         Could not open WhatsApp automatically. <a id="waOpenLink" href="#" target="_self">Tap here to open chat</a>.
       </div>
+    </div>
+  </div>
+
+  <div id="pslModalOverlay" class="modal-overlay" aria-hidden="true">
+    <div class="customizer-modal" id="pslModal">
+      <div class="modal-head">
+        <strong id="pslModalTitle">Customize</strong>
+        <button class="icon-btn" id="pslModalClose" type="button">✕</button>
+      </div>
+      <div class="modal-body" id="pslModalBody"></div>
+      <div class="modal-foot" id="pslModalFoot"></div>
     </div>
   </div>
 
@@ -619,6 +690,8 @@
       lastSubmittedBookingId: null,
       paymentPollTimer: null,
       paymentPollInFlight: false,
+      selectedSize: {},
+      pslModal: null,
     };
 
     const $ = (id) => document.getElementById(id);
@@ -776,7 +849,13 @@
     }
     function cartFingerprint() {
       const lines = [...state.cart.values()]
-        .map((l) => ({ id: String(l.id || ''), qty: Number(l.qty || 0), price: Number(l.price || 0) }))
+        .map((l) => ({
+          id: String(l.id || ''),
+          baseId: String(l.baseId || ''),
+          qty: Number(l.qty || 0),
+          price: Number(l.price || 0),
+          customization: l.customization || null,
+        }))
         .filter((l) => l.id && l.qty > 0)
         .sort((a, b) => a.id.localeCompare(b.id));
       const promo = ($('promo').value || '').trim().toUpperCase();
@@ -862,6 +941,7 @@ function cartTotals() {
           <div class="cart-line">
             <div>
               <div class="cl-name">${l.name}</div>
+              ${l.customization ? `<div class="cl-detail">${customizationLabel(l)}</div>` : ''}
               <div class="cl-price">${money(l.price)} each</div>
             </div>
             <div class="stepper" style="border-color:var(--brand)">
@@ -1048,28 +1128,411 @@ $('subtotal').textContent = money(subtotal);
       }
     }
 
-    function changeQty(id, delta) {
-      const item = state.menu.find(i => String(i.id) === String(id));
-      const key = item ? (item.retailer_id || item.id) : id;
+    function parseFlavourGroups(str) {
+      return String(str || '').split(',').map(s => s.trim()).filter(Boolean);
+    }
+
+    function flavourGroupsIntersect(baseGroups, flavourGroups) {
+      const base = parseFlavourGroups(baseGroups);
+      const flavour = parseFlavourGroups(flavourGroups);
+      return base.some(g => flavour.includes(g));
+    }
+
+    function cartKey(baseItem, customization) {
+      if (!customization) return baseItem.retailer_id || baseItem.id;
+      const parts = [
+        baseItem.retailer_id || baseItem.id,
+        customization.crust || '',
+        (customization.flavourIds || []).slice().sort().join('+'),
+        (customization.toppingIds || []).slice().sort().join('+'),
+      ];
+      return parts.filter(Boolean).join('|');
+    }
+
+    function customizationLabel(line) {
+      if (!line.customization) return '';
+      const parts = [];
+      if (line.customization.crust) parts.push(`${line.customization.crust} crust`);
+      if (line.customization.toppingNames && line.customization.toppingNames.length) {
+        parts.push(line.customization.toppingNames.join(', '));
+      }
+      if (line.customization.flavourNames && line.customization.flavourNames.length) {
+        parts.push(line.customization.flavourNames.join(' + '));
+      }
+      return parts.join(' · ');
+    }
+
+    function buildCustomizedLineName(item) {
+      let name = item.name;
+      if (item.size_label) name += ` (${item.size_label})`;
+      return name;
+    }
+
+    function getFlavoursForBase(baseItem) {
+      return state.menu.filter(f =>
+        (f.item_type || '').toUpperCase() === 'FLAVOUR' &&
+        flavourGroupsIntersect(baseItem.flavour_group, f.flavour_group)
+      );
+    }
+
+    function getToppingAddons() {
+      return state.menu.filter(i =>
+        (i.item_type || '').toUpperCase() === 'ADDON' &&
+        String(i.category || '').toLowerCase() === 'toppings'
+      );
+    }
+
+    function getUpsellAddons() {
+      return state.menu.filter(i =>
+        (i.item_type || '').toUpperCase() === 'ADDON' &&
+        String(i.category || '').toLowerCase() !== 'toppings'
+      );
+    }
+
+    function needsPizzaCustomizer(item) {
+      return !!item.toppings_allowed || !!(item.crust_options && String(item.crust_options).trim());
+    }
+
+    function addCustomizedToCart(item, customization, computedPrice) {
+      const key = cartKey(item, customization);
       const prev = state.cart.get(key);
-      const nextQty = (prev ? prev.qty : 0) + delta;
-      if (nextQty <= 0) {
-        state.cart.delete(key);
-      } else if (prev) {
-        prev.qty = nextQty;
-      } else if (item) {
-        state.cart.set(key, { id: key, name: item.name, price: Number(item.price || 0), qty: nextQty });
+      if (prev) {
+        prev.qty += 1;
+      } else {
+        state.cart.set(key, {
+          id: key,
+          baseId: item.id,
+          name: buildCustomizedLineName(item),
+          price: computedPrice,
+          qty: 1,
+          customization,
+        });
       }
       renderCart();
     }
 
-    function addToCart(item) { changeQty(item.id, 1); }
+    function addPlainToCart(item) {
+      const key = item.retailer_id || item.id;
+      const prev = state.cart.get(key);
+      const nextQty = (prev ? prev.qty : 0) + 1;
+      if (prev) {
+        prev.qty = nextQty;
+      } else {
+        state.cart.set(key, {
+          id: key,
+          name: item.name,
+          price: Number(item.price || 0),
+          qty: nextQty,
+        });
+      }
+      renderCart();
+    }
+
+    function changeQty(id, delta) {
+      const rawId = String(id);
+      let resolvedKey = rawId;
+      let prev = state.cart.get(rawId);
+
+      if (!prev) {
+        const item = state.menu.find(i => String(i.id) === rawId || String(i.retailer_id || i.id) === rawId);
+        if (item) {
+          const plainKey = String(item.retailer_id || item.id);
+          if (plainKey !== rawId) {
+            prev = state.cart.get(plainKey);
+            if (prev) resolvedKey = plainKey;
+          }
+        }
+      }
+
+      if (prev) {
+        const nextQty = prev.qty + delta;
+        if (nextQty <= 0) state.cart.delete(resolvedKey);
+        else prev.qty = nextQty;
+        renderCart();
+        return;
+      }
+
+      const item = state.menu.find(i => String(i.id) === rawId || String(i.retailer_id || i.id) === rawId);
+      if (!item || delta <= 0) return;
+      addPlainToCart(item);
+    }
+
+    function changeQtyForBase(baseId, delta) {
+      if (delta > 0) {
+        const item = state.menu.find(i => String(i.id) === String(baseId));
+        if (!item) return;
+        const type = (item.item_type || 'PRODUCT').toUpperCase();
+        if (['CUP', 'CONE', 'SUNDAE'].includes(type)) openFlavourModal(item);
+        else if (type === 'PIZZA' && needsPizzaCustomizer(item)) openPizzaCustomizer(item);
+        else addPlainToCart(item);
+        return;
+      }
+      for (const [key, line] of state.cart.entries()) {
+        if (String(line.baseId) === String(baseId)) {
+          changeQty(key, delta);
+          return;
+        }
+      }
+      const item = state.menu.find(i => String(i.id) === String(baseId));
+      if (item) changeQty(item.retailer_id || item.id, delta);
+    }
+
+    function addToCart(item) {
+      const type = (item.item_type || 'PRODUCT').toUpperCase();
+      if (['CUP', 'CONE', 'SUNDAE'].includes(type)) {
+        openFlavourModal(item);
+        return;
+      }
+      if (type === 'PIZZA' && needsPizzaCustomizer(item)) {
+        openPizzaCustomizer(item);
+        return;
+      }
+      addPlainToCart(item);
+    }
 
     function rowQty(item) {
-      const key = item.retailer_id || item.id;
-      const line = state.cart.get(key);
-      return line ? line.qty : 0;
+      let total = 0;
+      const itemKey = String(item.retailer_id || item.id);
+      for (const line of state.cart.values()) {
+        if (line.customization && String(line.baseId) === String(item.id)) {
+          total += line.qty;
+        } else if (!line.customization && String(line.id) === itemKey) {
+          total += line.qty;
+        }
+      }
+      return total;
     }
+
+    const pslModalOverlay = $('pslModalOverlay');
+    const pslModalBody = $('pslModalBody');
+    const pslModalFoot = $('pslModalFoot');
+    const pslModalTitle = $('pslModalTitle');
+
+    function closePslModal() {
+      state.pslModal = null;
+      pslModalOverlay.classList.remove('open');
+      pslModalOverlay.setAttribute('aria-hidden', 'true');
+      document.body.classList.remove('wa-guide-open');
+    }
+
+    function openPslModalShell(title) {
+      pslModalTitle.textContent = title;
+      pslModalOverlay.classList.add('open');
+      pslModalOverlay.setAttribute('aria-hidden', 'false');
+      document.body.classList.add('wa-guide-open');
+    }
+
+    function proceedToAddonUpsell(pending) {
+      const upsellAddons = getUpsellAddons();
+      if (!upsellAddons.length) {
+        addCustomizedToCart(pending.item, pending.customization, pending.price);
+        closePslModal();
+        return;
+      }
+      state.pslModal = { type: 'addon', pending };
+      renderAddonUpsellModal();
+    }
+
+    function renderAddonUpsellModal() {
+      const pending = state.pslModal && state.pslModal.pending;
+      if (!pending) return;
+      const upsellAddons = getUpsellAddons();
+      openPslModalShell('Add extras?');
+      pslModalBody.innerHTML = `
+        <div class="addon-upsell-list">
+          ${upsellAddons.map(a => `
+            <div class="addon-upsell-item" data-addon="${a.id}">
+              <div>
+                <div style="font-weight:600">${a.name}</div>
+                <div style="font-size:12px;color:var(--muted)">${a.category || 'Extra'}</div>
+              </div>
+              <strong>${money(a.price)}</strong>
+            </div>
+          `).join('')}
+        </div>`;
+      pslModalFoot.innerHTML = `
+        <button class="modal-skip" type="button" id="pslSkipAddons">Skip</button>
+        <button class="modal-confirm" type="button" id="pslConfirmAddons">Add to cart</button>`;
+      $('pslSkipAddons').addEventListener('click', () => {
+        addCustomizedToCart(pending.item, pending.customization, pending.price);
+        closePslModal();
+      });
+      $('pslConfirmAddons').addEventListener('click', () => {
+        addCustomizedToCart(pending.item, pending.customization, pending.price);
+        closePslModal();
+      });
+      pslModalBody.querySelectorAll('[data-addon]').forEach(el => {
+        el.addEventListener('click', () => {
+          const addon = state.menu.find(i => String(i.id) === el.dataset.addon);
+          if (addon) addPlainToCart(addon);
+        });
+      });
+    }
+
+    function openFlavourModal(baseItem) {
+      const flavours = getFlavoursForBase(baseItem);
+      const scoopMax = Math.max(1, parseInt(baseItem.scoop_count, 10) || 1);
+      const selected = [];
+      state.pslModal = { type: 'flavour', baseItem, flavours, scoopMax, selected };
+      openPslModalShell(`${baseItem.name} — Pick up to ${scoopMax} flavour${scoopMax === 1 ? '' : 's'}`);
+      renderFlavourModal();
+    }
+
+    function renderFlavourModal() {
+      const modal = state.pslModal;
+      if (!modal || modal.type !== 'flavour') return;
+      const { baseItem, flavours, scoopMax, selected } = modal;
+      const atLimit = selected.length >= scoopMax;
+      pslModalBody.innerHTML = `
+        <div class="flavour-list">
+          ${flavours.length ? flavours.map(f => {
+            const checked = selected.includes(f.id);
+            const disabled = atLimit && !checked;
+            return `
+              <label class="flavour-checkbox ${disabled ? 'disabled' : ''}" data-flavour="${f.id}">
+                <input type="checkbox" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''} />
+                <span>${f.name}</span>
+              </label>`;
+          }).join('') : '<div class="empty-state">No flavours configured for this item.</div>'}
+        </div>
+        <div class="modal-price">${money(baseItem.price)}</div>`;
+      pslModalFoot.innerHTML = `
+        <button class="modal-skip" type="button" id="pslCancelFlavour">Cancel</button>
+        <button class="modal-confirm" type="button" id="pslConfirmFlavour" ${selected.length ? '' : 'disabled'}>Continue</button>`;
+      $('pslCancelFlavour').addEventListener('click', closePslModal);
+      $('pslConfirmFlavour').addEventListener('click', confirmFlavourModal);
+      pslModalBody.querySelectorAll('[data-flavour]').forEach(el => {
+        el.addEventListener('click', (e) => {
+          if (e.target.tagName === 'INPUT') return;
+          const fid = el.dataset.flavour;
+          toggleFlavourSelection(fid);
+        });
+        const input = el.querySelector('input');
+        input.addEventListener('change', () => toggleFlavourSelection(el.dataset.flavour));
+      });
+    }
+
+    function toggleFlavourSelection(flavourId) {
+      const modal = state.pslModal;
+      if (!modal || modal.type !== 'flavour') return;
+      const idx = modal.selected.indexOf(flavourId);
+      if (idx >= 0) modal.selected.splice(idx, 1);
+      else if (modal.selected.length < modal.scoopMax) modal.selected.push(flavourId);
+      renderFlavourModal();
+    }
+
+    function confirmFlavourModal() {
+      const modal = state.pslModal;
+      if (!modal || modal.type !== 'flavour' || !modal.selected.length) return;
+      const selectedFlavours = modal.flavours.filter(f => modal.selected.includes(f.id));
+      const customization = {
+        flavourIds: selectedFlavours.map(f => f.id),
+        flavourNames: selectedFlavours.map(f => f.name),
+      };
+      proceedToAddonUpsell({
+        item: modal.baseItem,
+        customization,
+        price: Number(modal.baseItem.price || 0),
+      });
+    }
+
+    function openPizzaCustomizer(pizzaItem) {
+      const crusts = pizzaItem.crust_options
+        ? String(pizzaItem.crust_options).split(',').map(s => s.trim()).filter(Boolean)
+        : [];
+      const toppings = getToppingAddons();
+      state.pslModal = {
+        type: 'pizza',
+        pizzaItem,
+        crusts,
+        toppings,
+        selectedCrust: crusts[0] || '',
+        selectedToppingIds: [],
+      };
+      openPslModalShell(`${pizzaItem.name}${pizzaItem.size_label ? ` (${pizzaItem.size_label})` : ''}`);
+      renderPizzaCustomizerModal();
+    }
+
+    function renderPizzaCustomizerModal() {
+      const modal = state.pslModal;
+      if (!modal || modal.type !== 'pizza') return;
+      const { pizzaItem, crusts, toppings, selectedCrust, selectedToppingIds } = modal;
+      const toppingExtra = Number(pizzaItem.topping_extra_price || 0);
+      const toppingTotal = selectedToppingIds.length * toppingExtra;
+      const totalPrice = Number(pizzaItem.price || 0) + toppingTotal;
+
+      let bodyHtml = '';
+      if (crusts.length) {
+        bodyHtml += `
+          <div class="modal-section">
+            <div class="modal-section-title">Crust</div>
+            <div class="size-pills">
+              ${crusts.map(c => `
+                <button class="crust-pill ${c === selectedCrust ? 'active' : ''}" data-crust="${c}" type="button">${c}</button>
+              `).join('')}
+            </div>
+          </div>`;
+      }
+      if (pizzaItem.toppings_allowed && toppings.length) {
+        bodyHtml += `
+          <div class="modal-section">
+            <div class="modal-section-title">Toppings (+${money(toppingExtra)} each)</div>
+            <div class="flavour-list">
+              ${toppings.map(t => {
+                const checked = selectedToppingIds.includes(t.id);
+                return `
+                  <label class="flavour-checkbox" data-topping="${t.id}">
+                    <input type="checkbox" ${checked ? 'checked' : ''} />
+                    <span>${t.name}</span>
+                  </label>`;
+              }).join('')}
+            </div>
+          </div>`;
+      }
+      pslModalBody.innerHTML = bodyHtml + `<div class="modal-price">${money(totalPrice)}</div>`;
+      pslModalFoot.innerHTML = `
+        <button class="modal-skip" type="button" id="pslCancelPizza">Cancel</button>
+        <button class="modal-confirm" type="button" id="pslConfirmPizza">Continue</button>`;
+      $('pslCancelPizza').addEventListener('click', closePslModal);
+      $('pslConfirmPizza').addEventListener('click', confirmPizzaModal);
+
+      pslModalBody.querySelectorAll('[data-crust]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          modal.selectedCrust = btn.dataset.crust;
+          renderPizzaCustomizerModal();
+        });
+      });
+      pslModalBody.querySelectorAll('[data-topping]').forEach(el => {
+        const toggle = () => {
+          const tid = el.dataset.topping;
+          const idx = modal.selectedToppingIds.indexOf(tid);
+          if (idx >= 0) modal.selectedToppingIds.splice(idx, 1);
+          else modal.selectedToppingIds.push(tid);
+          renderPizzaCustomizerModal();
+        };
+        el.addEventListener('click', (e) => { if (e.target.tagName !== 'INPUT') toggle(); });
+        el.querySelector('input').addEventListener('change', toggle);
+      });
+    }
+
+    function confirmPizzaModal() {
+      const modal = state.pslModal;
+      if (!modal || modal.type !== 'pizza') return;
+      const { pizzaItem, crusts, selectedCrust, selectedToppingIds, toppings } = modal;
+      if (crusts.length && !selectedCrust) return;
+      const selectedToppings = toppings.filter(t => selectedToppingIds.includes(t.id));
+      const toppingExtra = Number(pizzaItem.topping_extra_price || 0);
+      const customization = {
+        crust: selectedCrust || undefined,
+        toppingIds: selectedToppings.map(t => t.id),
+        toppingNames: selectedToppings.map(t => t.name),
+      };
+      const price = Number(pizzaItem.price || 0) + selectedToppings.length * toppingExtra;
+      proceedToAddonUpsell({ item: pizzaItem, customization, price });
+    }
+
+    $('pslModalClose').addEventListener('click', closePslModal);
+    pslModalOverlay.addEventListener('click', (e) => { if (e.target === pslModalOverlay) closePslModal(); });
 
     function hCardHtml(item) {
       return `
@@ -1101,20 +1564,139 @@ $('subtotal').textContent = money(subtotal);
         </div>`;
     }
 
+    function groupMenuForDisplay(menu) {
+      const standalone = [];
+      const variantGroups = new Map();
+      const flavourCatalog = [];
+      const iceCreamBases = [];
+
+      for (const item of menu) {
+        const type = (item.item_type || 'PRODUCT').toUpperCase();
+        if (type === 'FLAVOUR') {
+          flavourCatalog.push(item);
+          continue;
+        }
+        if (type === 'ADDON') continue;
+        if (['CUP', 'CONE', 'SUNDAE'].includes(type)) {
+          iceCreamBases.push(item);
+          continue;
+        }
+        if (type === 'PIZZA' && item.variant_group_id) {
+          if (!variantGroups.has(item.variant_group_id)) variantGroups.set(item.variant_group_id, []);
+          variantGroups.get(item.variant_group_id).push(item);
+          continue;
+        }
+        standalone.push(item);
+      }
+      for (const rows of variantGroups.values()) rows.sort((a, b) => a.price - b.price);
+      return { standalone, variantGroups, flavourCatalog, iceCreamBases };
+    }
+
+    function selectedRowFor(groupId, rows) {
+      const chosenId = state.selectedSize[groupId];
+      return rows.find(r => r.id === chosenId) || rows[0];
+    }
+
+    function iceCreamCardHtml(item) {
+      const qty = rowQty(item);
+      const scoopMax = Math.max(1, parseInt(item.scoop_count, 10) || 1);
+      const scoopHint = scoopMax > 1 ? `Pick up to ${scoopMax} flavours` : 'Pick a flavour';
+      const actions = qty > 0
+        ? `<div class="stepper"><button data-step="-1" data-base="${item.id}">−</button><span>${qty}</span><button data-step="1" data-ice="${item.id}">+</button></div>`
+        : `<button class="btn-add" data-ice="${item.id}">+</button>`;
+      return `
+        <div class="row-card ice-cream-card" data-ice-base="${item.id}">
+          ${item.image_url ? `<img src="${item.image_url}" alt="" onerror="this.outerHTML='<div class=\\'img-fallback\\'>No image</div>'" />` : `<div class="img-fallback">No image</div>`}
+          <div class="row-info">
+            <div class="row-cat">${item.category || 'General'}</div>
+            <div class="row-name">${item.name}</div>
+            <div class="row-hint">${scoopHint}</div>
+            <div class="row-price">${money(item.price)}</div>
+          </div>
+          <div class="add-zone">${actions}</div>
+        </div>`;
+    }
+
+    function variantCardHtml(rows) {
+      const groupId = rows[0].variant_group_id;
+      const base = rows[0];
+      const current = selectedRowFor(groupId, rows);
+      const qty = rowQty(current);
+      const customized = needsPizzaCustomizer(current);
+
+      const sizePills = rows.map(r => `
+        <button class="size-pill ${r.id === current.id ? 'active' : ''}" data-group="${groupId}" data-row="${r.id}">
+          ${r.size_label || 'Size'}
+        </button>
+      `).join('');
+
+      const actions = qty > 0
+        ? `<div class="stepper"><button data-step="-1" data-base="${current.id}">−</button><span>${qty}</span><button data-step="1" data-pizza="${current.id}">+</button></div>`
+        : `<button class="btn-add" data-pizza="${current.id}">+</button>`;
+
+      return `
+        <div class="row-card" data-variant-group="${groupId}">
+          ${base.image_url ? `<img src="${base.image_url}" alt="" onerror="this.outerHTML='<div class=\\'img-fallback\\'>No image</div>'" />` : `<div class="img-fallback">No image</div>`}
+          <div class="row-info">
+            <div class="row-cat">${base.category || 'General'}</div>
+            <div class="row-name">${base.name}</div>
+            <div class="size-pills">${sizePills}</div>
+            <div class="row-price">${money(current.price)}</div>
+            ${customized ? '<div class="row-hint">Customize crust & toppings</div>' : ''}
+          </div>
+          <div class="add-zone">${actions}</div>
+        </div>`;
+    }
+
     function bindRowHandlers(root) {
       root.querySelectorAll('button[data-add]').forEach(btn => {
-        btn.addEventListener('click', () => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
           const item = state.menu.find(i => String(i.id) === btn.dataset.add);
           if (item) addToCart(item);
         });
       });
+      root.querySelectorAll('button[data-pizza]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const item = state.menu.find(i => String(i.id) === btn.dataset.pizza);
+          if (!item) return;
+          if (needsPizzaCustomizer(item)) openPizzaCustomizer(item);
+          else addPlainToCart(item);
+        });
+      });
+      root.querySelectorAll('button[data-ice]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const item = state.menu.find(i => String(i.id) === btn.dataset.ice);
+          if (item) openFlavourModal(item);
+        });
+      });
       root.querySelectorAll('button[data-step]').forEach(btn => {
-        btn.addEventListener('click', () => changeQty(btn.dataset.id, Number(btn.dataset.step)));
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (btn.dataset.base) changeQtyForBase(btn.dataset.base, Number(btn.dataset.step));
+          else changeQty(btn.dataset.id, Number(btn.dataset.step));
+        });
+      });
+      root.querySelectorAll('.ice-cream-card[data-ice-base]').forEach(card => {
+        card.addEventListener('click', (e) => {
+          if (e.target.closest('button')) return;
+          const item = state.menu.find(i => String(i.id) === card.dataset.iceBase);
+          if (item) openFlavourModal(item);
+        });
       });
       root.querySelectorAll('.hcard[data-id]').forEach(card => {
         card.addEventListener('click', () => {
           const item = state.menu.find(i => String(i.id) === card.dataset.id);
           if (item) addToCart(item);
+        });
+      });
+      root.querySelectorAll('.size-pill').forEach(pill => {
+        pill.addEventListener('click', (e) => {
+          e.stopPropagation();
+          state.selectedSize[pill.dataset.group] = pill.dataset.row;
+          renderMenuList();
         });
       });
     }
@@ -1144,7 +1726,11 @@ $('subtotal').textContent = money(subtotal);
     }
 
     function renderChips() {
-      state.categories = [...new Set(state.menu.map(i => i.category || 'General'))];
+      const displayable = state.menu.filter(i => {
+        const type = (i.item_type || 'PRODUCT').toUpperCase();
+        return type !== 'FLAVOUR' && type !== 'ADDON';
+      });
+      state.categories = [...new Set(displayable.map(i => i.category || 'General'))];
       state.categories.sort((a, b) => {
         const rankDiff = categorySortRank(a) - categorySortRank(b);
         return rankDiff !== 0 ? rankDiff : a.localeCompare(b);
@@ -1174,8 +1760,29 @@ $('subtotal').textContent = money(subtotal);
           i.name.toLowerCase().includes(q) || (i.category || '').toLowerCase().includes(q)
         );
       }
-      menuList.innerHTML = visible.length
-        ? visible.map(rowCardHtml).join('')
+
+      const { variantGroups } = groupMenuForDisplay(visible);
+      const seenGroups = new Set();
+      const seenIceCream = new Set();
+      const cards = [];
+      for (const item of visible) {
+        const type = (item.item_type || 'PRODUCT').toUpperCase();
+        if (type === 'FLAVOUR' || type === 'ADDON') continue;
+        if (type === 'PIZZA' && item.variant_group_id) {
+          if (seenGroups.has(item.variant_group_id)) continue;
+          seenGroups.add(item.variant_group_id);
+          cards.push(variantCardHtml(variantGroups.get(item.variant_group_id)));
+        } else if (['CUP', 'CONE', 'SUNDAE'].includes(type)) {
+          if (seenIceCream.has(item.id)) continue;
+          seenIceCream.add(item.id);
+          cards.push(iceCreamCardHtml(item));
+        } else if (!item.variant_group_id) {
+          cards.push(rowCardHtml(item));
+        }
+      }
+
+      menuList.innerHTML = cards.length
+        ? cards.join('')
         : '<div class="empty-state">No dishes match your search.</div>';
       bindRowHandlers(menuList);
     }
