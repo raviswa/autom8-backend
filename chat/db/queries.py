@@ -59,6 +59,42 @@ async def get_client_by_phone(supplier_id: str, phone: str) -> Optional[dict]:
     return None
 
 
+async def get_supply_client_by_restaurant_id(restaurant_id: str) -> Optional[dict]:
+    """
+    Bridge lookup for the shared-WABA testing path: given a Munafe
+    tenant/restaurant id (a "supply" lob_type tenant acting as a client),
+    resolve the real supply_clients row — and therefore the real
+    supplier_id — via supply_clients.munafe_restaurant_id.
+
+    Returns {'id': <supply_clients.id>, 'supplier_id': <suppliers.id>} or
+    None if this restaurant hasn't been registered as a client of any
+    supplier yet.
+
+    NOTE: assumes one supplier per restaurant for now (limit=1). If a
+    restaurant is ever linked to multiple suppliers, this needs a
+    disambiguation step (e.g. keyed by which supplier's WABA the
+    conversation is pinned to).
+    """
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            _url("supply_clients"),
+            headers=_headers(),
+            params={
+                "munafe_restaurant_id": f"eq.{restaurant_id}",
+                "is_active":            "eq.true",
+                "select":               "id,supplier_id",
+                "limit":                "1",
+            },
+        )
+    if resp.status_code == 200:
+        data = resp.json()
+        return data[0] if data else None
+    logger.error(
+        f"[queries] get_supply_client_by_restaurant_id HTTP {resp.status_code}: {resp.text[:200]}"
+    )
+    return None
+
+
 async def get_supply_session(supplier_id: str, phone: str) -> dict:
     """
     Fetch the current conversation state for a supplier+phone pair.
@@ -101,34 +137,38 @@ async def save_supply_session(
     }
     headers = _headers(prefer="resolution=merge-duplicates,return=minimal")
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(
-            _url("supply_conversation_states"),
-            headers=headers,
-            params={"on_conflict": "supplier_id,phone"},
-            json=payload,
-        )
+        resp = await client.post(_url("supply_conversation_states"), headers=headers, json=payload)
     if resp.status_code not in (200, 201):
         logger.error(f"[queries] save_supply_session HTTP {resp.status_code}: {resp.text[:200]}")
 
 
 async def get_client_outstanding(supplier_id: str, client_id: str) -> float:
     """
-    Return the total outstanding (unpaid) balance for a client in rupees.
-    Sums the 'amount' column of supply_statements where status='unpaid'.
+    Return the client's current outstanding balance in rupees.
+
+    supply_statements is a periodic PDF billing snapshot (period_start/
+    period_end, sent to the client) — not live, and wrong for an
+    on-demand "My Balance" check.
+
+    supply_credit_ledger is the real-time ledger: every debit/credit
+    entry carries a running balance_after. The current balance is simply
+    balance_after on the most recent ledger row for this client.
     """
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(
-            _url("supply_statements"),
+            _url("supply_credit_ledger"),
             headers=_headers(),
             params={
                 "supplier_id": f"eq.{supplier_id}",
                 "client_id":   f"eq.{client_id}",
-                "status":      "eq.unpaid",
-                "select":      "amount",
+                "select":      "balance_after",
+                "order":       "created_at.desc",
+                "limit":       "1",
             },
         )
     if resp.status_code == 200:
-        return sum(float(row.get("amount", 0)) for row in resp.json())
+        data = resp.json()
+        return float(data[0]["balance_after"]) if data else 0.0
     logger.error(f"[queries] get_client_outstanding HTTP {resp.status_code}: {resp.text[:200]}")
     return 0.0
 
@@ -163,30 +203,6 @@ async def create_payment_claim(
     return None
 
 
-async def get_last_supply_order(supplier_id: str, client_id: str) -> Optional[dict]:
-    """
-    Return the most recent non-cancelled order for a client (order status intent).
-    """
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(
-            _url("supply_orders"),
-            headers=_headers(),
-            params={
-                "supplier_id": f"eq.{supplier_id}",
-                "client_id":   f"eq.{client_id}",
-                "status":      "neq.cancelled",
-                "select":      "order_number,delivery_date,status,total_amount",
-                "order":       "created_at.desc",
-                "limit":       "1",
-            },
-        )
-    if resp.status_code == 200:
-        data = resp.json()
-        return data[0] if data else None
-    logger.error(f"[queries] get_last_supply_order HTTP {resp.status_code}: {resp.text[:200]}")
-    return None
-
-
 async def log_supply_notification(
     supplier_id: str,
     client_id: Optional[str],
@@ -216,7 +232,7 @@ async def log_supply_notification(
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             resp = await client.post(
-                _url("supply_notification_log"),
+                _url("supply_notifications"),
                 headers=_headers(prefer="return=minimal"),
                 json=row,
             )
