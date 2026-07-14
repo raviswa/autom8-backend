@@ -27,7 +27,7 @@ const {
   menuItemSpecialTodayMiddleware,
 } = require('./src/routes/catalog');
 const { logKdsSecretStatus } = require('./src/config/internalSecret');
-const { verifyScheduledDeliveryTokenType } = require('./src/helpers/schemaChecks');
+const { verifyScheduledDeliveryTokenType, verifyMigrationColumns } = require('./src/helpers/schemaChecks');
 const { supabaseAdmin } = require('./src/config/supabase');
 
 if (process.env.NODE_ENV === 'production' && !process.env.AUTOM8_KDS_SECRET) {
@@ -136,4 +136,21 @@ server.listen(PORT, () => {
   verifyScheduledDeliveryTokenType().catch((err) => {
     console.error('[boot] schema probe error:', err.message);
   });
+
+  // Fails loudly at boot if a migration file in the repo was never run
+  // against this Supabase project, instead of silently 500ing on the first
+  // request that touches the missing column.
+  verifyMigrationColumns()
+    .then(({ ok }) => {
+      // Set STRICT_SCHEMA_CHECK=true in Railway to crash-restart on a
+      // missing column instead of just logging. Off by default so a
+      // deploy never goes down over an unrelated/legacy table.
+      if (!ok && process.env.STRICT_SCHEMA_CHECK === 'true') {
+        console.error('[boot] STRICT_SCHEMA_CHECK is on — exiting so Railway restarts/alerts.');
+        process.exit(1);
+      }
+    })
+    .catch((err) => {
+      console.error('[boot] migration column check error:', err.message);
+    });
 });
