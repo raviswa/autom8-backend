@@ -373,27 +373,41 @@ async def _refuse_and_reenqueue_if_still_future(
         return False
 
     ks_raw = fresh.get("kitchen_start_at") if fresh else None
-    if not ks_raw:
-        return False
+    slot_raw = None
+    if fresh:
+        slot_raw = fresh.get("scheduled_slot_at") or fresh.get("booking_datetime")
 
     from datetime import datetime
     from tools.kitchen_scheduler import parse_slot_datetime
 
     ks_dt = parse_slot_datetime(ks_raw)
-    if not ks_dt or ks_dt <= datetime.now(tz=ks_dt.tzinfo):
+    slot_dt = parse_slot_datetime(slot_raw)
+
+    # Prefer cook-based kitchen_start; otherwise treat a still-future pickup/delivery
+    # slot as deferred so we never fail-open into live KDS.
+    gate_dt = ks_dt
+    if gate_dt is None and slot_dt is not None:
+        # Conservative: start kitchen at least 45 minutes before slot if timings missing.
+        from datetime import timedelta
+        gate_dt = slot_dt - timedelta(minutes=45)
+
+    if not gate_dt:
+        return False
+
+    if gate_dt <= datetime.now(tz=gate_dt.tzinfo):
         return False
 
     logger.warning(
         f"[scheduled-release] REFUSED early dispatch booking={booking_id} "
-        f"kitchen_start_at={ks_raw} (still future, source=fresh DB read) — "
-        f"re-enqueuing instead of live-dispatching"
+        f"kitchen_start_at={ks_raw} slot={slot_raw} gate={gate_dt.isoformat()} "
+        f"(still future, source=fresh DB read) — re-enqueuing instead of live-dispatching"
     )
     try:
         await enqueue_scheduled_jobs(
             restaurant_id,
             booking_id,
             token,
-            ks_dt.isoformat(),
+            gate_dt.isoformat(),
             {
                 "customer_name": customer_name,
                 "customer_phone": customer_phone,
@@ -519,7 +533,9 @@ async def _build_retry_payload_from_booking(
         "session_hints": {
             "kitchen_start_at": booking.get("kitchen_start_at"),
             "scheduled_at": booking.get("scheduled_slot_at") or booking.get("booking_datetime"),
-            "order_mode": meta.get("order_mode"),
+            "order_mode": meta.get("order_mode") or (
+                "scheduled" if (booking.get("kitchen_start_at") or booking.get("scheduled_slot_at")) else None
+            ),
             "service_type": booking.get("service_type"),
         },
     }
@@ -860,9 +876,12 @@ async def _ensure_scheduled_schedule_persisted(payload: dict[str, Any]) -> dict[
         kitchen_start = schedule["kitchen_start_at"]
         slot_at = schedule["scheduled_slot_at"]
         schedule_meta = {
+            "order_mode": "scheduled",
             "order_text": order_text,
             "cart": cart_snapshot,
+            "kitchen_start_at": kitchen_start.isoformat(),
             "kitchen_start_label": format_ist_label(kitchen_start),
+            "scheduled_at": slot_at.isoformat(),
             "scheduled_at_label": hints.get("scheduled_at_label") or "",
             "station_breakdown": schedule.get("station_breakdown") or {},
             "service_type": svc,
@@ -878,7 +897,9 @@ async def _ensure_scheduled_schedule_persisted(payload: dict[str, Any]) -> dict[
             schedule_meta=schedule_meta,
         )
 
+        hints["order_mode"] = "scheduled"
         hints["kitchen_start_at"] = kitchen_start.isoformat()
+        hints["scheduled_at"] = slot_at.isoformat()
         hints["scheduled_slot_at"] = slot_at.isoformat()
         hints["kitchen_start_at_label"] = format_ist_label(kitchen_start)
         hints["total_cook_minutes"] = schedule["total_cook_minutes"]
@@ -972,12 +993,20 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
     totals = payload.get("totals") or {}
     booking_time = payload["booking_time"]
     token = payload.get("token") or payload.get("display_token")
-    hints = payload.get("session_hints") or {}
-    scheduled_flow = bool(hints.get("kitchen_start_at") or hints.get("scheduled_at"))
+    hints = dict(payload.get("session_hints") or {})
+    scheduled_flow = bool(
+        hints.get("kitchen_start_at")
+        or hints.get("scheduled_at")
+        or hints.get("scheduled_slot_at")
+        or (hints.get("order_mode") or "").lower() == "scheduled"
+    )
 
-    if scheduled_flow:
+    # Always try to recover cook-based kitchen_start before deciding live vs deferred.
+    if scheduled_flow or hints.get("scheduled_at") or hints.get("kitchen_start_at"):
         hints = await _ensure_scheduled_schedule_persisted(payload)
         payload["session_hints"] = hints
+        scheduled_flow = True
+        hints["order_mode"] = hints.get("order_mode") or "scheduled"
 
     portal_token_id = None
     if not scheduled_flow:
@@ -991,12 +1020,31 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
     display_token = portal_token_id or token
     kds_token = str(token or display_token)
 
-    jobs_enqueued = await _enqueue_scheduled_takeaway_jobs(payload)
+    jobs_enqueued = await _enqueue_scheduled_takeaway_jobs(payload) if scheduled_flow else False
     defer, defer_note = await _should_defer_kds_for_scheduled(
         hints, restaurant_id=restaurant_id,
     )
 
-    if jobs_enqueued or defer:
+    # Fail closed: future scheduled slots must never hit captain + live KDS path.
+    if scheduled_flow and (jobs_enqueued or defer or hints.get("kitchen_start_at") or hints.get("scheduled_at")):
+        if not jobs_enqueued and not defer:
+            # Still have schedule context but defer check said "now" incorrectly —
+            # re-check via hard gate before any live write.
+            refused = await _refuse_and_reenqueue_if_still_future(
+                booking_id=booking_id,
+                restaurant_id=restaurant_id,
+                token=kds_token,
+                customer_name=customer_name,
+                customer_phone=customer_phone,
+                service_type="takeaway",
+            )
+            if refused:
+                defer = True
+                defer_note = defer_note or (
+                    "👨‍🍳 Kitchen prep is scheduled for closer to your pickup time."
+                )
+
+    if scheduled_flow and (jobs_enqueued or defer):
         sched_label = hints.get("scheduled_at_label") or hints.get("scheduled_at") or "your slot"
         confirm_body = (
             f"Payment received! ✅\n────────────────────\n"
@@ -1036,6 +1084,24 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
         await update_booking_status(booking_id, "confirmed")
         logger.info(f"[prepay-fulfill] Scheduled takeaway {booking_id} confirmed — jobs queued")
         return True
+
+    if scheduled_flow:
+        # Absolute last resort: still refuse live board if DB says future.
+        refused = await _refuse_and_reenqueue_if_still_future(
+            booking_id=booking_id,
+            restaurant_id=restaurant_id,
+            token=kds_token,
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            service_type="takeaway",
+        )
+        if refused:
+            await update_booking_status(booking_id, "confirmed")
+            logger.info(
+                f"[prepay-fulfill] Scheduled takeaway {booking_id} confirmed — "
+                "early KDS refused, jobs re-enqueued"
+            )
+            return True
 
     captain_result = await assign_and_notify_captain_takeaway(
         restaurant_id,
@@ -1162,15 +1228,42 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
     token = str(payload.get("token") or "—")
     manager_phone = payload.get("manager_phone") or ""
     delivery_address = payload.get("delivery_address") or ""
-    hints = payload.get("session_hints") or {}
+    hints = dict(payload.get("session_hints") or {})
     delivery_address = delivery_address or hints.get("delivery_address") or ""
-    scheduled_flow = bool(hints.get("kitchen_start_at") or hints.get("scheduled_at"))
+    scheduled_flow = bool(
+        hints.get("kitchen_start_at")
+        or hints.get("scheduled_at")
+        or hints.get("scheduled_slot_at")
+        or (hints.get("order_mode") or "").lower() == "scheduled"
+    )
+    if scheduled_flow or hints.get("scheduled_at") or hints.get("kitchen_start_at"):
+        hints = await _ensure_scheduled_schedule_persisted(payload)
+        payload["session_hints"] = hints
+        scheduled_flow = True
+        hints["order_mode"] = hints.get("order_mode") or "scheduled"
+
     jobs_enqueued = await _enqueue_scheduled_kds_jobs(payload) if scheduled_flow else False
     defer, defer_note = await _should_defer_kds_for_scheduled(
         hints, restaurant_id=restaurant_id,
     )
 
-    if jobs_enqueued or defer:
+    if scheduled_flow and (jobs_enqueued or defer or hints.get("kitchen_start_at") or hints.get("scheduled_at")):
+        if not jobs_enqueued and not defer:
+            refused = await _refuse_and_reenqueue_if_still_future(
+                booking_id=booking_id,
+                restaurant_id=restaurant_id,
+                token=token,
+                customer_name=customer_name,
+                customer_phone=customer_phone,
+                service_type="delivery",
+            )
+            if refused:
+                defer = True
+                defer_note = defer_note or (
+                    "👨‍🍳 Kitchen prep is scheduled for closer to your delivery slot."
+                )
+
+    if scheduled_flow and (jobs_enqueued or defer):
         sched_label = hints.get("scheduled_at_label") or hints.get("scheduled_at") or "your slot"
         confirm_body = (
             f"Payment received! ✅\n────────────────────\n"
@@ -1207,6 +1300,23 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
         await update_booking_status(booking_id, "confirmed")
         logger.info(f"[prepay-fulfill] Scheduled delivery {booking_id} confirmed — jobs queued")
         return True
+
+    if scheduled_flow:
+        refused = await _refuse_and_reenqueue_if_still_future(
+            booking_id=booking_id,
+            restaurant_id=restaurant_id,
+            token=token,
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            service_type="delivery",
+        )
+        if refused:
+            await update_booking_status(booking_id, "confirmed")
+            logger.info(
+                f"[prepay-fulfill] Scheduled delivery {booking_id} confirmed — "
+                "early KDS refused, jobs re-enqueued"
+            )
+            return True
 
     dispatched_now = await _finalize_kds_for_scheduled_order(
         booking_id=booking_id,

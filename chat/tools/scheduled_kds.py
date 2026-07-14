@@ -75,14 +75,19 @@ def is_scheduled_order_mode(
     service_type: str | None = None,
 ) -> bool:
     """
-    True only for future-slot takeaway/delivery — never for dine-in or immediate orders.
+    True for future-slot takeaway/delivery — never for dine-in or explicit immediate.
+
+    Prefer an explicit order_mode when present. When mode is missing, treat any
+    future kitchen_start_at / scheduled_at as scheduled so payment fulfill cannot
+    fail-open into live KDS.
     """
     if (service_type or (session_state or {}).get("service_type")) == "dine_in":
         return False
 
+    state = session_state or {}
     mode = (
         order_mode
-        or (session_state or {}).get("order_mode")
+        or state.get("order_mode")
         or ""
     ).strip().lower()
 
@@ -91,7 +96,14 @@ def is_scheduled_order_mode(
     if mode == ORDER_MODE_SCHEDULED:
         return True
 
-    # Unknown / missing mode → immediate (never defer on stale scheduled_at alone).
+    # Missing mode: infer from schedule timestamps (fail closed for future slots).
+    for key in ("kitchen_start_at", "scheduled_at", "scheduled_slot_at"):
+        dt = parse_scheduled_at(state.get(key))
+        if dt is None:
+            continue
+        now = datetime.now(tz=dt.tzinfo or IST)
+        if dt > now + timedelta(minutes=5):
+            return True
     return False
 
 
@@ -106,23 +118,40 @@ def is_deferred_scheduled_order(
     """
     Returns (should_defer, scheduled_at, kds_release_at).
 
-    Immediate / dine-in orders always dispatch now.
-    Scheduled future slots defer until within the lead window (default 150 min).
+    Prefer cook-based kitchen_start_at when present (takeaway ≈ slot − cook − pack − buffer;
+    delivery also subtracts transit). Fall back to fixed lead minutes only when
+    kitchen_start_at is missing.
     """
+    state = dict(session_state or {})
+    if scheduled_at_raw is not None and not state.get("scheduled_at"):
+        state["scheduled_at"] = scheduled_at_raw
+
     if not is_scheduled_order_mode(
-        session_state,
+        state,
         service_type=service_type,
     ):
         return False, None, None
 
+    # Cook-based start is the source of truth when known.
+    kitchen_start = parse_scheduled_at(state.get("kitchen_start_at"))
     scheduled_at = parse_scheduled_at(
-        scheduled_at_raw if scheduled_at_raw is not None else (session_state or {}).get("scheduled_at")
-    )
+        scheduled_at_raw if scheduled_at_raw is not None else state.get("scheduled_at")
+    ) or parse_scheduled_at(state.get("scheduled_slot_at"))
+
+    now = now or datetime.now(tz=IST)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
+
+    if kitchen_start is not None:
+        if kitchen_start > now.astimezone(kitchen_start.tzinfo):
+            return True, scheduled_at or kitchen_start, kitchen_start
+        return False, scheduled_at or kitchen_start, kitchen_start
+
     if scheduled_at is None:
         return False, None, None
 
     lead = resolve_kds_lead_minutes(
-        session_state=session_state,
+        session_state=state,
         restaurant_info=restaurant_info,
     )
     release_at = compute_kds_release_at(scheduled_at, lead)

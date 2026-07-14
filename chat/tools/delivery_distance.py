@@ -73,6 +73,86 @@ def _customer_coords(state: dict[str, Any]) -> tuple[float, float] | None:
     return None
 
 
+_REVERSE_PREF_TYPES = frozenset({"street_address", "premise", "subpremise", "route"})
+
+
+def _dedupe_geocode_candidates(results: list[Any], limit: int = 4) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        formatted = (r.get("formatted_address") or "").strip()
+        loc = (r.get("geometry") or {}).get("location") or {}
+        try:
+            lat = float(loc["lat"])
+            lng = float(loc["lng"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not formatted or formatted in seen:
+            continue
+        seen.add(formatted)
+        out.append(
+            {
+                "formatted_address": formatted,
+                "place_id": r.get("place_id") or None,
+                "lat": lat,
+                "lng": lng,
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def reverse_geocode_candidates(
+    lat: float,
+    lng: float,
+    *,
+    limit: int = 4,
+) -> list[dict[str, Any]]:
+    """
+    Reverse-geocode a pin into up to `limit` nearby formatted addresses.
+    Prefers street/premise/route results; returns [] when the API key is
+    missing or the call fails.
+    """
+    api_key = maps_api_key()
+    if not api_key:
+        logger.warning("[reverse-geocode] GOOGLE_MAPS_API_KEY missing; disabled")
+        return []
+
+    try:
+        resp = await get_http().get(
+            GEOCODE_URL,
+            params={
+                "latlng": f"{lat},{lng}",
+                "key": api_key,
+            },
+            timeout=__import__("aiohttp").ClientTimeout(total=8),
+        )
+        if resp.status != 200:
+            logger.warning(f"[reverse-geocode] HTTP {resp.status}")
+            return []
+        data = await resp.json()
+        if data.get("status") != "OK" or not data.get("results"):
+            logger.info(f"[reverse-geocode] no result status={data.get('status')}")
+            return []
+
+        results = data["results"]
+        preferred = [
+            r for r in results
+            if isinstance(r, dict)
+            and isinstance(r.get("types"), list)
+            and any(t in _REVERSE_PREF_TYPES for t in r["types"])
+        ]
+        ranked = [*preferred, *results] if preferred else results
+        return _dedupe_geocode_candidates(ranked, limit=limit)
+    except Exception as e:
+        logger.warning(f"[reverse-geocode] failed: {e}")
+        return []
+
+
 async def geocode_address(address: str, *, city: str = "", state_name: str = "") -> tuple[float, float] | None:
     """
     Resolve a typed delivery address to coordinates via Google Geocoding API.

@@ -109,7 +109,14 @@ router.post('/webhook', async (req, res) => {
               })
             : null;
 
-          if (message.type === 'location' && restaurantId && session) {
+          // Python booking owns address capture during these steps — do not
+          // intercept location / addr_* so the chat agent can reverse-geocode
+          // and offer nearby address choices.
+          const bookingStep = session?.context?.booking_step || null;
+          const pythonOwnsAddress = bookingStep === 'awaiting_address'
+            || bookingStep === 'awaiting_address_choice';
+
+          if (message.type === 'location' && restaurantId && session && !pythonOwnsAddress) {
             const handledLocation = await handleLocationMessage(message, session).catch(err => {
               console.error('[WA Webhook] handleLocationMessage failed:', err.message);
               return false;
@@ -123,7 +130,7 @@ router.post('/webhook', async (req, res) => {
             );
 
           } else if (message.type === 'text' || message.type === 'button' || message.type === 'interactive') {
-            if (restaurantId && session && message.type === 'interactive') {
+            if (restaurantId && session && message.type === 'interactive' && !pythonOwnsAddress) {
               const handledInteractive = await handleInteractiveReply(message, session).catch(err => {
                 console.error('[WA Webhook] handleInteractiveReply failed:', err.message);
                 return false;
@@ -131,7 +138,7 @@ router.post('/webhook', async (req, res) => {
               if (handledInteractive) continue;
             }
 
-            if (restaurantId && session && message.type === 'text') {
+            if (restaurantId && session && message.type === 'text' && !pythonOwnsAddress) {
               const handledCustomAddress = await handleCustomAddressText(
                 message.text?.body || '',
                 session,

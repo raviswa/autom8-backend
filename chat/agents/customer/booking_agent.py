@@ -377,7 +377,7 @@ async def handle_booking_flow(
     if (
         not kitchen_accepting_orders(session_state)
         and ordering_blocked_for_service(svc, session_state)
-        and current_step in ("awaiting_order", "awaiting_address")
+        and current_step in ("awaiting_order", "awaiting_address", "awaiting_address_choice")
         and (is_greeting(message) or len(message.strip()) < 4)
     ):
         from tools.kitchen_hours import build_blanket_closed_message

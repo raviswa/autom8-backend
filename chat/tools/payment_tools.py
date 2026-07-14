@@ -614,10 +614,59 @@ async def build_scheduled_payment_line(
     """
     Scheduled slots always require online prepay before kitchen fulfillment.
     Never falls back to counter/delivery cash messaging.
+
+    Hard gate: scheduled_takeaway / scheduled_delivery walk-in tokens must already
+    be manager-approved (status=takeaway) before any payment link is issued.
     """
     session_state["payment_mode"] = "prepay"
     if not booking_id:
         return "", False
+
+    restaurant_id = str(session_state.get("restaurant_id") or "")
+    portal_token = None
+    token_id = session_state.get("display_token") or session_state.get("token_number")
+    if restaurant_id and token_id:
+        try:
+            from tools.db_tools import get_walk_in_token_by_id
+            portal_token = await get_walk_in_token_by_id(restaurant_id, str(token_id))
+        except Exception as exc:
+            logger.warning(f"[payment] token lookup for gate failed: {exc}")
+
+    # Infer gated token from session when portal row was not found yet.
+    if portal_token is None and (
+        session_state.get("scheduled_at")
+        or (session_state.get("order_mode") or "").lower() == "scheduled"
+    ):
+        inferred_type = (
+            "scheduled_delivery"
+            if (service_type or session_state.get("service_type")) == "delivery"
+            else "scheduled_takeaway"
+        )
+        portal_token = {
+            "id": token_id,
+            "type": inferred_type,
+            "status": "takeaway" if session_state.get("scheduled_takeaway_approved")
+                or session_state.get("scheduled_delivery_approved")
+                else "pending_approval",
+        }
+
+    if portal_token and portal_token.get("type") in ("scheduled_takeaway", "scheduled_delivery"):
+        try:
+            from tools.payment_gate import PaymentGateError, assert_token_approved_for_payment
+            await assert_token_approved_for_payment(
+                restaurant_id or str(session_state.get("restaurant_id") or ""),
+                portal_token,
+                str(booking_id),
+            )
+        except Exception as exc:
+            from tools.payment_gate import PaymentGateError
+            if isinstance(exc, PaymentGateError):
+                logger.error(
+                    f"[payment] build_scheduled_payment_line BLOCKED booking={booking_id} "
+                    f"reason={exc.reason}"
+                )
+                return "", False
+            raise
 
     link = await ensure_prepay_payment_link(
         str(booking_id), amount, customer_name, description,
@@ -879,10 +928,34 @@ async def prepare_checkout_page(booking_id: str, token: str) -> dict[str, Any]:
     booking = await get_booking_with_customer(booking_id)
     if not booking:
         return {"error": "booking_not_found"}
-    if booking.get("payment_status") == "paid" or booking.get("status") == "confirmed":
+    if booking.get("payment_status") == "paid":
+        return {"already_paid": True}
+    # Do not treat pre-payment "confirmed" as paid — scheduled delivery used to
+    # flip status on manager approve before Razorpay success.
+    if booking.get("status") == "confirmed" and booking.get("payment_status") == "paid":
         return {"already_paid": True}
 
+    # Scheduled bookings: require manager-approved walk-in token before checkout.
     restaurant_id = str(booking["restaurant_id"])
+    token_label = booking.get("token_number") or ""
+    if token_label:
+        try:
+            from tools.db_tools import get_walk_in_token_by_id
+            from tools.payment_gate import PaymentGateError, assert_token_approved_for_payment
+            portal = await get_walk_in_token_by_id(restaurant_id, str(token_label))
+            if portal and portal.get("type") in ("scheduled_takeaway", "scheduled_delivery"):
+                await assert_token_approved_for_payment(restaurant_id, portal, booking_id)
+        except Exception as exc:
+            from tools.payment_gate import PaymentGateError
+            if isinstance(exc, PaymentGateError) and exc.reason == "token_not_approved":
+                return {"error": "approval_required", "message": "Manager approval required before payment."}
+            if isinstance(exc, PaymentGateError) and exc.reason == "already_paid":
+                return {"already_paid": True}
+            # booking_not_payable / missing token → fall through carefully
+            if isinstance(exc, PaymentGateError) and exc.reason == "booking_not_payable":
+                return {"error": "booking_not_payable"}
+            logger.warning(f"[checkout] approval gate check failed: {exc}")
+
     phone = booking.get("customer_phone") or ""
     session: dict[str, Any] = {}
     if phone:
@@ -890,7 +963,6 @@ async def prepare_checkout_page(booking_id: str, token: str) -> dict[str, Any]:
 
     amount = float(session.get("order_total") or 0)
     customer_name = booking.get("customer_name") or session.get("customer_name") or "Guest"
-    token_label = booking.get("token_number") or ""
 
     if amount < 1:
         from tools.prepay_fulfillment import load_prepay_payload

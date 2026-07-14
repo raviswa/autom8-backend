@@ -140,7 +140,7 @@ def resolve_transit_minutes(
     *,
     explicit_minutes: int | None = None,
     distance_km: float | None = None,
-    default_delivery: int = 20,
+    default_delivery: int = 30,
 ) -> int:
     """Delivery needs earlier kitchen start; takeaway has no transit leg."""
     st = (service_type or "").replace("-", "_").lower()

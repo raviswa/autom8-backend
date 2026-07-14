@@ -194,9 +194,12 @@ async def _compute_and_persist_takeaway_schedule(
     kitchen_start = schedule["kitchen_start_at"]
     slot_at = schedule["scheduled_slot_at"]
     schedule_meta = {
+        "order_mode": "scheduled",
         "order_text": order_text,
         "cart": cart_snapshot,
+        "kitchen_start_at": kitchen_start.isoformat(),
         "kitchen_start_label": format_ist_label(kitchen_start),
+        "scheduled_at": slot_at.isoformat(),
         "scheduled_at_label": _scheduled_takeaway_label(session_state),
         "station_breakdown": schedule.get("station_breakdown") or {},
         "service_type": "takeaway",
@@ -212,6 +215,7 @@ async def _compute_and_persist_takeaway_schedule(
         schedule_meta=schedule_meta,
     )
 
+    session_state["order_mode"] = "scheduled"
     session_state["kitchen_start_at"] = kitchen_start.isoformat()
     session_state["scheduled_slot_at"] = slot_at.isoformat()
     session_state["total_cook_minutes"] = schedule["total_cook_minutes"]

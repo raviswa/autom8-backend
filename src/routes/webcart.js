@@ -486,7 +486,7 @@ router.get('/api/webcart/session', async (req, res) => {
 
     let slotInfo;
     let availableNow;
-    let primaryCategory = null;
+    let preferredCategory = null;
 
     if (catalogLob) {
       slotInfo = {
@@ -519,25 +519,10 @@ router.get('/api/webcart/session', async (req, res) => {
           ? menuItems.filter(i => i.effective_slots.includes('anytime') || i.effective_slots.includes(slotInfo.current_slot))
           : [];
 
-      const countsByCategory = {};
-      if (slotInfo.slot_state === 'open') {
-        for (const item of availableNow) {
-          const cat = item.category || 'General';
-          countsByCategory[cat] = (countsByCategory[cat] || 0) + 1;
-        }
-      }
       const primarySlotMap = restaurant?.primary_slot_category || {};
-      const preferredForSlot = slotInfo.current_slot
-        ? String(primarySlotMap?.[slotInfo.current_slot] || '').trim()
-        : '';
-      const top = Object.entries(countsByCategory)
-        .sort((a, b) => {
-          if (b[1] !== a[1]) return b[1] - a[1];
-          if (preferredForSlot && a[0] === preferredForSlot) return -1;
-          if (preferredForSlot && b[0] === preferredForSlot) return 1;
-          return a[0].localeCompare(b[0]);
-        })[0];
-      if (top) primaryCategory = top[0];
+      preferredCategory = slotInfo.current_slot
+        ? String(primarySlotMap?.[slotInfo.current_slot] || '').trim() || null
+        : null;
     }
 
     const todaysSpecial = catalogLob ? [] : menuItems.filter(i => i.is_todays_special);
@@ -588,7 +573,9 @@ router.get('/api/webcart/session', async (req, res) => {
       // ordering here; it's surfaced for future conversational-flow use
       // (e.g. showing a longer prep-time notice), not as a booking gate.
       kitchen_busy: !!restaurant.kitchen_busy,
-      primary_category: primaryCategory,
+      // preferred_category = manager primary for the active meal slot (chip sort hint).
+      // Webcart always opens on "All Items" — do not force another tab.
+      preferred_category: preferredCategory,
       category_slots: categorySlotMap,
       promotions: [],
       session_message: session

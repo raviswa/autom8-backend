@@ -461,7 +461,8 @@ _STEPS_ALLOWING_SHORT_REPLY: set[str] = {
     "awaiting_numbered_order","awaiting_payment","awaiting_prepay","awaiting_special_notes",
     "awaiting_flow_datetime","awaiting_table_assignment",
     "awaiting_large_party_response","awaiting_manager_approval","visit_complete",
-    "awaiting_order","awaiting_address","confirming_order","awaiting_cart_action",
+    "awaiting_order","awaiting_address","awaiting_address_choice",
+    "confirming_order","awaiting_cart_action",
     "awaiting_scheduled_time", "awaiting_scheduled_flow",
     "awaiting_scheduled_delivery_approval", "awaiting_scheduled_delivery_payment",
     "awaiting_scheduled_takeaway_approval", "awaiting_scheduled_takeaway_payment",
@@ -576,7 +577,8 @@ async def abandon_incomplete_session(
     session_state["_session_abandoned_at"] = datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
     if had_cart or step in (
         "awaiting_order", "awaiting_category_selection", "awaiting_cart_action",
-        "confirming_order", "awaiting_address", "awaiting_table_assignment",
+        "confirming_order", "awaiting_address", "awaiting_address_choice",
+        "awaiting_table_assignment",
     ):
         session_state["_last_visit_abandoned"] = True
         logger.info(

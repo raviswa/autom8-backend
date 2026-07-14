@@ -311,8 +311,10 @@ async function approveScheduledDeliveryToken(tokenId, restaurantId, token) {
   }
 
   if (meta.booking_id) {
+    // Keep pending until payment succeeds — confirming here made fulfill_from_webhook
+    // skip the deferred-KDS path and push live tickets immediately.
     await supabaseAdmin.from('bookings')
-      .update({ status: 'confirmed' })
+      .update({ status: 'pending' })
       .eq('id', meta.booking_id);
   }
 

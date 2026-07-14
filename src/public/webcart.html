@@ -153,6 +153,101 @@
       flex-shrink: 0;
     }
     .chip.active { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); }
+    .chip.disabled {
+      opacity: 0.45;
+      color: var(--muted);
+      background: #f3f4f6;
+      border-style: dashed;
+      cursor: not-allowed;
+    }
+
+    /* Categories FAB + sheet (all-categories picker) */
+    .cat-fab {
+      position: fixed;
+      right: 16px;
+      bottom: calc(72px + env(safe-area-inset-bottom));
+      z-index: 37;
+      width: 52px;
+      height: 52px;
+      border: none;
+      border-radius: 50%;
+      background: var(--header);
+      color: #fff;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.25);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .cat-fab:active { transform: scale(0.96); }
+    body.has-cart-float .cat-fab {
+      bottom: calc(148px + env(safe-area-inset-bottom));
+    }
+    .cat-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+      z-index: 55; display: none; align-items: flex-end; justify-content: center;
+    }
+    .cat-overlay.open { display: flex; }
+    .cat-sheet {
+      width: min(520px, 100%);
+      max-height: 78vh;
+      background: var(--panel);
+      border-radius: 18px 18px 0 0;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 -8px 24px rgba(0,0,0,0.18);
+    }
+    .cat-sheet-head {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .cat-sheet-head strong { font-size: 16px; font-weight: 700; }
+    .cat-sheet-body {
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 4px 0 12px;
+    }
+    .cat-row {
+      width: 100%;
+      border: none;
+      background: none;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      cursor: pointer;
+      text-align: left;
+      font: inherit;
+      color: var(--ink);
+    }
+    .cat-row:active { background: #fff7ef; }
+    .cat-row.disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      color: var(--muted);
+    }
+    .cat-row .cat-num {
+      width: 22px;
+      flex-shrink: 0;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+    }
+    .cat-row .cat-name { flex: 1; font-weight: 600; font-size: 14px; }
+    .cat-row .cat-count { font-size: 12px; color: var(--muted); white-space: nowrap; }
+    .cat-row.active .cat-name { color: var(--brand); }
+    .cat-section-label {
+      padding: 10px 16px 4px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      color: var(--muted);
+    }
 
     /* FIX (2): denser rows + 2-col grid on tablet/wide-mobile widths so the
        large blank space next to short single-line item names goes away */
@@ -404,6 +499,7 @@
       .layout { grid-template-columns: 1fr 360px; align-items: start; }
       .bottom-nav { display: none; }
       .float-bar { display: none !important; }
+      .cat-fab { bottom: 24px; }
       .cart-overlay { display: none !important; }
       .cart-panel {
         position: sticky !important;
@@ -572,6 +668,22 @@
     <div class="fb-cta">View Cart →</div>
   </div>
 
+  <button type="button" class="cat-fab" id="catFab" aria-label="Browse categories" title="Categories">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+      <path d="M4 7h16M4 12h16M4 17h10"/>
+    </svg>
+  </button>
+
+  <div id="catOverlay" class="cat-overlay" aria-hidden="true">
+    <div class="cat-sheet" role="dialog" aria-labelledby="catSheetTitle">
+      <div class="cat-sheet-head">
+        <strong id="catSheetTitle">Categories</strong>
+        <button type="button" class="icon-btn" id="catCloseBtn" aria-label="Close">✕</button>
+      </div>
+      <div class="cat-sheet-body" id="catSheetBody"></div>
+    </div>
+  </div>
+
   <div id="waGuideOverlay" class="wa-guide-overlay" aria-hidden="true">
     <div class="wa-guide-card">
       <div class="wa-guide-icon" aria-hidden="true">W</div>
@@ -698,6 +810,9 @@
       categories: [],
       categorySlots: {},
       currentSlotForSort: null,
+      slotState: null,
+      preferredCategory: null,
+      disabledCategories: [],
       activeTab: 'all',
       searchQuery: '',
       todaysSpecial: [],
@@ -899,12 +1014,27 @@
     cartOverlay.addEventListener('click', closeCart);
     floatBar.addEventListener('click', openCart);
     $('navCart').addEventListener('click', openCart);
-    $('navMenu').addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+    $('navMenu').addEventListener('click', () => openCategoriesSheet());
     $('navSearch').addEventListener('click', () => { $('searchBox').focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
     $('navHelp').addEventListener('click', () => {
       const phoneNum = (state.restaurant && state.restaurant.support_phone) || '';
       const msg = encodeURIComponent(`Hi, I need help with my order at ${(state.restaurant && state.restaurant.name) || 'the restaurant'}.`);
       if (phoneNum) window.open(`https://wa.me/${phoneNum}?text=${msg}`, '_blank');
+    });
+
+    function openCategoriesSheet() {
+      renderCategoriesSheet();
+      $('catOverlay').classList.add('open');
+      $('catOverlay').setAttribute('aria-hidden', 'false');
+    }
+    function closeCategoriesSheet() {
+      $('catOverlay').classList.remove('open');
+      $('catOverlay').setAttribute('aria-hidden', 'true');
+    }
+    $('catFab').addEventListener('click', openCategoriesSheet);
+    $('catCloseBtn').addEventListener('click', closeCategoriesSheet);
+    $('catOverlay').addEventListener('click', (e) => {
+      if (e.target === $('catOverlay')) closeCategoriesSheet();
     });
 
     function currentDiscount(subtotal) {
@@ -1013,7 +1143,9 @@ $('subtotal').textContent = money(subtotal);
 
       $('fbCount').textContent = `${count} item${count === 1 ? '' : 's'}`;
       $('fbTotal').textContent = money(total);
-      floatBar.classList.toggle('show', count > 0 && !isDesktop());
+      const showCartFloat = count > 0 && !isDesktop();
+      floatBar.classList.toggle('show', showCartFloat);
+      document.body.classList.toggle('has-cart-float', showCartFloat);
 
       const badge = $('navCartBadge');
       if (count > 0) { badge.style.display = 'flex'; badge.textContent = count; }
@@ -1301,6 +1433,10 @@ $('subtotal').textContent = money(subtotal);
     }
 
     function addToCart(item) {
+      if (!isItemShoppable(item)) {
+        showStatus('This item is not available in the current meal slot.', 'err');
+        return;
+      }
       const type = (item.item_type || 'PRODUCT').toUpperCase();
       if (['CUP', 'CONE', 'SUNDAE'].includes(type)) {
         openFlavourModal(item);
@@ -1831,56 +1967,211 @@ $('subtotal').textContent = money(subtotal);
       bindRowHandlers(availableNowGrid);
     }
 
-    // FIX (category sort): categories that match the current meal slot
-    // (e.g. "tiffin" in the morning, "lunch" midday, "dinner" at night) are
-    // ranked first, "anytime" categories next, everything else last. Falls
-    // back to plain alphabetical when there's no active slot (kitchen closed
-    // / gap window) so behavior is unchanged in that case.
-    function categorySortRank(cat) {
-      if (state.catalogLob) return 0;
+    // Category chip order: All Items → Anytime → current-slot categories
+    // (manager preferred first) → other anytime categories. Meal-slot-only
+    // categories outside the active window are listed as disabled (not orderable).
+    function normalizeItemSlots(item) {
+      if (Array.isArray(item.effective_slots) && item.effective_slots.length) {
+        return item.effective_slots.map(s => String(s).toLowerCase());
+      }
+      const fromCat = state.categorySlots[item.category || 'General'];
+      if (Array.isArray(fromCat) && fromCat.length) {
+        return fromCat.map(s => String(s).toLowerCase());
+      }
+      return ['anytime'];
+    }
+
+    function categorySlotList(cat) {
+      const slots = state.categorySlots[cat];
+      if (Array.isArray(slots) && slots.length) return slots.map(s => String(s).toLowerCase());
+      return ['anytime'];
+    }
+
+    function isDisplayableMenuItem(item) {
+      const type = (item.item_type || 'PRODUCT').toUpperCase();
+      return type !== 'FLAVOUR' && type !== 'ADDON';
+    }
+
+    function isItemShoppable(item) {
+      if (state.catalogLob) return item.is_publicly_available !== false;
+      const slots = normalizeItemSlots(item);
+      if (slots.includes('anytime')) return true;
       const slot = state.currentSlotForSort;
-      if (!slot) return 1;
-      const slots = state.categorySlots[cat] || ['anytime'];
-      if (slots.includes(slot)) return 0;
-      if (slots.includes('anytime')) return 1;
-      return 2;
+      if (slot && slots.includes(slot)) return true;
+      // Manager kitchen-open override with no active meal window
+      if (!slot && state.slotState === 'open') return true;
+      return false;
+    }
+
+    function isCategoryShoppable(cat) {
+      if (state.catalogLob) return true;
+      const slots = categorySlotList(cat);
+      if (slots.includes('anytime')) return true;
+      const slot = state.currentSlotForSort;
+      if (slot && slots.includes(slot)) return true;
+      if (!slot && state.slotState === 'open') return true;
+      return false;
+    }
+
+    function isCurrentSlotCategory(cat) {
+      const slot = state.currentSlotForSort;
+      if (!slot) return false;
+      return categorySlotList(cat).includes(slot);
+    }
+
+    function preferCategorySort(a, b) {
+      const preferred = state.preferredCategory;
+      if (preferred && a === preferred) return -1;
+      if (preferred && b === preferred) return 1;
+      return a.localeCompare(b);
+    }
+
+    function buildCategoryPlan() {
+      const displayable = state.menu.filter(isDisplayableMenuItem);
+      const cats = [...new Set(displayable.map(i => i.category || 'General'))];
+
+      if (state.catalogLob) {
+        const enabled = cats
+          .filter(c => c.toLowerCase() !== 'anytime')
+          .sort((a, b) => a.localeCompare(b));
+        return { enabled, disabled: [] };
+      }
+
+      const slotCats = [];
+      const anytimeCats = [];
+      const disabled = [];
+
+      for (const cat of cats) {
+        if (cat.toLowerCase() === 'anytime') continue; // covered by synthetic Anytime tab
+        if (isCurrentSlotCategory(cat)) {
+          slotCats.push(cat);
+        } else if (isCategoryShoppable(cat)) {
+          anytimeCats.push(cat);
+        } else {
+          disabled.push(cat);
+        }
+      }
+
+      slotCats.sort(preferCategorySort);
+      anytimeCats.sort((a, b) => a.localeCompare(b));
+      disabled.sort((a, b) => a.localeCompare(b));
+
+      // Slot categories (lunch/tiffin/dinner) first after Anytime, then other anytime cats
+      return { enabled: [...slotCats, ...anytimeCats], disabled };
+    }
+
+    function countItemsInCategory(cat, { shoppableOnly = true } = {}) {
+      return state.menu.filter(i => {
+        if (!isDisplayableMenuItem(i)) return false;
+        if ((i.category || 'General') !== cat) return false;
+        return shoppableOnly ? isItemShoppable(i) : true;
+      }).length;
+    }
+
+    function selectCategoryTab(tab) {
+      if (tab !== 'all' && tab !== 'anytime' && state.disabledCategories.includes(tab)) {
+        showStatus('This category is not served in the current meal slot.', 'err');
+        return;
+      }
+      state.activeTab = tab;
+      renderChips();
+      renderMenuList();
+      closeCategoriesSheet();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
     function renderChips() {
-      const displayable = state.menu.filter(i => {
-        const type = (i.item_type || 'PRODUCT').toUpperCase();
-        return type !== 'FLAVOUR' && type !== 'ADDON';
-      });
-      state.categories = [...new Set(displayable.map(i => i.category || 'General'))];
-      state.categories.sort((a, b) => {
-        const rankDiff = categorySortRank(a) - categorySortRank(b);
-        return rankDiff !== 0 ? rankDiff : a.localeCompare(b);
-      });
-      const tabs = ['all', ...state.categories];
+      const plan = buildCategoryPlan();
+      state.categories = plan.enabled;
+      state.disabledCategories = plan.disabled;
+
+      const tabs = state.catalogLob
+        ? [
+            { id: 'all', label: 'All Items', disabled: false },
+            ...plan.enabled.map(cat => ({ id: cat, label: cat, disabled: false })),
+          ]
+        : [
+            { id: 'all', label: 'All Items', disabled: false },
+            { id: 'anytime', label: 'Anytime', disabled: false },
+            ...plan.enabled.map(cat => ({ id: cat, label: cat, disabled: false })),
+          ];
+
       tabChips.innerHTML = tabs.map(tab => {
-        const active = state.activeTab === tab;
-        const label = tab === 'all' ? 'All Items' : tab;
-        return `<button class="chip ${active ? 'active' : ''}" data-tab="${tab}">${label}</button>`;
+        const active = state.activeTab === tab.id;
+        const disabledCls = tab.disabled ? 'disabled' : '';
+        const activeCls = active ? 'active' : '';
+        return `<button type="button" class="chip ${activeCls} ${disabledCls}" data-tab="${tab.id}" ${tab.disabled ? 'aria-disabled="true"' : ''}>${tab.label}</button>`;
       }).join('');
+
       tabChips.querySelectorAll('button[data-tab]').forEach(btn => {
-        btn.addEventListener('click', () => {
-          state.activeTab = btn.dataset.tab;
-          renderChips();
-          renderMenuList();
-        });
+        btn.addEventListener('click', () => selectCategoryTab(btn.dataset.tab));
+      });
+    }
+
+    function renderCategoriesSheet() {
+      const plan = buildCategoryPlan();
+      const rows = [];
+      let n = 1;
+
+      const pushRow = (id, label, count, { disabled = false } = {}) => {
+        const active = state.activeTab === id;
+        rows.push(`
+          <button type="button" class="cat-row ${disabled ? 'disabled' : ''} ${active ? 'active' : ''}" data-cat="${id}" ${disabled ? 'disabled' : ''}>
+            <span class="cat-num">${n++}</span>
+            <span class="cat-name">${label}</span>
+            <span class="cat-count">${count}${disabled ? ' · later' : ''}</span>
+          </button>
+        `);
+      };
+
+      pushRow('all', 'All Items', state.menu.filter(i => isDisplayableMenuItem(i) && isItemShoppable(i)).length);
+      if (!state.catalogLob) {
+        pushRow(
+          'anytime',
+          'Anytime',
+          state.menu.filter(i => isDisplayableMenuItem(i) && isItemShoppable(i) && normalizeItemSlots(i).includes('anytime')).length,
+        );
+      }
+
+      for (const cat of plan.enabled) {
+        pushRow(cat, cat, countItemsInCategory(cat, { shoppableOnly: true }));
+      }
+
+      if (plan.disabled.length) {
+        rows.push(`<div class="cat-section-label">Not served right now</div>`);
+        for (const cat of plan.disabled) {
+          pushRow(cat, cat, countItemsInCategory(cat, { shoppableOnly: false }), { disabled: true });
+        }
+      }
+
+      $('catSheetBody').innerHTML = rows.join('');
+      $('catSheetBody').querySelectorAll('button[data-cat]:not([disabled])').forEach(btn => {
+        btn.addEventListener('click', () => selectCategoryTab(btn.dataset.cat));
       });
     }
 
     function renderMenuList() {
       const q = state.searchQuery.trim().toLowerCase();
-      let visible = state.activeTab === 'all'
-        ? state.menu
-        : state.menu.filter(i => (i.category || 'General') === state.activeTab);
-      if (q) {
-        visible = state.menu.filter(i =>
-          i.name.toLowerCase().includes(q) || (i.category || '').toLowerCase().includes(q)
+      let visible = state.menu.filter(isDisplayableMenuItem);
+
+      if (!q) {
+        if (state.activeTab === 'all') {
+          visible = visible.filter(isItemShoppable);
+        } else if (state.activeTab === 'anytime') {
+          visible = visible.filter(i => isItemShoppable(i) && normalizeItemSlots(i).includes('anytime'));
+        } else {
+          visible = visible.filter(i =>
+            (i.category || 'General') === state.activeTab && isItemShoppable(i)
+          );
+        }
+      } else {
+        visible = visible.filter(i =>
+          isItemShoppable(i) && (
+            i.name.toLowerCase().includes(q) || (i.category || '').toLowerCase().includes(q)
+          )
         );
       }
+
       if (state.catalogLob) {
         visible = visible.filter(i => i.is_publicly_available !== false);
       }
@@ -1931,7 +2222,9 @@ $('subtotal').textContent = money(subtotal);
       state.availableNow = data.available_now || [];
       state.categorySlots = data.category_slots || {};
       state.currentSlotForSort = data.current_slot || null;
-      state.activeTab = data.primary_category || 'all';
+      state.slotState = data.slot_state || null;
+      state.preferredCategory = data.preferred_category || null;
+      state.activeTab = 'all';
       state.lobType = data.restaurant?.lob_type || data.lob_type || 'restaurant';
       state.catalogLob = !!data.catalog_lob || state.lobType !== 'restaurant';
 

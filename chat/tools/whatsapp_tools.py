@@ -359,6 +359,91 @@ async def send_whatsapp_flow(
 
 
 # ---------------------------------------------------------------------------
+# Outbound: interactive list
+# ---------------------------------------------------------------------------
+
+async def send_whatsapp_list(
+    phone: str,
+    restaurant_id: str,
+    *,
+    body_text: str,
+    button_text: str,
+    rows: list,
+    header_text: str | None = None,
+    footer_text: str | None = None,
+    section_title: str = "Options",
+) -> bool:
+    """Send a WhatsApp interactive list message.
+
+    Each row: {id, title, description?} — title max 24 chars, desc max 72,
+    id max 200 chars (Meta limits). Max 10 rows per section.
+    """
+    try:
+        credentials = await _get_whatsapp_credentials(restaurant_id)
+        if not credentials:
+            return False
+
+        url = f"{credentials['api_endpoint']}/{credentials['phone_number_id']}/messages"
+
+        list_rows = []
+        for row in (rows or [])[:10]:
+            if not isinstance(row, dict) or not row.get("id") or not row.get("title"):
+                continue
+            item: Dict[str, Any] = {
+                "id": str(row["id"])[:200],
+                "title": str(row["title"])[:24],
+            }
+            if row.get("description"):
+                item["description"] = str(row["description"])[:72]
+            list_rows.append(item)
+
+        if not list_rows:
+            logger.warning("send_whatsapp_list: no valid rows")
+            return False
+
+        interactive: Dict[str, Any] = {
+            "type": "list",
+            "body": {"text": body_text},
+            "action": {
+                "button": button_text[:20],
+                "sections": [
+                    {
+                        "title": (section_title or "Options")[:24],
+                        "rows": list_rows,
+                    }
+                ],
+            },
+        }
+        if header_text:
+            interactive["header"] = {"type": "text", "text": header_text[:60]}
+        if footer_text:
+            interactive["footer"] = {"text": footer_text[:60]}
+
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": phone,
+            "type": "interactive",
+            "interactive": interactive,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {credentials['access_token']}",
+        }
+
+        client = _get_http_client()
+        response = await client.post(url, json=payload, headers=headers)
+        logger.info(
+            f"send_whatsapp_list → {response.status_code} | to={phone} | "
+            f"rows={len(list_rows)} | response={response.text[:200]}"
+        )
+        return response.status_code in (200, 201)
+
+    except Exception as e:
+        logger.error(f"Failed to send WhatsApp list to {phone}: {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Outbound: location request
 # ---------------------------------------------------------------------------
 

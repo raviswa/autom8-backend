@@ -209,6 +209,36 @@ async function markJob(jobId, status, extra = {}) {
 }
 
 async function executeKdsDispatchJob(job) {
+  // Hard gate: never dispatch before booking.kitchen_start_at (cook/pack/transit math).
+  if (job.booking_id) {
+    const { data: booking } = await supabaseAdmin
+      .from('bookings')
+      .select('kitchen_start_at, scheduled_slot_at, booking_datetime, kds_sent_at')
+      .eq('id', job.booking_id)
+      .maybeSingle();
+    if (booking?.kds_sent_at) {
+      console.log(`[scheduled-jobs] booking ${job.booking_id} already on KDS — skip`);
+      return booking.kds_sent_at;
+    }
+    const ksRaw = booking?.kitchen_start_at || job.run_at;
+    if (ksRaw) {
+      const ks = new Date(ksRaw).getTime();
+      if (Number.isFinite(ks) && ks > Date.now() + 15_000) {
+        console.warn(
+          `[scheduled-release] REFUSED job KDS dispatch booking=${job.booking_id} ` +
+          `kitchen_start_at=${ksRaw} still future — reschedule job`,
+        );
+        await supabaseAdmin.from('scheduled_jobs').update({
+          status: 'pending',
+          run_at: new Date(ks).toISOString(),
+          updated_at: new Date().toISOString(),
+          last_error: 'released_too_early',
+        }).eq('id', job.id);
+        return null;
+      }
+    }
+  }
+
   const payload = job.payload || {};
   const orderId = await notifyKdsFromPayload({
     restaurant_id: job.restaurant_id,
