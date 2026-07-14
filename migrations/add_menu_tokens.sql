@@ -3,7 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS public.menu_tokens (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  restaurant_id uuid NOT NULL REFERENCES public.restaurants(id) ON DELETE CASCADE,
+  restaurant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
   phone text NOT NULL,
   session_token text NOT NULL,
   walk_in_token_id text NULL REFERENCES public.walk_in_tokens(id) ON DELETE SET NULL,

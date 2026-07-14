@@ -10,7 +10,7 @@ ALTER TABLE broadcast_campaigns
 
 CREATE TABLE IF NOT EXISTS marketing_template_drafts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  restaurant_id uuid NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+  restaurant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
   name text NOT NULL DEFAULT 'untitled_draft',
   payload jsonb NOT NULL DEFAULT '{}',
   created_by uuid,
@@ -23,7 +23,7 @@ CREATE INDEX IF NOT EXISTS idx_marketing_template_drafts_restaurant
 
 CREATE TABLE IF NOT EXISTS marketing_automations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  restaurant_id uuid NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+  restaurant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
   name text NOT NULL,
   trigger_type text NOT NULL,
   segment_type text NOT NULL,

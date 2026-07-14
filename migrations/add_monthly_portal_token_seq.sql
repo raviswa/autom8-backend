@@ -3,10 +3,10 @@
 -- Token IDs: T-YYMM-001 (e.g. T-2506-001 for June 2026).
 -- Run once in Supabase SQL editor after add_portal_token_sequence.sql.
 
-ALTER TABLE public.restaurants
+ALTER TABLE public.tenants
   ADD COLUMN IF NOT EXISTS portal_token_seq_month text;
 
-COMMENT ON COLUMN public.restaurants.portal_token_seq_month IS
+COMMENT ON COLUMN public.tenants.portal_token_seq_month IS
   'IST YYYY-MM for portal_token_seq; when month changes the counter resets to 0 before next allocate.';
 
 -- Reset counter when IST month rolls over; always increment (never skip for cancelled/superseded).
@@ -20,7 +20,7 @@ DECLARE
 BEGIN
   v_month := to_char((now() AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM');
 
-  UPDATE public.restaurants
+  UPDATE public.tenants
   SET
     portal_token_seq = CASE
       WHEN portal_token_seq_month IS DISTINCT FROM v_month THEN 1

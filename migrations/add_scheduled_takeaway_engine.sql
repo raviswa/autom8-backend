@@ -37,7 +37,7 @@ BEGIN
 END $$;
 
 -- ── Restaurant scheduling config ─────────────────────────────────────────────
-ALTER TABLE public.restaurants
+ALTER TABLE public.tenants
   ADD COLUMN IF NOT EXISTS scheduled_slot_max_orders integer NOT NULL DEFAULT 10,
   ADD COLUMN IF NOT EXISTS schedule_buffer_minutes integer NOT NULL DEFAULT 15,
   ADD COLUMN IF NOT EXISTS schedule_rounding_minutes integer NOT NULL DEFAULT 15,
@@ -48,7 +48,7 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'restaurants_scheduled_slot_max_orders_check'
   ) THEN
-    ALTER TABLE public.restaurants
+    ALTER TABLE public.tenants
       ADD CONSTRAINT restaurants_scheduled_slot_max_orders_check
       CHECK (scheduled_slot_max_orders BETWEEN 1 AND 100);
   END IF;

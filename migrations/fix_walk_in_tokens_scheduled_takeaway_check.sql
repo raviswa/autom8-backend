@@ -50,7 +50,7 @@ INSERT INTO public.walk_in_tokens
 VALUES
   (
     'T-MIGTEST-TAKEAWAY',
-    (SELECT id FROM public.restaurants WHERE is_active = true LIMIT 1),
+    (SELECT id FROM public.tenants WHERE is_active = true LIMIT 1),
     'migration test',
     'scheduled_takeaway',
     1,

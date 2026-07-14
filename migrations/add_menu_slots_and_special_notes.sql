@@ -1,13 +1,13 @@
 -- Addendum C: menu source-of-truth extensions
 -- - Category-level applicable slots with item-level override
 -- - Today's special note + recurring flag
--- - Optional primary slot category mapping on restaurants
+-- - Optional primary slot category mapping on tenants
 
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS public.menu_categories (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  restaurant_id uuid NOT NULL REFERENCES public.restaurants(id) ON DELETE CASCADE,
+  restaurant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
   name text NOT NULL,
   applicable_slots text[] NOT NULL DEFAULT ARRAY['anytime']::text[],
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -21,7 +21,7 @@ ALTER TABLE public.menu_items
   ADD COLUMN IF NOT EXISTS recurring_special boolean NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS is_todays_special boolean NOT NULL DEFAULT false;
 
-ALTER TABLE public.restaurants
+ALTER TABLE public.tenants
   ADD COLUMN IF NOT EXISTS primary_slot_category jsonb NULL;
 
 CREATE INDEX IF NOT EXISTS idx_menu_categories_restaurant

@@ -1,4 +1,7 @@
-alter table orders
-  add column if not exists token_id uuid references walk_in_tokens(id);
+-- Link POS orders to portal walk-in tokens.
+-- walk_in_tokens.id is text (e.g. T-2607-001), not uuid.
 
-create index if not exists idx_orders_token_id on orders(token_id);
+ALTER TABLE orders
+  ADD COLUMN IF NOT EXISTS token_id text REFERENCES walk_in_tokens(id);
+
+CREATE INDEX IF NOT EXISTS idx_orders_token_id ON orders(token_id);

@@ -15,6 +15,6 @@ COMMENT ON COLUMN public.walk_in_tokens.estimate_display IS
 COMMENT ON COLUMN public.tables.seated_at IS
   'When the table was last seated (occupied); used for wait estimates';
 
--- Optional: shift default dining duration for new restaurants (existing rows unchanged)
-ALTER TABLE public.restaurants
+-- Optional: shift default dining duration for new tenants (existing rows unchanged)
+ALTER TABLE public.tenants
   ALTER COLUMN dining_duration_minutes SET DEFAULT 45;

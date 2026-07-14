@@ -29,7 +29,7 @@ AS $$
     AND e.restaurant_id IS NOT NULL
   UNION
   SELECT r.id
-  FROM restaurants r
+  FROM tenants r
   INNER JOIN employees e ON e.brand_id = r.brand_id
   WHERE e.id = auth.uid()
     AND e.is_active = true
@@ -119,11 +119,11 @@ CREATE POLICY staff_employees_self ON public.employees
   FOR SELECT TO authenticated
   USING (id = auth.uid());
 
--- ── restaurants (read assigned outlets) ──────────────────────────────────────
-ALTER TABLE public.restaurants ENABLE ROW LEVEL SECURITY;
+-- ── tenants (read assigned outlets) ──────────────────────────────────────
+ALTER TABLE public.tenants ENABLE ROW LEVEL SECURITY;
 
-DROP POLICY IF EXISTS staff_restaurants_select ON public.restaurants;
-CREATE POLICY staff_restaurants_select ON public.restaurants
+DROP POLICY IF EXISTS staff_restaurants_select ON public.tenants;
+CREATE POLICY staff_restaurants_select ON public.tenants
   FOR SELECT TO authenticated
   USING (id IN (SELECT public.staff_restaurant_ids()));
 

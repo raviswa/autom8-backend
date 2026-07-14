@@ -56,13 +56,14 @@ ALTER TABLE walk_in_tokens
     'dinein'::text,
     'takeaway'::text,
     'large_party'::text,
-    'scheduled_delivery'::text
+    'scheduled_delivery'::text,
+    'scheduled_takeaway'::text
   ]));
 
-ALTER TABLE restaurants
+ALTER TABLE tenants
   ADD COLUMN IF NOT EXISTS scheduled_kds_lead_minutes integer NOT NULL DEFAULT 150;
 
-COMMENT ON COLUMN restaurants.scheduled_kds_lead_minutes IS
+COMMENT ON COLUMN tenants.scheduled_kds_lead_minutes IS
   'Minutes before scheduled_at to release order to KDS (typical 120–180). Prevents early prep for future slots.';
 
 DO $$
@@ -70,7 +71,7 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'restaurants_scheduled_kds_lead_minutes_check'
   ) THEN
-    ALTER TABLE restaurants
+    ALTER TABLE tenants
       ADD CONSTRAINT restaurants_scheduled_kds_lead_minutes_check
       CHECK (scheduled_kds_lead_minutes BETWEEN 30 AND 480);
   END IF;

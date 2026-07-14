@@ -1,9 +1,9 @@
 -- Parcel/packaging charge per item (takeaway & door delivery) + special dish of the day.
 
-ALTER TABLE restaurants
+ALTER TABLE tenants
   ADD COLUMN IF NOT EXISTS parcel_charge_per_item numeric(8,2) NOT NULL DEFAULT 0;
 
-COMMENT ON COLUMN restaurants.parcel_charge_per_item IS
+COMMENT ON COLUMN tenants.parcel_charge_per_item IS
   'Extra charge per cart item qty for takeaway/delivery (₹). Added before GST. 0 = disabled.';
 
 ALTER TABLE menu_items

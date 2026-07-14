@@ -1,6 +1,6 @@
 create table if not exists outlets (
   id uuid primary key default gen_random_uuid(),
-  restaurant_id uuid not null references restaurants(id),
+  restaurant_id uuid not null references tenants(id),
   name text not null,
   address text,
   lat float8 not null,

@@ -1,14 +1,14 @@
 -- Monotonic portal token IDs (T-001, T-002, …) — never reuse once allocated.
 -- Run once in Supabase SQL editor.
 
-ALTER TABLE public.restaurants
+ALTER TABLE public.tenants
   ADD COLUMN IF NOT EXISTS portal_token_seq integer NOT NULL DEFAULT 0;
 
-COMMENT ON COLUMN public.restaurants.portal_token_seq IS
+COMMENT ON COLUMN public.tenants.portal_token_seq IS
   'Last allocated walk_in_tokens portal id sequence; incremented atomically per new token.';
 
 -- Seed from existing tokens so new allocations never collide with history.
-UPDATE public.restaurants r
+UPDATE public.tenants r
 SET portal_token_seq = GREATEST(
   r.portal_token_seq,
   COALESCE((
@@ -26,7 +26,7 @@ AS $$
 DECLARE
   v_next integer;
 BEGIN
-  UPDATE public.restaurants
+  UPDATE public.tenants
   SET portal_token_seq = portal_token_seq + 1
   WHERE id = p_restaurant_id
   RETURNING portal_token_seq INTO v_next;

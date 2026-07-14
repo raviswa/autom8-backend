@@ -1,19 +1,19 @@
 -- Per-restaurant WhatsApp / Meta config (replaces Railway env vars for tenants).
 -- Run once in Supabase SQL editor after add_restaurant_kitchen_settings.sql.
 
-ALTER TABLE restaurants
+ALTER TABLE tenants
   ADD COLUMN IF NOT EXISTS meta_catalog_id text;
 
-COMMENT ON COLUMN restaurants.meta_catalog_id IS
+COMMENT ON COLUMN tenants.meta_catalog_id IS
   'Meta Commerce catalog ID for WhatsApp catalog sync and catalog messages';
 
 -- phone_number_id + access_token live in restaurant_integrations (already exists).
--- manager_phone + whatsapp_number + waba_id live on restaurants (already exists).
+-- manager_phone + whatsapp_number + waba_id live on tenants (already exists).
 
 -- ── Backfill Munafe demo outlet ─────────────────────────────────────────────
 -- Replace placeholders with values currently in Railway env vars, then run:
 
--- UPDATE restaurants
+-- UPDATE tenants
 -- SET
 --   meta_catalog_id = '<META_CATALOG_ID from Railway>',
 --   manager_phone   = COALESCE(manager_phone, '<MANAGER_WHATSAPP_NUMBER>'),
