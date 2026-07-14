@@ -35,6 +35,8 @@ from tools.payment_tools import (
     build_scheduled_payment_line,
     scheduled_payment_already_delivered,
     format_payment_link_failure_message,
+    send_confirm_and_pay_cta,
+    RAZORPAY_NON_REFUND_NOTICE,
 )
 from tools.prepay_fulfillment import (
     prepay_fulfillment_required,
@@ -406,7 +408,8 @@ async def _complete_scheduled_takeaway_after_approval(
         f"Your scheduled take-away is confirmed! 🎉\n────────────────────\n"
         f"Token: {token}\nOrder: {order_text}\n"
         f"────────────────────\n"
-        f"{format_order_total_lines(totals)}\n\n{payment_line}"
+        f"{format_order_total_lines(totals)}\n\n"
+        f"{RAZORPAY_NON_REFUND_NOTICE}"
     )
     sched_label = _scheduled_takeaway_label(session_state)
     if sched_label:
@@ -420,6 +423,20 @@ async def _complete_scheduled_takeaway_after_approval(
         confirmation += f"\n\n{PREPAY_PENDING_FOOTER}"
 
     await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
+
+    payment_link = str(session_state.get("payment_link") or "").strip()
+    cta_ok = await send_confirm_and_pay_cta(
+        customer_phone,
+        restaurant_id,
+        payment_link,
+        token=str(token),
+        booking_id=str(booking_id or ""),
+        total=total,
+        order_text=order_text,
+        session_state=session_state,
+    )
+    if not cta_ok and payment_line:
+        await send_whatsapp_message(customer_phone, payment_line, restaurant_id)
 
     if prepay_pending:
         session_state["_scheduled_payment_sent"] = True

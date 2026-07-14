@@ -506,6 +506,67 @@ def checkout_gateway_label(gateway: str) -> str:
     return "PhonePe" if str(gateway or "").lower() == "phonepe" else "Razorpay"
 
 
+async def send_confirm_and_pay_cta(
+    customer_phone: str,
+    restaurant_id: str,
+    payment_link: str,
+    *,
+    token: str,
+    booking_id: str,
+    total: float,
+    order_text: str = "",
+    order_ref: str | None = None,
+    header_text: str = "Confirm Your Order",
+    session_state: dict[str, Any] | None = None,
+) -> bool:
+    """
+    Send the presentable WhatsApp CTA card (Confirm & Pay button) used by webcart.
+    Falls back to a short plain-text Confirm & Pay + URL if the interactive send fails.
+    """
+    from tools.whatsapp_tools import send_whatsapp_cta_url, send_whatsapp_message
+    from config.settings import settings
+
+    if not payment_link or is_placeholder_payment_link(str(payment_link)):
+        return False
+
+    gw = (session_state or {}).get("payment_gateway") or settings.payment_gateway
+    gateway_label = checkout_gateway_label(str(gw))
+
+    parts = [p.strip() for p in str(order_text or "").split(",") if p.strip()]
+    preview_lines = [f"- {p}" for p in parts[:6]]
+    if len(parts) > 6:
+        preview_lines.append(f"- +{len(parts) - 6} more item(s)")
+    order_preview = "\n".join(preview_lines)
+
+    ref = order_ref or (str(booking_id)[-8:] if booking_id else "—")
+    body_text = (
+        "Your order is almost confirmed.\n\n"
+        f"Order ref: {ref}\n"
+        f"Token: {token}\n"
+        f"Total: INR {float(total):.0f}\n"
+    )
+    if order_preview:
+        body_text += f"\n{order_preview}\n"
+    body_text += (
+        f"\nTap Confirm & Pay to complete payment securely via {gateway_label}."
+    )
+
+    sent = await send_whatsapp_cta_url(
+        customer_phone,
+        restaurant_id,
+        body_text=body_text.strip(),
+        button_text="Confirm & Pay",
+        url=str(payment_link),
+        header_text=header_text,
+        footer_text=f"Secure payment powered by {gateway_label}",
+    )
+    if sent:
+        return True
+
+    fallback = f"{body_text.strip()}\n\nConfirm & Pay:\n{payment_link}"
+    return await send_whatsapp_message(customer_phone, fallback, restaurant_id)
+
+
 def _record_prepay_gateway(
     session_state: dict[str, Any] | None,
     booking_id: str,
