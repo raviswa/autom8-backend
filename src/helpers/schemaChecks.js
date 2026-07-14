@@ -51,34 +51,56 @@ function parseMigrationColumns() {
  */
 async function verifyMigrationColumns() {
   const byTable = parseMigrationColumns();
-  const missing = []; // { table, column, file }
+  const missing = [];        // { table, column, file }
+  const missingTables = [];  // { table, files }
+
+  const isMissingRelation = (error) =>
+    !!error && (error.code === '42P01' || /relation .* does not exist/i.test(error.message || '')
+      || /could not find the table/i.test(error.message || ''));
 
   for (const [table, columnMap] of byTable.entries()) {
     const columns = [...columnMap.keys()];
     const { error } = await supabaseAdmin.from(table).select(columns.join(',')).limit(0);
     if (!error) continue; // whole set exists, nothing missing on this table
 
+    if (isMissingRelation(error)) {
+      // The table itself doesn't exist (dropped, renamed, or not yet created) —
+      // report that once, don't bisect column-by-column (every column would
+      // "fail" identically and falsely imply a column-level problem when the
+      // real issue is the table name/existence).
+      missingTables.push({ table, files: [...new Set(columnMap.values())] });
+      continue;
+    }
+
     // Something in this table's column set is missing — bisect to find
     // exactly which ones, since PostgREST only reports the first offender.
     for (const column of columns) {
       const probe = await supabaseAdmin.from(table).select(column).limit(0);
-      if (probe.error) {
+      if (probe.error && !isMissingRelation(probe.error)) {
         missing.push({ table, column, file: columnMap.get(column) });
       }
     }
   }
 
-  if (missing.length) {
-    console.error('[boot] ❌ schema check found columns the code expects but the DB is missing:');
-    for (const { table, column, file } of missing) {
-      console.error(`[boot]    ${table}.${column}  ←  run migrations/${file}`);
+  if (missingTables.length || missing.length) {
+    if (missingTables.length) {
+      console.error('[boot] ❌ schema check found tables referenced in migrations that do not exist (renamed or dropped?):');
+      for (const { table, files } of missingTables) {
+        console.error(`[boot]    table "${table}" not found  ←  referenced in ${files.map((f) => `migrations/${f}`).join(', ')}`);
+      }
+    }
+    if (missing.length) {
+      console.error('[boot] ❌ schema check found columns the code expects but the DB is missing:');
+      for (const { table, column, file } of missing) {
+        console.error(`[boot]    ${table}.${column}  ←  run migrations/${file}`);
+      }
     }
     console.error(`[boot]    Target DB: ${process.env.SUPABASE_URL || '(SUPABASE_URL not set)'}`);
   } else {
     console.log(`[boot] ✅ schema check passed — all migration-tracked columns present (${byTable.size} tables checked)`);
   }
 
-  return { ok: missing.length === 0, missing };
+  return { ok: missingTables.length === 0 && missing.length === 0, missing, missingTables };
 }
 
 /**
