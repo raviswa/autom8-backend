@@ -136,7 +136,15 @@ async def reverse_geocode_candidates(
             return []
         data = await resp.json()
         if data.get("status") != "OK" or not data.get("results"):
-            logger.info(f"[reverse-geocode] no result status={data.get('status')}")
+            status = data.get("status")
+            if status == "REQUEST_DENIED":
+                logger.warning(
+                    "[reverse-geocode] REQUEST_DENIED — enable Geocoding API for "
+                    "GOOGLE_MAPS_API_KEY (or fix key restrictions/billing). "
+                    f"error_message={data.get('error_message')!r}"
+                )
+            else:
+                logger.info(f"[reverse-geocode] no result status={status}")
             return []
 
         results = data["results"]

@@ -970,6 +970,26 @@ async def handle_delivery_flow(
                 float(session_state["delivery_lng"]),
                 limit=4,
             )
+            # When Google reverse-geocode is denied/unavailable, still offer a
+            # Choose Address sheet: shared place name (if any) + confirm pin.
+            if not candidates:
+                synthetic = []
+                if pin_label and not pin_label.replace(".", "").replace(",", "").replace("-", "").replace(" ", "").isdigit():
+                    synthetic.append({
+                        "formatted_address": pin_label,
+                        "lat": session_state["delivery_lat"],
+                        "lng": session_state["delivery_lng"],
+                    })
+                synthetic.append({
+                    "formatted_address": (
+                        f"Shared pin ({float(session_state['delivery_lat']):.5f}, "
+                        f"{float(session_state['delivery_lng']):.5f})"
+                    ),
+                    "lat": session_state["delivery_lat"],
+                    "lng": session_state["delivery_lng"],
+                })
+                candidates = synthetic
+
             if candidates:
                 sent = await _send_address_choice_list(
                     customer_phone, restaurant_id, session_state, candidates,
@@ -977,7 +997,7 @@ async def handle_delivery_flow(
                 if sent:
                     return {"status": "awaiting_address_choice"}
 
-            # No candidates / list send failed — fall back to pin label
+            # List send failed — fall back to pin label when it is a real place name
             if pin_label and not pin_label.replace(".", "").replace(",", "").replace("-", "").replace(" ", "").isdigit():
                 return await _finalize_and_continue_after_address(
                     customer_phone, restaurant_id, session_state,

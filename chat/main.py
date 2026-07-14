@@ -744,9 +744,23 @@ async def internal_scheduled_approval_payment(request: Request):
     return JSONResponse(status_code=status_code, content=result)
 
 
+def _normalize_webcart_service_type(raw: str | None) -> tuple[str, bool]:
+    """Map walk-in / body service labels → (booking service_type, is_scheduled)."""
+    value = str(raw or "takeaway").strip().lower()
+    if value in ("scheduled_delivery",):
+        return "delivery", True
+    if value in ("scheduled_takeaway", "scheduled_pickup"):
+        return "takeaway", True
+    if value in ("delivery", "takeaway", "dine_in"):
+        return value, False
+    if value in ("dinein", "dine-in"):
+        return "dine_in", False
+    return "takeaway", False
+
+
 @app.post("/internal/webcart-confirm-pay")
 async def internal_webcart_confirm_pay(request: Request):
-    """Node API calls this after webcart submit to send customer-facing Confirm & Pay CTA."""
+    """Node API calls this after webcart submit to send Confirm & Pay (or schedule approval)."""
     if not _verify_internal_secret(request):
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -758,10 +772,11 @@ async def internal_webcart_confirm_pay(request: Request):
     restaurant_id = str(body.get("restaurant_id") or "").strip()
     customer_phone = str(body.get("customer_phone") or "").strip()
     customer_name = str(body.get("customer_name") or "Guest").strip() or "Guest"
-    service_type = str(body.get("service_type") or "takeaway").strip().lower()
+    raw_service = str(body.get("service_type") or "takeaway").strip().lower()
     token_label = str(body.get("token") or "").strip()
     order_ref = str(body.get("order_ref") or "").strip()
     items = body.get("items") or []
+    body_order_mode = str(body.get("order_mode") or "").strip().lower()
 
     try:
         total = float(body.get("total") or 0)
@@ -773,8 +788,7 @@ async def internal_webcart_confirm_pay(request: Request):
     if total < 1:
         raise HTTPException(status_code=400, detail="total must be at least 1")
 
-    if service_type not in ("takeaway", "delivery", "dine_in"):
-        service_type = "takeaway"
+    service_type, scheduled_from_type = _normalize_webcart_service_type(raw_service)
 
     phone_digits = "".join(ch for ch in customer_phone if ch.isdigit())
     phone_candidates = [customer_phone, phone_digits]
@@ -804,19 +818,63 @@ async def internal_webcart_confirm_pay(request: Request):
     if not customer_id:
         raise HTTPException(status_code=500, detail="Customer resolution failed")
 
-    token_number = await get_next_token_number(restaurant_id)
-    booking = await create_booking(
-        restaurant_id,
-        customer_id,
-        service_type,
-        token_number=token_number,
+    # Hydrate WhatsApp session — never invent a blank prepay-only state that
+    # drops scheduled_at / delivery address / order_mode from the chat flow.
+    session_state: dict = {}
+    for ph in phone_candidates:
+        session_state = dict(await get_session_state(restaurant_id, ph) or {})
+        if session_state:
+            canonical_phone = ph
+            break
+
+    session_service = str(session_state.get("service_type") or "").strip().lower()
+    if session_service in ("delivery", "takeaway", "dine_in"):
+        service_type = session_service
+
+    is_scheduled = bool(
+        scheduled_from_type
+        or body_order_mode == "scheduled"
+        or str(session_state.get("order_mode") or "").lower() == "scheduled"
+        or session_state.get("scheduled_at")
+        or body.get("scheduled_at")
     )
-    booking_id = str(booking.get("id") or "").strip()
-    if not booking_id:
-        raise HTTPException(status_code=500, detail="Booking creation failed")
+    if is_scheduled:
+        session_state["order_mode"] = "scheduled"
+        if body.get("scheduled_at") and not session_state.get("scheduled_at"):
+            session_state["scheduled_at"] = body.get("scheduled_at")
 
+    # Prefer walk-in token meta when the menu row knows the schedule.
+    from tools.db_tools import get_walk_in_token_by_id, get_active_walk_in_token, parse_walk_in_meta
+    portal_token = None
+    if token_label:
+        portal_token = await get_walk_in_token_by_id(restaurant_id, token_label)
+    if not portal_token:
+        portal_token = await get_active_walk_in_token(restaurant_id, canonical_phone)
+    portal_meta = parse_walk_in_meta((portal_token or {}).get("meta")) if portal_token else {}
+    portal_type = str((portal_token or {}).get("type") or "").strip().lower()
+    if portal_type in ("scheduled_delivery", "scheduled_takeaway"):
+        is_scheduled = True
+        session_state["order_mode"] = "scheduled"
+        mapped, _ = _normalize_webcart_service_type(portal_type)
+        service_type = mapped
+    if portal_meta.get("scheduled_at") and not session_state.get("scheduled_at"):
+        session_state["scheduled_at"] = portal_meta.get("scheduled_at")
+        is_scheduled = True
+        session_state["order_mode"] = "scheduled"
+    if portal_meta.get("service_type") in ("delivery", "takeaway", "dine_in"):
+        service_type = str(portal_meta["service_type"])
 
-
+    session_state["payment_mode"] = "prepay"
+    session_state["service_type"] = service_type
+    session_state["restaurant_id"] = restaurant_id
+    session_state["customer_name"] = (
+        customer_name
+        or session_state.get("customer_name")
+        or "Guest"
+    )
+    session_state["order_total"] = total
+    if token_label:
+        session_state["menu_session_token"] = token_label
 
     # Build cart_snapshot from webcart items in the shape prepay_fulfillment expects
     cart_snapshot = {}
@@ -834,16 +892,158 @@ async def internal_webcart_confirm_pay(request: Request):
         order_text_lines.append(f"{qty}x {name}")
     order_text_display = ", ".join(order_text_lines)
 
-    
-    session_state: dict = {
-        "payment_mode": "prepay",
-        "service_type": service_type,
-        "order_total": total,    # ← add this: prepare_checkout_page reads this key directly
-    }
+    token_number = await get_next_token_number(restaurant_id)
+    booking = await create_booking(
+        restaurant_id,
+        customer_id,
+        service_type,
+        token_number=token_number,
+        delivery_address=session_state.get("delivery_address"),
+        booking_datetime=session_state.get("scheduled_at"),
+    )
+    booking_id = str(booking.get("id") or "").strip()
+    if not booking_id:
+        raise HTTPException(status_code=500, detail="Booking creation failed")
+
+    session_state["booking_id"] = booking_id
+    session_state["token_number"] = token_number
+    session_state["cart"] = cart_snapshot
+
+    from tools.order_pricing import compute_order_totals, resolve_delivery_charge
+    from tools.booking_mechanisms import cache_restaurant_pricing
+
+    await cache_restaurant_pricing(session_state, restaurant_id)
+    parcel_rate = float(session_state.get("parcel_charge_per_item") or 0)
+    delivery_fee = resolve_delivery_charge(session_state) if service_type == "delivery" else 0.0
+    totals = compute_order_totals(
+        cart_snapshot,
+        service_type if service_type in ("takeaway", "delivery") else "takeaway",
+        parcel_per_item=parcel_rate,
+        delivery_charge=delivery_fee,
+    )
+    # Prefer webcart-calculated total when present (includes the same fee rules).
+    if total > 0:
+        totals = {**totals, "grand_total": total, "total": total}
+    session_state["order_totals"] = totals
+    session_state["order_total"] = float(totals.get("grand_total") or total)
+
+    # Scheduled delivery/takeaway must go through manager approval — never issue pay CTA here.
+    needs_scheduled_approval = bool(is_scheduled)
+    if needs_scheduled_approval and not session_state.get("scheduled_at"):
+        logger.error(
+            f"[webcart-confirm-pay] scheduled order missing scheduled_at "
+            f"phone={canonical_phone} service={service_type} portal_type={portal_type}"
+        )
+        await send_whatsapp_message(
+            canonical_phone,
+            "We couldn't find your delivery/pickup time for this scheduled order. "
+            "Please reply *Home* and choose *Scheduled Delivery* / *Scheduled Pickup* again.",
+            restaurant_id,
+        )
+        await save_session_state(restaurant_id, canonical_phone, session_state)
+        return JSONResponse(
+            status_code=409,
+            content={"ok": False, "error": "scheduled_at_missing", "booking_id": booking_id},
+        )
+
+    if needs_scheduled_approval and service_type == "delivery":
+        from agents.customer.delivery_flow import _submit_scheduled_delivery_for_approval
+
+        restaurant = await get_restaurant_by_id(restaurant_id)
+        manager_phone = str(
+            session_state.get("manager_phone")
+            or (restaurant or {}).get("manager_phone")
+            or ""
+        )
+        try:
+            result = await _submit_scheduled_delivery_for_approval(
+                restaurant_id,
+                customer_id,
+                session_state.get("customer_name") or customer_name,
+                canonical_phone,
+                manager_phone,
+                session_state,
+                order_text=order_text_display,
+                cart_snapshot=cart_snapshot,
+                totals=totals,
+                total=float(totals.get("grand_total") or total),
+                delivery_fee=delivery_fee,
+                token=str(token_label or token_number),
+                booking_id=booking_id,
+            )
+        except Exception as exc:
+            logger.error(f"[webcart-confirm-pay] scheduled delivery approval submit failed: {exc}")
+            await save_session_state(restaurant_id, canonical_phone, session_state)
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": "scheduled_approval_failed", "booking_id": booking_id},
+            )
+        await save_session_state(restaurant_id, canonical_phone, session_state)
+        logger.info(
+            f"[webcart-confirm-pay] scheduled delivery routed to manager approval "
+            f"booking={booking_id} phone={canonical_phone}"
+        )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "booking_id": booking_id,
+                "payment_link": None,
+                "awaiting_approval": True,
+                "status": result.get("status"),
+                "customer_phone": canonical_phone,
+            },
+        )
+
+    if needs_scheduled_approval and service_type == "takeaway":
+        from agents.customer.takeaway_flow import _submit_scheduled_takeaway_for_approval
+
+        restaurant = await get_restaurant_by_id(restaurant_id)
+        manager_phone = str(
+            session_state.get("manager_phone")
+            or (restaurant or {}).get("manager_phone")
+            or ""
+        )
+        try:
+            result = await _submit_scheduled_takeaway_for_approval(
+                restaurant_id,
+                customer_id,
+                session_state.get("customer_name") or customer_name,
+                canonical_phone,
+                manager_phone,
+                session_state,
+                order_text=order_text_display,
+                cart_snapshot=cart_snapshot,
+                totals=totals,
+                total=float(totals.get("grand_total") or total),
+                token=str(token_label or token_number),
+                booking_id=booking_id,
+                booking_time=datetime.utcnow().isoformat(),
+            )
+        except Exception as exc:
+            logger.error(f"[webcart-confirm-pay] scheduled takeaway approval submit failed: {exc}")
+            await save_session_state(restaurant_id, canonical_phone, session_state)
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": "scheduled_approval_failed", "booking_id": booking_id},
+            )
+        await save_session_state(restaurant_id, canonical_phone, session_state)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "booking_id": booking_id,
+                "payment_link": None,
+                "awaiting_approval": True,
+                "status": result.get("status"),
+                "customer_phone": canonical_phone,
+            },
+        )
+
     payment_link = await ensure_prepay_payment_link(
         booking_id,
-        total,
-        customer_name,
+        float(totals.get("grand_total") or total),
+        session_state.get("customer_name") or customer_name,
         f"Web cart {service_type.replace('_', ' ')} order",
         customer_phone=canonical_phone,
         session_state=session_state,
@@ -854,29 +1054,26 @@ async def internal_webcart_confirm_pay(request: Request):
             content={"ok": False, "error": "payment_link_unavailable", "booking_id": booking_id},
         )
 
-    # ← add this: persist so /pay/{booking_id} can find order_total + razorpay_order_id later    
-    
-    # Persist the prepay payload so fulfill_from_webhook() has something to dispatch to KDS with
     from tools.prepay_fulfillment import build_prepay_payload, persist_prepay_payload
     prepay_payload = build_prepay_payload(
         service_type=service_type,
         session_state=session_state,
         restaurant_id=restaurant_id,
         customer_id=customer_id,
-        customer_name=customer_name,
+        customer_name=session_state.get("customer_name") or customer_name,
         customer_phone=canonical_phone,
         booking_id=booking_id,
         token=str(token_label or token_number),
-        total=total,
+        total=float(totals.get("grand_total") or total),
         booking_time=datetime.utcnow().isoformat(),
         order_text_display=order_text_display,
         cart_snapshot=cart_snapshot,
-        totals={"total": total},
+        totals=totals,
     )
     await persist_prepay_payload(booking_id, prepay_payload)
-    
+    session_state["booking_step"] = "awaiting_prepay"
     await save_session_state(restaurant_id, canonical_phone, session_state)
-    
+
     preview_lines = []
     for row in items[:6]:
         try:
@@ -895,7 +1092,7 @@ async def internal_webcart_confirm_pay(request: Request):
         "Your order is almost confirmed.\n\n"
         f"Order ref: {order_ref or booking_id[-8:]}\n"
         f"Token: {token_label or token_number}\n"
-        f"Total: INR {total:.0f}\n\n"
+        f"Total: INR {float(totals.get('grand_total') or total):.0f}\n\n"
         f"{order_preview}\n\n"
         f"Tap Confirm & Pay to complete payment securely via {gateway_label}."
     ).strip()
@@ -914,7 +1111,7 @@ async def internal_webcart_confirm_pay(request: Request):
         fallback_text = (
             "Your order is almost confirmed.\n"
             f"Order ref: {order_ref or booking_id[-8:]}\n"
-            f"Total: INR {total:.0f}\n\n"
+            f"Total: INR {float(totals.get('grand_total') or total):.0f}\n\n"
             "Confirm & Pay:\n"
             f"{payment_link}"
         )

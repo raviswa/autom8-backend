@@ -1435,6 +1435,125 @@ def _build_web_menu_url(slug: str, token: str, phone_digits: str) -> str:
     return f"https://{slug}.{domain}/menu?token={token}&phone={phone_digits}"
 
 
+def _expected_menu_walk_in_type(session_state: dict[str, Any]) -> str:
+    """Walk-in token type that matches the customer's selected service/mode."""
+    service = str(session_state.get("service_type") or "").strip().lower()
+    mode = str(session_state.get("order_mode") or "").strip().lower()
+    if service == "dine_in":
+        return "dinein"
+    if service == "delivery":
+        return "scheduled_delivery" if mode == "scheduled" else "takeaway"
+    if service == "takeaway":
+        return "scheduled_takeaway" if mode == "scheduled" else "takeaway"
+    return "takeaway"
+
+
+async def _resolve_menu_walk_in_token(
+    restaurant_id: str,
+    customer_phone: str,
+    session_state: dict[str, Any],
+) -> tuple[str | None, bool]:
+    """
+    Return (token_id, is_real_walk_row) for the web-menu link.
+
+    Never reuse an active token of the wrong type (e.g. leftover takeaway while
+    the customer is on scheduled delivery) — that made webcart treat scheduled
+    orders as immediate takeaway and skip manager approval / KDS deferral.
+    """
+    from tools.db_tools import get_walk_in_token_by_id
+
+    expected = _expected_menu_walk_in_type(session_state)
+    meta = {
+        "source": "web_menu_link",
+        "service_type": session_state.get("service_type"),
+        "order_mode": session_state.get("order_mode"),
+        "scheduled_at": session_state.get("scheduled_at"),
+    }
+
+    async def _refresh_meta(tid: str) -> None:
+        try:
+            import json
+            from sqlalchemy import text
+            from tools.db_tools import AsyncSessionLocal, parse_walk_in_meta
+
+            if AsyncSessionLocal is None:
+                return
+            existing = await get_walk_in_token_by_id(restaurant_id, tid)
+            prev = parse_walk_in_meta((existing or {}).get("meta"))
+            merged = {**prev, **{k: v for k, v in meta.items() if v is not None}}
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    text("""
+                        UPDATE walk_in_tokens
+                        SET meta = CAST(:meta AS jsonb)
+                        WHERE id = :tid AND restaurant_id = CAST(:rid AS uuid)
+                    """),
+                    {
+                        "tid": tid,
+                        "rid": restaurant_id,
+                        "meta": json.dumps(merged),
+                    },
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.warning(f"[BOOKING] menu token meta refresh failed for {tid}: {exc}")
+
+    candidates: list[str] = []
+    for key in ("menu_session_token", "token_number", "display_token"):
+        raw = session_state.get(key)
+        if raw and str(raw) not in candidates:
+            candidates.append(str(raw))
+
+    for tid in candidates:
+        walk = await get_walk_in_token_by_id(restaurant_id, tid)
+        if (
+            walk
+            and walk.get("type") == expected
+            and walk.get("status") in ("seated", "takeaway", "waiting", "pending_approval")
+        ):
+            await _refresh_meta(str(walk["id"]))
+            return str(walk["id"]), True
+
+    walk = await get_active_walk_in_token(restaurant_id, customer_phone)
+    if walk and walk.get("type") == expected and walk.get("id"):
+        await _refresh_meta(str(walk["id"]))
+        return str(walk["id"]), True
+
+    # Drop leftover tokens of a different service (e.g. old takeaway while
+    # starting scheduled delivery) so webcart cannot resolve the wrong type.
+    if walk and walk.get("id") and walk.get("type") != expected:
+        try:
+            from tools.db_tools import supersede_walk_in_token
+            await supersede_walk_in_token(
+                restaurant_id,
+                str(walk["id"]),
+                reason=f"replaced_by_menu_{expected}",
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[BOOKING] could not supersede leftover token {walk.get('id')}: {exc}"
+            )
+
+    created_id = await create_walk_in_token_direct(
+        restaurant_id=restaurant_id,
+        name=session_state.get("customer_name") or "WhatsApp Guest",
+        phone=customer_phone,
+        token_type=expected,
+        pax=int(session_state.get("pax") or 1),
+        meta=meta,
+    )
+    if created_id:
+        return created_id, True
+
+    logger.error(
+        "[BOOKING] %s → could not create walk_in_tokens row type=%s; "
+        "menu link will rely on phone-based session lookup only",
+        customer_phone,
+        expected,
+    )
+    return uuid4().hex, False
+
+
 async def _send_web_menu_message(
     customer_phone: str,
     restaurant_id: str,
@@ -1454,52 +1573,9 @@ async def _send_web_menu_message(
     service_label, service_icon = _service_label_and_icon(session_state)
     phone_digits = _normalize_phone_digits(customer_phone)
 
-    token_id = (
-        session_state.get('menu_session_token')
-        or session_state.get('token_number')
-        or session_state.get('display_token')
+    token_id, token_id_is_real_walk_row = await _resolve_menu_walk_in_token(
+        restaurant_id, customer_phone, session_state,
     )
-    token_id_is_real_walk_row = bool(token_id)  # these all originate from real walk_in_tokens rows
-    if not token_id:
-        walk = await get_active_walk_in_token(restaurant_id, customer_phone)
-        if walk and walk.get('id'):
-            token_id = str(walk.get('id'))
-            token_id_is_real_walk_row = True
-
-    if not token_id:
-        # No walk_in_tokens row exists yet (e.g. customer tapped a service
-        # button before any order details were collected). Create one now
-        # so the web cart can resolve a real session instead of a 410.
-        service = str(session_state.get('service_type') or '').strip().lower()
-        mode = str(session_state.get('order_mode') or '').strip().lower()
-        if service == 'dine_in':
-            wtype = 'dinein'
-        elif service == 'delivery':
-            wtype = 'scheduled_delivery' if mode == 'scheduled' else 'takeaway'
-        else:
-            wtype = 'scheduled_takeaway' if mode == 'scheduled' else 'takeaway'
-
-        created_id = await create_walk_in_token_direct(
-            restaurant_id=restaurant_id,
-            name=session_state.get('customer_name') or 'WhatsApp Guest',
-            phone=customer_phone,
-            token_type=wtype,
-            pax=int(session_state.get('pax') or 1),
-            meta={'source': 'web_menu_link'},
-        )
-        if created_id:
-            token_id = created_id
-            token_id_is_real_walk_row = True
-        else:
-            # Real walk_in_tokens row could not be created (DB error etc).
-            # Use a session-only token so the link still works via phone
-            # lookup, but NEVER reference it as a walk_in_token_id FK below.
-            logger.error(
-                "[BOOKING] %s → could not create walk_in_tokens row; "
-                "menu link will rely on phone-based session lookup only",
-                customer_phone,
-            )
-            token_id = uuid4().hex
 
     try:
         # Only pass walk_in_token_id when token_id genuinely refers to a

@@ -2331,7 +2331,10 @@ async def create_menu_link_token(
                 ON CONFLICT (restaurant_id, phone)
                 DO UPDATE SET
                     session_token = EXCLUDED.session_token,
-                    walk_in_token_id = COALESCE(EXCLUDED.walk_in_token_id, menu_tokens.walk_in_token_id),
+                    -- Always replace. COALESCE(old) kept stale takeaway ids on the
+                    -- menu link when a new scheduled_delivery walk-in was omitted,
+                    -- so webcart submitted as immediate takeaway.
+                    walk_in_token_id = EXCLUDED.walk_in_token_id,
                     expires_at = EXCLUDED.expires_at,
                     is_active = TRUE,
                     updated_at = NOW()

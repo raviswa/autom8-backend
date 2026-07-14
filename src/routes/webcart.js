@@ -296,11 +296,21 @@ function normalizeSlots(input) {
   return clean.length ? clean : ['anytime'];
 }
 
+function isActiveWalkInRow(data) {
+  if (!data) return false;
+  if (!ACTIVE_TOKEN_STATUSES.has(data.status) || data.completed_at) return false;
+  const arrivedAt = data.arrived_at ? new Date(data.arrived_at) : null;
+  const ageMs = arrivedAt ? Date.now() - arrivedAt.getTime() : Number.POSITIVE_INFINITY;
+  if (!arrivedAt || ageMs > 1000 * 60 * 60 * 12) return false;
+  return true;
+}
+
 async function resolveSession({ restaurantId, token, phone }) {
   const rawVariants = phoneVariants(phone);
   if (!restaurantId || !token) return null;
 
   let menuToken = null;
+  let menuTokensTableMissing = false;
   try {
     let menuQuery = supabaseAdmin
       .from('menu_tokens')
@@ -321,6 +331,7 @@ async function resolveSession({ restaurantId, token, phone }) {
       const raw = `${menuErr.code || ''} ${menuErr.message || ''}`.toLowerCase();
       const missingTable = raw.includes('menu_tokens') || raw.includes('pgrst205') || raw.includes('42p01');
       if (!missingTable) throw menuErr;
+      menuTokensTableMissing = true;
     } else {
       menuToken = menuData || null;
     }
@@ -332,11 +343,22 @@ async function resolveSession({ restaurantId, token, phone }) {
   const variants = rawVariants.length ? rawVariants : phoneVariants(tokenPhone);
   if (!variants.length) return null;
 
-  const walkTokenId = menuToken?.walk_in_token_id || token;
+  // ── Primary path: menu_tokens row exists for this URL token ──────────────
+  // Never fall back to "latest walk_in by phone" here. That silently binds a
+  // scheduled-delivery menu link to a stale takeaway token (e.g. T-2607-132)
+  // and webcart then treats the order as immediate takeaway.
+  if (menuToken) {
+    const walkTokenId = String(menuToken.walk_in_token_id || '').trim();
+    if (!walkTokenId) {
+      console.error(
+        '[webcart/session] menu_tokens row missing walk_in_token_id — refusing phone fallback',
+        { restaurantId, token: String(token).slice(0, 12), phone: variants[0] }
+      );
+      return null;
+    }
 
-  let data = null;
-  if (walkTokenId) {
-    const { data: byId, error } = await supabaseAdmin
+    // Prefer exact id; phone filter is a safety check, not the identity key.
+    let { data: byId, error } = await supabaseAdmin
       .from('walk_in_tokens')
       .select('id, phone, status, arrived_at, completed_at, meta, type')
       .eq('restaurant_id', restaurantId)
@@ -345,41 +367,73 @@ async function resolveSession({ restaurantId, token, phone }) {
       .limit(1)
       .maybeSingle();
     if (error) throw error;
-    data = byId || null;
-  }
 
-  if (!data && menuToken) {
-    const { data: byPhone, error } = await supabaseAdmin
-      .from('walk_in_tokens')
-      .select('id, phone, status, arrived_at, completed_at, meta, type')
-      .eq('restaurant_id', restaurantId)
-      .in('phone', variants)
-      .order('arrived_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (error) throw error;
-    data = byPhone || null;
-
-    if (data?.id && !menuToken.walk_in_token_id) {
-      await supabaseAdmin
-        .from('menu_tokens')
-        .update({ walk_in_token_id: data.id })
+    if (!byId) {
+      // Retry without phone filter when variants mismatch (91 vs 10-digit).
+      const byIdOnly = await supabaseAdmin
+        .from('walk_in_tokens')
+        .select('id, phone, status, arrived_at, completed_at, meta, type')
         .eq('restaurant_id', restaurantId)
-        .eq('session_token', token)
-        .eq('is_active', true)
-        .in('phone', variants);
+        .eq('id', walkTokenId)
+        .limit(1)
+        .maybeSingle();
+      if (byIdOnly.error) throw byIdOnly.error;
+      byId = byIdOnly.data || null;
+      if (byId && !phoneVariants(byId.phone).some((p) => variants.includes(p))) {
+        console.error(
+          '[webcart/session] walk_in_token_id phone mismatch — refusing to bind',
+          { restaurantId, walkTokenId, menuPhone: variants[0], walkPhone: byId.phone }
+        );
+        return null;
+      }
     }
+
+    if (!byId) {
+      console.error(
+        '[webcart/session] menu_tokens.walk_in_token_id not found — refusing phone fallback',
+        { restaurantId, walkTokenId, phone: variants[0] }
+      );
+      return null;
+    }
+
+    if (!isActiveWalkInRow(byId)) {
+      console.error(
+        '[webcart/session] linked walk_in token inactive/stale — refusing phone fallback',
+        {
+          restaurantId,
+          walkTokenId,
+          status: byId.status,
+          type: byId.type,
+          completed_at: byId.completed_at,
+        }
+      );
+      return null;
+    }
+
+    return byId;
   }
 
-  if (!data) return null;
+  // ── Legacy path: no menu_tokens row (old links / table not migrated) ─────
+  // Resolve only by explicit walk-in id == URL token. Do not grab "latest by phone".
+  if (!menuTokensTableMissing) {
+    console.warn(
+      '[webcart/session] no active menu_tokens row for session_token — trying legacy id match only',
+      { restaurantId, token: String(token).slice(0, 12), phone: variants[0] }
+    );
+  }
 
-  if (!ACTIVE_TOKEN_STATUSES.has(data.status) || data.completed_at) return null;
+  const { data: legacyById, error: legacyErr } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .select('id, phone, status, arrived_at, completed_at, meta, type')
+    .eq('restaurant_id', restaurantId)
+    .eq('id', token)
+    .in('phone', variants)
+    .limit(1)
+    .maybeSingle();
+  if (legacyErr) throw legacyErr;
 
-  const arrivedAt = data.arrived_at ? new Date(data.arrived_at) : null;
-  const ageMs = arrivedAt ? Date.now() - arrivedAt.getTime() : Number.POSITIVE_INFINITY;
-  if (!arrivedAt || ageMs > 1000 * 60 * 60 * 12) return null;
-
-  return data;
+  if (!isActiveWalkInRow(legacyById)) return null;
+  return legacyById;
 }
 
 // Restaurant LOBs (Munafe etc.) never use PSL/catalog fields — selecting them
@@ -792,7 +846,18 @@ router.post('/api/webcart/submit', async (req, res) => {
     }
 
     const subtotal = normalizedItems.reduce((sum, line) => sum + Number(line.line_total || 0), 0);
-    const serviceType = String(session?.type || 'takeaway').toLowerCase();
+    const sessionMeta = session?.meta || {};
+    const rawType = String(session?.type || sessionMeta.service_type || 'takeaway').toLowerCase();
+    const orderMode = String(
+      sessionMeta.order_mode
+      || (rawType.startsWith('scheduled_') ? 'scheduled' : '')
+      || ''
+    ).toLowerCase();
+    let serviceType = rawType;
+    if (rawType === 'scheduled_delivery') serviceType = 'delivery';
+    else if (rawType === 'scheduled_takeaway' || rawType === 'scheduled_pickup') serviceType = 'takeaway';
+    else if (rawType === 'dinein' || rawType === 'dine-in') serviceType = 'dine_in';
+    else if (sessionMeta.service_type) serviceType = String(sessionMeta.service_type).toLowerCase();
     const parcelPerItem = parseFloat(restaurant.parcel_charge_per_item || 0);
     const gstRate = parseFloat(restaurant.gst_rate || 5.0);
 
@@ -842,9 +907,11 @@ router.post('/api/webcart/submit', async (req, res) => {
       });
     }
 
-    const sessionMeta = session?.meta || {};
     const nextMeta = {
       ...sessionMeta,
+      service_type: serviceType,
+      order_mode: orderMode || sessionMeta.order_mode || null,
+      scheduled_at: sessionMeta.scheduled_at || null,
       web_cart_submission: {
         submitted_at: new Date().toISOString(),
         promo_code: promo_code ? String(promo_code).trim().slice(0, 40) : null,
@@ -882,7 +949,13 @@ router.post('/api/webcart/submit', async (req, res) => {
         'Guest',
       token: String(session?.id || safeToken),
       order_ref: orderRef,
-      service_type: String(session?.type || 'takeaway'),
+      // Send the walk-in type when scheduled so chat can gate approval;
+      // otherwise send normalized booking service_type.
+      service_type: orderMode === 'scheduled' || rawType.startsWith('scheduled_')
+        ? rawType
+        : serviceType,
+      order_mode: orderMode || undefined,
+      scheduled_at: sessionMeta.scheduled_at || undefined,
       total: totalAmount,
       items: normalizedItems,
       promo_code: promo_code ? String(promo_code).trim().slice(0, 40) : null,
@@ -913,9 +986,12 @@ router.post('/api/webcart/submit', async (req, res) => {
       order_ref: orderRef,
       booking_id: confirmResult?.booking_id || null,
       payment_link: confirmResult?.payment_link || null,
-      message: confirmResult?.payment_link
-        ? 'Hosted checkout ready.'
-        : 'Confirm & Pay has been sent to your WhatsApp.',
+      awaiting_approval: !!confirmResult?.awaiting_approval,
+      message: confirmResult?.awaiting_approval
+        ? 'Order submitted for manager approval. Check WhatsApp for updates.'
+        : confirmResult?.payment_link
+          ? 'Hosted checkout ready.'
+          : 'Confirm & Pay has been sent to your WhatsApp.',
     });
   } catch (err) {
     console.error('[webcart/submit]', err.message);
