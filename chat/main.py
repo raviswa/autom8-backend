@@ -65,7 +65,6 @@ from tools.booking_mechanisms import (
 )
 from agents.root_agent import route_message
 from agents.supply_agent import handle_supply_message  # Module 11
-from agents.customer.minimal_order_agent import handle_minimal_order_flow
 
 import asyncio
 
@@ -266,12 +265,10 @@ async def _dispatch_to_lob(
 
     Current LOBs
     ------------
-    "restaurant"     → handled by caller (booking_agent / dine-in / takeaway / delivery)
-    "supply"         → handle_supply_message (B2B food supply, already live)
-    "psl"            → minimal_order_agent (webcart link only, ≤5 msgs/order)
-    "food_products"  → minimal_order_agent (same pattern)
-    "retail"         → minimal_order_agent (same pattern)
-    "jewellery"      → placeholder — will route to jewellery_agent when built
+    "restaurant"  → handled by caller (booking_agent / dine-in / takeaway / delivery)
+    "supply"      → handle_supply_message (B2B food supply, already live)
+    "retail"      → placeholder — will route to retail_agent when built
+    "jewellery"   → placeholder — will route to jewellery_agent when built
 
     Adding a new LOB
     ----------------
@@ -279,19 +276,51 @@ async def _dispatch_to_lob(
     2. Import and call its handle_* function.
     3. Set lob_type on the tenant's restaurant row in the DB.
     No changes to the webhook handler or routing logic required.
+
+    Testing-mode note (shared WABA number)
+    ---------------------------------------
+    Until each supplier gets its own dedicated WABA number, multiple LOBs
+    (fnb, psl, ...) share Munafe's restaurant WhatsApp number and are routed
+    here purely via the "Hi <short_code>" keyword. Because of that, a
+    "supply" tenant here is a *client* of some supplier, not a supplier
+    itself — its real supplier_id/client_id must be resolved via the
+    supply_clients bridge row (supply_clients.munafe_restaurant_id), never
+    assumed to equal restaurant_id.
     """
     restaurant_id = restaurant["id"]
 
     if lob_type == "supply":
-        # Reuse existing supply agent — supplier_id maps to restaurant_id for now
+        from db.queries import get_supply_client_by_restaurant_id
+
+        client_row = await get_supply_client_by_restaurant_id(restaurant_id)
+        if not client_row:
+            logger.warning(
+                f"[lob-dispatch] no supply_clients row for restaurant {restaurant_id} "
+                f"(munafe_restaurant_id not linked) — dropping supply message"
+            )
+            from tools.whatsapp_tools import send_whatsapp_message as _send
+            await _send(
+                phone,
+                "This outlet isn't registered as a supply client yet. "
+                "Please contact your supplier to get set up. 🙏",
+                restaurant_id,
+            )
+            return
+
         await handle_supply_message(
             phone           = phone,
-            supplier_id     = restaurant_id,
-            client_id       = restaurant_id,
+            supplier_id     = client_row["supplier_id"],
+            client_id       = client_row["id"],
             message         = message_body,
             message_type    = msg_type,
             raw_message_obj = message_obj,
         )
+
+    elif lob_type == "retail":
+        # Placeholder — import and call retail_agent when implemented
+        logger.info(f"[lob-dispatch] retail agent not yet implemented for {restaurant_id}")
+        from tools.whatsapp_tools import send_whatsapp_message as _send
+        await _send(phone, "Our retail ordering service is coming soon! 🛍️", restaurant_id)
 
     elif lob_type == "jewellery":
         # Placeholder
@@ -429,40 +458,20 @@ async def _process_meta_payload(payload: dict):
         # Refresh pin on every message — keeps subsequent turns fast
         await pin_active_restaurant_for_phone(restaurant_whatsapp, phone, restaurant["id"])
         
-        # 3f. LOB dispatch — non-restaurant tenants go to their own agent
+        # 3e. LOB dispatch — non-restaurant tenants go to their own agent
         lob_type = restaurant.get("lob_type") or "restaurant"
         if lob_type != "restaurant":
-            restaurant_id = restaurant["id"]
-            profile_name = (
-                value.get("contacts", [{}])[0].get("profile", {}).get("name", "")
-            )
-            if lob_type in ("psl", "food_products", "retail"):
-                logger.info(
-                    f"[routing] lob='{lob_type}' for {restaurant['name']} — minimal order agent"
-                )
-                async with customer_lock(restaurant_id, phone):
-                    session_state = await get_session_state(restaurant_id, phone)
-                    await handle_minimal_order_flow(
-                        restaurant=restaurant,
-                        phone=phone,
-                        message_body=message_body,
-                        session_state=session_state,
-                        profile_name=profile_name,
-                    )
-                    await save_session_state(restaurant_id, phone, session_state)
-                return
-
             logger.info(
                 f"[routing] lob='{lob_type}' for {restaurant['name']} — dispatching"
             )
             await _dispatch_to_lob(
-                lob_type=lob_type,
-                restaurant=restaurant,
-                phone=phone,
-                message_body=message_body,
-                msg_type=msg_type,
-                message_obj=message_obj,
-                payload=payload,
+                lob_type    = lob_type,
+                restaurant  = restaurant,
+                phone       = phone,
+                message_body= message_body,
+                msg_type    = msg_type,
+                message_obj = message_obj,
+                payload     = payload,
             )
             return
 
@@ -878,9 +887,7 @@ async def internal_webcart_confirm_pay(request: Request):
     if len(items) > 6:
         order_preview += f"\n- +{len(items) - 6} more item(s)"
 
-    from tools.payment_tools import checkout_gateway_label
-
-    gateway_label = checkout_gateway_label(session_state.get("payment_gateway") or "phonepe")
+    gateway_label = "Razorpay" if settings.payment_gateway == "razorpay" else "PhonePe"
     body_text = (
         "Your order is almost confirmed.\n\n"
         f"Order ref: {order_ref or booking_id[-8:]}\n"
@@ -925,38 +932,6 @@ async def internal_webcart_confirm_pay(request: Request):
             "customer_phone": canonical_phone,
         },
     )
-
-
-@app.post("/internal/shipment-notify")
-async def internal_shipment_notify(request: Request):
-    """Node API calls this after Shiprocket webhooks or manual AWB portal entry."""
-    if not _verify_internal_secret(request):
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
-
-    from tools.shipment_notify import notify_shipment_update
-
-    restaurant_id = str(body.get("restaurant_id") or "").strip()
-    customer_phone = str(body.get("customer_phone") or "").strip()
-    order_ref = str(body.get("order_ref") or "").strip()
-    if not restaurant_id or not customer_phone or not order_ref:
-        raise HTTPException(status_code=400, detail="restaurant_id, customer_phone, and order_ref are required")
-
-    ok = await notify_shipment_update(
-        restaurant_id=restaurant_id,
-        customer_phone=customer_phone,
-        order_ref=order_ref,
-        courier_name=str(body.get("courier_name") or "").strip(),
-        awb=str(body.get("awb") or "").strip(),
-        status=str(body.get("status") or "Shipped").strip(),
-    )
-    if not ok:
-        return JSONResponse(status_code=500, content={"ok": False, "error": "whatsapp_send_failed"})
-    return JSONResponse(status_code=200, content={"ok": True})
 
 
 @app.get("/payment/complete")
@@ -1100,19 +1075,23 @@ async def pay_failure_event(request: Request):
 
 @app.get("/pay/{booking_id}")
 async def pay_checkout(booking_id: str, request: Request):
-    """Hosted checkout entry point — PhonePe-primary with Razorpay runtime fallback.
+    """Hosted checkout entry point — routes to PhonePe or Razorpay.
 
-    Append ?gw=razorpay or ?gw=phonepe to force a specific gateway for testing.
+    Gateway is settings.payment_gateway ("phonepe" by default). Append
+    ?gw=razorpay or ?gw=phonepe to a link to force a specific gateway for
+    testing without redeploying.
     """
     token = request.query_params.get("t", "")
 
-    from tools.phonepe_tools import prepare_phonepe_redirect
-    from tools.payment_tools import phonepe_prepay_available
+    from tools.phonepe_tools import phonepe_configured 
+    
+    gateway = (request.query_params.get("gw") or settings.payment_gateway or "phonepe").lower()
 
-    forced = (request.query_params.get("gw") or "").strip().lower()
-    use_phonepe = forced == "phonepe" or (forced != "razorpay" and await phonepe_prepay_available())
+    if gateway == "phonepe" and not phonepe_configured():
+        logger.warning(f"[pay-checkout] PhonePe not configured, falling back to Razorpay, booking={booking_id}")
+        gateway = "razorpay"
 
-    if use_phonepe:
+    if gateway == "phonepe" and phonepe_configured():
         result = await prepare_phonepe_redirect(booking_id, token)
         if result.get("error") == "invalid_token":
             return HTMLResponse("<h1>Invalid or expired payment link</h1>", status_code=403)
@@ -1123,15 +1102,17 @@ async def pay_checkout(booking_id: str, request: Request):
                 "<h1>Already paid ✅</h1><p>Return to WhatsApp for your confirmation.</p>",
                 status_code=200,
             )
-        if result.get("redirect_url"):
-            logger.info(f"[pay-checkout] booking={booking_id} gateway=phonepe")
-            return RedirectResponse(result["redirect_url"], status_code=303)
-        if result.get("fallback") or result.get("error"):
-            logger.warning(
-                f"[pay-checkout] PhonePe failed for booking={booking_id} "
-                f"(error={result.get('error')}), falling back to Razorpay"
+        if result.get("error") == "phonepe_not_configured":
+            logger.error(f"[pay-checkout] PhonePe not configured, booking={booking_id}")
+            return HTMLResponse(
+                "<h1>Payment unavailable</h1>"
+                "<p>Online payment isn't set up yet. Please contact the restaurant, "
+                "or reply <em>pay</em> on WhatsApp in a moment to try again.</p>",
+                status_code=503,
             )
-            use_phonepe = False
+        if result.get("error"):
+            return HTMLResponse(f"<h1>Payment unavailable</h1><p>{result['error']}</p>", status_code=400)
+        return RedirectResponse(result["redirect_url"], status_code=303)
 
     # Razorpay — hosted method-picker page (click-first to avoid WebView popup blocking)
     ctx = await resolve_checkout_context(booking_id, token)
@@ -1146,7 +1127,6 @@ async def pay_checkout(booking_id: str, request: Request):
         )
     if ctx.get("error"):
         return HTMLResponse(f"<h1>Payment unavailable</h1><p>{ctx['error']}</p>", status_code=400)
-    logger.info(f"[pay-checkout] booking={booking_id} gateway=razorpay")
     return HTMLResponse(render_method_selection_html(ctx), status_code=200)
 
 
