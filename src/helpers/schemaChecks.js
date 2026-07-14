@@ -1,42 +1,156 @@
+// server.js
+// ============================================================================
+// Autom8 Backend — Express bootstrap
+//
+// This file is intentionally lean. All business logic lives in:
+//   src/routes/       — HTTP handlers
+//   src/helpers/      — Shared utilities (whatsapp, feedback, resolveRestaurant)
+//   src/schedulers/   — Background jobs
+//   src/handlers/     — WhatsApp event handlers (waHandlers.js)
+//   src/middleware/   — Auth, region
+//
+// Supply routes are served by a separate Railway service (server-supply.js).
+// ============================================================================
+
 'use strict';
 
-const { supabaseAdmin } = require('../config/supabase');
+const http    = require('http');
+const express = require('express');
+const cors    = require('cors');
 
-const PROBE_ID = '__schema_probe_scheduled_delivery__';
+const { startAllSchedulers } = require('./src/schedulers/index');
+const { attachWebSocketServer } = require('./src/websocket');
+const {
+  handleInternalMenuItems,
+  menuUploadMiddleware,
+  menuItemAvailabilityMiddleware,
+  menuItemSpecialTodayMiddleware,
+} = require('./src/routes/catalog');
+const { logKdsSecretStatus } = require('./src/config/internalSecret');
+const { verifyScheduledDeliveryTokenType, verifyMigrationColumns } = require('./src/helpers/schemaChecks');
+const { supabaseAdmin } = require('./src/config/supabase');
 
-/**
- * Insert + delete a scheduled_delivery row at boot so we know the live DB
- * accepts the type (catches migration applied in wrong Supabase project).
- */
-async function verifyScheduledDeliveryTokenType() {
-  const restaurantId = process.env.SCHEMA_PROBE_RESTAURANT_ID
-    || '46fb9b9e-431a-43c9-9edb-d316b0fef216';
-
-  const { error } = await supabaseAdmin.from('walk_in_tokens').insert({
-    id:            PROBE_ID,
-    restaurant_id: restaurantId,
-    name:          'schema-probe',
-    type:          'scheduled_delivery',
-    pax:           1,
-    status:        'pending_approval',
-    meta:          {},
-  });
-
-  if (error) {
-    console.error(
-      '[boot] ❌ walk_in_tokens rejects scheduled_delivery on THIS Supabase project:',
-      error.message,
-    );
-    console.error(
-      '[boot]    Run migrations/fix_walk_in_tokens_scheduled_delivery_check.sql in the SQL editor',
-      `for ${process.env.SUPABASE_URL || '(SUPABASE_URL not set)'}`,
-    );
-    return false;
-  }
-
-  await supabaseAdmin.from('walk_in_tokens').delete().eq('id', PROBE_ID);
-  console.log('[boot] ✅ walk_in_tokens accepts scheduled_delivery');
-  return true;
+if (process.env.NODE_ENV === 'production' && !process.env.AUTOM8_KDS_SECRET) {
+  throw new Error('AUTOM8_KDS_SECRET must be set in production');
 }
 
-module.exports = { verifyScheduledDeliveryTokenType };
+const app = express();
+
+// ── CORS ──────────────────────────────────────────────────────────────────────
+app.use(cors({
+  origin: [
+    'https://app.autom8.works',
+    'http://127.0.0.1:5500',
+    'http://localhost:5500',
+    'http://localhost:5173',
+    process.env.FRONTEND_URL,
+  ].filter(Boolean),
+  methods:        ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-restaurant-id', 'x-internal-secret'],
+  credentials:    true,
+}));
+app.options('*', cors());
+
+// ── Body parser ───────────────────────────────────────────────────────────────
+app.use(express.json({ limit: '10mb' }));
+
+// ── Region middleware ─────────────────────────────────────────────────────────
+app.use(require('./src/middleware/region'));
+
+// ── Routes ────────────────────────────────────────────────────────────────────
+
+app.use('/api/auth',        require('./src/routes/auth'));
+app.use('/api/dashboard',   require('./src/routes/dashboard'));
+app.use('/api/marketing',   require('./src/routes/marketing'));
+app.use('/api/restaurants', require('./src/routes/marketing'));    // WABAStrip compat
+
+// ── NEW: brands must be before /api (pos router) to avoid prefix conflict ──
+app.use('/api/brands',      require('./src/routes/brands'));
+
+// ── Specific /api sub-paths (must come before the catch-all pos router) ──────
+app.use('/api/kds',         require('./src/routes/kds'));
+app.use('/api/catalog',     require('./src/routes/catalog'));
+app.post('/api/menu/upload', ...menuUploadMiddleware);
+app.put('/api/menu-items/:id/availability', ...menuItemAvailabilityMiddleware);
+app.put('/api/menu-items/:id/special-today', ...menuItemSpecialTodayMiddleware);
+app.get('/api/internal/menu-items', handleInternalMenuItems);
+app.use('/api/tokens',      require('./src/routes/tokens'));
+app.use('/api/feedback',    require('./src/routes/feedback'));
+app.use('/api/referrals',   require('./src/routes/referrals'));
+app.use('/api/delivery',    require('./src/routes/delivery'));
+app.use('/api/enterprise',  require('./src/routes/enterprise'));
+app.use('/api/invoices',    require('./src/routes/invoices'));
+app.use('/api/subscription',require('./src/routes/subscription'));
+
+// ── POS router (catch-all for /api/*) — must be last under /api ──────────────
+app.use('/api',             require('./src/routes/pos'));
+
+app.use('/api/onboarding',  require('./src/routes/onboarding'));
+app.use('/api/whatsapp',    require('./src/routes/webhook'));
+app.use('/api/v1/takeaway', require('./src/routes/takeaway'));
+app.use('/api/staff',       require('./src/routes/staff'));
+
+// ── Public web cart (slug/token based) ──────────────────────────────────────
+app.use('/',                require('./src/routes/webcart'));
+
+// ── Receipt + order verification (public HTML pages) ─────────────────────────
+app.use('/',                require('./src/routes/receipts'));
+
+// ── Restaurant discovery ──────────────────────────────────────────────────────
+app.use('/api/discovery',   require('./src/routes/discovery'));
+
+// ── Health check ─────────────────────────────────────────────────────────────
+app.get('/health', async (req, res) => {
+  let dbProbe = 'ok';
+  try {
+    const { error } = await supabaseAdmin.from('walk_in_tokens').select('id').limit(1);
+    if (error) dbProbe = error.message;
+  } catch (e) {
+    dbProbe = e.message;
+  }
+  res.json({
+    status:    dbProbe === 'ok' ? 'ok' : 'degraded',
+    service:   'autom8-backend',
+    timestamp: new Date().toISOString(),
+    uptime:    process.uptime(),
+    region:    process.env.REGION || 'IN',
+    commit:    process.env.RAILWAY_GIT_COMMIT_SHA || null,
+    kds:       'orders.notes',
+    db_probe:  dbProbe,
+  });
+});
+
+// ── Start ─────────────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3001;
+const server = http.createServer(app);
+attachWebSocketServer(server);
+
+server.listen(PORT, () => {
+  logKdsSecretStatus();
+  const sha = process.env.RAILWAY_GIT_COMMIT_SHA || 'unknown';
+  console.log(`[boot] commit=${sha} | kds orders column=notes`);
+  console.log(`🚀 Autom8 Backend running on port ${PORT}`);
+  console.log(`📍 Region: ${process.env.REGION || 'IN'}`);
+  console.log(`🗄️  Database: ${process.env.SUPABASE_URL}`);
+  startAllSchedulers();
+  verifyScheduledDeliveryTokenType().catch((err) => {
+    console.error('[boot] schema probe error:', err.message);
+  });
+
+  // Fails loudly at boot if a migration file in the repo was never run
+  // against this Supabase project, instead of silently 500ing on the first
+  // request that touches the missing column.
+  verifyMigrationColumns()
+    .then(({ ok }) => {
+      // Set STRICT_SCHEMA_CHECK=true in Railway to crash-restart on a
+      // missing column instead of just logging. Off by default so a
+      // deploy never goes down over an unrelated/legacy table.
+      if (!ok && process.env.STRICT_SCHEMA_CHECK === 'true') {
+        console.error('[boot] STRICT_SCHEMA_CHECK is on — exiting so Railway restarts/alerts.');
+        process.exit(1);
+      }
+    })
+    .catch((err) => {
+      console.error('[boot] migration column check error:', err.message);
+    });
+});
