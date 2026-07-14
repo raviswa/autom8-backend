@@ -309,6 +309,70 @@ async function generateAndUploadPdf(invoiceNumber, html, supplierId) {
   }
 }
 
+// ── Shared generate (used by HTTP route + order status hooks) ─────────────────
+
+/**
+ * Generate an invoice for a delivered/partially-delivered order.
+ * Idempotent: returns existing invoice if one already exists for this order.
+ *
+ * @returns {{ invoice: object, already_existed?: boolean }}
+ */
+async function generateInvoiceForOrder(supplierId, orderId, deliveredItems = null) {
+  const { data: order } = await supabaseAdmin
+    .from('supply_orders')
+    .select('*')
+    .eq('id', orderId)
+    .eq('supplier_id', supplierId)
+    .maybeSingle();
+  if (!order) throw new Error('Order not found');
+
+  const { data: existing } = await supabaseAdmin
+    .from('supply_invoices')
+    .select('id, invoice_number, pdf_url')
+    .eq('order_id', orderId)
+    .maybeSingle();
+  if (existing) {
+    return { invoice: existing, already_existed: true };
+  }
+
+  const invoiceNumber = await nextInvoiceNumber(supplierId);
+  const invoiceDate   = new Date().toISOString().slice(0, 10);
+  const payload       = await buildInvoicePayload(supplierId, order, deliveredItems || null);
+  const html          = renderInvoiceHtml(invoiceNumber, invoiceDate, payload);
+  const { pdf_url }   = await generateAndUploadPdf(invoiceNumber, html, supplierId);
+
+  const { data: invoice, error: invErr } = await supabaseAdmin
+    .from('supply_invoices')
+    .insert({
+      supplier_id:    supplierId,
+      client_id:      order.client_id,
+      order_id:       orderId,
+      invoice_number: invoiceNumber,
+      invoice_date:   invoiceDate,
+      taxable_amount: payload.totals.subtotal,
+      cgst_amount:    payload.totals.cgst,
+      sgst_amount:    payload.totals.sgst,
+      igst_amount:    payload.totals.igst,
+      total_amount:   payload.totals.grand_total,
+      pdf_url,
+    })
+    .select()
+    .single();
+  if (invErr) throw invErr;
+
+  const client = payload.client;
+  if (client?.phone) {
+    await notifyClient(supplierId, client.phone, 'supply_delivery_done_invoice', {
+      order_number:   order.order_number,
+      invoice_number: invoiceNumber,
+      grand_total:    payload.totals.grand_total,
+      pdf_url,
+    }, order.client_id);
+  }
+
+  return { invoice };
+}
+
 // ── POST /api/supply/invoices/generate/:order_id ─────────────────────────────
 // Called internally when order → delivered or partially_delivered.
 // Body: { delivered_items?: [{item_id, delivered_qty}] }
@@ -319,63 +383,15 @@ router.post('/generate/:order_id', authenticateSupplyToken, async (req, res) => 
     const { order_id } = req.params;
     const { delivered_items } = req.body;
 
-    // Fetch order
-    const { data: order } = await supabaseAdmin
-      .from('supply_orders')
-      .select('*')
-      .eq('id', order_id)
-      .eq('supplier_id', supplierId)
-      .maybeSingle();
-    if (!order) return res.status(404).json({ error: 'Order not found' });
-
-    // Idempotency: don't regenerate if already exists
-    const { data: existing } = await supabaseAdmin
-      .from('supply_invoices')
-      .select('id, invoice_number, pdf_url')
-      .eq('order_id', order_id)
-      .maybeSingle();
-    if (existing) {
-      return res.json({ invoice: existing, already_existed: true });
+    const result = await generateInvoiceForOrder(supplierId, order_id, delivered_items || null);
+    if (result.already_existed) {
+      return res.json({ invoice: result.invoice, already_existed: true });
     }
-
-    const invoiceNumber = await nextInvoiceNumber(supplierId);
-    const invoiceDate   = new Date().toISOString().slice(0, 10);
-    const payload       = await buildInvoicePayload(supplierId, order, delivered_items || null);
-    const html          = renderInvoiceHtml(invoiceNumber, invoiceDate, payload);
-    const { pdf_url }   = await generateAndUploadPdf(invoiceNumber, html, supplierId);
-
-    const { data: invoice, error: invErr } = await supabaseAdmin
-      .from('supply_invoices')
-      .insert({
-        supplier_id:    supplierId,
-        client_id:      order.client_id,
-        order_id,
-        invoice_number: invoiceNumber,
-        invoice_date:   invoiceDate,
-        taxable_amount: payload.totals.subtotal,
-        cgst_amount:    payload.totals.cgst,
-        sgst_amount:    payload.totals.sgst,
-        igst_amount:    payload.totals.igst,
-        total_amount:   payload.totals.grand_total,
-        pdf_url,
-      })
-      .select()
-      .single();
-    if (invErr) throw invErr;
-
-    // Send to client via WhatsApp
-    const client = payload.client;
-    await notifyClient(supplierId, client.phone, 'supply_delivery_done_invoice', {
-      order_number:   order.order_number,
-      invoice_number: invoiceNumber,
-      grand_total:    payload.totals.grand_total,
-      pdf_url,
-    }, client.id);
-
-    res.status(201).json({ invoice });
+    res.status(201).json({ invoice: result.invoice });
   } catch (err) {
     console.error('[invoices] generate error:', err);
-    res.status(500).json({ error: err.message });
+    const status = err.message === 'Order not found' ? 404 : 500;
+    res.status(status).json({ error: err.message });
   }
 });
 
@@ -531,4 +547,4 @@ router.post('/:id/resend', authenticateSupplyToken, async (req, res) => {
   }
 });
 
-module.exports = router;
+module.exports = Object.assign(router, { generateInvoiceForOrder });

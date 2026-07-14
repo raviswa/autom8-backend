@@ -382,17 +382,28 @@ async function resolveSession({ restaurantId, token, phone }) {
   return data;
 }
 
-async function fetchMenuItems(restaurantId) {
-  const cached = _menuCache.get(restaurantId);
+// Restaurant LOBs (Munafe etc.) never use PSL/catalog fields — selecting them
+// breaks PostgREST when those columns are not migrated (e.g. scoop_count).
+const RESTAURANT_MENU_ITEM_SELECT =
+  'id, retailer_id, name, price, category, description, image_url, image_url_2, image_url_3, image_url_4, image_url_5, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked, is_available';
+
+const CATALOG_MENU_ITEM_SELECT =
+  `${RESTAURANT_MENU_ITEM_SELECT}, variant_group_id, size_label, item_type, flavour_group, scoop_count, crust_options, toppings_allowed, topping_extra_price, pack_size_label, weight_grams, shelf_life_days, allergens, condition, original_mrp, warranty_days, colour`;
+
+async function fetchMenuItems(restaurantId, { catalogLob = false } = {}) {
+  const cacheKey = `${restaurantId}:${catalogLob ? 'catalog' : 'restaurant'}`;
+  const cached = _menuCache.get(cacheKey);
   const now = Date.now();
   if (cached && (now - cached.fetchedAt) <= MENU_CACHE_TTL_MS) {
     return { items: cached.items, categorySlotMap: cached.categorySlotMap };
   }
 
+  const itemColumns = catalogLob ? CATALOG_MENU_ITEM_SELECT : RESTAURANT_MENU_ITEM_SELECT;
+
   const [itemsRes, categoriesRes] = await Promise.all([
     supabaseAdmin
       .from('menu_items')
-      .select('id, retailer_id, name, price, category, description, image_url, image_url_2, image_url_3, image_url_4, image_url_5, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked, is_available, variant_group_id, size_label, item_type, flavour_group, scoop_count, crust_options, toppings_allowed, topping_extra_price, pack_size_label, weight_grams, shelf_life_days, allergens, condition, original_mrp, warranty_days, colour')
+      .select(itemColumns)
       .eq('restaurant_id', restaurantId)
       .is('archived_at', null)
       .order('category', { ascending: true })
@@ -404,10 +415,18 @@ async function fetchMenuItems(restaurantId) {
   ]);
 
   if (itemsRes.error) throw itemsRes.error;
-  if (categoriesRes.error) throw categoriesRes.error;
+
+  let categoryRows = [];
+  if (categoriesRes.error) {
+    const raw = `${categoriesRes.error.code || ''} ${categoriesRes.error.message || ''}`.toLowerCase();
+    const missingTable = raw.includes('menu_categories') || raw.includes('pgrst205') || raw.includes('42p01');
+    if (!missingTable) throw categoriesRes.error;
+  } else {
+    categoryRows = categoriesRes.data || [];
+  }
 
   const categorySlotMap = Object.fromEntries(
-    (categoriesRes.data || []).map(row => [row.name, normalizeSlots(row.applicable_slots)])
+    categoryRows.map(row => [row.name, normalizeSlots(row.applicable_slots)])
   );
 
   const items = (itemsRes.data || []).map(item => ({
@@ -419,7 +438,7 @@ async function fetchMenuItems(restaurantId) {
     is_todays_special: !!(item.is_todays_special || item.is_special_today),
   }));
 
-  _menuCache.set(restaurantId, { items, categorySlotMap, fetchedAt: now });
+  _menuCache.set(cacheKey, { items, categorySlotMap, fetchedAt: now });
 
   return { items, categorySlotMap };
 }
@@ -474,15 +493,16 @@ router.get('/api/webcart/session', async (req, res) => {
       });
     }
 
+    const lobType = restaurant.lob_type || 'restaurant';
+    const catalogLob = !isRestaurantLob(lobType);
+
     const session = await resolveSession({
       restaurantId: restaurant.id,
       token,
       phone,
     });
 
-    const { items: menuItems, categorySlotMap } = await fetchMenuItems(restaurant.id);
-    const lobType = restaurant.lob_type || 'restaurant';
-    const catalogLob = !isRestaurantLob(lobType);
+    const { items: menuItems, categorySlotMap } = await fetchMenuItems(restaurant.id, { catalogLob });
 
     let slotInfo;
     let availableNow;

@@ -34,28 +34,52 @@ def _url(table: str) -> str:
 
 # ─── Public query functions ───────────────────────────────────────────────────
 
+def _phone_variants(phone: str) -> list[str]:
+    digits = ''.join(c for c in str(phone or '') if c.isdigit())
+    if not digits:
+        return []
+    variants = [digits]
+    if len(digits) == 10:
+        variants.append(f'91{digits}')
+    if len(digits) > 10:
+        variants.append(digits[-10:])
+    if digits.startswith('91') and len(digits) == 12:
+        variants.append(digits[2:])
+    return list(dict.fromkeys(variants))
+
+
 async def get_client_by_phone(supplier_id: str, phone: str) -> Optional[dict]:
     """
     Look up a supply client by supplier + phone.
     Returns a dict with at minimum {'id': str, 'name': str, 'phone': str}
     or None if not found / inactive.
     """
+    variants = _phone_variants(phone)
+    if not variants:
+        return None
+
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(
-            _url("supply_clients"),
-            headers=_headers(),
-            params={
-                "supplier_id": f"eq.{supplier_id}",
-                "phone":       f"eq.{phone}",
-                "is_active":   "eq.true",
-                "select":      "id,name,phone",
-                "limit":       "1",
-            },
-        )
-    if resp.status_code == 200:
-        data = resp.json()
-        return data[0] if data else None
-    logger.error(f"[queries] get_client_by_phone HTTP {resp.status_code}: {resp.text[:200]}")
+        for variant in variants:
+            resp = await client.get(
+                _url("supply_clients"),
+                headers=_headers(),
+                params={
+                    "supplier_id": f"eq.{supplier_id}",
+                    "phone":       f"eq.{variant}",
+                    "is_active":   "eq.true",
+                    "select":      "id,name,phone",
+                    "limit":       "1",
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data:
+                    return data[0]
+            else:
+                logger.error(
+                    f"[queries] get_client_by_phone HTTP {resp.status_code}: {resp.text[:200]}"
+                )
+                return None
     return None
 
 
@@ -144,33 +168,100 @@ async def save_supply_session(
 
 async def get_client_outstanding(supplier_id: str, client_id: str) -> float:
     """
-    Return the client's current outstanding balance in rupees.
+    Return the current outstanding balance for a client in rupees.
 
-    supply_statements is a periodic PDF billing snapshot (period_start/
-    period_end, sent to the client) — not live, and wrong for an
-    on-demand "My Balance" check.
-
-    supply_credit_ledger is the real-time ledger: every debit/credit
-    entry carries a running balance_after. The current balance is simply
-    balance_after on the most recent ledger row for this client.
+    Matches Node ledger.getCurrentBalance:
+      1) latest supply_credit_ledger.balance_after
+      2) else SUM(debits) − SUM(credits)
     """
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(
+        latest = await client.get(
             _url("supply_credit_ledger"),
+            headers=_headers(),
+            params={
+                "client_id": f"eq.{client_id}",
+                "select":    "balance_after",
+                "order":     "created_at.desc",
+                "limit":     "1",
+            },
+        )
+        if latest.status_code == 200:
+            rows = latest.json()
+            if rows:
+                return float(rows[0].get("balance_after") or 0)
+
+        debits_resp = await client.get(
+            _url("supply_credit_ledger"),
+            headers=_headers(),
+            params={
+                "client_id": f"eq.{client_id}",
+                "type":      "eq.debit",
+                "select":    "amount",
+            },
+        )
+        credits_resp = await client.get(
+            _url("supply_credit_ledger"),
+            headers=_headers(),
+            params={
+                "client_id": f"eq.{client_id}",
+                "type":      "eq.credit",
+                "select":    "amount",
+            },
+        )
+
+    if debits_resp.status_code != 200 or credits_resp.status_code != 200:
+        logger.error(
+            f"[queries] get_client_outstanding fallback failed "
+            f"debits={debits_resp.status_code} credits={credits_resp.status_code}"
+        )
+        return 0.0
+
+    total_debits = sum(float(r.get("amount", 0) or 0) for r in debits_resp.json())
+    total_credits = sum(float(r.get("amount", 0) or 0) for r in credits_resp.json())
+    return total_debits - total_credits
+
+
+async def get_client_latest_order(supplier_id: str, client_id: str) -> Optional[dict]:
+    """Return the most recent non-cancelled order for a client, or None."""
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            _url("supply_orders"),
             headers=_headers(),
             params={
                 "supplier_id": f"eq.{supplier_id}",
                 "client_id":   f"eq.{client_id}",
-                "select":      "balance_after",
+                "status":      "neq.cancelled",
+                "select":      "order_number,delivery_date,status,total_amount",
                 "order":       "created_at.desc",
                 "limit":       "1",
             },
         )
     if resp.status_code == 200:
-        data = resp.json()
-        return float(data[0]["balance_after"]) if data else 0.0
-    logger.error(f"[queries] get_client_outstanding HTTP {resp.status_code}: {resp.text[:200]}")
-    return 0.0
+        rows = resp.json()
+        return rows[0] if rows else None
+    logger.error(f"[queries] get_client_latest_order HTTP {resp.status_code}: {resp.text[:200]}")
+    return None
+
+
+async def get_supplier_phone(supplier_id: str) -> Optional[str]:
+    """Return suppliers.phone for WhatsApp alerts, or None."""
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            _url("suppliers"),
+            headers=_headers(),
+            params={
+                "id":     f"eq.{supplier_id}",
+                "select": "phone",
+                "limit":  "1",
+            },
+        )
+    if resp.status_code == 200:
+        rows = resp.json()
+        if rows and rows[0].get("phone"):
+            return str(rows[0]["phone"])
+    else:
+        logger.error(f"[queries] get_supplier_phone HTTP {resp.status_code}: {resp.text[:200]}")
+    return None
 
 
 async def create_payment_claim(

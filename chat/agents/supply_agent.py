@@ -5,11 +5,12 @@
 # Entry point: handle_supply_message()
 # Called by main.py/_process_supply_payload after supplier + client are resolved.
 #
-# Four intents handled:
-#   1. BALANCE      → "what's my balance / outstanding / kitna baaki hai"
-#   2. PAYMENT      → "paid ₹5000 upi ref 12345 / sent 2000 gpay"
-#   3. ORDER_STATUS → "order status / last order / kya order hua"
-#   4. FALLBACK     → anything else → send order form link
+# Intents handled:
+#   1. PLACE_ORDER  → mint /s/:token webcart link
+#   2. BALANCE      → "what's my balance / outstanding / kitna baaki hai"
+#   3. PAYMENT      → "paid ₹5000 upi ref 12345 / sent 2000 gpay"
+#   4. ORDER_STATUS → text/keyword only (not on the 3-button menu)
+#   5. FALLBACK     → main menu buttons
 #
 # State is stored in supply_conversation_states (same table as supply_agent.py
 # referenced in db/queries.py).  State is intentionally minimal — supply chat
@@ -39,10 +40,14 @@ from db.queries import (
     create_payment_claim,
     log_supply_notification,
     get_last_supply_order,
+    get_supplier_phone,
 )
+from tools.supply_form_token import build_order_form_url
 from tools.supply_whatsapp import send_supply_text, send_supply_buttons
 
 logger = logging.getLogger(__name__)
+
+_MENU_ACTIONS = frozenset({'PLACE_ORDER', 'CHECK_BALANCE', 'ORDER_STATUS', 'RECORD_PAYMENT'})
 
 # ── Intent patterns ───────────────────────────────────────────────────────────
 
@@ -52,7 +57,12 @@ _BALANCE_RE = re.compile(
 )
 
 _ORDER_STATUS_RE = re.compile(
-    r'\b(order status|last order|my order|kya order|order hua|delivery|status)\b',
+    r'\b(order status|last order|my order|kya order|order hua|delivery status)\b',
+    re.IGNORECASE
+)
+
+_PLACE_ORDER_RE = re.compile(
+    r'\b(place order|order now|order form|want to order|new order|webcart)\b',
     re.IGNORECASE
 )
 
@@ -76,6 +86,50 @@ _METHOD_MAP = {
     'cheque':  'cheque', 'check': 'cheque',
 }
 
+_GREETING_RE = re.compile(r'^(hi|hello|hey|hii|namaste)\b', re.IGNORECASE)
+_SUPPLY_KEYWORD_RE = re.compile(r'\bfnb\b', re.IGNORECASE)
+
+
+def _is_supply_greeting(text: str) -> bool:
+    """True for Hi / Hi fnb and other bare supply entry phrases."""
+    cleaned = (text or '').strip()
+    if not cleaned:
+        return False
+    lower = cleaned.lower()
+    if lower in {'hi', 'hello', 'hey', 'fnb'}:
+        return True
+    if _GREETING_RE.match(lower):
+        return True
+    return bool(_SUPPLY_KEYWORD_RE.search(lower))
+
+
+async def _dispatch_supply_action(
+    action: str,
+    phone: str,
+    supplier_id: str,
+    client_id: str,
+    session: dict,
+    text: str = '',
+) -> None:
+    action = (action or '').strip().upper()
+    if action == 'PLACE_ORDER':
+        await _handle_place_order(phone, supplier_id, client_id, session)
+    elif action == 'CHECK_BALANCE':
+        await _handle_balance(phone, supplier_id, client_id, session)
+    elif action == 'ORDER_STATUS':
+        await _handle_order_status(phone, supplier_id, client_id, session)
+    elif action == 'RECORD_PAYMENT':
+        session['_state'] = 'awaiting_payment_details'
+        await send_supply_text(
+            phone,
+            "Please share the payment amount and reference "
+            '(e.g. "Paid ₹5000 GPay ref 123456789").',
+            supplier_id,
+            client_id,
+        )
+    elif action:
+        await _handle_fallback(phone, supplier_id, client_id, session)
+
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
@@ -94,21 +148,39 @@ async def handle_supply_message(
     raw_message_obj = raw_message_obj or {}
 
     # ── Unregistered client ───────────────────────────────────────────────────
-    if not client_id:
-        # Try one more DB lookup in case Node.js resolver missed a format variant
+    if not client_id or client_id == supplier_id:
         client = await get_client_by_phone(supplier_id, phone)
         if client:
             client_id = client['id']
         else:
-            logger.info(f"[supply-agent] Unknown number {phone} for supplier {supplier_id}")
-            await send_supply_text(
-                phone       = phone,
-                message     = "Hi! Your number isn't registered with us yet. "
-                              "Please contact your supplier to get set up. 🙏",
-                supplier_id = supplier_id,
-                client_id   = None,
-            )
-            return
+            client_id = None
+
+    if not client_id:
+        logger.info(f"[supply-agent] Unknown number {phone} for supplier {supplier_id}")
+        await send_supply_text(
+            phone       = phone,
+            message     = "Hi! Your number isn't registered with us yet. "
+                          "Please contact your supplier to get set up. 🙏",
+            supplier_id = supplier_id,
+            client_id   = None,
+        )
+        # Alert supplier so they can onboard this client
+        try:
+            supplier_phone = await get_supplier_phone(supplier_id)
+            if supplier_phone:
+                await send_supply_text(
+                    phone=supplier_phone,
+                    message=(
+                        f"Unregistered WhatsApp number tried to message you:\n"
+                        f"*{phone}*\n\n"
+                        f"Add them under Clients in the dashboard to onboard."
+                    ),
+                    supplier_id=supplier_id,
+                    client_id=None,
+                )
+        except Exception as exc:
+            logger.warning(f"[supply-agent] supplier notify for unknown phone failed: {exc}")
+        return
 
     # ── Load session ──────────────────────────────────────────────────────────
     session = await get_supply_session(supplier_id, phone)
@@ -134,24 +206,9 @@ async def handle_supply_message(
             )
             await save_supply_session(supplier_id, phone, client_id, session)
             return
-        # FIX: quick-reply menu buttons (from _handle_fallback) must be routed
-        # explicitly — their IDs (CHECK_BALANCE etc.) don't survive the
-        # free-text regex matchers below due to \b/underscore behavior.
-        if reply_id == 'CHECK_BALANCE':
-            await _handle_balance(phone, supplier_id, client_id, session)
-            await save_supply_session(supplier_id, phone, client_id, session)
-            return
-        if reply_id == 'ORDER_STATUS':
-            await _handle_order_status(phone, supplier_id, client_id, session)
-            await save_supply_session(supplier_id, phone, client_id, session)
-            return
-        if reply_id == 'RECORD_PAYMENT':
-            session['_state'] = 'awaiting_payment_details'
-            await send_supply_text(
-                phone,
-                "Sure — please share the amount and payment reference "
-                "(e.g. \"₹5000 GPay ref 123456789\").",
-                supplier_id, client_id,
+        if reply_id in _MENU_ACTIONS:
+            await _dispatch_supply_action(
+                reply_id, phone, supplier_id, client_id, session
             )
             await save_supply_session(supplier_id, phone, client_id, session)
             return
@@ -159,7 +216,16 @@ async def handle_supply_message(
     # ── Intent detection ──────────────────────────────────────────────────────
     text = message.strip()
 
-    if _BALANCE_RE.search(text):
+    if text.upper() in _MENU_ACTIONS:
+        await _dispatch_supply_action(text, phone, supplier_id, client_id, session, text)
+
+    elif _is_supply_greeting(text):
+        await _handle_fallback(phone, supplier_id, client_id, session)
+
+    elif _PLACE_ORDER_RE.search(text):
+        await _handle_place_order(phone, supplier_id, client_id, session)
+
+    elif _BALANCE_RE.search(text):
         await _handle_balance(phone, supplier_id, client_id, session)
 
     elif session.get('_state') == 'awaiting_payment_details' or _PAYMENT_RE.search(text):
@@ -175,6 +241,45 @@ async def handle_supply_message(
 
 
 # ── Intent handlers ───────────────────────────────────────────────────────────
+
+async def _handle_place_order(
+    phone: str, supplier_id: str, client_id: str, session: dict
+) -> None:
+    """Mint a signed /s/:token webcart link and send it over WhatsApp."""
+    session['_state'] = 'idle'
+    try:
+        order_url = await build_order_form_url(supplier_id, client_id)
+    except Exception as exc:
+        logger.error(f'[supply-agent] place_order token failed: {exc}', exc_info=True)
+        await send_supply_text(
+            phone,
+            "Sorry, we couldn't generate your order link right now. "
+            "Please try again in a moment or ask your supplier to resend it.",
+            supplier_id,
+            client_id,
+        )
+        return
+
+    await send_supply_text(
+        phone,
+        "Here's your order form — tap the link to reserve stock for the next delivery:\n\n"
+        f"{order_url}\n\n"
+        "This link is valid until tonight's ordering cutoff.",
+        supplier_id,
+        client_id,
+    )
+    try:
+        await log_supply_notification(
+            supplier_id=supplier_id,
+            client_id=client_id,
+            phone=phone,
+            template_name='supply_order_link',
+            status='sent',
+            payload={'order_form_url': order_url, 'source': 'whatsapp_agent'},
+        )
+    except Exception as exc:
+        logger.warning(f'[supply-agent] log_supply_notification failed: {exc}')
+
 
 async def _handle_balance(
     phone: str, supplier_id: str, client_id: str, session: dict
@@ -318,9 +423,10 @@ async def _handle_order_status(
         order = None
 
     if not order:
-        msg = "No recent orders found. Use your order link to place a new order."
+        msg = "No recent orders found. Tap *Order* to open your order form."
     else:
         status_labels = {
+            'requested':           '⏳ Reservation submitted — pending confirmation',
             'confirmed':           '✅ Confirmed — will be delivered soon',
             'out_for_delivery':    '🚚 Out for delivery',
             'delivered':           '✅ Delivered',
@@ -348,11 +454,11 @@ async def _handle_fallback(
 
     await send_supply_buttons(
         phone   = phone,
-        body    = "Hi! How can I help you today?",
+        body    = "Hi! Welcome to Munafe Supply. How can I help you today?",
         buttons = [
-            {'id': 'CHECK_BALANCE',  'title': '💰 My Balance'},
-            {'id': 'ORDER_STATUS',   'title': '📦 Order Status'},
-            {'id': 'RECORD_PAYMENT', 'title': '💳 Record Payment'},
+            {'id': 'PLACE_ORDER',     'title': '📦 Order'},
+            {'id': 'CHECK_BALANCE',   'title': '💰 My Balance'},
+            {'id': 'RECORD_PAYMENT',  'title': '💳 Record Payment'},
         ],
         supplier_id = supplier_id,
         client_id   = client_id,

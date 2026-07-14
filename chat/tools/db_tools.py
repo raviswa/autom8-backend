@@ -3362,6 +3362,7 @@ def extract_short_code(message: str) -> str | None:
 
     "Hi Munafe"          → "munafe"
     "Hi psl"             → "psl"
+    "Hi fnb"             → "fnb"   (Munafe Supply B2B on shared WABA)
     "Good morning PSL"   → "psl"
     "Hi"                 → None   (plain greeting — use default tenant)
     "Hi, I want biryani" → None   (2+ tokens — treat as normal message, not a keyword)
@@ -3408,7 +3409,7 @@ async def get_active_short_codes_for_waba(whatsapp_number: str) -> list[str]:
     """
     Returns all registered short_codes for active tenants on this WABA number,
     sorted by sort_order. Used to build the 'not found' hint reply.
-    e.g. ["munafe", "psl", "fnbneeds"]
+    e.g. ["munafe", "psl", "fnb"]
     """
     try:
         async with AsyncSessionLocal() as session:

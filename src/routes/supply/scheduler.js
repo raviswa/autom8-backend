@@ -237,5 +237,106 @@ router.get('/log', auth, async (req, res) => {
   }
 });
 
-module.exports = Object.assign(router, { runSchedulerJob });
+module.exports = Object.assign(router, {
+  runSchedulerJob,
+  runCronJobsForAllSuppliers,
+  startSupplySchedulerCron,
+});
 
+/**
+ * Run a named job for every active supplier.
+ * Used by in-process cron (no per-supplier JWT needed).
+ */
+async function runCronJobsForAllSuppliers(jobName, month) {
+  const { data: suppliers, error } = await supabaseAdmin
+    .from('suppliers')
+    .select('id, business_name')
+    .eq('is_active', true);
+
+  if (error) throw new Error(`Failed to list suppliers: ${error.message}`);
+
+  const results = [];
+  for (const supplier of suppliers || []) {
+    try {
+      const result = await runSchedulerJob(jobName, supplier.id, month);
+      results.push({
+        supplier_id: supplier.id,
+        ok: true,
+        processedCount: result.processedCount,
+        errors: result.errors,
+      });
+      await writeSchedulerLog({
+        jobName: `${jobName}:${supplier.id}`,
+        startedAt: new Date().toISOString(),
+        endedAt: new Date().toISOString(),
+        recordsProcessed: result.processedCount,
+        errors: result.errors,
+      });
+    } catch (err) {
+      results.push({ supplier_id: supplier.id, ok: false, error: err.message });
+      await writeSchedulerLog({
+        jobName: `${jobName}:${supplier.id}`,
+        startedAt: new Date().toISOString(),
+        endedAt: new Date().toISOString(),
+        recordsProcessed: 0,
+        errors: [err.message],
+      });
+    }
+  }
+  return results;
+}
+
+/**
+ * In-process IST cron:
+ *  - Overdue reminders: every day at 10:00 IST
+ *  - Monthly statements: 1st of each month at 09:00 IST
+ * Disable with SUPPLY_SCHEDULER_CRON=0
+ */
+function startSupplySchedulerCron() {
+  if (process.env.SUPPLY_SCHEDULER_CRON === '0') {
+    console.log('[supply-scheduler] cron disabled (SUPPLY_SCHEDULER_CRON=0)');
+    return;
+  }
+
+  const lastRun = { overdue: '', monthly: '' };
+
+  const tick = async () => {
+    try {
+      const now = new Date(
+        new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })
+      );
+      const ymd = [
+        now.getFullYear(),
+        String(now.getMonth() + 1).padStart(2, '0'),
+        String(now.getDate()).padStart(2, '0'),
+      ].join('-');
+      const hour = now.getHours();
+      const day = now.getDate();
+
+      if (hour === 10 && lastRun.overdue !== ymd) {
+        lastRun.overdue = ymd;
+        console.log('[supply-scheduler] cron overdue_reminders starting');
+        const results = await runCronJobsForAllSuppliers('overdue_reminders');
+        console.log('[supply-scheduler] cron overdue_reminders done', results.length);
+      }
+
+      if (day === 1 && hour === 9 && lastRun.monthly !== ymd) {
+        lastRun.monthly = ymd;
+        console.log('[supply-scheduler] cron monthly_statements starting');
+        const results = await runCronJobsForAllSuppliers(
+          'monthly_statements',
+          getPreviousMonth()
+        );
+        console.log('[supply-scheduler] cron monthly_statements done', results.length);
+      }
+    } catch (err) {
+      console.error('[supply-scheduler] cron tick failed:', err.message || err);
+    }
+  };
+
+  // Check every 15 minutes
+  setInterval(tick, 15 * 60 * 1000);
+  // First check shortly after boot
+  setTimeout(tick, 30 * 1000);
+  console.log('[supply-scheduler] in-process IST cron started (overdue 10:00, monthly 1st 09:00)');
+}

@@ -25,8 +25,24 @@ const { supplyAuthMiddleware }   = require('../../middleware/supplyAuth');
 const { validateFormToken }      = require('./supplyFormToken');
 const supplyLedger               = require('./ledger');
 const { notifyClient }           = require('./notify');
+const { sendSupplyWhatsAppMessage } = require('./supplyWhatsapp');
+const { generateInvoiceForOrder } = require('./invoices');
 
-const VALID_STATUSES = ['confirmed', 'out_for_delivery', 'delivered', 'partially_delivered', 'cancelled'];
+const VALID_STATUSES = [
+  'requested',
+  'confirmed',
+  'out_for_delivery',
+  'delivered',
+  'partially_delivered',
+  'cancelled',
+];
+
+/** Allowed next statuses from a given current status (cancel is via POST /cancel). */
+const STATUS_TRANSITIONS = {
+  requested:        ['confirmed'],
+  confirmed:        ['out_for_delivery', 'delivered', 'partially_delivered'],
+  out_for_delivery: ['delivered', 'partially_delivered'],
+};
 
 // ============================================================================
 // POST /api/supply/orders  — create order
@@ -214,6 +230,10 @@ router.post('/', async (req, res) => {
     const delivDate   = delivery_date || _nextDay();
     const orderNumber = await _generateOrderNumber(supplier_id, delivDate);
 
+    // Form / client submit = reservation (requested). Manual supplier create = confirmed.
+    const initialStatus = source === 'form' ? 'requested' : 'confirmed';
+    const changedBy     = source === 'manual' ? 'supplier' : 'client';
+
     // ── Insert supply_orders ──────────────────────────────────────────────
     const { data: newOrder, error: orderErr } = await supabaseAdmin
       .from('supply_orders')
@@ -222,7 +242,7 @@ router.post('/', async (req, res) => {
         client_id,
         order_number:   orderNumber,
         delivery_date:  delivDate,
-        status:         'confirmed',
+        status:         initialStatus,
         total_amount:   orderTotal,
         gst_amount:     gstTotal,
         delivery_notes: notes || null,
@@ -253,27 +273,57 @@ router.post('/', async (req, res) => {
     // ── Insert initial status history ─────────────────────────────────────
     await supabaseAdmin.from('supply_order_status_history').insert({
       order_id:   newOrder.id,
-      status:     'confirmed',
-      changed_by: source === 'manual' ? 'supplier' : 'system',
+      status:     initialStatus,
+      changed_by: changedBy,
     });
 
-    // ── Create ledger debit ───────────────────────────────────────────────
-    await supplyLedger.createDebit(supplier_id, client_id, newOrder.id, orderTotal, 'Order placed');
+    // Ledger debit only when confirmed (manual create, or later Accept).
+    // Reservations (requested) do not hit the ledger until the supplier accepts.
+    if (initialStatus === 'confirmed') {
+      await supplyLedger.createDebit(supplier_id, client_id, newOrder.id, orderTotal, 'Order placed');
+    }
 
     // ── Notifications ─────────────────────────────────────────────────────
     const notifyPromises = [];
-    notifyPromises.push(notifyClient(supplier_id, client.phone, 'supply_order_confirmed', {
-      order_number:  newOrder.order_number,
-      delivery_date: newOrder.delivery_date,
-      total_amount:  orderTotal,
-    }, client_id));
+    if (initialStatus === 'confirmed') {
+      notifyPromises.push(notifyClient(supplier_id, client.phone, 'supply_order_confirmed', {
+        order_number:  newOrder.order_number,
+        delivery_date: newOrder.delivery_date,
+        total_amount:  orderTotal,
+      }, client_id));
+    } else if (client.phone && sendSupplyWhatsAppMessage) {
+      const reservationMsg = [
+        `Reservation submitted ✅`,
+        ``,
+        `Order *${newOrder.order_number}* for delivery on ${newOrder.delivery_date}.`,
+        `Total: ₹${orderTotal.toFixed(2)}`,
+        ``,
+        `Pending supplier confirmation — you'll get a WhatsApp update once it's accepted.`,
+      ].join('\n');
+      notifyPromises.push(
+        sendSupplyWhatsAppMessage(client.phone, reservationMsg, supplier_id)
+      );
+    }
 
     if (supplier?.phone) {
-      notifyPromises.push(notifyClient(supplier_id, supplier.phone, 'supply_new_order_alert', {
-        client_name:  client.name,
-        order_number: newOrder.order_number,
-        total_amount: orderTotal,
-      }, client_id));
+      if (initialStatus === 'requested' && sendSupplyWhatsAppMessage) {
+        const alertMsg = [
+          `New reservation pending confirmation`,
+          `Client: ${client.name}`,
+          `Order: ${newOrder.order_number}`,
+          `Total: ₹${orderTotal.toFixed(2)}`,
+          `Accept or reject it in the Orders dashboard.`,
+        ].join('\n');
+        notifyPromises.push(
+          sendSupplyWhatsAppMessage(supplier.phone, alertMsg, supplier_id)
+        );
+      } else {
+        notifyPromises.push(notifyClient(supplier_id, supplier.phone, 'supply_new_order_alert', {
+          client_name:  client.name,
+          order_number: newOrder.order_number,
+          total_amount: orderTotal,
+        }, client_id));
+      }
     }
 
     Promise.allSettled(notifyPromises).catch(err => {
@@ -286,7 +336,9 @@ router.post('/', async (req, res) => {
       items:       orderItems,
       order_total: orderTotal,
       gst_total:   gstTotal,
-      new_balance: +(currentBalance + orderTotal).toFixed(2),
+      new_balance: initialStatus === 'confirmed'
+        ? +(currentBalance + orderTotal).toFixed(2)
+        : currentBalance,
     });
 
   } catch (err) {
@@ -531,7 +583,8 @@ router.get('/:id', supplyAuthMiddleware, async (req, res) => {
 
 // ============================================================================
 // PUT /api/supply/orders/:id/status  — update order status
-// Body: { status: 'out_for_delivery' | 'delivered' | 'partially_delivered' }
+// Body: { status: 'confirmed' | 'out_for_delivery' | 'delivered' | 'partially_delivered' }
+// Accept: requested → confirmed (creates ledger debit + confirms to client)
 // ============================================================================
 
 router.put('/:id/status', supplyAuthMiddleware, async (req, res) => {
@@ -550,7 +603,7 @@ router.put('/:id/status', supplyAuthMiddleware, async (req, res) => {
     // Include delivery_date + client phone so we can notify without a second query
     const { data: order, error: fetchErr } = await supabaseAdmin
       .from('supply_orders')
-      .select('id, status, client_id, total_amount, delivery_date, supply_clients(phone)')
+      .select('id, status, client_id, total_amount, delivery_date, order_number, supply_clients(phone)')
       .eq('id', id)
       .eq('supplier_id', supplier_id)
       .maybeSingle();
@@ -561,11 +614,18 @@ router.put('/:id/status', supplyAuthMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Cannot update a cancelled order.' });
     }
 
+    const allowed = STATUS_TRANSITIONS[order.status] || [];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({
+        error: `Cannot transition from '${order.status}' to '${status}'. Allowed: ${allowed.join(', ') || 'none'}.`,
+      });
+    }
+
     const { data: updated, error: updErr } = await supabaseAdmin
       .from('supply_orders')
       .update({ status, updated_at: new Date().toISOString() })
       .eq('id', id)
-      .select('id, order_number, status, updated_at')
+      .select('id, order_number, status, updated_at, delivery_date, total_amount')
       .single();
 
     if (updErr) return res.status(500).json({ error: updErr.message });
@@ -576,6 +636,24 @@ router.put('/:id/status', supplyAuthMiddleware, async (req, res) => {
       status,
       changed_by: 'supplier',
     });
+
+    // Accept reservation: debit ledger + send confirmation
+    if (order.status === 'requested' && status === 'confirmed') {
+      await supplyLedger.createDebit(
+        supplier_id,
+        order.client_id,
+        id,
+        Number(order.total_amount),
+        'Order confirmed'
+      );
+      if (order.supply_clients?.phone) {
+        notifyClient(supplier_id, order.supply_clients.phone, 'supply_order_confirmed', {
+          order_number:  updated.order_number,
+          delivery_date: order.delivery_date,
+          total_amount:  Number(order.total_amount),
+        }, order.client_id).catch(() => {});
+      }
+    }
 
     // Notify client on dispatch / delivery
     const statusTemplateMap = {
@@ -590,7 +668,11 @@ router.put('/:id/status', supplyAuthMiddleware, async (req, res) => {
       }, order.client_id).catch(() => {});
     }
 
-    // TODO: Module 9 — if status is 'delivered' or 'partially_delivered', trigger invoice generation
+    if (status === 'delivered' || status === 'partially_delivered') {
+      generateInvoiceForOrder(supplier_id, id).catch(err => {
+        console.error('[orders] auto-invoice failed:', err.message || err);
+      });
+    }
 
     return res.json({ success: true, order: updated });
 
@@ -703,7 +785,9 @@ router.put('/:id/partial-delivery', supplyAuthMiddleware, async (req, res) => {
       }, order.client_id).catch(() => {});
     }
 
-    // TODO: Module 9 — trigger invoice generation for delivered / partially_delivered
+    generateInvoiceForOrder(supplier_id, id, items).catch(err => {
+      console.error('[orders] auto-invoice (partial) failed:', err.message || err);
+    });
 
     return res.json({ success: true, order: updated });
 
@@ -740,6 +824,8 @@ router.post('/:id/cancel', supplyAuthMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Cannot cancel a delivered order.' });
     }
 
+    const wasRequested = order.status === 'requested';
+
     await supabaseAdmin
       .from('supply_orders')
       .update({ status: 'cancelled', updated_at: new Date().toISOString() })
@@ -751,14 +837,16 @@ router.post('/:id/cancel', supplyAuthMiddleware, async (req, res) => {
       changed_by: 'supplier',
     });
 
-    // Reverse ledger debit
-    await supplyLedger.reverseDebit(id, order.client_id, supplier_id, Number(order.total_amount));
+    // Reverse ledger debit only if one was posted (confirmed+ orders)
+    if (!wasRequested) {
+      await supplyLedger.reverseDebit(id, order.client_id, supplier_id, Number(order.total_amount));
+    }
 
-    // Notify client of cancellation
+    // Notify client of cancellation / rejection
     if (order.supply_clients?.phone) {
       notifyClient(supplier_id, order.supply_clients.phone, 'supply_order_cancelled', {
         order_number: order.order_number,
-        reason:       reason || null,
+        reason:       reason || (wasRequested ? 'Reservation not confirmed' : null),
       }, order.client_id).catch(() => {});
     }
 

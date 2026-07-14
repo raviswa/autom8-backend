@@ -100,4 +100,11 @@ server.listen(PORT, () => {
   console.log(`📦 Munafe Supply Backend running on port ${PORT}`);
   console.log(`📍 Region: ${process.env.REGION || 'IN'}`);
   console.log(`🗄️  Database: ${process.env.SUPABASE_URL}`);
+
+  try {
+    const { startSupplySchedulerCron } = require('./src/routes/supply/scheduler');
+    startSupplySchedulerCron();
+  } catch (err) {
+    console.warn('[boot] supply scheduler cron not started:', err.message);
+  }
 });

@@ -84,7 +84,7 @@ class Restaurant(Base):
 
     # ── Multi-tenant WABA routing ──────────────────────────────────────────────
     # short_code: keyword customers type after "Hi" to reach this tenant.
-    #   e.g. "munafe", "psl", "fnbneeds", "gold", "retail"
+    #   e.g. "munafe", "psl", "fnb", "gold", "retail"
     #   NULL = this tenant is the default fallback for its WABA number.
     # NULL = this tenant is the default fallback for its WABA number.
     short_code = Column(String(20), nullable=True, index=True)

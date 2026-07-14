@@ -107,7 +107,7 @@ async def _process_supply_payload(payload: dict):
 
         msg              = messages[0]
         phone            = msg.get("from", "")
-        msg_type         = msg.get("type", "")
+        msg_type     = msg.get("type", "")
         supply_context   = value.get("_supply_context", {})
         supplier_id      = supply_context.get("supplier_id")
         client_id        = supply_context.get("client_id")
@@ -122,6 +122,8 @@ async def _process_supply_payload(payload: dict):
             logger.info(f"[supply-webhook] Skipping unhandled type={msg_type!r}")
             return
 
+        message_body = _extract_message_body(msg)
+
         logger.info(
             f"[supply-webhook] supplier={supplier_id} client={client_id} "
             f"phone={phone} type={msg_type}"
@@ -131,6 +133,7 @@ async def _process_supply_payload(payload: dict):
             supplier_id      = supplier_id,
             client_id        = client_id,
             phone            = phone,
+            message          = message_body,
             message_type     = msg_type,
             raw_message_obj  = msg,
         )
@@ -140,6 +143,24 @@ async def _process_supply_payload(payload: dict):
 
 
 # ─── Signature helpers ────────────────────────────────────────────────────────
+
+def _extract_message_body(message_obj: dict) -> str:
+    """Extract text or interactive reply id from a WhatsApp message object."""
+    msg_type = message_obj.get("type", "")
+
+    if msg_type == "text":
+        return message_obj.get("text", {}).get("body", "").strip()
+
+    if msg_type == "interactive":
+        interactive = message_obj.get("interactive", {})
+        interactive_type = interactive.get("type", "")
+        if interactive_type == "button_reply":
+            return interactive.get("button_reply", {}).get("id", "").strip()
+        if interactive_type == "list_reply":
+            return interactive.get("list_reply", {}).get("id", "").strip()
+
+    return ""
+
 
 def _verify_supply_signature(body: bytes, signature: str) -> bool:
     is_prod = settings.environment == "production"

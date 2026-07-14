@@ -292,6 +292,9 @@ async def _dispatch_to_lob(
     if lob_type == "supply":
         from db.queries import get_supply_client_by_restaurant_id
 
+        # Shared-WABA entry: "Hi fnb" → tenant with short_code=fnb, lob_type=supply.
+        # Resolve the real supplier/client bridge via munafe_restaurant_id —
+        # never treat the shared tenant id as supplier_id.
         client_row = await get_supply_client_by_restaurant_id(restaurant_id)
         if not client_row:
             logger.warning(

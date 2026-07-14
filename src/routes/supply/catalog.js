@@ -41,6 +41,14 @@ const VALID_UNITS = [
   'kg', 'g', 'litre', 'ml', 'dozen', 'piece', 'bunch', 'bag', 'crate', 'sack',
 ];
 
+const VALID_UNIT_TYPES = ['count', 'weight', 'volume'];
+
+function defaultUnitType(unit) {
+  if (['piece', 'dozen', 'bunch'].includes(unit)) return 'count';
+  if (['litre', 'ml'].includes(unit)) return 'volume';
+  return 'weight';
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function validateItem(body) {
@@ -48,6 +56,8 @@ function validateItem(body) {
   if (!body.name?.trim())                        errors.push('name is required');
   if (!VALID_CATEGORIES.includes(body.category)) errors.push(`category must be one of: ${VALID_CATEGORIES.join(', ')}`);
   if (!VALID_UNITS.includes(body.unit))          errors.push(`unit must be one of: ${VALID_UNITS.join(', ')}`);
+  if (body.unit_type != null && !VALID_UNIT_TYPES.includes(body.unit_type))
+    errors.push(`unit_type must be one of: ${VALID_UNIT_TYPES.join(', ')}`);
   if (body.default_price == null || isNaN(Number(body.default_price)) || Number(body.default_price) < 0)
     errors.push('default_price must be a non-negative number');
   return errors;
@@ -81,7 +91,7 @@ router.get('/available-today', supplyAuthMiddleware, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('supply_catalog_items')
-      .select('id, name, category, unit, default_price, gst_rate, min_order_qty, display_order')
+      .select('id, name, category, unit, unit_type, default_price, gst_rate, min_order_qty, display_order')
       .eq('supplier_id', req.supplier_id)
       .eq('is_active', true)
       .eq('is_available', true)
@@ -101,7 +111,7 @@ router.get('/available-today', supplyAuthMiddleware, async (req, res) => {
 router.post('/', supplyAuthMiddleware, async (req, res) => {
   try {
     const {
-      name, category, unit, default_price,
+      name, category, unit, unit_type, default_price,
       hsn_code, gst_rate, min_order_qty, display_order,
       is_available = true,
     } = req.body;
@@ -114,6 +124,10 @@ router.post('/', supplyAuthMiddleware, async (req, res) => {
       ? Number(gst_rate)
       : GST_DEFAULTS[category] ?? 0;
 
+    const resolvedUnitType = VALID_UNIT_TYPES.includes(unit_type)
+      ? unit_type
+      : defaultUnitType(unit);
+
     const { data, error } = await supabaseAdmin
       .from('supply_catalog_items')
       .insert({
@@ -121,6 +135,7 @@ router.post('/', supplyAuthMiddleware, async (req, res) => {
         name:          name.trim(),
         category,
         unit,
+        unit_type:     resolvedUnitType,
         default_price: Number(default_price),
         hsn_code:      hsn_code ?? null,
         gst_rate:      resolvedGst,
@@ -205,7 +220,7 @@ router.put('/:id', supplyAuthMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'Catalog item not found' });
 
     const {
-      name, category, unit, default_price,
+      name, category, unit, unit_type, default_price,
       hsn_code, gst_rate, min_order_qty, display_order, is_available,
     } = req.body;
 
@@ -224,6 +239,11 @@ router.put('/:id', supplyAuthMiddleware, async (req, res) => {
       if (!VALID_UNITS.includes(unit))
         return res.status(400).json({ error: `Invalid unit: ${unit}` });
       patch.unit = unit;
+    }
+    if (unit_type !== undefined) {
+      if (!VALID_UNIT_TYPES.includes(unit_type))
+        return res.status(400).json({ error: `Invalid unit_type: ${unit_type}` });
+      patch.unit_type = unit_type;
     }
     if (default_price !== undefined) {
       if (isNaN(Number(default_price)) || Number(default_price) < 0)

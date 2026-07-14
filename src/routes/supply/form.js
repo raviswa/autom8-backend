@@ -102,7 +102,7 @@ router.get('/:token', async (req, res) => {
     // 5. Fetch today's available catalog items for this supplier
     const { data: items, error: itemErr } = await supabaseAdmin
       .from('supply_catalog_items')
-      .select('id, name, category, unit, default_price, gst_rate, min_order_qty, display_order, hsn_code')
+      .select('id, name, category, unit, unit_type, default_price, gst_rate, min_order_qty, display_order, hsn_code')
       .eq('supplier_id', supplier_id)
       .eq('is_available', true)
       .eq('is_active', true)
@@ -135,6 +135,7 @@ router.get('/:token', async (req, res) => {
       name:          item.name,
       category:      item.category,
       unit:          item.unit,
+      unit_type:     item.unit_type || 'weight',
       price:         priceOverrides[item.id] !== undefined
                        ? priceOverrides[item.id]
                        : Number(item.default_price),

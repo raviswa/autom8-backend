@@ -43,11 +43,34 @@ def _creds() -> dict | None:
     pid   = settings.supply_waba_phone_number_id
     token = settings.supply_waba_access_token
     if not pid or not token:
-        logger.error('[supply-wa] SUPPLY_WABA_PHONE_NUMBER_ID or SUPPLY_WABA_ACCESS_TOKEN not set')
         return None
     return {
         'url':   f"{settings.supply_waba_api_endpoint.rstrip('/')}/{pid}/messages",
         'token': token,
+    }
+
+
+async def _resolve_creds(supplier_id: str) -> dict | None:
+    """
+    Dedicated supply WABA env vars take priority (/webhook/supply path).
+    Shared-WABA "Hi fnb" routing falls back to the supplier tenant's integration.
+    """
+    creds = _creds()
+    if creds:
+        return creds
+
+    from tools.whatsapp_tools import _get_whatsapp_credentials
+    tenant_creds = await _get_whatsapp_credentials(supplier_id)
+    if not tenant_creds:
+        logger.error(
+            '[supply-wa] No supply WABA env creds and no tenant integration for %s',
+            supplier_id,
+        )
+        return None
+
+    return {
+        'url':   f"{tenant_creds['api_endpoint'].rstrip('/')}/{tenant_creds['phone_number_id']}/messages",
+        'token': tenant_creds['access_token'],
     }
 
 
@@ -58,7 +81,7 @@ async def send_supply_text(
     client_id:   str | None = None,
 ) -> bool:
     """Send a plain text WhatsApp message from the supplier's WABA number."""
-    creds = _creds()
+    creds = await _resolve_creds(supplier_id)
     if not creds:
         return False
 
@@ -81,7 +104,7 @@ async def send_supply_buttons(
     footer:      str | None = None,
 ) -> bool:
     """Send an interactive button message (max 3 buttons per Meta spec)."""
-    creds = _creds()
+    creds = await _resolve_creds(supplier_id)
     if not creds:
         return False
 
