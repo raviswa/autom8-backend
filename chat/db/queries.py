@@ -240,3 +240,81 @@ async def log_supply_notification(
             logger.warning(f"[queries] log_supply_notification HTTP {resp.status_code}")
     except Exception as exc:
         logger.warning(f"[queries] log_supply_notification failed: {exc}")
+
+
+async def get_last_supply_order(supplier_id: str, client_id: str) -> Optional[dict]:
+    """
+    Fetch this client's most recent supply order, including its line items —
+    used by the "reorder my last order" WhatsApp flow.
+
+    Returns a dict shaped like:
+        {
+            "id": str,
+            "order_number": str,
+            "delivery_date": str,      # ISO date
+            "status": str,
+            "total_amount": float,
+            "gst_amount": float,
+            "delivery_notes": str | None,
+            "created_at": str,         # ISO timestamp
+            "items": [
+                {
+                    "item_id": str | None,
+                    "item_name": str,
+                    "unit": str,
+                    "unit_price": float,
+                    "qty_ordered": float,
+                    "line_total": float,
+                },
+                ...
+            ],
+        }
+    or None if this client has never placed an order (or on lookup failure).
+
+    NOTE: this fetches the latest order regardless of status (including
+    cancelled ones) so "reorder my last order" always has something to
+    repeat. If a caller needs to exclude cancelled orders, add
+    "status": "neq.cancelled" to the params below.
+    """
+    async with httpx.AsyncClient(timeout=10) as client:
+        order_resp = await client.get(
+            _url("supply_orders"),
+            headers=_headers(),
+            params={
+                "supplier_id": f"eq.{supplier_id}",
+                "client_id":   f"eq.{client_id}",
+                "select":      "id,order_number,delivery_date,status,total_amount,gst_amount,delivery_notes,created_at",
+                "order":       "created_at.desc",
+                "limit":       "1",
+            },
+        )
+        if order_resp.status_code != 200:
+            logger.error(
+                f"[queries] get_last_supply_order (orders) HTTP {order_resp.status_code}: "
+                f"{order_resp.text[:200]}"
+            )
+            return None
+
+        orders = order_resp.json()
+        if not orders:
+            return None
+        order = orders[0]
+
+        items_resp = await client.get(
+            _url("supply_order_items"),
+            headers=_headers(),
+            params={
+                "order_id": f"eq.{order['id']}",
+                "select":   "item_id,item_name,unit,unit_price,qty_ordered,line_total",
+            },
+        )
+        if items_resp.status_code != 200:
+            logger.error(
+                f"[queries] get_last_supply_order (items) HTTP {items_resp.status_code}: "
+                f"{items_resp.text[:200]}"
+            )
+            order["items"] = []
+            return order
+
+        order["items"] = items_resp.json()
+        return order
