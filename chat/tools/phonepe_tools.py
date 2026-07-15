@@ -262,12 +262,23 @@ async def handle_payment_webhook(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "event": event, "handled": False, "state": state}
 
 
+def _is_hosted_checkout_url(url: str) -> bool:
+    """True when url is our GET /pay/{booking_id} page (not PhonePe’s gateway)."""
+    try:
+        from urllib.parse import urlparse
+
+        path = (urlparse(url).path or "").rstrip("/")
+        return "/pay/" in path
+    except Exception:
+        return "/pay/" in (url or "")
+
+
 async def prepare_phonepe_redirect(booking_id: str, token: str) -> dict[str, Any]:
     """Resolve booking + amount, create the PhonePe order, return its redirect_url.
 
     Called from GET /pay/{booking_id} when settings.payment_gateway == "phonepe".
     """
-    from tools.payment_tools import verify_checkout_token
+    from tools.payment_tools import build_checkout_page_url, verify_checkout_token
 
     if not verify_checkout_token(booking_id, token):
         return {"error": "invalid_token"}
@@ -298,12 +309,29 @@ async def prepare_phonepe_redirect(booking_id: str, token: str) -> dict[str, Any
     if amount < 1:
         return {"error": "amount_missing"}
 
-    # Reuse an order created earlier in the same session (e.g. ensure_prepay probe).
-    existing_redirect = session.get("payment_link")
+    # Reuse a real PhonePe gateway URL from an earlier create in this session.
+    # Never reuse our hosted /pay/{booking_id} page — reminders and ensure_prepay
+    # store that under payment_link for WhatsApp CTAs; treating it as the gateway
+    # URL causes GET /pay → 303 → /pay → net::ERR_TOO_MANY_REDIRECTS.
+    existing_redirect = str(
+        session.get("phonepe_redirect_url")
+        or session.get("payment_link")
+        or ""
+    ).strip()
     existing_merchant = session.get("phonepe_merchant_order_id")
-    if existing_redirect and existing_merchant and session.get("payment_gateway") == "phonepe":
+    if (
+        existing_redirect
+        and existing_merchant
+        and session.get("payment_gateway") == "phonepe"
+        and not _is_hosted_checkout_url(existing_redirect)
+    ):
         logger.info(f"[phonepe] Reusing existing redirect for booking {booking_id}")
         return {"redirect_url": existing_redirect}
+    if existing_redirect and _is_hosted_checkout_url(existing_redirect):
+        logger.info(
+            f"[phonepe] Ignoring hosted /pay URL as redirect for booking {booking_id}; "
+            "creating a fresh PhonePe order"
+        )
 
     if not phonepe_configured():
         return {"error": "phonepe_not_configured", "fallback": True}
@@ -318,7 +346,9 @@ async def prepare_phonepe_redirect(booking_id: str, token: str) -> dict[str, Any
 
     session["payment_gateway"] = "phonepe"
     session["phonepe_merchant_order_id"] = order["merchant_order_id"]
-    session["payment_link"] = order["redirect_url"]
+    # Keep payment_link as our hosted checkout (WhatsApp CTA); store gateway separately.
+    session["phonepe_redirect_url"] = order["redirect_url"]
+    session["payment_link"] = build_checkout_page_url(str(booking_id))
     if phone:
         await save_session_state(restaurant_id, phone, session)
 
