@@ -3,14 +3,16 @@
 // Munafe Supply — Module 3: Catalog Management
 //
 // GET    /api/supply/catalog                   — All items for supplier
+// GET    /api/supply/catalog/meta              — LOB schema (categories/units/GST)
 // POST   /api/supply/catalog                   — Add catalog item
+// POST   /api/supply/catalog/bulk-upload       — Bulk create/update from Excel/CSV rows
 // PUT    /api/supply/catalog/bulk-availability — Bulk toggle availability
 // GET    /api/supply/catalog/available-today   — Items where is_available=true
 // PUT    /api/supply/catalog/:id               — Edit catalog item
 // DELETE /api/supply/catalog/:id               — Soft delete
 //
-// All routes require Bearer JWT (supply JWT, not Supabase).
-// Middleware attaches req.supplier_id from verified token.
+// Auth: Bearer token → supplyAuthMiddleware (req.supplier_id + req.supplier.lob_type).
+// Catalog validation is driven by suppliers.lob_type — buyers may be any LOB.
 // ============================================================================
 
 'use strict';
@@ -18,54 +20,31 @@
 const express = require('express');
 const router  = express.Router();
 
-const { supabaseAdmin }     = require('../../config/supabase');
+const { supabaseAdmin } = require('../../config/supabase');
 const { supplyAuthMiddleware } = require('../../middleware/supplyAuth');
+const {
+  DEFAULT_LOB,
+  VALID_UNIT_TYPES,
+  getSupplySchema,
+  defaultUnitType,
+  resolveGst,
+  validateItem,
+  schemaMeta,
+} = require('../../config/supplyCatalogSchemas');
 
-// ── Category → default GST rate mapping ──────────────────────────────────────
-const GST_DEFAULTS = {
-  'Vegetables':      0,
-  'Fruits':          0,
-  'Dairy':           0,   // per-item override for butter/ghee/cheese → 5
-  'Eggs & Poultry':  0,
-  'Meat & Seafood':  0,
-  'Dry Goods':       0,
-  'Oils & Fats':     5,
-  'Spices':          5,
-  'Packaging':       18,
-  'Other':           5,
-};
-
-const VALID_CATEGORIES = Object.keys(GST_DEFAULTS);
-
-const VALID_UNITS = [
-  'kg', 'g', 'litre', 'ml', 'dozen', 'piece', 'bunch', 'bag', 'crate', 'sack',
-];
-
-const VALID_UNIT_TYPES = ['count', 'weight', 'volume'];
-
-function defaultUnitType(unit) {
-  if (['piece', 'dozen', 'bunch'].includes(unit)) return 'count';
-  if (['litre', 'ml'].includes(unit)) return 'volume';
-  return 'weight';
+function schemaForReq(req) {
+  return getSupplySchema(req.supplier?.lob_type || DEFAULT_LOB);
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function validateItem(body) {
-  const errors = [];
-  if (!body.name?.trim())                        errors.push('name is required');
-  if (!VALID_CATEGORIES.includes(body.category)) errors.push(`category must be one of: ${VALID_CATEGORIES.join(', ')}`);
-  if (!VALID_UNITS.includes(body.unit))          errors.push(`unit must be one of: ${VALID_UNITS.join(', ')}`);
-  if (body.unit_type != null && !VALID_UNIT_TYPES.includes(body.unit_type))
-    errors.push(`unit_type must be one of: ${VALID_UNIT_TYPES.join(', ')}`);
-  if (body.default_price == null || isNaN(Number(body.default_price)) || Number(body.default_price) < 0)
-    errors.push('default_price must be a non-negative number');
-  return errors;
+function parseAvailability(raw, defaultVal = true) {
+  if (raw === undefined || raw === null || raw === '') return defaultVal;
+  const s = String(raw).toLowerCase().trim();
+  if (s === 'true' || s === '1' || s === 'yes') return true;
+  if (s === 'false' || s === '0' || s === 'no') return false;
+  return defaultVal;
 }
 
 // ── GET /api/supply/catalog ───────────────────────────────────────────────────
-// Returns all active catalog items for the supplier, grouped by category,
-// sorted by display_order then name.
 router.get('/', supplyAuthMiddleware, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -85,8 +64,20 @@ router.get('/', supplyAuthMiddleware, async (req, res) => {
   }
 });
 
+// ── GET /api/supply/catalog/meta ──────────────────────────────────────────────
+// Dashboard / upload UI: valid categories, units, GST defaults for this supplier.
+router.get('/meta', supplyAuthMiddleware, async (req, res) => {
+  try {
+    const schema = schemaForReq(req);
+    res.json(schemaMeta(schema));
+  } catch (err) {
+    console.error('[supply/catalog] GET /meta', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /api/supply/catalog/available-today ───────────────────────────────────
-// Items visible on the order form today. Used by Module 5 (order form).
+// Items visible on the buyer order form today.
 router.get('/available-today', supplyAuthMiddleware, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -110,20 +101,17 @@ router.get('/available-today', supplyAuthMiddleware, async (req, res) => {
 // ── POST /api/supply/catalog ──────────────────────────────────────────────────
 router.post('/', supplyAuthMiddleware, async (req, res) => {
   try {
+    const schema = schemaForReq(req);
     const {
       name, category, unit, unit_type, default_price,
       hsn_code, gst_rate, min_order_qty, display_order,
       is_available = true,
     } = req.body;
 
-    const errors = validateItem(req.body);
+    const errors = validateItem(schema, req.body);
     if (errors.length) return res.status(400).json({ error: errors.join('; ') });
 
-    // Use category GST default if gst_rate not supplied
-    const resolvedGst = (gst_rate != null && !isNaN(Number(gst_rate)))
-      ? Number(gst_rate)
-      : GST_DEFAULTS[category] ?? 0;
-
+    const resolvedGst = resolveGst(schema, category, gst_rate);
     const resolvedUnitType = VALID_UNIT_TYPES.includes(unit_type)
       ? unit_type
       : defaultUnitType(unit);
@@ -141,7 +129,7 @@ router.post('/', supplyAuthMiddleware, async (req, res) => {
         gst_rate:      resolvedGst,
         min_order_qty: min_order_qty != null ? Number(min_order_qty) : 0,
         display_order: display_order != null ? Number(display_order) : 0,
-        is_available,
+        is_available:  Boolean(is_available),
       })
       .select()
       .single();
@@ -156,14 +144,13 @@ router.post('/', supplyAuthMiddleware, async (req, res) => {
 
 // ── PUT /api/supply/catalog/bulk-availability ─────────────────────────────────
 // Body: { items: [{ id, is_available }] }
-// Used every morning: supplier confirms today's stock in one action.
+// Morning stock confirm — toggles availability only, not product details.
 router.put('/bulk-availability', supplyAuthMiddleware, async (req, res) => {
   try {
     const { items } = req.body;
     if (!Array.isArray(items) || items.length === 0)
       return res.status(400).json({ error: 'items array is required' });
 
-    // Validate all IDs belong to this supplier before touching anything
     const ids = items.map(i => i.id).filter(Boolean);
     const { data: owned, error: checkErr } = await supabaseAdmin
       .from('supply_catalog_items')
@@ -177,10 +164,8 @@ router.put('/bulk-availability', supplyAuthMiddleware, async (req, res) => {
     if (unauthorised.length)
       return res.status(403).json({ error: `Item(s) not found or not yours: ${unauthorised.join(', ')}` });
 
-    // Group by is_available value to minimise DB round-trips
     const toEnable  = items.filter(i =>  i.is_available).map(i => i.id);
     const toDisable = items.filter(i => !i.is_available).map(i => i.id);
-    const now = new Date().toISOString();
 
     const ops = [];
     if (toEnable.length)
@@ -202,12 +187,138 @@ router.put('/bulk-availability', supplyAuthMiddleware, async (req, res) => {
   }
 });
 
+// ── POST /api/supply/catalog/bulk-upload ──────────────────────────────────────
+// Body: { items: [...], replace_existing?: boolean }
+// Frontend parses Excel/CSV (SheetJS); this endpoint upserts by name.
+// Default: safe upsert — unmatched existing items left alone.
+// replace_existing: true → soft-deactivate active items not in this upload.
+async function handleCatalogBulkUpload(req, res) {
+  try {
+    const { items, replace_existing } = req.body;
+    if (!items || !Array.isArray(items) || !items.length)
+      return res.status(400).json({ error: 'items array required' });
+
+    const schema = schemaForReq(req);
+    const supplierId = req.supplier_id;
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+    let deactivated = 0;
+    const errors = [];
+
+    const validRows = [];
+    items.forEach((item, idx) => {
+      const rowLabel = (item.name && String(item.name).trim()) || `row ${idx + 1}`;
+      const rowErrors = validateItem(schema, item);
+      if (rowErrors.length) {
+        errors.push({ row: rowLabel, error: rowErrors.join('; ') });
+        skipped += 1;
+        return;
+      }
+
+      const unit = item.unit;
+      const unitType = VALID_UNIT_TYPES.includes(item.unit_type)
+        ? item.unit_type
+        : defaultUnitType(unit);
+
+      validRows.push({
+        name:          String(item.name).trim(),
+        category:      item.category,
+        unit,
+        unit_type:     unitType,
+        default_price: Number(item.default_price),
+        hsn_code:      item.hsn_code ? String(item.hsn_code).trim() : null,
+        gst_rate:      resolveGst(schema, item.category, item.gst_rate),
+        min_order_qty: (item.min_order_qty != null && item.min_order_qty !== '')
+          ? Number(item.min_order_qty)
+          : 0,
+        display_order: (item.display_order != null && item.display_order !== '')
+          ? Number(item.display_order)
+          : 0,
+        is_available:  parseAvailability(item.is_available, true),
+      });
+    });
+
+    if (!validRows.length)
+      return res.status(400).json({ error: 'No valid rows found', skipped, errors });
+
+    const { data: existingItems, error: fetchErr } = await supabaseAdmin
+      .from('supply_catalog_items')
+      .select('id, name')
+      .eq('supplier_id', supplierId)
+      .eq('is_active', true);
+    if (fetchErr) throw fetchErr;
+
+    const byNameLower = new Map(
+      (existingItems ?? []).map((r) => [String(r.name || '').trim().toLowerCase(), r.id]),
+    );
+    const matchedIds = new Set();
+
+    for (const row of validRows) {
+      const existingId = byNameLower.get(row.name.toLowerCase());
+      try {
+        if (existingId) {
+          matchedIds.add(existingId);
+          const { error: updErr } = await supabaseAdmin
+            .from('supply_catalog_items')
+            .update(row)
+            .eq('id', existingId)
+            .eq('supplier_id', supplierId);
+          if (updErr) throw updErr;
+          updated += 1;
+        } else {
+          const { error: insErr } = await supabaseAdmin
+            .from('supply_catalog_items')
+            .insert({ supplier_id: supplierId, is_active: true, ...row });
+          if (insErr) throw insErr;
+          created += 1;
+        }
+      } catch (rowErr) {
+        errors.push({ row: row.name, error: rowErr.message });
+        skipped += 1;
+      }
+    }
+
+    if (replace_existing === true || replace_existing === 'true') {
+      const toDeactivate = (existingItems ?? [])
+        .filter((r) => !matchedIds.has(r.id))
+        .map((r) => r.id);
+      if (toDeactivate.length) {
+        const { error: deactErr } = await supabaseAdmin
+          .from('supply_catalog_items')
+          .update({ is_available: false, is_active: false })
+          .in('id', toDeactivate)
+          .eq('supplier_id', supplierId);
+        if (deactErr) throw deactErr;
+        deactivated = toDeactivate.length;
+      }
+    }
+
+    const response = {
+      success: true,
+      created,
+      updated,
+      deactivated,
+      skipped,
+      total: items.length,
+      lob_type: schema.lob_type,
+    };
+    if (errors.length) response.errors = errors;
+    res.json(response);
+  } catch (err) {
+    console.error('[supply/catalog] POST /bulk-upload', err.message);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+router.post('/bulk-upload', supplyAuthMiddleware, handleCatalogBulkUpload);
+
 // ── PUT /api/supply/catalog/:id ───────────────────────────────────────────────
 router.put('/:id', supplyAuthMiddleware, async (req, res) => {
   try {
+    const schema = schemaForReq(req);
     const { id } = req.params;
 
-    // Ownership check
     const { data: existing, error: findErr } = await supabaseAdmin
       .from('supply_catalog_items')
       .select('id, is_active')
@@ -224,19 +335,18 @@ router.put('/:id', supplyAuthMiddleware, async (req, res) => {
       hsn_code, gst_rate, min_order_qty, display_order, is_available,
     } = req.body;
 
-    // Validate only the fields being updated
     const patch = {};
     if (name !== undefined) {
       if (!name.trim()) return res.status(400).json({ error: 'name cannot be empty' });
       patch.name = name.trim();
     }
     if (category !== undefined) {
-      if (!VALID_CATEGORIES.includes(category))
+      if (!schema.categories.includes(category))
         return res.status(400).json({ error: `Invalid category: ${category}` });
       patch.category = category;
     }
     if (unit !== undefined) {
-      if (!VALID_UNITS.includes(unit))
+      if (!schema.units.includes(unit))
         return res.status(400).json({ error: `Invalid unit: ${unit}` });
       patch.unit = unit;
     }
@@ -246,7 +356,7 @@ router.put('/:id', supplyAuthMiddleware, async (req, res) => {
       patch.unit_type = unit_type;
     }
     if (default_price !== undefined) {
-      if (isNaN(Number(default_price)) || Number(default_price) < 0)
+      if (Number.isNaN(Number(default_price)) || Number(default_price) < 0)
         return res.status(400).json({ error: 'default_price must be a non-negative number' });
       patch.default_price = Number(default_price);
     }
@@ -276,8 +386,7 @@ router.put('/:id', supplyAuthMiddleware, async (req, res) => {
 });
 
 // ── DELETE /api/supply/catalog/:id ───────────────────────────────────────────
-// Soft delete only — marks is_active = false.
-// Hard delete is never done because order_items reference catalog items.
+// Soft delete only — is_active = false (order line items may reference the row).
 router.delete('/:id', supplyAuthMiddleware, async (req, res) => {
   try {
     const { id } = req.params;

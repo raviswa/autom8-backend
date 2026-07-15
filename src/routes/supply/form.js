@@ -9,6 +9,7 @@
 //
 // The order SUBMISSION (POST /api/supply/orders) is handled in orders.js.
 // This file is intentionally public — no JWT. Auth is via HMAC-signed token.
+// Buyers are supply_clients (any LOB); catalog comes from the supplier.
 // ============================================================================
 
 'use strict';
@@ -26,7 +27,7 @@ const BASE_URL = process.env.SUPPLY_FORM_BASE_URL || 'https://order.autom8.works
 
 // ── GET /api/supply/form/:token ───────────────────────────────────────────────
 // Public. Called by OrderForm.jsx on mount.
-// Returns: supplier header, client profile + credit balance, today's catalog grouped by category.
+// Returns: supplier header, buyer profile + credit balance, today's catalog grouped by category.
 
 router.get('/:token', async (req, res) => {
   const { token }  = req.params;

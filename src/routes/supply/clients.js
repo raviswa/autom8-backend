@@ -1,8 +1,9 @@
 // src/routes/supply/clients.js
 // ============================================================================
-// Munafe Supply — Module 2: Client Management
+// Munafe Supply — Module 2: Client / Buyer Management
 //
-// Endpoints:
+// Buyers are supply_clients for any LOB (restaurants, retail, etc.).
+// Optional munafe_restaurant_id bridges shared-WABA demo tenants only.
 //   GET    /api/supply/clients                — list all clients for supplier
 //   POST   /api/supply/clients                — add new client
 //   GET    /api/supply/clients/:id            — get single client
@@ -148,7 +149,7 @@ router.get('/', authenticateToken, getSupplierContext, async (req, res) => {
 });
 
 // ── POST /api/supply/clients ──────────────────────────────────────────────────
-// Add a new restaurant client.
+// Add a new buyer/client (any LOB — restaurant, retail, etc.).
 // Sends a WhatsApp welcome message if Module 12 is deployed.
 
 router.post('/', authenticateToken, getSupplierContext, async (req, res) => {

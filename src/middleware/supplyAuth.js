@@ -35,7 +35,7 @@ async function getSupplierContext(req, res, next) {
         'waba_phone', 'waba_phone_number_id',
         'gstin', 'address', 'city', 'state', 'pincode',
         'logo_url', 'ordering_open_time', 'ordering_cutoff_time',
-        'always_open', 'timezone', 'is_active',
+        'always_open', 'timezone', 'is_active', 'lob_type',
       ].join(', '))
       .eq('auth_user_id', authUserId)
       .maybeSingle();

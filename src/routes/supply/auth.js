@@ -27,6 +27,7 @@ const router  = express.Router();
 const { supabase, supabaseAdmin }  = require('../../config/supabase');
 const { authenticateToken }        = require('../../middleware/auth');
 const { getSupplierContext }       = require('../../middleware/supplyAuth');
+const { listSupplyLobTypes }       = require('../../config/supplyCatalogSchemas');
 
 // ── POST /api/supply/auth/register ────────────────────────────────────────────
 // Creates a Supabase auth user + suppliers row in one transaction.
@@ -47,6 +48,7 @@ router.post('/register', async (req, res) => {
       city,
       state,
       pincode,
+      lob_type,
     } = req.body;
 
     // ── Validate required fields ──────────────────────────────────────────────
@@ -56,6 +58,16 @@ router.post('/register', async (req, res) => {
     if (!name?.trim())           return res.status(400).json({ error: 'Contact name is required' });
     if (!business_name?.trim())  return res.status(400).json({ error: 'Business name is required' });
     if (!phone?.trim())          return res.status(400).json({ error: 'Phone number is required' });
+
+    let resolvedLob = 'food_service';
+    if (lob_type !== undefined && lob_type !== null && String(lob_type).trim() !== '') {
+      resolvedLob = String(lob_type).trim().toLowerCase();
+      if (!listSupplyLobTypes().includes(resolvedLob)) {
+        return res.status(400).json({
+          error: `lob_type must be one of: ${listSupplyLobTypes().join(', ')}`,
+        });
+      }
+    }
 
     // ── Check for duplicate email ─────────────────────────────────────────────
     const { data: existing } = await supabaseAdmin
@@ -96,6 +108,7 @@ router.post('/register', async (req, res) => {
         city:          city?.trim() || null,
         state:         state?.trim() || null,
         pincode:       pincode?.trim() || null,
+        lob_type:      resolvedLob,
       })
       .select()
       .single();
@@ -158,7 +171,7 @@ router.post('/login', async (req, res) => {
         'waba_phone', 'waba_phone_number_id',
         'gstin', 'city', 'state', 'logo_url',
         'ordering_open_time', 'ordering_cutoff_time',
-        'always_open', 'timezone', 'is_active',
+        'always_open', 'timezone', 'is_active', 'lob_type',
       ].join(', '))
       .eq('auth_user_id', sessionData.user.id)
       .maybeSingle();
@@ -285,6 +298,7 @@ router.put('/profile', authenticateToken, getSupplierContext, async (req, res) =
       ordering_open_time,
       ordering_cutoff_time,
       always_open,
+      lob_type,
     } = req.body;
 
     // Build update object — only include defined fields
@@ -302,6 +316,15 @@ router.put('/profile', authenticateToken, getSupplierContext, async (req, res) =
     if (ordering_open_time !== undefined) updates.ordering_open_time = ordering_open_time;
     if (ordering_cutoff_time !== undefined) updates.ordering_cutoff_time = ordering_cutoff_time;
     if (always_open        !== undefined) updates.always_open        = Boolean(always_open);
+    if (lob_type !== undefined) {
+      const nextLob = String(lob_type || '').trim().toLowerCase();
+      if (!listSupplyLobTypes().includes(nextLob)) {
+        return res.status(400).json({
+          error: `lob_type must be one of: ${listSupplyLobTypes().join(', ')}`,
+        });
+      }
+      updates.lob_type = nextLob;
+    }
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ error: 'No fields provided to update' });
