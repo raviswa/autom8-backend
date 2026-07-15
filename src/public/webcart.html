@@ -431,6 +431,8 @@
       cursor: pointer;
       border: 1px solid transparent;
       width: 100%;
+      box-sizing: border-box;
+      display: block;
     }
     .wa-primary {
       background: var(--brand);
@@ -442,6 +444,7 @@
       color: var(--ink);
       border-color: var(--line);
     }
+    a.wa-secondary { color: var(--ink); }
     @media (max-width: 520px) {
       .wa-guide-overlay {
         align-items: end;
@@ -687,19 +690,20 @@
   <div id="waGuideOverlay" class="wa-guide-overlay" aria-hidden="true">
     <div class="wa-guide-card">
       <div class="wa-guide-icon" aria-hidden="true">W</div>
-      <div class="wa-guide-kicker">WhatsApp Checkout</div>
-      <h2 class="wa-guide-title">Payment Link Sent</h2>
-      <p class="wa-guide-sub">
+      <div class="wa-guide-kicker" id="waGuideKicker">WhatsApp Checkout</div>
+      <h2 class="wa-guide-title" id="waGuideTitle">Back to WhatsApp</h2>
+      <p class="wa-guide-sub" id="waGuideSub">
         We sent your <strong>Confirm &amp; Pay</strong> link on WhatsApp.<br>
         Switch to WhatsApp now and tap the button to complete payment.
       </p>
-      <p class="wa-guide-tip">After payment, return to this page. It will auto-update.</p>
+      <p class="wa-guide-tip" id="waGuideTip">After payment, return to this page. It will auto-update.</p>
       <div class="wa-guide-actions">
         <button id="waOpenBtn" class="wa-primary" type="button">Go to WhatsApp</button>
+        <a id="waPayNowBtn" class="wa-secondary" href="#" style="display:none;text-decoration:none;text-align:center">Pay in this browser</a>
         <button id="waCloseBtn" class="wa-secondary" type="button">Stay on this page</button>
       </div>
       <div id="waOpenHelp" class="wa-open-help">
-        Could not open WhatsApp automatically. <a id="waOpenLink" href="#" target="_self">Tap here to open chat</a>.
+        Could not open WhatsApp automatically. <a id="waOpenLink" href="#" target="_blank" rel="noopener noreferrer">Tap here to open chat</a>.
       </div>
     </div>
   </div>
@@ -823,6 +827,8 @@
       lastSubmittedAt: 0,
       lastSubmittedOrderRef: null,
       lastSubmittedBookingId: null,
+      lastSubmittedPaymentLink: null,
+      lastSubmitAwaitingApproval: false,
       paymentPollTimer: null,
       paymentPollInFlight: false,
       selectedSize: {},
@@ -968,21 +974,37 @@
         state.lastSubmittedFingerprint = parsed.fingerprint || null;
         state.lastSubmittedAt = Number(parsed.ts || 0);
         state.lastSubmittedOrderRef = parsed.orderRef || null;
+        state.lastSubmittedBookingId = parsed.bookingId || null;
+        state.lastSubmittedPaymentLink = parsed.paymentLink || null;
+        state.lastSubmitAwaitingApproval = !!parsed.awaitingApproval;
       } catch (_e) { /* ignore corrupt/missing data */ }
     }
-    function saveLastSubmitLocal(fingerprint, orderRef) {
+    function saveLastSubmitLocal(fingerprint, orderRef, extra = {}) {
       const now = Date.now();
       state.lastSubmittedFingerprint = fingerprint || null;
       state.lastSubmittedAt = now;
       state.lastSubmittedOrderRef = orderRef || null;
+      if (extra.bookingId !== undefined) state.lastSubmittedBookingId = extra.bookingId || null;
+      if (extra.paymentLink !== undefined) state.lastSubmittedPaymentLink = extra.paymentLink || null;
+      if (extra.awaitingApproval !== undefined) state.lastSubmitAwaitingApproval = !!extra.awaitingApproval;
       try {
-        sessionStorage.setItem(lastSubmitStorageKey(), JSON.stringify({ fingerprint, orderRef: orderRef || null, ts: now }));
+        sessionStorage.setItem(lastSubmitStorageKey(), JSON.stringify({
+          fingerprint,
+          orderRef: orderRef || null,
+          bookingId: state.lastSubmittedBookingId || null,
+          paymentLink: state.lastSubmittedPaymentLink || null,
+          awaitingApproval: !!state.lastSubmitAwaitingApproval,
+          ts: now,
+        }));
       } catch (_e) { /* storage unavailable */ }
     }
     function clearLastSubmitLocal() {
       state.lastSubmittedFingerprint = null;
       state.lastSubmittedAt = 0;
       state.lastSubmittedOrderRef = null;
+      state.lastSubmittedBookingId = null;
+      state.lastSubmittedPaymentLink = null;
+      state.lastSubmitAwaitingApproval = false;
       try { sessionStorage.removeItem(lastSubmitStorageKey()); } catch (_e) {}
     }
     function cartFingerprint() {
@@ -1157,17 +1179,89 @@ $('subtotal').textContent = money(subtotal);
         state.lastSubmittedFingerprint &&
         state.lastSubmittedFingerprint === cartFingerprint() &&
         now - Number(state.lastSubmittedAt || 0) < 20 * 60 * 1000;
-      submitBtn.disabled = count === 0 || state.submitting || sameAsLast;
+      // Keep re-tappable after submit so customers can reopen the WhatsApp guide.
+      submitBtn.disabled = count === 0 || state.submitting;
       if (state.submitting) submitBtn.textContent = 'Submitting…';
       else if (state.sessionExpired) submitBtn.textContent = 'Checkout Now';
-      else if (sameAsLast) submitBtn.textContent = 'Payment Link Sent';
+      else if (sameAsLast) submitBtn.textContent = 'Open WhatsApp again';
       else submitBtn.textContent = 'Continue to WhatsApp';
 
       renderMenuList(); // refresh +/- buttons on rows in sync with cart
     }
 
-    function showWhatsAppGuide() {
+    function isWhatsAppInAppBrowser() {
+      const ua = String(navigator.userAgent || '');
+      return /WhatsApp/i.test(ua);
+    }
+
+    function restaurantWhatsAppDigits() {
+      return String(
+        (state.restaurant && state.restaurant.support_phone) ||
+        fallbackSupportPhone ||
+        ''
+      ).replace(/\D/g, '');
+    }
+
+    function restaurantChatUrl() {
+      const digits = restaurantWhatsAppDigits();
+      return digits ? `https://wa.me/${digits}` : 'https://api.whatsapp.com/';
+    }
+
+    function showWhatsAppGuide({ awaitingApproval = false, paymentLink = null } = {}) {
       if (!waGuideOverlay) return;
+
+      const titleEl = $('waGuideTitle');
+      const subEl = $('waGuideSub');
+      const tipEl = $('waGuideTip');
+      const kickerEl = $('waGuideKicker');
+      const payBtn = $('waPayNowBtn');
+      const openBtn = $('waOpenBtn');
+      const inWa = isWhatsAppInAppBrowser();
+
+      if (kickerEl) kickerEl.textContent = awaitingApproval ? 'Scheduled Order' : 'WhatsApp Checkout';
+      if (titleEl) {
+        titleEl.textContent = inWa
+          ? 'Return to chat'
+          : (awaitingApproval ? 'Sent for approval' : 'Back to WhatsApp');
+      }
+      if (subEl) {
+        if (awaitingApproval) {
+          subEl.innerHTML = inWa
+            ? 'Your order was sent for manager approval on WhatsApp.<br><strong>Close this menu</strong> and return to the chat — we will message you there.'
+            : 'Your order was sent for manager approval on WhatsApp.<br>Switch to WhatsApp to follow the latest updates.';
+        } else {
+          subEl.innerHTML = inWa
+            ? 'We sent your <strong>Confirm &amp; Pay</strong> link on WhatsApp.<br><strong>Close this menu</strong> and tap <strong>Confirm &amp; Pay</strong> in the chat.'
+            : 'We sent your <strong>Confirm &amp; Pay</strong> link on WhatsApp.<br>Switch to WhatsApp now and tap the button to complete payment.';
+        }
+      }
+      if (tipEl) {
+        tipEl.textContent = inWa
+          ? 'Tip: use the ✕ / back control on this browser to return to your chat thread.'
+          : 'After payment, return to this page. It will auto-update.';
+      }
+      if (openBtn) {
+        openBtn.textContent = inWa ? 'I\'ve returned to chat' : 'Go to WhatsApp';
+      }
+
+      if (payBtn) {
+        const canPayHere = !awaitingApproval && paymentLink && !inWa;
+        if (canPayHere) {
+          payBtn.href = paymentLink;
+          payBtn.style.display = '';
+        } else {
+          payBtn.removeAttribute('href');
+          payBtn.style.display = 'none';
+        }
+      }
+
+      if (waOpenHelp) waOpenHelp.style.display = 'none';
+      if (waOpenLink) {
+        waOpenLink.setAttribute('href', restaurantChatUrl());
+        waOpenLink.setAttribute('target', '_blank');
+        waOpenLink.setAttribute('rel', 'noopener noreferrer');
+      }
+
       waGuideOverlay.classList.add('show');
       waGuideOverlay.setAttribute('aria-hidden', 'false');
       document.body.classList.add('wa-guide-open');
@@ -1181,27 +1275,56 @@ $('subtotal').textContent = money(subtotal);
     }
 
     function openWhatsApp() {
+      // Already inside WhatsApp's in-app browser — deep-links cannot "leave" to WhatsApp.
+      if (isWhatsAppInAppBrowser()) {
+        hideWhatsAppGuide();
+        showStatus(
+          'Close this menu browser and return to the WhatsApp chat to continue.',
+          'ok',
+        );
+        if (waOpenHelp) waOpenHelp.style.display = 'block';
+        return;
+      }
+
       const ua = String(navigator.userAgent || '').toLowerCase();
       const isAndroid = ua.includes('android');
       const isIOS = /iphone|ipad|ipod/.test(ua);
-      const supportDigits = String((state.restaurant && state.restaurant.support_phone) || fallbackSupportPhone || '').replace(/\D/g, '');
-      const chatUrl = supportDigits
-        ? `https://wa.me/${supportDigits}`
-        : 'https://api.whatsapp.com/';
+      const chatUrl = restaurantChatUrl();
       let movedAway = false;
 
       if (waOpenHelp) waOpenHelp.style.display = 'none';
-      if (waOpenLink) waOpenLink.setAttribute('href', chatUrl);
+      if (waOpenLink) {
+        waOpenLink.setAttribute('href', chatUrl);
+        waOpenLink.setAttribute('target', '_blank');
+        waOpenLink.setAttribute('rel', 'noopener noreferrer');
+      }
 
       const onHide = () => {
         movedAway = true;
         document.removeEventListener('visibilitychange', onHide);
+        document.removeEventListener('pagehide', onHide);
       };
       document.addEventListener('visibilitychange', onHide, { once: true });
+      document.addEventListener('pagehide', onHide, { once: true });
 
-      // Prefer native deep links first. If blocked, fall back to web WhatsApp.
+      // Prefer wa.me (opens the restaurant chat). Intent / custom schemes are flaky in WebViews.
+      try {
+        const opened = window.open(chatUrl, '_blank', 'noopener,noreferrer');
+        if (opened) {
+          setTimeout(() => {
+            if (!movedAway && document.visibilityState === 'visible' && waOpenHelp) {
+              waOpenHelp.style.display = 'block';
+            }
+          }, 1600);
+          return;
+        }
+      } catch (_e) { /* fall through */ }
+
       if (isAndroid) {
-        const intentUrl = 'intent://send/#Intent;scheme=whatsapp;package=com.whatsapp;end';
+        const digits = restaurantWhatsAppDigits();
+        const intentUrl = digits
+          ? `intent://send?phone=${digits}#Intent;scheme=whatsapp;package=com.whatsapp;end`
+          : 'intent://send/#Intent;scheme=whatsapp;package=com.whatsapp;end';
         window.location.href = intentUrl;
         setTimeout(() => {
           if (!movedAway && document.visibilityState === 'visible') {
@@ -1213,7 +1336,7 @@ $('subtotal').textContent = money(subtotal);
       }
 
       if (isIOS) {
-        window.location.href = 'whatsapp://send';
+        window.location.href = digitsPhoneDeepLink() || chatUrl;
         setTimeout(() => {
           if (!movedAway && document.visibilityState === 'visible') {
             if (waOpenHelp) waOpenHelp.style.display = 'block';
@@ -1223,7 +1346,12 @@ $('subtotal').textContent = money(subtotal);
         return;
       }
 
-      window.open('https://web.whatsapp.com', '_blank', 'noopener,noreferrer');
+      window.location.href = chatUrl;
+    }
+
+    function digitsPhoneDeepLink() {
+      const digits = restaurantWhatsAppDigits();
+      return digits ? `whatsapp://send?phone=${digits}` : 'whatsapp://send';
     }
 
     async function checkPaymentStatus() {
@@ -2337,15 +2465,23 @@ $('subtotal').textContent = money(subtotal);
         state.lastSubmittedFingerprint === fingerprint &&
         Date.now() - Number(state.lastSubmittedAt || 0) < 20 * 60 * 1000;
       if (sameAsLast) {
-        showStatus('Payment link already sent. Please check WhatsApp and complete payment.', 'ok');
+        // Re-open the handoff guide instead of silent no-op / dead button.
+        showWhatsAppGuide({
+          awaitingApproval: !!state.lastSubmitAwaitingApproval,
+          paymentLink: state.lastSubmittedPaymentLink || null,
+        });
+        showStatus(
+          state.lastSubmitAwaitingApproval
+            ? 'Order already submitted for approval. Return to WhatsApp for updates.'
+            : 'Payment link already sent. Complete payment from WhatsApp.',
+          'ok',
+        );
         renderCart();
         return;
       }
 
       state.submitting = true;
       renderCart();
-
-      const submitBtn = $('submitBtn');
 
       const body = {
         token,
@@ -2372,20 +2508,33 @@ $('subtotal').textContent = money(subtotal);
           return;
         }
 
+        const awaitingApproval = !!data.awaiting_approval;
+        const paymentLink = data.payment_link || null;
+
         showStatus(
-          `Checkout ready. Ref: ${data.order_ref}. Opening the payment page now.`,
+          data.message ||
+            (awaitingApproval
+              ? 'Order submitted for approval. Check WhatsApp.'
+              : 'Confirm & Pay sent to WhatsApp.'),
           'ok',
         );
 
-        // Keep cart visible after checkout starts to prevent accidental
+        // Keep cart visible after Continue to WhatsApp to prevent accidental
         // reordering when the customer returns before payment completion.
-        saveLastSubmitLocal(fingerprint, data.order_ref || null);
+        saveLastSubmitLocal(fingerprint, data.order_ref || null, {
+          bookingId: data.booking_id || null,
+          paymentLink,
+          awaitingApproval,
+        });
         state.lastSubmittedBookingId = data.booking_id || null;
+        state.lastSubmittedPaymentLink = paymentLink;
+        state.lastSubmitAwaitingApproval = awaitingApproval;
         state.submitting = false;
         renderCart();
-        if (data.payment_link) {
-          window.location.href = data.payment_link;
-        }
+
+        // Always hand off via WhatsApp guide. Do NOT auto-navigate to /pay
+        // inside WhatsApp's in-app browser (broken deep-links + nested checkout).
+        showWhatsAppGuide({ awaitingApproval, paymentLink });
         startPaymentPolling();
       } catch (_e) {
         showStatus('Order submission failed. Please try again.', 'err');
