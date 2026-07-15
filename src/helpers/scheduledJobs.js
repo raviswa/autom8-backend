@@ -160,11 +160,54 @@ async function enqueueScheduledJobs({
     },
   ];
 
-  const { error } = await supabaseAdmin.from('scheduled_jobs').upsert(jobs, {
-    onConflict: 'idempotency_key',
-    ignoreDuplicates: false,
-  });
-  if (error) throw error;
+  for (const job of jobs) {
+    const { data: existing, error: lookupErr } = await supabaseAdmin
+      .from('scheduled_jobs')
+      .select('id, status')
+      .eq('idempotency_key', job.idempotency_key)
+      .maybeSingle();
+    if (lookupErr) throw lookupErr;
+
+    if (!existing) {
+      const { error: insertErr } = await supabaseAdmin.from('scheduled_jobs').insert(job);
+      if (insertErr) throw insertErr;
+      continue;
+    }
+
+    // Never resurrect completed/running jobs — upsert(status=pending) was resetting
+    // prep_start_whatsapp every minute and re-sending "starting your order" forever.
+    // Only cancelled → pending (re-armed). failed stays failed until retryFailedDispatchJobs.
+    if (existing.status === 'completed' || existing.status === 'running') {
+      await supabaseAdmin.from('scheduled_jobs').update({
+        run_at: job.run_at,
+        payload: job.payload,
+        token_id: job.token_id,
+        updated_at: new Date().toISOString(),
+      }).eq('id', existing.id);
+      continue;
+    }
+
+    if (existing.status === 'cancelled') {
+      await supabaseAdmin.from('scheduled_jobs').update({
+        run_at: job.run_at,
+        payload: job.payload,
+        token_id: job.token_id,
+        status: 'pending',
+        last_error: null,
+        updated_at: new Date().toISOString(),
+      }).eq('id', existing.id);
+      continue;
+    }
+
+    // pending or failed: refresh schedule payload without flipping status
+    await supabaseAdmin.from('scheduled_jobs').update({
+      run_at: job.run_at,
+      payload: job.payload,
+      token_id: job.token_id,
+      updated_at: new Date().toISOString(),
+    }).eq('id', existing.id);
+  }
+
   return jobs.length;
 }
 
@@ -276,6 +319,32 @@ async function executePrepStartWhatsappJob(job) {
   const phone = payload.customer_phone;
   if (!phone) return;
 
+  // Job row was previously completed then incorrectly reset to pending by upsert.
+  if (job.completed_at) {
+    console.log(
+      `[scheduled-jobs] prep WhatsApp job ${job.id} already completed_at=${job.completed_at} — skip`,
+    );
+    return;
+  }
+
+  // Survive accidental job-row resets: one customer notify per booking.
+  if (job.booking_id) {
+    const { data: booking } = await supabaseAdmin
+      .from('bookings')
+      .select('schedule_meta')
+      .eq('id', job.booking_id)
+      .maybeSingle();
+    const meta = (booking && booking.schedule_meta && typeof booking.schedule_meta === 'object')
+      ? booking.schedule_meta
+      : {};
+    if (meta.prep_start_whatsapp_sent_at) {
+      console.log(
+        `[scheduled-jobs] prep WhatsApp already sent for booking ${job.booking_id} — skip`,
+      );
+      return;
+    }
+  }
+
   const slotLabel = payload.slot_label || 'your slot';
   const startLabel = payload.kitchen_start_label || '';
   const token = payload.token_number || job.token_id || '—';
@@ -288,6 +357,22 @@ async function executePrepStartWhatsappJob(job) {
     + `We'll message you when it's ready. 🙏`,
     job.restaurant_id,
   );
+
+  if (job.booking_id) {
+    const { data: booking } = await supabaseAdmin
+      .from('bookings')
+      .select('schedule_meta')
+      .eq('id', job.booking_id)
+      .maybeSingle();
+    const meta = (booking && booking.schedule_meta && typeof booking.schedule_meta === 'object')
+      ? { ...booking.schedule_meta }
+      : {};
+    meta.prep_start_whatsapp_sent_at = new Date().toISOString();
+    await supabaseAdmin
+      .from('bookings')
+      .update({ schedule_meta: meta })
+      .eq('id', job.booking_id);
+  }
 }
 
 /**
@@ -371,21 +456,46 @@ async function processDueJobs(due) {
       executed += 1;
     } catch (err) {
       console.error(`[scheduled-jobs] ${job.job_type} ${job.id} failed:`, err.message);
-      await markJob(job.id, 'failed', { last_error: err.message });
+      const attempts = Number(job.payload?.attempts || 0) + 1;
+      await markJob(job.id, 'failed', {
+        last_error: err.message,
+        payload: { ...(job.payload || {}), attempts },
+      });
     }
   }
   return executed;
 }
 
+const KDS_DISPATCH_MAX_ATTEMPTS = 5;
+
 async function retryFailedDispatchJobs(restaurantId = null) {
+  // Cap retries so a broken KDS endpoint cannot spin forever (and drain WA/manager alerts).
   let q = supabaseAdmin
     .from('scheduled_jobs')
-    .update({ status: 'pending', last_error: null, updated_at: new Date().toISOString() })
+    .select('id, payload, updated_at')
     .eq('job_type', 'kds_dispatch')
     .eq('status', 'failed');
   if (restaurantId) q = q.eq('restaurant_id', restaurantId);
-  const { error } = await q;
-  if (error) console.warn('[scheduled-jobs] retry failed jobs:', error.message);
+  const { data: failed, error } = await q.limit(50);
+  if (error) {
+    console.warn('[scheduled-jobs] retry failed jobs:', error.message);
+    return;
+  }
+
+  for (const row of failed || []) {
+    const attempts = Number(row.payload?.attempts || 0);
+    if (attempts >= KDS_DISPATCH_MAX_ATTEMPTS) continue;
+
+    // Backoff: wait at least 5 minutes between retries.
+    const updatedMs = row.updated_at ? new Date(row.updated_at).getTime() : 0;
+    if (updatedMs && Date.now() - updatedMs < 5 * 60 * 1000) continue;
+
+    await supabaseAdmin.from('scheduled_jobs').update({
+      status: 'pending',
+      last_error: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', row.id);
+  }
 }
 
 /** Run due jobs for one outlet — used when KDS polls scheduled board. */
