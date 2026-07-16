@@ -1,6 +1,7 @@
 'use strict';
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const ORDER_TOKEN_MATCH_MS = 7 * 24 * 60 * 60 * 1000;
 const WHATSAPP_SOURCES = new Set([
   'whatsapp_booking', 'whatsapp', 'dine_in', 'takeaway', 'delivery',
   'reserve_table', 'dinein',
@@ -271,6 +272,49 @@ function buildRepeatTrend(orders) {
     });
 }
 
+function nearestTokenForOrder(order, tokens, {
+  phoneKey = null,
+  windowMs = ORDER_TOKEN_MATCH_MS,
+  excludeTokenIds = null,
+} = {}) {
+  if (!order?.created_at || !tokens?.length) return null;
+  const orderTs = new Date(order.created_at).getTime();
+  let candidates = tokens;
+  if (phoneKey) {
+    const byPhone = tokens.filter(t => normPhone(t.phone) === phoneKey);
+    if (byPhone.length) candidates = byPhone;
+  }
+  let best = null;
+  let bestDist = Infinity;
+  for (const t of candidates) {
+    if (!t?.arrived_at) continue;
+    if (excludeTokenIds?.has(t.id)) continue;
+    const dist = Math.abs(new Date(t.arrived_at).getTime() - orderTs);
+    if (dist <= windowMs && dist < bestDist) {
+      bestDist = dist;
+      best = t;
+    }
+  }
+  return best;
+}
+
+function resolveOrderGuest(order, tokens, tokenPhoneById, tokenNameById) {
+  let phone = order.customer_phone || tokenPhoneById[order.token_id] || null;
+  let name = order.customer_name || tokenNameById[order.token_id] || null;
+  if (phone) return { phone, name };
+
+  const phoneKey = normPhone(order.customer_phone);
+  const matched = nearestTokenForOrder(order, tokens, { phoneKey: phoneKey || null });
+  if (matched) {
+    return {
+      phone: matched.phone || phone,
+      name: name || matched.name || null,
+      tokenId: matched.id,
+    };
+  }
+  return { phone: null, name };
+}
+
 function buildCustomerInsights(orders, tokens, orderRevenueById = {}) {
   const customers = {};
   const tokenPhoneById = Object.fromEntries(
@@ -301,10 +345,16 @@ function buildCustomerInsights(orders, tokens, orderRevenueById = {}) {
     const amount = Number(o.total_amount) > 0
       ? Number(o.total_amount)
       : Number(orderRevenueById[o.id]) || 0;
-    const phone = o.customer_phone || tokenPhoneById[o.token_id] || null;
-    const name = o.customer_name || tokenNameById[o.token_id] || null;
+    const guest = resolveOrderGuest(o, tokens, tokenPhoneById, tokenNameById);
+    const linkedViaToken = Boolean(o.token_id && tokenPhoneById[o.token_id]);
     // Spend attaches to the guest; do not double-count visits already recorded via tokens.
-    touch(phone, name, o.created_at, amount, { countVisit: !o.token_id && !tokenPhoneById[o.token_id] });
+    touch(
+      guest.phone,
+      guest.name,
+      o.created_at,
+      amount,
+      { countVisit: !linkedViaToken && !guest.tokenId },
+    );
   }
 
   // Deduplicate near-simultaneous visit stamps (token + order within 90 minutes).
@@ -496,7 +546,140 @@ function buildMenuQuadrant(orderItems) {
   };
 }
 
-async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, endISO) {
+async function fetchOrderRevenueById(supabaseAdmin, orderIds, context = {}) {
+  const orderItems = [];
+  const orderRevenueById = {};
+  if (!orderIds?.length) return { orderItems, orderRevenueById };
+
+  const CHUNK = 150;
+  for (let i = 0; i < orderIds.length; i += CHUNK) {
+    const chunk = orderIds.slice(i, i + CHUNK);
+    let oiData = [];
+    const primaryItems = await supabaseAdmin.from('order_items')
+      .select('order_id, quantity, unit_price, special_instructions, menu_item:menu_item_id(name, price)')
+      .in('order_id', chunk);
+
+    if (!primaryItems.error) {
+      oiData = primaryItems.data ?? [];
+    } else {
+      logSupabaseError('order_items.primary', primaryItems.error, {
+        ...context,
+        chunkLength: chunk.length,
+        chunkSample: chunk.slice(0, 5),
+      });
+      const fallbackItems = await supabaseAdmin.from('order_items')
+        .select('order_id, quantity, unit_price, special_instructions, menu_item:menu_item_id(name)')
+        .in('order_id', chunk);
+      if (fallbackItems.error) {
+        logSupabaseError('order_items.fallback', fallbackItems.error, {
+          ...context,
+          chunkLength: chunk.length,
+          chunkSample: chunk.slice(0, 5),
+        });
+        oiData = [];
+      } else {
+        oiData = (fallbackItems.data ?? []).map(r => ({ ...r, menu_item: null, item_name: null }));
+      }
+    }
+
+    if (!oiData.length) continue;
+    orderItems.push(...oiData);
+    for (const row of oiData) {
+      const qty = Number(row.quantity) || 0;
+      const price = Number(row.unit_price ?? row.menu_item?.price) || 0;
+      const rev = qty * price;
+      if (!row.order_id || rev <= 0) continue;
+      orderRevenueById[row.order_id] = (orderRevenueById[row.order_id] || 0) + rev;
+    }
+  }
+
+  return { orderItems, orderRevenueById };
+}
+
+function enrichOrdersWithRevenue(orders, orderRevenueById) {
+  return orders.map(o => {
+    const captured = Number(o.total_amount) || 0;
+    if (captured > 0) return o;
+    const fromItems = Number(orderRevenueById[o.id]) || 0;
+    return fromItems > 0 ? { ...o, total_amount: fromItems } : o;
+  });
+}
+
+function buildTopMenuItems(orderItems, limit = 7) {
+  const map = {};
+  for (const row of orderItems) {
+    const name = extractItemName(row);
+    if (!name) continue;
+    if (!map[name]) map[name] = { name, qty: 0, revenue: 0 };
+    const qty = Number(row.quantity) || 1;
+    const price = Number(row.unit_price ?? row.menu_item?.price) || 0;
+    map[name].qty += qty;
+    map[name].revenue += qty * price;
+  }
+  return Object.values(map)
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, limit);
+}
+
+function buildRevenueTrend(orders, preset = '30d') {
+  const byLabel = {};
+  const hourly = preset === 'today' || preset === 'yesterday';
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  for (const o of orders) {
+    if (!o.created_at || o.status === 'cancelled') continue;
+    const ist = toISTDate(o.created_at);
+    const label = hourly
+      ? `${ist.getUTCHours()}:00`
+      : `${String(ist.getUTCDate()).padStart(2, '0')} ${monthNames[ist.getUTCMonth()]}`;
+    if (!byLabel[label]) {
+      byLabel[label] = {
+        revenue: 0,
+        orders: 0,
+        covers: 0,
+        sortKey: hourly ? ist.getUTCHours() : ist.getTime(),
+      };
+    }
+    byLabel[label].revenue += Number(o.total_amount) || 0;
+    byLabel[label].orders += 1;
+    byLabel[label].covers += 1;
+  }
+
+  const labels = Object.keys(byLabel).sort((a, b) => byLabel[a].sortKey - byLabel[b].sortKey);
+  return {
+    labels,
+    revenue: labels.map(l => Math.round(byLabel[l].revenue * 100) / 100),
+    orders: labels.map(l => byLabel[l].orders),
+    covers: labels.map(l => byLabel[l].covers),
+  };
+}
+
+function buildPeriodSummary(enrichedOrders, tokens) {
+  const activeOrders = enrichedOrders.filter(o => o.status !== 'cancelled');
+  const totalRevenue = activeOrders.reduce((s, o) => s + (Number(o.total_amount) || 0), 0);
+  const totalOrders = activeOrders.length;
+  const tokenRows = tokens ?? [];
+  const seated = tokenRows.filter(t => t.seated_at && t.arrived_at);
+  const avgWait = seated.length
+    ? Math.round(seated.reduce((s, t) => s + (new Date(t.seated_at) - new Date(t.arrived_at)) / 60000, 0) / seated.length)
+    : null;
+  const completed = tokenRows.filter(t => t.seated_at && t.completed_at);
+  const avgDining = completed.length
+    ? Math.round(completed.reduce((s, t) => s + (new Date(t.completed_at) - new Date(t.seated_at)) / 60000, 0) / completed.length)
+    : null;
+
+  return {
+    totalRevenue: Math.round(totalRevenue * 100) / 100,
+    totalOrders,
+    aov: totalOrders > 0 ? Math.round(totalRevenue / totalOrders) : 0,
+    totalCovers: totalOrders,
+    tokensIssued: tokenRows.length,
+    avgDining,
+    avgWait,
+  };
+}
+
+async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, endISO, preset = '30d') {
   let orders = [];
   const primaryOrders = await supabaseAdmin.from('orders')
     .select('id, created_at, total_amount, status, source, service_type, token_id, customer_phone, customer_name')
@@ -533,7 +716,7 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
 
   const [tokensRes, auditRes] = await Promise.all([
     supabaseAdmin.from('walk_in_tokens')
-      .select('id, phone, name, arrived_at, status')
+      .select('id, phone, name, arrived_at, status, seated_at, completed_at')
       .eq('restaurant_id', restaurantId)
       .gte('arrived_at', startISO).lte('arrived_at', endISO),
     supabaseAdmin.from('audit_logs')
@@ -559,74 +742,27 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
   }
 
   const orderIds = orders.map(o => o.id).filter(Boolean);
-
-  let orderItems = [];
-  const orderRevenueById = {};
-  if (orderIds.length) {
-    const CHUNK = 150;
-    for (let i = 0; i < orderIds.length; i += CHUNK) {
-      const chunk = orderIds.slice(i, i + CHUNK);
-      let oiData = [];
-      const primaryItems = await supabaseAdmin.from('order_items')
-        .select('order_id, quantity, unit_price, special_instructions, menu_item:menu_item_id(name, price)')
-        .in('order_id', chunk);
-
-      if (!primaryItems.error) {
-        oiData = primaryItems.data ?? [];
-      } else {
-        logSupabaseError('order_items.primary', primaryItems.error, {
-          restaurantId,
-          startISO,
-          endISO,
-          chunkLength: chunk.length,
-          chunkSample: chunk.slice(0, 5),
-        });
-        const fallbackItems = await supabaseAdmin.from('order_items')
-          .select('order_id, quantity, unit_price, special_instructions, menu_item:menu_item_id(name)')
-          .in('order_id', chunk);
-        if (fallbackItems.error) {
-          logSupabaseError('order_items.fallback', fallbackItems.error, {
-            restaurantId,
-            startISO,
-            endISO,
-            chunkLength: chunk.length,
-            chunkSample: chunk.slice(0, 5),
-          });
-          oiData = [];
-        } else {
-          oiData = (fallbackItems.data ?? []).map(r => ({ ...r, menu_item: null, item_name: null }));
-        }
-      }
-
-      if (oiData.length) {
-        orderItems.push(...oiData);
-        for (const row of oiData) {
-          const qty = Number(row.quantity) || 0;
-          const price = Number(row.unit_price ?? row.menu_item?.price) || 0;
-          const rev = qty * price;
-          if (!row.order_id || rev <= 0) continue;
-          orderRevenueById[row.order_id] = (orderRevenueById[row.order_id] || 0) + rev;
-        }
-      }
-    }
-  }
+  const { orderItems, orderRevenueById } = await fetchOrderRevenueById(
+    supabaseAdmin,
+    orderIds,
+    { restaurantId, startISO, endISO },
+  );
 
   const stockOutages = buildStockOutages(auditRes.data);
 
   // Backfill missing order totals from line items so revenue-derived panels
   // (heatmap, service split, customer spend) degrade gracefully.
-  const enrichedOrders = orders.map(o => {
-    const captured = Number(o.total_amount) || 0;
-    if (captured > 0) return o;
-    const fromItems = Number(orderRevenueById[o.id]) || 0;
-    return fromItems > 0 ? { ...o, total_amount: fromItems } : o;
-  });
+  const enrichedOrders = enrichOrdersWithRevenue(orders, orderRevenueById);
+  const tokens = tokensRes.data ?? [];
 
   return {
+    summary: buildPeriodSummary(enrichedOrders, tokens),
+    revenueTrend: buildRevenueTrend(enrichedOrders, preset),
+    topMenuItems: buildTopMenuItems(orderItems),
     revenueHeatmap: buildRevenueHeatmap(enrichedOrders, endISO, orderRevenueById),
     serviceSplit: buildServiceSplit(enrichedOrders),
     repeatTrend: buildRepeatTrend(enrichedOrders),
-    customers: buildCustomerInsights(enrichedOrders, tokensRes.data ?? [], orderRevenueById),
+    customers: buildCustomerInsights(enrichedOrders, tokens, orderRevenueById),
     stockOutages,
     stockOutagesMeta: {
       source: 'audit_logs',
@@ -640,6 +776,10 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
 
 module.exports = {
   computeDashboardInsights,
+  fetchOrderRevenueById,
+  enrichOrdersWithRevenue,
+  nearestTokenForOrder,
   normPhone,
   channelFromSource,
+  ORDER_TOKEN_MATCH_MS,
 };

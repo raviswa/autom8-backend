@@ -9,7 +9,7 @@
 const express = require('express');
 const router  = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
-const { computeDashboardInsights } = require('../helpers/dashboardAnalytics');
+const { computeDashboardInsights, fetchOrderRevenueById, nearestTokenForOrder } = require('../helpers/dashboardAnalytics');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { getKdsSecret } = require('../config/internalSecret');
 
@@ -155,31 +155,17 @@ router.get('/wa-orders', authenticateToken, getRestaurantId, requireOutlet, asyn
       orderRows = (fallbackOrders.data ?? []).map(r => ({ ...r, token_id: null }));
     }
 
-    // Backfill sparse/zero totals from order_items so Amount is not blank when
-    // the parent order row never received a persisted total_amount.
+    // Backfill sparse/zero totals from order_items (incl. menu price fallback).
     const zeroAmountIds = orderRows.filter(r => !(Number(r.total_amount) > 0)).map(r => r.id).filter(Boolean);
     if (zeroAmountIds.length) {
-      const revenueByOrderId = {};
-      const CHUNK = 150;
-      for (let i = 0; i < zeroAmountIds.length; i += CHUNK) {
-        const chunk = zeroAmountIds.slice(i, i + CHUNK);
-        const { data: itemRows, error: itemErr } = await supabaseAdmin
-          .from('order_items')
-          .select('order_id, quantity, unit_price')
-          .in('order_id', chunk);
-        if (itemErr) {
-          console.error('[dashboard/wa-orders] order_items backfill failed:', itemErr.message);
-          break;
-        }
-        for (const row of itemRows ?? []) {
-          const rev = (Number(row.quantity) || 0) * (Number(row.unit_price) || 0);
-          if (!row.order_id || rev <= 0) continue;
-          revenueByOrderId[row.order_id] = (revenueByOrderId[row.order_id] || 0) + rev;
-        }
-      }
+      const { orderRevenueById } = await fetchOrderRevenueById(
+        supabaseAdmin,
+        zeroAmountIds,
+        { restaurantId: req.restaurant_id, start, end },
+      );
       orderRows = orderRows.map(r => {
         if (Number(r.total_amount) > 0) return r;
-        const fromItems = revenueByOrderId[r.id];
+        const fromItems = orderRevenueById[r.id];
         return fromItems > 0 ? { ...r, total_amount: fromItems } : r;
       });
     }
@@ -201,34 +187,13 @@ router.get('/wa-orders', authenticateToken, getRestaurantId, requireOutlet, asyn
       }
     }
 
-    const tokensByPhone = {};
-    for (const t of tokens) {
-      const phoneKey = normPhone(t.phone);
-      if (!phoneKey) continue;
-      if (!tokensByPhone[phoneKey]) tokensByPhone[phoneKey] = [];
-      tokensByPhone[phoneKey].push(t);
-    }
-
     const phoneAssignedAmount = {};
     for (const row of unmatchedOrders) {
-      const phoneKey = normPhone(row.customer_phone);
-      if (!phoneKey) continue;
-      const candidates = tokensByPhone[phoneKey];
-      if (!candidates?.length) continue;
-
-      const orderTs = new Date(row.created_at).getTime();
-      let best = null;
-      let bestDist = Infinity;
-      for (const t of candidates) {
-        const dist = Math.abs(new Date(t.arrived_at).getTime() - orderTs);
-        // Prefer same-day / nearby sessions; ignore matches older than 36h.
-        if (dist < bestDist && dist <= 36 * 60 * 60 * 1000) {
-          bestDist = dist;
-          best = t;
-        }
-      }
-      if (!best) continue;
       const amount = Number(row.total_amount) || 0;
+      if (amount <= 0) continue;
+      const phoneKey = normPhone(row.customer_phone);
+      const best = nearestTokenForOrder(row, tokens, { phoneKey: phoneKey || null });
+      if (!best) continue;
       phoneAssignedAmount[best.id] = (phoneAssignedAmount[best.id] || 0) + amount;
     }
 
@@ -329,10 +294,16 @@ router.get('/cancel-stats', authenticateToken, getRestaurantId, requireOutlet, a
 
 router.get('/insights', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
   try {
-    const { start, end } = req.query;
+    const { start, end, preset } = req.query;
     if (!start || !end) return res.status(400).json({ error: 'start and end required' });
 
-    const insights = await computeDashboardInsights(supabaseAdmin, req.restaurant_id, start, end);
+    const insights = await computeDashboardInsights(
+      supabaseAdmin,
+      req.restaurant_id,
+      start,
+      end,
+      preset || '30d',
+    );
     res.json({ success: true, ...insights });
   } catch (err) {
     console.error('[dashboard/insights]', err.message);
