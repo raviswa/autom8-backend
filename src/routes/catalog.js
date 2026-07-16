@@ -981,7 +981,10 @@ function normalizeSlotArray(input) {
   const list = Array.isArray(input) ? input : [];
   const clean = [...new Set(list.map(s => String(s || '').toLowerCase().trim()).filter(Boolean))]
     .filter(s => ALLOWED.has(s));
-  return clean.length ? clean : ['anytime'];
+  if (!clean.length) return ['anytime'];
+  // anytime = all day; never combine with specific meal slots
+  if (clean.includes('anytime')) return ['anytime'];
+  return clean;
 }
 
 router.get('/menu-categories/slots', authenticateToken, getRestaurantId, async (req, res) => {

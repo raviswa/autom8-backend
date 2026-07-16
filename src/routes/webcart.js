@@ -293,7 +293,10 @@ function normalizeSlots(input) {
   const slots = Array.isArray(input) ? input : [];
   const clean = [...new Set(slots.map(v => String(v || '').toLowerCase().trim()).filter(Boolean))]
     .filter(v => allowed.has(v));
-  return clean.length ? clean : ['anytime'];
+  if (!clean.length) return ['anytime'];
+  // anytime = all day; never combine with specific meal slots
+  if (clean.includes('anytime')) return ['anytime'];
+  return clean;
 }
 
 function isActiveWalkInRow(data) {
