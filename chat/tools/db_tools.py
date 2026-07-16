@@ -1528,6 +1528,7 @@ async def get_bookings_due_for_kds() -> list[dict]:
                   b.token_number,
                   b.delivery_address,
                   b.booking_datetime,
+                  b.schedule_meta,
                   c.name AS customer_name,
                   c.phone AS customer_phone,
                   wt.id AS portal_token_id,
@@ -1568,6 +1569,13 @@ async def get_bookings_due_for_kds() -> list[dict]:
                 except Exception:
                     meta = {}
             data["token_meta"] = meta
+            schedule_meta = data.get("schedule_meta") or {}
+            if isinstance(schedule_meta, str):
+                try:
+                    schedule_meta = json.loads(schedule_meta)
+                except Exception:
+                    schedule_meta = {}
+            data["schedule_meta"] = schedule_meta
             rows.append(data)
         return rows
 
@@ -3261,10 +3269,25 @@ async def enqueue_scheduled_jobs(
                        :job_type, :run_at, :status, :idempotency_key, CAST(:payload AS jsonb))
                     ON CONFLICT (idempotency_key) DO UPDATE SET
                       run_at = EXCLUDED.run_at,
-                      payload = EXCLUDED.payload,
+                      -- Never wipe a good cart with an empty re-enqueue payload.
+                      payload = CASE
+                        WHEN COALESCE(jsonb_array_length(EXCLUDED.payload->'items'), 0) > 0
+                          THEN EXCLUDED.payload
+                        ELSE scheduled_jobs.payload
+                      END,
                       status = CASE
                         WHEN scheduled_jobs.status = 'cancelled' THEN 'pending'
+                        -- Re-arm completed kds_dispatch so stuck present orders can retry.
+                        WHEN scheduled_jobs.status = 'completed'
+                          AND scheduled_jobs.job_type = 'kds_dispatch'
+                          THEN 'pending'
                         ELSE scheduled_jobs.status
+                      END,
+                      completed_at = CASE
+                        WHEN scheduled_jobs.status = 'completed'
+                          AND scheduled_jobs.job_type = 'kds_dispatch'
+                          THEN NULL
+                        ELSE scheduled_jobs.completed_at
                       END,
                       updated_at = NOW()
                 """),

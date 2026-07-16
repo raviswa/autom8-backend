@@ -117,10 +117,25 @@ class LineItem:
 
     @classmethod
     def from_cart(cls, cart: dict):
-        return [
-            cls(name=line["title"], qty=line["qty"], unit_price=line["unit_price"])
-            for item_id, line in cart.items()
-        ]
+        items: list["LineItem"] = []
+        if not isinstance(cart, dict):
+            return items
+        for _item_id, line in cart.items():
+            if not isinstance(line, dict):
+                continue
+            name = (line.get("title") or line.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                qty = int(line.get("qty") or 1)
+            except (TypeError, ValueError):
+                qty = 1
+            try:
+                unit_price = float(line.get("unit_price") or 0)
+            except (TypeError, ValueError):
+                unit_price = 0.0
+            items.append(cls(name=name, qty=max(qty, 1), unit_price=unit_price))
+        return items
 
     @classmethod
     def from_order_text(cls, order_text: str) -> list["LineItem"]:

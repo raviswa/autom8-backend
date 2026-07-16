@@ -675,9 +675,7 @@ async def _complete_scheduled_delivery_after_approval(
                 payment_mode=session_state.get("payment_mode", "Cash"),
             )
             receipt_path = _generate_receipt(receipt_data)
-            asyncio.create_task(
-                upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, str(token))
-            )
+            await upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, str(token))
         except Exception as _re:
             logger.warning(f"[receipt] scheduled delivery receipt failed (non-fatal): {_re}")
 
@@ -1451,9 +1449,7 @@ async def handle_delivery_flow(
                     )
                     receipt_path = _generate_receipt(receipt_data)
                     logger.info(f"[receipt] Delivery receipt saved: {receipt_path}")
-                    asyncio.create_task(
-                        upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, token)
-                    )
+                    await upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, token)
                     await update_booking_status(booking_id, "confirmed")
                     logger.info(f"[receipt] Booking {booking_id} marked confirmed")
                 except Exception as _re:

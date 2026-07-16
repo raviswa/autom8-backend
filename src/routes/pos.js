@@ -700,6 +700,8 @@ router.get('/kds/scheduled', authenticateToken, getRestaurantId, async (req, res
     if (present.length) {
       let dispatched = false;
       for (const order of present) {
+        // Unpaid "present" rows stay on the orange strip; only paid go Live.
+        if (order.payment_status && order.payment_status !== 'paid') continue;
         if (await dispatchBookingToKds(restaurantId, order)) dispatched = true;
       }
       if (dispatched) {

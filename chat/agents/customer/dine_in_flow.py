@@ -488,9 +488,7 @@ async def _fire_kitchen_and_receipt(
         receipt_path = _generate_receipt(receipt_data)
         logger.info(f"[receipt] Dine-in receipt saved: {receipt_path}")
         session_state["_receipt_sent"] = True
-        asyncio.create_task(
-            upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, token)
-        )
+        await upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, token)
         booking_id = session_state.get("booking_id")
         if booking_id:
             await update_booking_status(booking_id, "confirmed")

@@ -243,8 +243,9 @@ async def dispatch_deferred_scheduled_kds():
         dispatched = 0
         for row in due_rows:
             meta = row.get("token_meta") or {}
-            cart = meta.get("cart") or {}
-            order_text = meta.get("order_text") or ""
+            schedule_meta = row.get("schedule_meta") or {}
+            cart = meta.get("cart") or schedule_meta.get("cart") or {}
+            order_text = (meta.get("order_text") or schedule_meta.get("order_text") or "").strip()
             token = row.get("portal_token_id") or row.get("token_number") or "—"
             service_type = row.get("service_type") or "delivery"
 

@@ -403,6 +403,31 @@ async def _refuse_and_reenqueue_if_still_future(
         f"(still future, source=fresh DB read) — re-enqueuing instead of live-dispatching"
     )
     try:
+        import json
+
+        meta = (fresh or {}).get("schedule_meta") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        cart = _normalize_cart_snapshot(meta.get("cart") or {})
+        items: list[dict] = []
+        for rid, line in cart.items():
+            if not isinstance(line, dict):
+                continue
+            items.append(
+                {
+                    "retailer_id": rid,
+                    "name": line.get("title") or line.get("name") or "Item",
+                    "qty": int(line.get("qty") or 1),
+                    "unit_price": float(line.get("unit_price") or 0),
+                }
+            )
+        order_text = (meta.get("order_text") or "").strip()
+        if not items and order_text:
+            items = [{"retailer_id": "manual", "name": order_text, "qty": 1, "unit_price": 0}]
+
         await enqueue_scheduled_jobs(
             restaurant_id,
             booking_id,
@@ -413,9 +438,10 @@ async def _refuse_and_reenqueue_if_still_future(
                 "customer_phone": customer_phone,
                 "token_number": token,
                 "service_type": service_type,
-                "items": [],
-                "slot_label": "",
-                "kitchen_start_label": "",
+                "items": items,
+                "order_text": order_text,
+                "slot_label": meta.get("scheduled_at_label") or "",
+                "kitchen_start_label": meta.get("kitchen_start_label") or "",
             },
         )
     except Exception as exc:
@@ -791,23 +817,30 @@ async def _send_receipt(
     parcel_charge: float = 0,
     footer_message: str = "",
     gst_rate: float = 5.0,
+    order_text: str = "",
 ) -> None:
     if not RECEIPT_AVAILABLE:
+        logger.warning("[prepay-fulfill] receipt skipped — generate_receipt unavailable")
         return
     try:
         r_info = await fetch_restaurant_info(restaurant_id)
-        token_clean = str(token).lstrip("#").replace("T-", "")
+        r_info = r_info or {}
+        token_str = str(token or "—")
+        token_clean = token_str.lstrip("#").replace("T-", "")
+        items = _LineItem.from_cart(cart_snapshot) if cart_snapshot else []
+        if not items and order_text:
+            items = _LineItem.from_order_text(order_text)
         receipt_data = _ReceiptData(
             **(_restaurant_receipt_fields(r_info) if _restaurant_receipt_fields else {}),
-            receipt_url=receipt_qr_url(token),
-            token_number=token,
+            receipt_url=receipt_qr_url(token_str),
+            token_number=token_str,
             bill_number=token_clean[-6:] if token_clean else "",
             table_number=table_number,
             service_type=service_type,
             customer_name=customer_name,
             customer_phone=customer_phone,
             delivery_address=delivery_address,
-            items=_LineItem.from_cart(cart_snapshot) if cart_snapshot else [],
+            items=items,
             gst_rate=float(totals.get("gst_rate", gst_rate) if totals else gst_rate),
             gst_inclusive=False,
             delivery_charge=float((totals or {}).get("delivery_charge", delivery_charge)),
@@ -818,9 +851,8 @@ async def _send_receipt(
         )
         receipt_path = _generate_receipt(receipt_data)
         logger.info(f"[prepay-fulfill] Receipt saved: {receipt_path}")
-        asyncio.create_task(
-            upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, token)
-        )
+        # Await so payment webhooks cannot finish before WhatsApp send starts.
+        await upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, token_str)
     except Exception as exc:
         logger.warning(f"[prepay-fulfill] receipt failed (non-fatal): {exc}")
 
@@ -1080,6 +1112,7 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
             cart_snapshot=cart_snapshot,
             totals=totals,
             parcel_charge=float(totals.get("parcel_charge") or 0),
+            order_text=order_text_display,
         )
         await update_booking_status(booking_id, "confirmed")
         logger.info(f"[prepay-fulfill] Scheduled takeaway {booking_id} confirmed — jobs queued")
@@ -1096,6 +1129,26 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
             service_type="takeaway",
         )
         if refused:
+            sched_label = hints.get("scheduled_at_label") or hints.get("scheduled_at") or "your slot"
+            await send_whatsapp_message(
+                customer_phone,
+                f"Payment received! ✅\n────────────────────\n"
+                f"Token: {display_token}\n"
+                f"Your scheduled take-away is confirmed for *{sched_label}*.\n\n"
+                f"👨‍🍳 Kitchen prep is scheduled for closer to your pickup time.",
+                restaurant_id,
+            )
+            await _send_receipt(
+                restaurant_id=restaurant_id,
+                customer_phone=customer_phone,
+                customer_name=customer_name,
+                token=display_token,
+                service_type="takeaway",
+                cart_snapshot=cart_snapshot,
+                totals=totals,
+                parcel_charge=float(totals.get("parcel_charge") or 0),
+                order_text=order_text_display,
+            )
             await update_booking_status(booking_id, "confirmed")
             logger.info(
                 f"[prepay-fulfill] Scheduled takeaway {booking_id} confirmed — "
@@ -1207,6 +1260,7 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
         cart_snapshot=cart_snapshot,
         totals=totals,
         parcel_charge=float(totals.get("parcel_charge") or 0),
+        order_text=order_text_display,
     )
     await update_booking_status(booking_id, "confirmed")
     logger.info(f"[prepay-fulfill] Takeaway booking {booking_id} confirmed after payment")
@@ -1296,6 +1350,7 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
             delivery_address=delivery_address,
             delivery_charge=float(totals.get("delivery_charge") or payload.get("delivery_fee") or 0),
             parcel_charge=float(totals.get("parcel_charge") or 0),
+            order_text=order_text_display,
         )
         await update_booking_status(booking_id, "confirmed")
         logger.info(f"[prepay-fulfill] Scheduled delivery {booking_id} confirmed — jobs queued")
@@ -1311,6 +1366,28 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
             service_type="delivery",
         )
         if refused:
+            sched_label = hints.get("scheduled_at_label") or hints.get("scheduled_at") or "your slot"
+            await send_whatsapp_message(
+                customer_phone,
+                f"Payment received! ✅\n────────────────────\n"
+                f"Token: {token}\n"
+                f"Your scheduled delivery is confirmed for *{sched_label}*.\n\n"
+                f"👨‍🍳 Kitchen prep is scheduled for closer to your delivery slot.",
+                restaurant_id,
+            )
+            await _send_receipt(
+                restaurant_id=restaurant_id,
+                customer_phone=customer_phone,
+                customer_name=customer_name,
+                token=token,
+                service_type="delivery",
+                cart_snapshot=cart_snapshot,
+                totals=totals,
+                delivery_address=delivery_address,
+                delivery_charge=float(totals.get("delivery_charge") or payload.get("delivery_fee") or 0),
+                parcel_charge=float(totals.get("parcel_charge") or 0),
+                order_text=order_text_display,
+            )
             await update_booking_status(booking_id, "confirmed")
             logger.info(
                 f"[prepay-fulfill] Scheduled delivery {booking_id} confirmed — "
@@ -1437,6 +1514,7 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
         delivery_address=delivery_address,
         delivery_charge=float(totals.get("delivery_charge") or payload.get("delivery_fee") or 0),
         parcel_charge=float(totals.get("parcel_charge") or 0),
+        order_text=order_text_display,
     )
     await update_booking_status(booking_id, "confirmed")
     logger.info(f"[prepay-fulfill] Delivery booking {booking_id} confirmed after payment")
@@ -1540,6 +1618,7 @@ async def _fulfill_dine_in(payload: dict[str, Any]) -> bool:
         cart_snapshot=cart_snapshot,
         totals=totals,
         table_number=str(table_number or ""),
+        order_text=order_text_display,
     )
     await update_booking_status(booking_id, "confirmed")
     logger.info(

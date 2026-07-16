@@ -103,7 +103,12 @@ _AUTOM8_BACKEND_URL    = _os.getenv("AUTOM8_BACKEND_URL", "https://api.autom8.wo
 PORTAL_API_URL         = f"{_AUTOM8_BACKEND_URL}/api/tokens"
 AUTOM8_KDS_URL         = f"{_AUTOM8_BACKEND_URL}/api/kds/notify"
 _KDS_DEV_FALLBACK      = "munafe_kds_sync_2026"
-_RECEIPT_REDIRECT_BASE = f"{_AUTOM8_BACKEND_URL}/r"
+# Customer-facing receipt links must stay on api.autom8.works/r/{token}
+# (not chat.autom8.works, and not a raw Supabase signed URL).
+_RECEIPT_REDIRECT_BASE = (
+    _os.getenv("RECEIPT_PUBLIC_BASE")
+    or "https://api.autom8.works/r"
+).rstrip("/")
 
 
 def _get_kds_secret() -> str:
@@ -436,8 +441,9 @@ async def upload_and_send_receipt(
                 return
             logger.info("[receipt-upload] Signed URL generated (48 h)")
 
-            # Step 3: send redirect URL to customer
+            # Step 3: send stable redirect URL (never the signed Supabase URL)
             redirect_url = receipt_qr_url(token_number)
+            logger.info(f"[receipt-upload] Sending WhatsApp receipt link {redirect_url}")
             await send_whatsapp_message(
                 customer_phone,
                 f"🧾 *Your Receipt — Token {token_number}*\n\n"

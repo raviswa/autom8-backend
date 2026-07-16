@@ -181,10 +181,11 @@ def is_booking_on_kds_future_tab(
     now: datetime | None = None,
 ) -> bool:
     """
-  True when a paid booking legitimately has no live kds_items yet.
+    True when a paid booking legitimately has no live kds_items yet.
 
-  Scheduled takeaway/delivery appear on the KDS *Future* tab until kitchen_start_at.
-  The reconcile job must not treat these as missing tickets.
+    Scheduled takeaway/delivery appear on the KDS Future / present strip until
+    kitchen_start_at. Once kitchen_start_at has passed, return False so reconcile
+    and retries can push the order to the Live board (kds_sent_at still null).
     """
     if kds_sent_at:
         return False
@@ -200,7 +201,10 @@ def is_booking_on_kds_future_tab(
     now = now or datetime.now(IST)
 
     ks = parse_slot_datetime(kitchen_start_at)
-    if ks and ks > now.astimezone(ks.tzinfo):
+    if ks is not None:
+        # Past (or at) kitchen start → needs a live ticket, not "still on Future".
+        if ks <= now.astimezone(ks.tzinfo):
+            return False
         return True
 
     meta: dict[str, Any] = {}

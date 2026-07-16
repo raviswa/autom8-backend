@@ -24,13 +24,30 @@ const { sendWhatsAppMessage } = require('./whatsapp');
 const { notifyKdsFromPayload } = require('./kdsNotifyClient');
 
 function buildItemsFromCart(cart) {
-  if (!cart || typeof cart !== 'object') return [];
+  if (!cart || typeof cart !== 'object' || Array.isArray(cart)) return [];
   return Object.entries(cart).map(([id, line]) => ({
     retailer_id: id,
     name: line?.title || line?.name || 'Item',
     qty: Number(line?.qty ?? 1),
     unit_price: Number(line?.unit_price ?? 0),
   }));
+}
+
+/** Prefer cart lines; fall back to order_text so UI-visible orders still go Live. */
+function buildDispatchItems(orderOrMeta = {}) {
+  const cart = orderOrMeta.cart
+    || orderOrMeta.schedule_meta?.cart
+    || {};
+  const items = buildItemsFromCart(cart);
+  if (items.length) return items;
+
+  const orderText = String(
+    orderOrMeta.order_text
+    || orderOrMeta.schedule_meta?.order_text
+    || '',
+  ).trim();
+  if (!orderText) return [];
+  return [{ retailer_id: 'manual', name: orderText, qty: 1, unit_price: 0 }];
 }
 
 function resolvePortalToken(tokens, booking) {
@@ -88,7 +105,11 @@ async function syncScheduledJobsFromBookings() {
       const meta = b.schedule_meta || {};
       const portalMeta = portal?.meta || {};
       const cart = (meta.cart && Object.keys(meta.cart).length) ? meta.cart : (portalMeta.cart || {});
-      const items = buildItemsFromCart(cart);
+      const items = buildDispatchItems({
+        cart,
+        order_text: meta.order_text || portalMeta.order_text,
+        schedule_meta: { ...portalMeta, ...meta, cart },
+      });
       if (!items.length) continue;
 
       const portalType = String(portal?.type || '').toLowerCase();
@@ -174,16 +195,37 @@ async function enqueueScheduledJobs({
       continue;
     }
 
-    // Never resurrect completed/running jobs — upsert(status=pending) was resetting
-    // prep_start_whatsapp every minute and re-sending "starting your order" forever.
-    // Only cancelled → pending (re-armed). failed stays failed until retryFailedDispatchJobs.
-    if (existing.status === 'completed' || existing.status === 'running') {
+    // Never resurrect completed prep_start_whatsapp — that was re-sending forever.
+    // But kds_dispatch completed while booking still lacks kds_sent_at (caller only
+    // syncs unpaid-kds rows) must be re-armed so Live promotion can retry.
+    if (existing.status === 'running') {
       await supabaseAdmin.from('scheduled_jobs').update({
         run_at: job.run_at,
         payload: job.payload,
         token_id: job.token_id,
         updated_at: new Date().toISOString(),
       }).eq('id', existing.id);
+      continue;
+    }
+    if (existing.status === 'completed') {
+      if (job.job_type === 'kds_dispatch') {
+        await supabaseAdmin.from('scheduled_jobs').update({
+          run_at: job.run_at,
+          payload: job.payload,
+          token_id: job.token_id,
+          status: 'pending',
+          completed_at: null,
+          last_error: 'rearmed_missing_kds_sent_at',
+          updated_at: new Date().toISOString(),
+        }).eq('id', existing.id);
+      } else {
+        await supabaseAdmin.from('scheduled_jobs').update({
+          run_at: job.run_at,
+          payload: job.payload,
+          token_id: job.token_id,
+          updated_at: new Date().toISOString(),
+        }).eq('id', existing.id);
+      }
       continue;
     }
 
@@ -253,12 +295,14 @@ async function markJob(jobId, status, extra = {}) {
 
 async function executeKdsDispatchJob(job) {
   // Hard gate: never dispatch before booking.kitchen_start_at (cook/pack/transit math).
+  let bookingRow = null;
   if (job.booking_id) {
     const { data: booking } = await supabaseAdmin
       .from('bookings')
-      .select('kitchen_start_at, scheduled_slot_at, booking_datetime, kds_sent_at')
+      .select('kitchen_start_at, scheduled_slot_at, booking_datetime, kds_sent_at, schedule_meta')
       .eq('id', job.booking_id)
       .maybeSingle();
+    bookingRow = booking;
     if (booking?.kds_sent_at) {
       console.log(`[scheduled-jobs] booking ${job.booking_id} already on KDS — skip`);
       return booking.kds_sent_at;
@@ -283,13 +327,27 @@ async function executeKdsDispatchJob(job) {
   }
 
   const payload = job.payload || {};
+  let items = Array.isArray(payload.items) ? payload.items : [];
+  if (!items.length) {
+    items = buildDispatchItems({
+      cart: bookingRow?.schedule_meta?.cart,
+      order_text: bookingRow?.schedule_meta?.order_text || payload.order_text,
+      schedule_meta: bookingRow?.schedule_meta || {},
+    });
+    if (items.length) {
+      console.warn(
+        `[scheduled-jobs] booking ${job.booking_id} — rebuilt ${items.length} item(s) from schedule_meta`,
+      );
+    }
+  }
+
   const orderId = await notifyKdsFromPayload({
     restaurant_id: job.restaurant_id,
     customer_name: payload.customer_name,
     customer_phone: payload.customer_phone,
     token_number: payload.token_number || job.token_id,
     service_type: payload.service_type || 'takeaway',
-    items: payload.items || [],
+    items,
     special_notes: payload.special_notes || null,
     booking_id: job.booking_id,
     create_kot: true,
@@ -399,10 +457,18 @@ async function dispatchBookingToKds(restaurantId, order) {
     }
   }
 
-  const cart = order.cart || order.schedule_meta?.cart || {};
-  const items = buildItemsFromCart(cart);
+  if (order.payment_status && order.payment_status !== 'paid') {
+    console.warn(
+      `[scheduled-dispatch] booking ${order.booking_id} — payment_status=${order.payment_status}, skip`,
+    );
+    return false;
+  }
+
+  const items = buildDispatchItems(order);
   if (!items.length) {
-    console.warn(`[scheduled-dispatch] booking ${order.booking_id} — empty cart, skip`);
+    console.warn(
+      `[scheduled-dispatch] booking ${order.booking_id} — empty cart/order_text, skip`,
+    );
     return false;
   }
 
@@ -417,11 +483,13 @@ async function dispatchBookingToKds(restaurantId, order) {
       service_type: order.service_type || 'takeaway',
       items,
       special_notes: order.schedule_meta?.special_notes || null,
+      order_text: order.order_text || order.schedule_meta?.order_text || null,
     },
   };
 
   try {
-    await executeKdsDispatchJob(job);
+    const result = await executeKdsDispatchJob(job);
+    if (result == null) return false;
     console.log(
       `[scheduled-release] booking=${order.booking_id} released to KDS ` +
       `token=${order.token_number} (${items.length} ribbon(s), kitchen_start_at=${order.kitchen_start_at || 'n/a'})`
@@ -448,7 +516,21 @@ async function processDueJobs(due) {
 
     try {
       if (job.job_type === 'kds_dispatch') {
-        await executeKdsDispatchJob(job);
+        const result = await executeKdsDispatchJob(job);
+        // Early-refuse re-pends the row; do not mark completed or the job dies forever.
+        if (result == null) {
+          const { data: current } = await supabaseAdmin
+            .from('scheduled_jobs')
+            .select('status')
+            .eq('id', job.id)
+            .maybeSingle();
+          if (current?.status === 'pending') continue;
+          await markJob(job.id, 'failed', {
+            last_error: 'dispatch_returned_null',
+            payload: { ...(job.payload || {}), attempts: Number(job.payload?.attempts || 0) + 1 },
+          });
+          continue;
+        }
       } else if (job.job_type === 'prep_start_whatsapp') {
         await executePrepStartWhatsappJob(job);
       }
@@ -550,17 +632,30 @@ async function reconcileMissedKdsDispatches(restaurantId) {
     return 0;
   }
 
+  const { data: tokens } = await supabaseAdmin
+    .from('walk_in_tokens')
+    .select('id, meta, type')
+    .eq('restaurant_id', restaurantId)
+    .in('type', ['scheduled_takeaway', 'scheduled_delivery']);
+
   let dispatched = 0;
   for (const b of bookings ?? []) {
     const meta = b.schedule_meta || {};
+    const portal = resolvePortalToken(tokens, b);
+    const portalMeta = portal?.meta || {};
+    const cart = (meta.cart && Object.keys(meta.cart).length)
+      ? meta.cart
+      : (portalMeta.cart || {});
     const order = {
       booking_id: b.id,
-      token_number: b.token_number,
+      token_number: portal?.id || b.token_number,
       customer_name: b.customer?.name,
       customer_phone: b.customer?.phone,
       service_type: b.service_type,
-      cart: meta.cart || {},
-      schedule_meta: meta,
+      payment_status: b.payment_status,
+      cart,
+      order_text: meta.order_text || portalMeta.order_text || '',
+      schedule_meta: { ...portalMeta, ...meta, cart },
       kitchen_start_at: b.kitchen_start_at,
     };
     if (await dispatchBookingToKds(restaurantId, order)) dispatched += 1;
