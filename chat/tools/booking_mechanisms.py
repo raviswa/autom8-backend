@@ -59,6 +59,7 @@ import asyncio
 import logging
 import os as _os
 import secrets
+import time
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -74,6 +75,11 @@ from tools.db_tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+# In-process TTL cache for tenants metadata (Hi / service-menu path hits this
+# multiple times per turn). Failures are never cached.
+_RESTAURANT_INFO_TTL_S = int(_os.getenv("RESTAURANT_INFO_CACHE_TTL_S", "60"))
+_RESTAURANT_INFO_CACHE: dict[str, tuple[float, dict]] = {}
 
 
 # ─────────────────────────────────────────────
@@ -187,7 +193,19 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict | None:
     Callers that want the old best-effort/graceful-degradation behavior
     (e.g. receipt generation, pricing cache) should do `info = info or {}`
     after calling this.
+
+    Results are TTL-cached in-process (default 60s) so Hi / service-menu
+    paths that call this 2–3 times per turn share one Supabase round-trip.
     """
+    rid = str(restaurant_id or "").strip()
+    if not rid:
+        return None
+
+    now = time.monotonic()
+    cached = _RESTAURANT_INFO_CACHE.get(rid)
+    if cached and (now - cached[0]) < _RESTAURANT_INFO_TTL_S:
+        return cached[1]
+
     try:
         base = _os.getenv("AUTOM8_SUPABASE_URL", "").rstrip("/")
         key  = _os.getenv("AUTOM8_SUPABASE_SERVICE_KEY", "")
@@ -215,7 +233,7 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict | None:
                 f"{base}/rest/v1/tenants",
                 params={
                     "select": select_clause,
-                    "id":     f"eq.{restaurant_id}",
+                    "id":     f"eq.{rid}",
                     "limit":  "1",
                 },
                 headers={"apikey": key, "Authorization": f"Bearer {key}"},
@@ -224,19 +242,29 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict | None:
             last_status = resp.status
             if resp.status == 200:
                 rows = await resp.json()
-                return rows[0] if rows else {}
+                result = rows[0] if rows else {}
+                _RESTAURANT_INFO_CACHE[rid] = (now, result)
+                return result
 
         # All select attempts failed (non-200) — this is a fetch failure,
         # not "restaurant has no rows". Surface None so callers don't treat
-        # it as "no services enabled".
+        # it as "no services enabled". Do not cache failures.
         logger.error(
-            f"[restaurant-info] fetch failed for restaurant_id={restaurant_id} "
+            f"[restaurant-info] fetch failed for restaurant_id={rid} "
             f"— last status={last_status}"
         )
         return None
     except Exception as e:
-        logger.warning(f"[restaurant-info] fetch errored for restaurant_id={restaurant_id}: {e}")
+        logger.warning(f"[restaurant-info] fetch errored for restaurant_id={rid}: {e}")
         return None
+
+
+def invalidate_restaurant_info_cache(restaurant_id: str | None = None) -> None:
+    """Drop cached restaurant info for one tenant, or clear the whole map."""
+    if restaurant_id is None:
+        _RESTAURANT_INFO_CACHE.clear()
+        return
+    _RESTAURANT_INFO_CACHE.pop(str(restaurant_id).strip(), None)
 
 
 async def cache_restaurant_pricing(session_state: dict, restaurant_id: str) -> None:

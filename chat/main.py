@@ -36,7 +36,7 @@ from tools.db_tools import (
     get_booking_with_customer,
 )
 from tools.whatsapp_tools import parse_incoming, send_whatsapp_message, send_whatsapp_cta_url
-from agents.customer.booking_helpers import touch_session_activity, is_reset_keyword, mark_session_visit_complete
+from agents.customer.booking_helpers import touch_session_activity, is_reset_keyword, mark_session_visit_complete, should_skip_feedback_bridge
 from tools.feedback_bridge import try_handle_feedback_via_api, try_dismiss_feedback_via_api
 from tools.payment_tools import (
     verify_webhook_signature,
@@ -126,6 +126,7 @@ class _LatencyTrace:
             b.get("feedback_bridge", 0)
             + b.get("feedback_dismiss", 0)
             + b.get("feedback_handle", 0)
+            + b.get("feedback_skipped", 0)
         )
         logger.info(
             f"[LATENCY] wamid={self.wamid} summary total_ms={total_ms} "
@@ -619,10 +620,14 @@ async def _process_meta_payload(payload: dict):
                     )
                     return
 
-            # 5b. Feedback reply — delegate to Node before booking routing
+            # 5b. Feedback reply — delegate to Node before booking routing.
+            # Skip the Node hop for greetings / Home / Menu — those are never
+            # feedback replies and the bridge timeout can add seconds to Hi.
             if msg_type in ("text", "button", "interactive") and is_reset_keyword(message_body):
                 await try_dismiss_feedback_via_api(phone, restaurant_id)
                 lat.mark("feedback_dismiss")
+            elif msg_type in ("text", "button", "interactive") and should_skip_feedback_bridge(message_body):
+                lat.mark("feedback_skipped")
             elif msg_type in ("text", "button", "interactive"):
                 fb_result = await try_handle_feedback_via_api(phone, message_obj, restaurant_id)
                 lat.mark("feedback_handle")

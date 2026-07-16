@@ -504,8 +504,27 @@ def is_feedback_aspect_reply(text: str) -> bool:
     return False
 
 
+_GREETING_PREFIX_RE = re.compile(r"^(hi|hello|hey|hii|helo|hola|namaste)\b", re.IGNORECASE)
+
+
 def is_greeting(text: str) -> bool:
-    return text.strip().lower() in _GREETING_WORDS
+    """Bare greeting, short ack words, or 'hi <restaurant>' style openers."""
+    normalized = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not normalized:
+        return False
+    if normalized in _GREETING_WORDS:
+        return True
+    match = _GREETING_PREFIX_RE.match(normalized)
+    if not match:
+        return False
+    remainder = normalized[match.end():].strip()
+    # "hi" / "hi munafe" — not "hi I'd like a table for 4"
+    return len(remainder.split()) <= 1
+
+
+def should_skip_feedback_bridge(text: str) -> bool:
+    """Home/reset and greetings should not wait on the feedback Node hop."""
+    return is_reset_keyword(text) or is_greeting(text)
 
 
 def mark_session_visit_complete(session_state: Dict[str, Any]) -> None:
@@ -744,6 +763,17 @@ async def send_service_menu(
     *,
     announce_closed: bool = True,
 ) -> None:
+    import time as _time
+    _t0 = _time.monotonic()
+
+    def _lat(stage: str, t_mark: float) -> float:
+        now = _time.monotonic()
+        logger.info(
+            f"[LATENCY] stage=service_menu.{stage} "
+            f"dur_ms={int((now - t_mark) * 1000)} restaurant_id={restaurant_id}"
+        )
+        return now
+
     from tools.kitchen_hours import (
         build_blanket_closed_message,
         kitchen_accepting_orders,
@@ -752,8 +782,11 @@ async def send_service_menu(
 
     state = session_state or {}
     from tools.booking_mechanisms import cache_restaurant_pricing
+    t = _time.monotonic()
     await cache_restaurant_pricing(state, restaurant_id)
+    t = _lat("pricing", t)
     await refresh_kitchen_acceptance(state, restaurant_id)
+    t = _lat("kitchen_refresh", t)
 
     if not kitchen_accepting_orders(state):
         await send_whatsapp_message(
@@ -763,11 +796,17 @@ async def send_service_menu(
         )
         state["booking_step"] = "kitchen_closed"
         state.pop("_service_menu_rows", None)
+        _lat("closed_reply", t)
+        logger.info(
+            f"[LATENCY] stage=service_menu.total dur_ms={int((_time.monotonic() - _t0) * 1000)} "
+            f"restaurant_id={restaurant_id} outcome=kitchen_closed"
+        )
         return
 
     rows = await build_service_menu_rows(restaurant_id, state)
     rows = sanitize_list_rows(rows)
     state["_service_menu_rows"] = rows
+    t = _lat("build_rows", t)
 
     # RULE 2: Minimum viable menu guard
     if len(rows) == 0:
@@ -894,6 +933,7 @@ async def send_service_menu(
         ensure_restaurant_greeting_context,
     )
     await ensure_restaurant_greeting_context(state, restaurant_id)
+    t = _lat("greeting_ctx", t)
     header = (state.get("_restaurant_display_name") or "Service Menu").strip()
 
     body_lines = []
@@ -907,11 +947,14 @@ async def send_service_menu(
     if not state.get("_last_visit_abandoned"):
         from tools.db_tools import get_ready_takeaway_order
         ready_takeaway = await get_ready_takeaway_order(restaurant_id, customer_phone)
+        t = _lat("ready_takeaway", t)
         if ready_takeaway:
             token = ready_takeaway.get("display_token") or ready_takeaway.get("order_number", "")
             body_lines.append(
                 f"Your takeaway order *{token}* is ready — pick up at the counter."
             )
+    else:
+        t = _lat("ready_takeaway_skipped", t)
 
     state.pop("_last_visit_abandoned", None)
     body_lines.append("How can we help you today?")
@@ -931,6 +974,7 @@ async def send_service_menu(
             },
         }
     }, restaurant_id)
+    t = _lat("wa_interactive", t)
     if not ok:
         lines = "\n".join(f"{i + 1}. {r['title']}" for i, r in enumerate(rows))
         await send_whatsapp_message(
@@ -938,6 +982,11 @@ async def send_service_menu(
             f"{body_text}\n\n{lines}\n\nReply with a number.",
             restaurant_id,
         )
+        _lat("wa_fallback_text", t)
+    logger.info(
+        f"[LATENCY] stage=service_menu.total dur_ms={int((_time.monotonic() - _t0) * 1000)} "
+        f"restaurant_id={restaurant_id} outcome=list rows={len(rows)}"
+    )
 
 
 # ─────────────────────────────────────────────
