@@ -44,6 +44,23 @@ function istDateKey(iso) {
   return `${y}-${m}-${d}`;
 }
 
+function summarizeSupabaseError(error) {
+  if (!error) return null;
+  return {
+    message: error.message || null,
+    details: error.details || null,
+    hint: error.hint || null,
+    code: error.code || null,
+  };
+}
+
+function logSupabaseError(scope, error, context = {}) {
+  console.error(`[dashboard/insights] ${scope} failed`, {
+    ...context,
+    error: summarizeSupabaseError(error),
+  });
+}
+
 function buildRevenueHeatmap(orders, endISO) {
   const days = [
     { key: 1, label: 'Mon' },
@@ -110,22 +127,48 @@ function buildRevenueHeatmap(orders, endISO) {
 }
 
 function buildServiceSplit(orders) {
-  const buckets = { dine_in: 0, takeaway: 0, delivery: 0, other: 0 };
+  const buckets = {
+    dine_in: { revenue: 0, orderCount: 0, revenueOrderCount: 0, missingAmountCount: 0 },
+    takeaway: { revenue: 0, orderCount: 0, revenueOrderCount: 0, missingAmountCount: 0 },
+    delivery: { revenue: 0, orderCount: 0, revenueOrderCount: 0, missingAmountCount: 0 },
+    other: { revenue: 0, orderCount: 0, revenueOrderCount: 0, missingAmountCount: 0 },
+  };
   let whatsappRevenue = 0;
-  let total = 0;
+  let whatsappOrderCount = 0;
+  let totalRevenue = 0;
+  let totalOrders = 0;
+  let revenueOrderCount = 0;
 
   for (const o of orders) {
     if (o.status === 'cancelled') continue;
-    const rev = Number(o.total_amount) || 0;
-    if (rev <= 0) continue;
     const sourceHint = o.service_type || o.source;
     const ch = channelFromSource(sourceHint);
-    buckets[ch] = (buckets[ch] || 0) + rev;
-    total += rev;
-    if (o.token_id || isWhatsappSource(o.source)) whatsappRevenue += rev;
+    const bucket = buckets[ch] || buckets.other;
+    const rev = Number(o.total_amount) || 0;
+    const hasRevenue = rev > 0;
+
+    bucket.orderCount += 1;
+    totalOrders += 1;
+    if (o.token_id || isWhatsappSource(o.source)) whatsappOrderCount += 1;
+
+    if (hasRevenue) {
+      bucket.revenue += rev;
+      bucket.revenueOrderCount += 1;
+      totalRevenue += rev;
+      revenueOrderCount += 1;
+      if (o.token_id || isWhatsappSource(o.source)) whatsappRevenue += rev;
+    } else {
+      bucket.missingAmountCount += 1;
+    }
   }
 
-  // Fix double-count for other channel
+  const missingAmountCount = Math.max(0, totalOrders - revenueOrderCount);
+  const useOrderCountMode = totalOrders > 0 && revenueOrderCount < Math.ceil(totalOrders * 0.5);
+  const mode = useOrderCountMode ? 'order_count' : 'revenue';
+  const metricLabel = useOrderCountMode ? 'by order count' : 'by revenue';
+  const total = useOrderCountMode ? totalOrders : totalRevenue;
+  const whatsappValue = useOrderCountMode ? whatsappOrderCount : whatsappRevenue;
+
   const channels = [
     { key: 'dine_in', label: 'Dine-in' },
     { key: 'takeaway', label: 'Takeaway' },
@@ -134,15 +177,28 @@ function buildServiceSplit(orders) {
   ];
 
   return {
+    mode,
+    metricLabel,
     total: Math.round(total),
+    totalRevenue: Math.round(totalRevenue),
+    totalOrderCount: totalOrders,
+    revenueOrderCount,
+    missingAmountCount,
     whatsappRevenue: Math.round(whatsappRevenue),
-    whatsappPct: total > 0 ? Math.round((whatsappRevenue / total) * 100) : 0,
+    whatsappOrderCount,
+    whatsappValue: Math.round(whatsappValue),
+    whatsappPct: total > 0 ? Math.round((whatsappValue / total) * 100) : 0,
     channels: channels.map(c => ({
       channel: c.key,
       label: c.label,
-      revenue: Math.round(buckets[c.key] || 0),
-      pct: total > 0 ? Math.round(((buckets[c.key] || 0) / total) * 100) : 0,
-    })).filter(c => c.revenue > 0),
+      revenue: Math.round(useOrderCountMode ? buckets[c.key].orderCount : buckets[c.key].revenue),
+      actualRevenue: Math.round(buckets[c.key].revenue),
+      orderCount: buckets[c.key].orderCount,
+      value: Math.round(useOrderCountMode ? buckets[c.key].orderCount : buckets[c.key].revenue),
+      pct: total > 0 ? Math.round((((useOrderCountMode ? buckets[c.key].orderCount : buckets[c.key].revenue) || 0) / total) * 100) : 0,
+      revenueOrderCount: buckets[c.key].revenueOrderCount,
+      missingAmountCount: buckets[c.key].missingAmountCount,
+    })).filter(c => c.value > 0),
   };
 }
 
@@ -402,13 +458,27 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
   if (!primaryOrders.error) {
     orders = primaryOrders.data ?? [];
   } else {
+    logSupabaseError('orders.primary', primaryOrders.error, {
+      restaurantId,
+      startISO,
+      endISO,
+    });
     const fallbackOrders = await supabaseAdmin.from('orders')
       .select('id, created_at, total_amount, status, source, customer_phone, customer_name')
       .eq('restaurant_id', restaurantId)
       .gte('created_at', startISO).lte('created_at', endISO)
       .neq('status', 'cancelled')
       .order('created_at', { ascending: true });
-    orders = (fallbackOrders.data ?? []).map(o => ({ ...o, token_id: null, service_type: null }));
+    if (fallbackOrders.error) {
+      logSupabaseError('orders.fallback', fallbackOrders.error, {
+        restaurantId,
+        startISO,
+        endISO,
+      });
+      orders = [];
+    } else {
+      orders = (fallbackOrders.data ?? []).map(o => ({ ...o, token_id: null, service_type: null }));
+    }
   }
 
   const [tokensRes, auditRes] = await Promise.all([
@@ -423,6 +493,21 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
       .or('action.ilike.%stock%,action.ilike.%Stock%'),
   ]);
 
+  if (tokensRes.error) {
+    logSupabaseError('walk_in_tokens', tokensRes.error, {
+      restaurantId,
+      startISO,
+      endISO,
+    });
+  }
+  if (auditRes.error) {
+    logSupabaseError('audit_logs', auditRes.error, {
+      restaurantId,
+      startISO,
+      endISO,
+    });
+  }
+
   const orderIds = orders.map(o => o.id).filter(Boolean);
 
   let orderItems = [];
@@ -433,16 +518,34 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
       const chunk = orderIds.slice(i, i + CHUNK);
       let oiData = [];
       const primaryItems = await supabaseAdmin.from('order_items')
-        .select('order_id, quantity, unit_price, item_name, special_instructions, menu_item:menu_item_id(name, price)')
+        .select('order_id, quantity, unit_price, special_instructions, menu_item:menu_item_id(name)')
         .in('order_id', chunk);
 
       if (!primaryItems.error) {
         oiData = primaryItems.data ?? [];
       } else {
+        logSupabaseError('order_items.primary', primaryItems.error, {
+          restaurantId,
+          startISO,
+          endISO,
+          chunkLength: chunk.length,
+          chunkSample: chunk.slice(0, 5),
+        });
         const fallbackItems = await supabaseAdmin.from('order_items')
-          .select('order_id, quantity, unit_price, menu_item:menu_item_id(name, price)')
+          .select('order_id, quantity, unit_price, special_instructions')
           .in('order_id', chunk);
-        oiData = (fallbackItems.data ?? []).map(r => ({ ...r, item_name: null, special_instructions: null }));
+        if (fallbackItems.error) {
+          logSupabaseError('order_items.fallback', fallbackItems.error, {
+            restaurantId,
+            startISO,
+            endISO,
+            chunkLength: chunk.length,
+            chunkSample: chunk.slice(0, 5),
+          });
+          oiData = [];
+        } else {
+          oiData = (fallbackItems.data ?? []).map(r => ({ ...r, menu_item: null, item_name: null }));
+        }
       }
 
       if (oiData.length) {
