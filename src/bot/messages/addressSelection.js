@@ -31,7 +31,7 @@ async function sendAddressSelectionMessage(session, candidates, outletMatch) {
 
   const rows = candidates.map((candidate, index) => ({
     id: `addr_${index}`,
-    title: truncate(candidate.formatted_address, 24),
+    title: truncate(candidate.short_label || candidate.formatted_address, 24),
     description: truncate(candidate.formatted_address, 72),
   }));
 

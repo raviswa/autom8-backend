@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 
 GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 DISTANCE_MATRIX_URL = "https://maps.googleapis.com/maps/api/distancematrix/json"
+PLACES_NEARBY_URL = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+_NOMINATIM_UA = "MunafeDeliveryBot/1.0 (delivery-address-lookup)"
 
 
 def maps_api_key() -> str:
@@ -73,13 +77,90 @@ def _customer_coords(state: dict[str, Any]) -> tuple[float, float] | None:
     return None
 
 
-_REVERSE_PREF_TYPES = frozenset({"street_address", "premise", "subpremise", "route"})
+_REVERSE_PREF_TYPES = frozenset({
+    "street_address", "premise", "subpremise", "route",
+    "establishment", "point_of_interest", "neighborhood",
+    "sublocality", "sublocality_level_1", "sublocality_level_2",
+    "locality", "landmark",
+})
 
 
-def _dedupe_geocode_candidates(results: list[Any], limit: int = 4) -> list[dict[str, Any]]:
+def _normalize_candidate_key(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _is_coordinate_only_label(text: str) -> bool:
+    clean = (text or "").strip()
+    if not clean:
+        return True
+    if clean.lower().startswith("shared pin"):
+        return True
+    return _parse_coords_from_text(clean) is not None and len(clean) < 40
+
+
+def _short_label_from_address(formatted: str) -> str:
+    clean = (formatted or "").strip()
+    if not clean:
+        return ""
+    return clean.split(",", 1)[0].strip()
+
+
+def _simplify_place_name(name: str) -> str:
+    clean = (name or "").strip()
+    if not clean:
+        return ""
+    m = re.match(r"zone\s+\d+\s+(.+)$", clean, flags=re.IGNORECASE)
+    return m.group(1).strip() if m else clean
+
+
+def _candidate(
+    formatted_address: str,
+    lat: float,
+    lng: float,
+    *,
+    short_label: str | None = None,
+    place_id: str | None = None,
+) -> dict[str, Any]:
+    formatted = (formatted_address or "").strip()
+    label = (short_label or _short_label_from_address(formatted)).strip() or formatted
+    return {
+        "formatted_address": formatted,
+        "short_label": label,
+        "place_id": place_id,
+        "lat": lat,
+        "lng": lng,
+    }
+
+
+def _merge_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    limit: int = 4,
+) -> list[dict[str, Any]]:
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
 
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        formatted = (item.get("formatted_address") or "").strip()
+        if not formatted or _is_coordinate_only_label(formatted):
+            continue
+        key = _normalize_candidate_key(formatted)
+        short_key = _normalize_candidate_key(item.get("short_label") or "")
+        if key in seen or (short_key and short_key in seen):
+            continue
+        seen.add(key)
+        if short_key:
+            seen.add(short_key)
+        out.append(item)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _dedupe_geocode_candidates(results: list[Any], limit: int = 4) -> list[dict[str, Any]]:
+    raw: list[dict[str, Any]] = []
     for r in results:
         if not isinstance(r, dict):
             continue
@@ -90,36 +171,130 @@ def _dedupe_geocode_candidates(results: list[Any], limit: int = 4) -> list[dict[
             lng = float(loc["lng"])
         except (KeyError, TypeError, ValueError):
             continue
-        if not formatted or formatted in seen:
+        if not formatted:
             continue
-        seen.add(formatted)
-        out.append(
-            {
-                "formatted_address": formatted,
-                "place_id": r.get("place_id") or None,
-                "lat": lat,
-                "lng": lng,
-            }
-        )
-        if len(out) >= limit:
-            break
+        short = None
+        for comp in r.get("address_components") or []:
+            if not isinstance(comp, dict):
+                continue
+            types = comp.get("types") or []
+            if "route" in types or "neighborhood" in types or "sublocality" in types:
+                short = (comp.get("long_name") or comp.get("short_name") or "").strip()
+                if short:
+                    break
+        raw.append(_candidate(formatted, lat, lng, short_label=short, place_id=r.get("place_id")))
+    return _merge_candidates(raw, limit=limit)
+
+
+def _nominatim_address_variants(data: dict[str, Any], lat: float, lng: float) -> list[dict[str, Any]]:
+    """Build readable address options from one Nominatim reverse-geocode payload."""
+    addr = data.get("address") or {}
+    if not isinstance(addr, dict):
+        return []
+
+    road = (addr.get("road") or addr.get("pedestrian") or addr.get("residential") or "").strip()
+    neighbourhood = _simplify_place_name(
+        (addr.get("neighbourhood") or addr.get("quarter") or addr.get("hamlet") or "").strip()
+    )
+    suburb = _simplify_place_name((addr.get("suburb") or addr.get("city_district") or "").strip())
+    city = _simplify_place_name(
+        (addr.get("city") or addr.get("town") or addr.get("village") or addr.get("county") or "").strip()
+    )
+    postcode = (addr.get("postcode") or "").strip()
+    state = (addr.get("state") or "").strip()
+
+    variants: list[tuple[str, str]] = []
+    if road and suburb and city:
+        variants.append((road, f"{road}, {suburb}, {city}"))
+    elif road and city:
+        variants.append((road, f"{road}, {city}"))
+    elif data.get("name") and road:
+        variants.append((str(data["name"]), f"{data['name']}, {road}, {city or suburb}".strip(", ")))
+
+    if neighbourhood and city and neighbourhood not in {road, suburb}:
+        variants.append((neighbourhood, f"{neighbourhood}, {city}"))
+    if suburb and city and suburb not in {road, neighbourhood}:
+        variants.append((suburb, f"{suburb}, {city}"))
+    if city and postcode:
+        variants.append((city, f"{city}, {postcode}"))
+    elif city and state:
+        variants.append((city, f"{city}, {state}"))
+
+    display = (data.get("display_name") or "").strip()
+    if display:
+        variants.append((_short_label_from_address(display), display))
+
+    out: list[dict[str, Any]] = []
+    for short, formatted in variants:
+        if not formatted or _is_coordinate_only_label(formatted):
+            continue
+        out.append(_candidate(formatted, lat, lng, short_label=short))
     return out
 
 
-async def reverse_geocode_candidates(
-    lat: float,
-    lng: float,
-    *,
-    limit: int = 4,
-) -> list[dict[str, Any]]:
-    """
-    Reverse-geocode a pin into up to `limit` nearby formatted addresses.
-    Prefers street/premise/route results; returns [] when the API key is
-    missing or the call fails.
-    """
+async def _google_nearby_places(lat: float, lng: float, *, limit: int = 4) -> list[dict[str, Any]]:
     api_key = maps_api_key()
     if not api_key:
-        logger.warning("[reverse-geocode] GOOGLE_MAPS_API_KEY missing; disabled")
+        return []
+
+    try:
+        resp = await get_http().get(
+            PLACES_NEARBY_URL,
+            params={
+                "location": f"{lat},{lng}",
+                "rankby": "distance",
+                "key": api_key,
+            },
+            timeout=__import__("aiohttp").ClientTimeout(total=8),
+        )
+        if resp.status != 200:
+            logger.warning(f"[nearby-places] HTTP {resp.status}")
+            return []
+        data = await resp.json()
+        status = data.get("status")
+        if status not in ("OK", "ZERO_RESULTS"):
+            if status == "REQUEST_DENIED":
+                logger.warning(
+                    "[nearby-places] REQUEST_DENIED — enable Places API for "
+                    f"GOOGLE_MAPS_API_KEY. error_message={data.get('error_message')!r}"
+                )
+            else:
+                logger.info(f"[nearby-places] status={status}")
+            return []
+
+        raw: list[dict[str, Any]] = []
+        for place in data.get("results") or []:
+            if not isinstance(place, dict):
+                continue
+            name = (place.get("name") or "").strip()
+            vicinity = (place.get("vicinity") or "").strip()
+            if not name:
+                continue
+            formatted = f"{name}, {vicinity}" if vicinity else name
+            loc = (place.get("geometry") or {}).get("location") or {}
+            try:
+                p_lat = float(loc["lat"])
+                p_lng = float(loc["lng"])
+            except (KeyError, TypeError, ValueError):
+                p_lat, p_lng = lat, lng
+            raw.append(
+                _candidate(
+                    formatted,
+                    p_lat,
+                    p_lng,
+                    short_label=name,
+                    place_id=place.get("place_id"),
+                )
+            )
+        return _merge_candidates(raw, limit=limit)
+    except Exception as e:
+        logger.warning(f"[nearby-places] failed: {e}")
+        return []
+
+
+async def _google_reverse_geocode(lat: float, lng: float, *, limit: int = 4) -> list[dict[str, Any]]:
+    api_key = maps_api_key()
+    if not api_key:
         return []
 
     try:
@@ -159,6 +334,129 @@ async def reverse_geocode_candidates(
     except Exception as e:
         logger.warning(f"[reverse-geocode] failed: {e}")
         return []
+
+
+async def _nominatim_candidates(lat: float, lng: float, *, limit: int = 4) -> list[dict[str, Any]]:
+    raw: list[dict[str, Any]] = []
+    try:
+        for zoom in (18, 16, 15):
+            resp = await get_http().get(
+                NOMINATIM_REVERSE_URL,
+                params={
+                    "lat": lat,
+                    "lon": lng,
+                    "format": "json",
+                    "zoom": zoom,
+                    "addressdetails": 1,
+                },
+                headers={"User-Agent": _NOMINATIM_UA},
+                timeout=__import__("aiohttp").ClientTimeout(total=8),
+            )
+            if resp.status != 200:
+                logger.warning(f"[nominatim] HTTP {resp.status} zoom={zoom}")
+                continue
+            data = await resp.json()
+            if not isinstance(data, dict):
+                continue
+            try:
+                p_lat = float(data.get("lat", lat))
+                p_lng = float(data.get("lon", lng))
+            except (TypeError, ValueError):
+                p_lat, p_lng = lat, lng
+            raw.extend(_nominatim_address_variants(data, p_lat, p_lng))
+            if len(_merge_candidates(raw, limit=limit)) >= limit:
+                break
+    except Exception as e:
+        logger.warning(f"[nominatim] failed: {e}")
+    return _merge_candidates(raw, limit=limit)
+
+
+async def _overpass_nearby_places(lat: float, lng: float, *, limit: int = 4) -> list[dict[str, Any]]:
+    query = f"""[out:json][timeout:10];
+(
+  node["name"](around:350,{lat},{lng});
+  way["name"](around:350,{lat},{lng});
+);
+out center {max(limit, 4)};"""
+    try:
+        resp = await get_http().post(
+            OVERPASS_URL,
+            data=query,
+            headers={"User-Agent": _NOMINATIM_UA},
+            timeout=__import__("aiohttp").ClientTimeout(total=12),
+        )
+        if resp.status != 200:
+            logger.warning(f"[overpass] HTTP {resp.status}")
+            return []
+        data = await resp.json()
+        raw: list[dict[str, Any]] = []
+        for el in data.get("elements") or []:
+            if not isinstance(el, dict):
+                continue
+            tags = el.get("tags") or {}
+            name = (tags.get("name") or "").strip()
+            if not name:
+                continue
+            street = (tags.get("addr:street") or tags.get("addr:full") or "").strip()
+            suburb = _simplify_place_name((tags.get("addr:suburb") or tags.get("addr:city") or "").strip())
+            formatted = f"{name}, {street}" if street else (
+                f"{name}, {suburb}" if suburb else name
+            )
+            center = el.get("center") or el
+            try:
+                p_lat = float(center["lat"])
+                p_lng = float(center["lon"])
+            except (KeyError, TypeError, ValueError):
+                p_lat, p_lng = lat, lng
+            raw.append(_candidate(formatted, p_lat, p_lng, short_label=name))
+        return _merge_candidates(raw, limit=limit)
+    except Exception as e:
+        logger.warning(f"[overpass] failed: {e}")
+        return []
+
+
+async def reverse_geocode_candidates(
+    lat: float,
+    lng: float,
+    *,
+    limit: int = 4,
+    pin_label: str = "",
+) -> list[dict[str, Any]]:
+    """
+    Resolve a shared map pin into up to `limit` human-readable nearby addresses.
+    Combines Google Places + reverse geocode when configured, then OpenStreetMap
+    fallbacks so customers always see named streets/landmarks — never raw coords.
+    """
+    merged: list[dict[str, Any]] = []
+
+    label = (pin_label or "").strip()
+    if label and not _is_coordinate_only_label(label):
+        merged.append(
+            _candidate(
+                label,
+                lat,
+                lng,
+                short_label=_short_label_from_address(label),
+            )
+        )
+
+    for fetcher in (
+        lambda: _google_nearby_places(lat, lng, limit=limit),
+        lambda: _google_reverse_geocode(lat, lng, limit=limit),
+        lambda: _overpass_nearby_places(lat, lng, limit=limit),
+        lambda: _nominatim_candidates(lat, lng, limit=limit),
+    ):
+        try:
+            batch = await fetcher()
+        except Exception as e:
+            logger.warning(f"[reverse-geocode] source failed: {e}")
+            batch = []
+        if batch:
+            merged = _merge_candidates([*merged, *batch], limit=limit)
+        if len(merged) >= limit:
+            break
+
+    return merged[:limit]
 
 
 async def geocode_address(address: str, *, city: str = "", state_name: str = "") -> tuple[float, float] | None:

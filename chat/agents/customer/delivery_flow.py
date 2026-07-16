@@ -837,9 +837,10 @@ async def _send_address_choice_list(
         formatted = (candidate.get("formatted_address") or "").strip()
         if not formatted:
             continue
+        title = (candidate.get("short_label") or formatted).strip()
         rows.append({
             "id": f"addr_{index}",
-            "title": _truncate_wa(formatted, 24),
+            "title": _truncate_wa(title, 24),
             "description": _truncate_wa(formatted, 72),
         })
     rows.append({
@@ -987,26 +988,8 @@ async def handle_delivery_flow(
                 float(session_state["delivery_lat"]),
                 float(session_state["delivery_lng"]),
                 limit=4,
+                pin_label=pin_label,
             )
-            # When Google reverse-geocode is denied/unavailable, still offer a
-            # Choose Address sheet: shared place name (if any) + confirm pin.
-            if not candidates:
-                synthetic = []
-                if pin_label and not pin_label.replace(".", "").replace(",", "").replace("-", "").replace(" ", "").isdigit():
-                    synthetic.append({
-                        "formatted_address": pin_label,
-                        "lat": session_state["delivery_lat"],
-                        "lng": session_state["delivery_lng"],
-                    })
-                synthetic.append({
-                    "formatted_address": (
-                        f"Shared pin ({float(session_state['delivery_lat']):.5f}, "
-                        f"{float(session_state['delivery_lng']):.5f})"
-                    ),
-                    "lat": session_state["delivery_lat"],
-                    "lng": session_state["delivery_lng"],
-                })
-                candidates = synthetic
 
             if candidates:
                 sent = await _send_address_choice_list(
