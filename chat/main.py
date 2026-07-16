@@ -5,6 +5,7 @@ import logging
 import hmac
 import hashlib
 import os
+import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -92,6 +93,61 @@ async def lifespan(app: FastAPI):
 
 logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger(__name__)
+
+
+class _LatencyTrace:
+    """Per-message stage timer for webhook processing (Phase A instrumentation)."""
+
+    __slots__ = ("wamid", "t0", "last", "breakdown")
+
+    def __init__(self, wamid: str | None):
+        self.wamid = wamid or "unknown"
+        self.t0 = time.monotonic()
+        self.last = self.t0
+        self.breakdown: dict[str, int] = {}
+
+    def mark(self, stage: str) -> int:
+        now = time.monotonic()
+        dur_ms = int((now - self.last) * 1000)
+        self.last = now
+        self.breakdown[stage] = self.breakdown.get(stage, 0) + dur_ms
+        logger.info(f"[LATENCY] wamid={self.wamid} stage={stage} dur_ms={dur_ms}")
+        return dur_ms
+
+    def add(self, stage: str, dur_ms: int) -> None:
+        """Accumulate a nested stage (e.g. send_wa) without moving the main cursor."""
+        self.breakdown[stage] = self.breakdown.get(stage, 0) + int(dur_ms)
+        logger.info(f"[LATENCY] wamid={self.wamid} stage={stage} dur_ms={int(dur_ms)}")
+
+    def summary(self) -> None:
+        total_ms = int((time.monotonic() - self.t0) * 1000)
+        b = self.breakdown
+        feedback_ms = (
+            b.get("feedback_bridge", 0)
+            + b.get("feedback_dismiss", 0)
+            + b.get("feedback_handle", 0)
+        )
+        logger.info(
+            f"[LATENCY] wamid={self.wamid} summary total_ms={total_ms} "
+            f"resolve_ms={b.get('resolve_restaurant', 0)} "
+            f"lock_ms={b.get('customer_lock', 0)} "
+            f"session_get_ms={b.get('session_get', 0)} "
+            f"special_notes_ms={b.get('special_notes', 0)} "
+            f"feedback_ms={feedback_ms} "
+            f"route_ms={b.get('route_message', 0)} "
+            f"session_save_ms={b.get('session_save', 0)} "
+            f"send_ms={b.get('send_wa', 0)}"
+        )
+
+
+async def _latency_send_wa(lat: _LatencyTrace | None, *args, **kwargs):
+    t0 = time.monotonic()
+    try:
+        return await send_whatsapp_message(*args, **kwargs)
+    finally:
+        if lat is not None:
+            lat.add("send_wa", int((time.monotonic() - t0) * 1000))
+
 
 app = FastAPI(title="Munafe Bot", version="0.1.0", lifespan=lifespan)
 
@@ -341,6 +397,9 @@ async def _process_meta_payload(payload: dict):
     phone: str | None = None
     restaurant_id: str | None = None
     manager_phone: str | None = None
+    lat: _LatencyTrace | None = None
+    result: dict = {}
+    session_state: dict = {}
     try:
         # 1. Extraction & in-process dedup
         value = payload.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {})
@@ -348,7 +407,7 @@ async def _process_meta_payload(payload: dict):
             return
 
         message_obj = value["messages"][0]
-        message_id  = message_obj.get("id", "")
+        message_id  = message_obj.get("id", "") or "unknown"
 
         async with _processed_message_ids_lock:
             if message_id in _processed_message_ids:
@@ -356,6 +415,8 @@ async def _process_meta_payload(payload: dict):
             _processed_message_ids[message_id] = 1
             if len(_processed_message_ids) > 1000:
                 _processed_message_ids.popitem(last=False)
+
+        lat = _LatencyTrace(message_id)
 
         # 2. Parse message body
         msg_type     = message_obj.get("type", "")
@@ -387,7 +448,7 @@ async def _process_meta_payload(payload: dict):
             )
             return
 
-# 3. Restaurant / LOB resolution — keyword-first, pin-second approach
+        # 3. Restaurant / LOB resolution — keyword-first, pin-second approach
         #
         #    Priority order:
         #    a. Explicit keyword — resolves to a real tenant → always wins,
@@ -429,13 +490,15 @@ async def _process_meta_payload(payload: dict):
         if not restaurant and keyword:
             codes = await get_active_short_codes_for_waba(restaurant_whatsapp)
             hint  = ", ".join(f"*Hi {c}*" for c in codes) if codes else "*Hi* (to start)"
-            await send_whatsapp_message(
+            await _latency_send_wa(
+                lat,
                 phone,
                 f"Sorry, we couldn't find that outlet. 🙏\n\n"
                 f"Available options on this number:\n{hint}\n\n"
                 f"Please try again with one of the above.",
                 None,
             )
+            lat.mark("resolve_restaurant")
             logger.warning(
                 f"[routing] unknown keyword '{keyword}' from {phone} on {restaurant_whatsapp}"
             )
@@ -452,6 +515,7 @@ async def _process_meta_payload(payload: dict):
             restaurant = await get_restaurant_by_whatsapp_number(restaurant_whatsapp)
 
         if not restaurant:
+            lat.mark("resolve_restaurant")
             logger.error(
                 f"[routing] no tenant resolved for "
                 f"waba={restaurant_whatsapp!r} pnid={phone_number_id!r} phone={phone!r}"
@@ -460,7 +524,8 @@ async def _process_meta_payload(payload: dict):
 
         # Refresh pin on every message — keeps subsequent turns fast
         await pin_active_restaurant_for_phone(restaurant_whatsapp, phone, restaurant["id"])
-        
+        lat.mark("resolve_restaurant")
+
         # 3e. LOB dispatch — non-restaurant tenants go to their own agent
         lob_type = restaurant.get("lob_type") or "restaurant"
         if lob_type != "restaurant":
@@ -485,11 +550,15 @@ async def _process_meta_payload(payload: dict):
         )
 
         # 4. Per-customer advisory lock → load → process → save
+        # Reset cursor so customer_lock stage = acquisition wait only.
+        lat.last = time.monotonic()
         async with customer_lock(restaurant_id, phone):
+            lat.mark("customer_lock")
 
             session_state = await get_session_state(restaurant_id, phone)
             if session_state is None:
                 session_state = {}
+            lat.mark("session_get")
 
             from agents.customer.dine_in_flow import _on_special_notes_timeout
             from agents.customer.booking_helpers import ensure_special_notes_kitchen_delivery
@@ -499,6 +568,7 @@ async def _process_meta_payload(payload: dict):
                 session_state,
                 on_timeout=lambda: _on_special_notes_timeout(restaurant_id, phone),
             )
+            lat.mark("special_notes")
 
             # 5a. Catalog order bridge
             if is_catalog_order(message_obj):
@@ -520,7 +590,8 @@ async def _process_meta_payload(payload: dict):
                         "confirming_order",
                     )
                     if in_checkout:
-                        await send_whatsapp_message(
+                        await _latency_send_wa(
+                            lat,
                             phone,
                             "We've noted those items — please finish payment for your "
                             "current order first. Reply *Home* to start a fresh order.",
@@ -528,15 +599,19 @@ async def _process_meta_payload(payload: dict):
                         )
                     else:
                         from tools.cart_tools import send_catalog_cart_acknowledgment
+                        _t_send = time.monotonic()
                         await send_catalog_cart_acknowledgment(
                             phone, restaurant_id, session_state,
                         )
+                        lat.add("send_wa", int((time.monotonic() - _t_send) * 1000))
                     touch_session_activity(session_state)
                     await save_session_state(restaurant_id, phone, session_state)
+                    lat.mark("session_save")
                     return
                 else:
                     logger.warning(f"[CATALOG] Failed to bridge order for {phone}")
-                    await send_whatsapp_message(
+                    await _latency_send_wa(
+                        lat,
                         phone,
                         "We had trouble processing your catalog order. "
                         "Please try again, or type *MENU* to order from our list. 🙏",
@@ -547,13 +622,16 @@ async def _process_meta_payload(payload: dict):
             # 5b. Feedback reply — delegate to Node before booking routing
             if msg_type in ("text", "button", "interactive") and is_reset_keyword(message_body):
                 await try_dismiss_feedback_via_api(phone, restaurant_id)
+                lat.mark("feedback_dismiss")
             elif msg_type in ("text", "button", "interactive"):
                 fb_result = await try_handle_feedback_via_api(phone, message_obj, restaurant_id)
+                lat.mark("feedback_handle")
                 if fb_result.get("consumed"):
                     if fb_result.get("completed"):
                         mark_session_visit_complete(session_state)
                     touch_session_activity(session_state)
                     await save_session_state(restaurant_id, phone, session_state)
+                    lat.mark("session_save")
                     return
 
             # 6. Route message
@@ -570,7 +648,9 @@ async def _process_meta_payload(payload: dict):
                 table_number=parsed.get("table_number"),
                 session_state=session_state,
                 raw_message_obj=message_obj,
+                message_id=message_id,
             )
+            lat.mark("route_message")
 
             # 7. Persist state
             logger.info(
@@ -579,10 +659,12 @@ async def _process_meta_payload(payload: dict):
             )
             touch_session_activity(session_state)
             await save_session_state(restaurant_id, phone, session_state)
+            lat.mark("session_save")
 
         # 8. Manager fallback (outside lock)
         if phone == manager_phone and result.get("status") == "unknown_command":
-            await send_whatsapp_message(
+            await _latency_send_wa(
+                lat,
                 phone,
                 "Welcome, Manager! Use 'dashboard' to see today's bookings "
                 "or 'status' to check tables.",
@@ -608,9 +690,12 @@ async def _process_meta_payload(payload: dict):
                         "Sorry, something went wrong while saving your pickup time. "
                         "Please try again in a moment, or reply *Home* to start over."
                     )
-                await send_whatsapp_message(phone, fallback, restaurant_id)
+                await _latency_send_wa(lat, phone, fallback, restaurant_id)
             except Exception:
                 logger.exception("Failed to send webhook error fallback to customer")
+    finally:
+        if lat is not None:
+            lat.summary()
 
 
 # ── Module 11: Supply payload processor ───────────────────────────────────────

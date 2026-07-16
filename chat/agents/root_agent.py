@@ -164,9 +164,15 @@ async def route_message(
     table_number: int | None = None,
     session_state: Dict[str, Any] | None = None,
     raw_message_obj: Dict[str, Any] | None = None,
+    message_id: str | None = None,
 ) -> Dict[str, Any]:
     if session_state is None:
         session_state = {}
+
+    def _lat(stage: str, t0: float) -> None:
+        dur_ms = int((time.monotonic() - t0) * 1000)
+        wid = message_id or "unknown"
+        logger.info(f"[LATENCY] wamid={wid} stage={stage} dur_ms={dur_ms}")
 
     # ── 0. DEDUPLICATION ─────────────────────────────────────────────────────
     wamid = _extract_wamid(message)
@@ -178,6 +184,9 @@ async def route_message(
             return {"status": "duplicate", "ignored": True}
     else:
         logger.debug(f"No wamid found for message from {sender_phone}, skipping dedup")
+
+    if not message_id and isinstance(raw_message_obj, dict):
+        message_id = raw_message_obj.get("id") or message_id
 
     # ── 0b. EXTRACT INTERACTIVE REPLY ID ─────────────────────────────────────
     # BUG 2 FIX: Capture the raw dict BEFORE converting to a string.
@@ -191,7 +200,10 @@ async def route_message(
     # ── 1. MANAGER ROUTE ─────────────────────────────────────────────────────
     if sender_phone == restaurant_manager_phone:
         logger.info(f"Manager command from {sender_phone}: {message[:50]}")
-        return await parse_manager_command(restaurant_id, sender_phone, message)
+        _t = time.monotonic()
+        result = await parse_manager_command(restaurant_id, sender_phone, message)
+        _lat("route_manager", _t)
+        return result
 
     # ── 2. IDENTITY ROUTE ────────────────────────────────────────────────────
     logger.info(f"Customer message from {sender_phone}: {message[:50]}")
@@ -214,6 +226,7 @@ async def route_message(
     if needs_identity:
         logger.info(f"Routing to Identity Agent. Current step: {identity_step}")
 
+        _t = time.monotonic()
         result = await handle_identity_flow(
             restaurant_id=restaurant_id,
             customer_phone=sender_phone,
@@ -222,6 +235,7 @@ async def route_message(
             session_state=session_state,
             message_obj=raw_message_obj,  # BUG 2 FIX: pass raw dict for button detection
         )
+        _lat("route_identity", _t)
 
         if "identity_step" in result:
             session_state["identity_step"] = result["identity_step"]
@@ -242,6 +256,7 @@ async def route_message(
                 f"({session_state['customer_name']}) — chaining to booking agent"
             )
 
+            _t = time.monotonic()
             result = await handle_booking_flow(
                 restaurant_id=restaurant_id,
                 customer_id=session_state["customer_id"],
@@ -253,6 +268,7 @@ async def route_message(
                 table_number=table_number,
                 raw_message_obj=raw_message_obj,
             )
+            _lat("route_booking", _t)
 
             if result.get("status") != "error":
                 session_state["current_state"] = "booking"
@@ -271,6 +287,7 @@ async def route_message(
         session_state["booking_step"] = "ask_service"
 
         # Delegate to booking agent so it sends native interactive service picker
+        _t = time.monotonic()
         result = await handle_booking_flow(
             restaurant_id=restaurant_id,
             customer_id=customer_id,
@@ -282,6 +299,7 @@ async def route_message(
             table_number=table_number,
             raw_message_obj=raw_message_obj,
         )
+        _lat("route_booking", _t)
         if result.get("status") != "error":
             session_state["current_state"] = "booking"
         return result
@@ -291,6 +309,7 @@ async def route_message(
         session_state["booking_step"] = "ask_service"
 
         # Delegate to booking agent so it sends native interactive service picker
+        _t = time.monotonic()
         result = await handle_booking_flow(
             restaurant_id=restaurant_id,
             customer_id=customer_id,
@@ -302,6 +321,7 @@ async def route_message(
             table_number=table_number,
             raw_message_obj=raw_message_obj,
         )
+        _lat("route_booking", _t)
         if result.get("status") != "error":
             session_state["current_state"] = "booking"
         return result
@@ -325,11 +345,13 @@ async def route_message(
     logger.info(f"Customer {sender_phone} ({customer_name}) - Booking flow")
 
     message_dict = _make_message_dict(message)
+    _t = time.monotonic()
     cart_handled = await handle_incoming_message(
         customer_phone=sender_phone,
         message=message_dict,
         session_state=session_state,
     )
+    _lat("route_cart", _t)
 
     if cart_handled:
         session_state["current_state"] = "booking"
@@ -344,6 +366,7 @@ async def route_message(
     # awaiting_service_selection, awaiting_party_size, awaiting_order,
     # awaiting_cart_action (CONFIRM/ADD_MORE/CLEAR as plain text fallback),
     # awaiting_address, awaiting_datetime, awaiting_payment, etc.
+    _t = time.monotonic()
     result = await handle_booking_flow(
         restaurant_id=restaurant_id,
         customer_id=customer_id,
@@ -355,6 +378,7 @@ async def route_message(
         table_number=table_number,
         raw_message_obj=raw_message_obj,
     )
+    _lat("route_booking", _t)
 
     if result.get("status") != "error":
         session_state["current_state"] = "booking"
@@ -376,6 +400,7 @@ async def route_message(
         )
 
         # Chain into identity immediately so the welcome prompt fires now
+        _t = time.monotonic()
         result = await handle_identity_flow(
             restaurant_id=restaurant_id,
             customer_phone=sender_phone,
@@ -384,6 +409,7 @@ async def route_message(
             session_state=session_state,
             message_obj=raw_message_obj,
         )
+        _lat("route_identity", _t)
 
         if "identity_step" in result:
             session_state["identity_step"] = result["identity_step"]
@@ -398,6 +424,7 @@ async def route_message(
             session_state["booking_step"]  = "ask_service"
             session_state.pop("identity_step", None)
 
+            _t = time.monotonic()
             result = await handle_booking_flow(
                 restaurant_id=restaurant_id,
                 customer_id=session_state["customer_id"],
@@ -409,6 +436,7 @@ async def route_message(
                 table_number=table_number,
                 raw_message_obj=raw_message_obj,
             )
+            _lat("route_booking", _t)
 
             if result.get("status") != "error":
                 session_state["current_state"] = "booking"
