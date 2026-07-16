@@ -61,15 +61,15 @@ function logSupabaseError(scope, error, context = {}) {
   });
 }
 
-function buildRevenueHeatmap(orders, endISO) {
+function buildRevenueHeatmap(orders, endISO, orderRevenueById = {}) {
   const days = [
-    { key: 1, label: 'Mon' },
-    { key: 2, label: 'Tue' },
-    { key: 3, label: 'Wed' },
-    { key: 4, label: 'Thu' },
-    { key: 5, label: 'Fri' },
-    { key: 6, label: 'Sat' },
-    { key: 0, label: 'Sun' },
+    { key: 1, label: 'Mon', dow: 'Mon' },
+    { key: 2, label: 'Tue', dow: 'Tue' },
+    { key: 3, label: 'Wed', dow: 'Wed' },
+    { key: 4, label: 'Thu', dow: 'Thu' },
+    { key: 5, label: 'Fri', dow: 'Fri' },
+    { key: 6, label: 'Sat', dow: 'Sat' },
+    { key: 0, label: 'Sun', dow: 'Sun' },
   ];
 
   const dayIndex = Object.fromEntries(days.map((d, i) => [d.key, i]));
@@ -78,6 +78,9 @@ function buildRevenueHeatmap(orders, endISO) {
   const matrix = Array.from({ length: 7 }, () => Array(24).fill(0));
 
   let max = 0;
+  let revenueOrderCount = 0;
+  let totalOrders = 0;
+
   for (const o of orders) {
     if (!o.created_at || o.status === 'cancelled') continue;
     const ist = toISTDate(o.created_at);
@@ -85,20 +88,47 @@ function buildRevenueHeatmap(orders, endISO) {
     if (di == null) continue;
 
     const hour = ist.getUTCHours();
-    const rev = Number(o.total_amount) || 0;
-    if (rev <= 0) continue;
+    const rev = Number(o.total_amount) > 0
+      ? Number(o.total_amount)
+      : Number(orderRevenueById[o.id]) || 0;
 
-    revenueSum[di][hour] += rev;
+    totalOrders += 1;
     orderCount[di][hour] += 1;
+    if (rev > 0) {
+      revenueSum[di][hour] += rev;
+      revenueOrderCount += 1;
+    }
   }
+
+  // Prefer average revenue when enough totals exist; otherwise show order density
+  // so the heatmap is not blank when total_amount is sparsely captured.
+  const useOrderCount = totalOrders > 0 && revenueOrderCount < Math.ceil(totalOrders * 0.5);
+  const aggregation = useOrderCount ? 'order_count' : 'average_revenue_per_order';
 
   for (let di = 0; di < 7; di++) {
     for (let h = 0; h < 24; h++) {
-      const avg = orderCount[di][h] > 0 ? (revenueSum[di][h] / orderCount[di][h]) : 0;
-      matrix[di][h] = Math.round(avg);
+      const value = useOrderCount
+        ? orderCount[di][h]
+        : (orderCount[di][h] > 0 ? (revenueSum[di][h] / orderCount[di][h]) : 0);
+      matrix[di][h] = Math.round(value);
       if (matrix[di][h] > max) max = matrix[di][h];
     }
   }
+
+  // Attach calendar labels for the trailing 7 IST days ending at endISO.
+  const endIst = toISTDate(endISO || new Date().toISOString());
+  const labeledDays = days.map((d, di) => {
+    const offsetFromEnd = (endIst.getUTCDay() - d.key + 7) % 7;
+    const dayDate = new Date(endIst.getTime() - offsetFromEnd * 86400000);
+    const y = dayDate.getUTCFullYear();
+    const m = String(dayDate.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(dayDate.getUTCDate()).padStart(2, '0');
+    return {
+      ...d,
+      date: `${y}-${m}-${day}`,
+      label: `${Number(day)} ${dayDate.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' })}`,
+    };
+  });
 
   const peaks = [];
   for (let di = 0; di < 7; di++) {
@@ -108,7 +138,7 @@ function buildRevenueHeatmap(orders, endISO) {
           dayIndex: di,
           hour: h,
           revenue: matrix[di][h],
-          label: `${days[di].label} ${h % 12 || 12}${h < 12 ? 'am' : 'pm'}`,
+          label: `${labeledDays[di].dow} ${h % 12 || 12}${h < 12 ? 'am' : 'pm'}`,
         });
       }
     }
@@ -117,12 +147,12 @@ function buildRevenueHeatmap(orders, endISO) {
   peaks.sort((a, b) => b.revenue - a.revenue);
 
   return {
-    days,
+    days: labeledDays,
     hours: Array.from({ length: 24 }, (_, i) => i),
     matrix,
     max: Math.round(max),
     peaks: peaks.slice(0, 5),
-    aggregation: 'average_revenue_per_order',
+    aggregation,
   };
 }
 
@@ -246,17 +276,25 @@ function buildCustomerInsights(orders, tokens, orderRevenueById = {}) {
   const tokenPhoneById = Object.fromEntries(
     (tokens || []).map(t => [t.id, normPhone(t.phone)]).filter(([, p]) => Boolean(p))
   );
+  const tokenNameById = Object.fromEntries(
+    (tokens || []).map(t => [t.id, t.name || null]).filter(([, n]) => Boolean(n))
+  );
 
-  const touch = (phone, name, ts, amount) => {
+  const touch = (phone, name, ts, amount, { countVisit = true } = {}) => {
     const p = normPhone(phone);
     if (!p) return;
     if (!customers[p]) {
       customers[p] = { phone: p, name: name || null, visits: [], spend: 0 };
     }
     if (name && !customers[p].name) customers[p].name = name;
-    if (ts) customers[p].visits.push(new Date(ts).getTime());
+    if (countVisit && ts) customers[p].visits.push(new Date(ts).getTime());
     if (amount) customers[p].spend += Number(amount) || 0;
   };
+
+  // Prefer token sessions as the visit source (one visit per token).
+  for (const t of tokens || []) {
+    touch(t.phone, t.name, t.arrived_at, null, { countVisit: true });
+  }
 
   for (const o of orders) {
     if (o.status === 'cancelled') continue;
@@ -264,10 +302,21 @@ function buildCustomerInsights(orders, tokens, orderRevenueById = {}) {
       ? Number(o.total_amount)
       : Number(orderRevenueById[o.id]) || 0;
     const phone = o.customer_phone || tokenPhoneById[o.token_id] || null;
-    touch(phone, o.customer_name, o.created_at, amount);
+    const name = o.customer_name || tokenNameById[o.token_id] || null;
+    // Spend attaches to the guest; do not double-count visits already recorded via tokens.
+    touch(phone, name, o.created_at, amount, { countVisit: !o.token_id && !tokenPhoneById[o.token_id] });
   }
-  for (const t of tokens) {
-    touch(t.phone, t.name, t.arrived_at, null);
+
+  // Deduplicate near-simultaneous visit stamps (token + order within 90 minutes).
+  for (const c of Object.values(customers)) {
+    c.visits.sort((a, b) => a - b);
+    const deduped = [];
+    for (const ts of c.visits) {
+      if (!deduped.length || (ts - deduped[deduped.length - 1]) > 90 * 60 * 1000) {
+        deduped.push(ts);
+      }
+    }
+    c.visits = deduped;
   }
 
   const now = Date.now();
@@ -331,7 +380,7 @@ function buildCustomerInsights(orders, tokens, orderRevenueById = {}) {
 function buildStockOutages(auditRows) {
   const byItem = {};
   const events = (auditRows ?? [])
-    .filter(r => /marked (in|out) stock/i.test(r.action || ''))
+    .filter(r => /marked (in|out)(?: of)? stock/i.test(r.action || ''))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
   for (const ev of events) {
@@ -352,6 +401,7 @@ function buildStockOutages(auditRows) {
   }
 
   return Object.values(byItem)
+    .filter(r => r.offCount > 0)
     .sort((a, b) => b.offCount - a.offCount || b.totalOffMinutes - a.totalOffMinutes)
     .slice(0, 15)
     .map(r => ({
@@ -518,7 +568,7 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
       const chunk = orderIds.slice(i, i + CHUNK);
       let oiData = [];
       const primaryItems = await supabaseAdmin.from('order_items')
-        .select('order_id, quantity, unit_price, special_instructions, menu_item:menu_item_id(name)')
+        .select('order_id, quantity, unit_price, special_instructions, menu_item:menu_item_id(name, price)')
         .in('order_id', chunk);
 
       if (!primaryItems.error) {
@@ -532,7 +582,7 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
           chunkSample: chunk.slice(0, 5),
         });
         const fallbackItems = await supabaseAdmin.from('order_items')
-          .select('order_id, quantity, unit_price, special_instructions')
+          .select('order_id, quantity, unit_price, special_instructions, menu_item:menu_item_id(name)')
           .in('order_id', chunk);
         if (fallbackItems.error) {
           logSupabaseError('order_items.fallback', fallbackItems.error, {
@@ -563,11 +613,20 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
 
   const stockOutages = buildStockOutages(auditRes.data);
 
+  // Backfill missing order totals from line items so revenue-derived panels
+  // (heatmap, service split, customer spend) degrade gracefully.
+  const enrichedOrders = orders.map(o => {
+    const captured = Number(o.total_amount) || 0;
+    if (captured > 0) return o;
+    const fromItems = Number(orderRevenueById[o.id]) || 0;
+    return fromItems > 0 ? { ...o, total_amount: fromItems } : o;
+  });
+
   return {
-    revenueHeatmap: buildRevenueHeatmap(orders, endISO),
-    serviceSplit: buildServiceSplit(orders),
-    repeatTrend: buildRepeatTrend(orders),
-    customers: buildCustomerInsights(orders, tokensRes.data ?? [], orderRevenueById),
+    revenueHeatmap: buildRevenueHeatmap(enrichedOrders, endISO, orderRevenueById),
+    serviceSplit: buildServiceSplit(enrichedOrders),
+    repeatTrend: buildRepeatTrend(enrichedOrders),
+    customers: buildCustomerInsights(enrichedOrders, tokensRes.data ?? [], orderRevenueById),
     stockOutages,
     stockOutagesMeta: {
       source: 'audit_logs',

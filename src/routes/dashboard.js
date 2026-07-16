@@ -155,8 +155,40 @@ router.get('/wa-orders', authenticateToken, getRestaurantId, requireOutlet, asyn
       orderRows = (fallbackOrders.data ?? []).map(r => ({ ...r, token_id: null }));
     }
 
+    // Backfill sparse/zero totals from order_items so Amount is not blank when
+    // the parent order row never received a persisted total_amount.
+    const zeroAmountIds = orderRows.filter(r => !(Number(r.total_amount) > 0)).map(r => r.id).filter(Boolean);
+    if (zeroAmountIds.length) {
+      const revenueByOrderId = {};
+      const CHUNK = 150;
+      for (let i = 0; i < zeroAmountIds.length; i += CHUNK) {
+        const chunk = zeroAmountIds.slice(i, i + CHUNK);
+        const { data: itemRows, error: itemErr } = await supabaseAdmin
+          .from('order_items')
+          .select('order_id, quantity, unit_price')
+          .in('order_id', chunk);
+        if (itemErr) {
+          console.error('[dashboard/wa-orders] order_items backfill failed:', itemErr.message);
+          break;
+        }
+        for (const row of itemRows ?? []) {
+          const rev = (Number(row.quantity) || 0) * (Number(row.unit_price) || 0);
+          if (!row.order_id || rev <= 0) continue;
+          revenueByOrderId[row.order_id] = (revenueByOrderId[row.order_id] || 0) + rev;
+        }
+      }
+      orderRows = orderRows.map(r => {
+        if (Number(r.total_amount) > 0) return r;
+        const fromItems = revenueByOrderId[r.id];
+        return fromItems > 0 ? { ...r, total_amount: fromItems } : r;
+      });
+    }
+
+    // Prefer exact token_id links. Phone fallback assigns each unmatched order to
+    // at most ONE nearest token for that phone — never broadcast a period total
+    // onto every visit for the same guest (that produced duplicate ₹ amounts).
     const amountByToken = {};
-    const amountByPhone = {};
+    const unmatchedOrders = [];
 
     for (const row of orderRows) {
       const amount = Number(row.total_amount) || 0;
@@ -165,16 +197,47 @@ router.get('/wa-orders', authenticateToken, getRestaurantId, requireOutlet, asyn
       if (row.token_id) {
         amountByToken[row.token_id] = (amountByToken[row.token_id] || 0) + amount;
       } else {
-        const phoneKey = normPhone(row.customer_phone);
-        if (!phoneKey) continue;
-        amountByPhone[phoneKey] = (amountByPhone[phoneKey] || 0) + amount;
+        unmatchedOrders.push(row);
       }
+    }
+
+    const tokensByPhone = {};
+    for (const t of tokens) {
+      const phoneKey = normPhone(t.phone);
+      if (!phoneKey) continue;
+      if (!tokensByPhone[phoneKey]) tokensByPhone[phoneKey] = [];
+      tokensByPhone[phoneKey].push(t);
+    }
+
+    const phoneAssignedAmount = {};
+    for (const row of unmatchedOrders) {
+      const phoneKey = normPhone(row.customer_phone);
+      if (!phoneKey) continue;
+      const candidates = tokensByPhone[phoneKey];
+      if (!candidates?.length) continue;
+
+      const orderTs = new Date(row.created_at).getTime();
+      let best = null;
+      let bestDist = Infinity;
+      for (const t of candidates) {
+        const dist = Math.abs(new Date(t.arrived_at).getTime() - orderTs);
+        // Prefer same-day / nearby sessions; ignore matches older than 36h.
+        if (dist < bestDist && dist <= 36 * 60 * 60 * 1000) {
+          bestDist = dist;
+          best = t;
+        }
+      }
+      if (!best) continue;
+      const amount = Number(row.total_amount) || 0;
+      phoneAssignedAmount[best.id] = (phoneAssignedAmount[best.id] || 0) + amount;
     }
 
     const orders = tokens.map(t => {
       const tokenAmount = amountByToken[t.id];
-      const phoneAmount = amountByPhone[normPhone(t.phone)];
-      const resolvedAmount = tokenAmount != null ? tokenAmount : (phoneAmount || 0);
+      const phoneAmount = phoneAssignedAmount[t.id];
+      const resolvedAmount = tokenAmount != null
+        ? tokenAmount
+        : (phoneAmount != null ? phoneAmount : 0);
 
       return {
         id:           t.id,
@@ -184,7 +247,9 @@ router.get('/wa-orders', authenticateToken, getRestaurantId, requireOutlet, asyn
         party_size:   t.pax,
         token_number: t.id,
         total_amount: Math.round(resolvedAmount * 100) / 100,
-        amount_match_mode: tokenAmount != null ? 'token_id_exact' : (phoneAmount != null ? 'phone_fallback' : 'none'),
+        amount_match_mode: tokenAmount != null
+          ? 'token_id_exact'
+          : (phoneAmount != null ? 'phone_nearest_token' : 'none'),
         customers:    { name: t.name, phone: t.phone },
       };
     });
