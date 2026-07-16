@@ -12,6 +12,7 @@ const {
   getRestaurantId,
   canManageRestaurantSettings,
 } = require('../middleware/auth');
+const { withAudit, auditOwnerDashboardContext } = require('../middleware/audit');
 const { estimateKitchenStartFromTotals, assignScheduledBucket } = require('../helpers/kitchenScheduler');
 
 function requireSettingsAccess(req, res, next) {
@@ -886,7 +887,14 @@ router.post('/restaurants/resolve-pickup', authenticateToken, getRestaurantId, r
 // ── Owner self-service restaurant update ──────────────────────────────────────
 // Used by SettingsPanel tabs: Restaurant, Services, Kitchen, WhatsApp
 
-router.put('/restaurants/me', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
+router.put(
+  '/restaurants/me',
+  authenticateToken,
+  getRestaurantId,
+  requireSettingsAccess,
+  auditOwnerDashboardContext,
+  withAudit('settings.update', 'tenant'),
+  async (req, res) => {
   try {
     const ALLOWED = [
       'name','display_name','legal_name','address_line1','address_line2',
