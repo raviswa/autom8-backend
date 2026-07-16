@@ -283,7 +283,10 @@ async def classify_intent(message: str, current_state: str, context: dict) -> Di
             '}'
         )
 
-        response = client.models.generate_content(
+        # google-genai generate_content is sync — never call it on the event
+        # loop or background analytics will stall WhatsApp routing (Hi latency).
+        response = await asyncio.to_thread(
+            client.models.generate_content,
             model="gemini-2.0-flash",
             contents=prompt,
         )

@@ -89,6 +89,17 @@ async def background_analytics(
     step: str,
 ) -> None:
     try:
+        # Greetings / Home never need Gemini — sync generate_content would also
+        # block the event loop and inflate Hi → service-menu latency.
+        from agents.customer.booking_helpers import is_greeting, is_reset_keyword
+
+        if is_greeting(message) or is_reset_keyword(message):
+            await safe_log_event(
+                restaurant_id, customer_id,
+                f"booking_{step}", "booking_message", "greeting", message,
+            )
+            return
+
         context = await safe_load_context(restaurant_id, customer_id)
         intent  = await safe_classify_intent(message, "booking_flow", context)
         await safe_log_event(

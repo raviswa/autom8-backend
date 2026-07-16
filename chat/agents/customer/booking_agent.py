@@ -115,19 +115,21 @@ async def handle_booking_flow(
     raw_message_obj: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
 
-    asyncio.create_task(background_analytics(
-        restaurant_id, customer_id,
-        message, session_state.get("booking_step", "start"),
-    ))
+    current_step = session_state.get("booking_step") or "ask_service"
+    # Analytics (incl. Gemini) is skippable for greetings — see background_analytics.
+    if not is_greeting(message) and not is_reset_keyword(message):
+        asyncio.create_task(background_analytics(
+            restaurant_id, customer_id,
+            message, current_step or "start",
+        ))
 
-    current_step = session_state.get("booking_step", "ask_service")
     session_state["restaurant_id"] = restaurant_id
 
     # ── Idle session expiry (30 min) — drop stale mid-flow steps ───────────────
     if expire_session_if_stale(
         session_state, customer_id=customer_id, customer_name=customer_name,
     ):
-        current_step = session_state.get("booking_step", "ask_service")
+        current_step = session_state.get("booking_step") or "ask_service"
 
     msg_lower = message.strip().lower()
 
