@@ -18,8 +18,10 @@ TAKEAWAY_ROUNDING_MINUTES = 30
 DELIVERY_ROUNDING_MINUTES = 15
 
 KITCHEN_STATIONS = frozenset({
-    "tawa", "steamer", "kadai", "beverages", "assembly", "cold",
+    "tawa", "steamer", "kadai", "beverages", "assembly", "cold", "sweets_counter",
 })
+
+PACKING_STATIONS = frozenset({"sweets_counter"})
 
 MENU_DEFAULTS: dict[str, Any] = {
     "prep_time_fixed": 5,
@@ -81,10 +83,14 @@ def compute_order_timing(
         if not m["holds_well"]:
             all_hold_well = False
 
+        packing_total += m["packing_time"] * qty
+        # Pre-packed / sweets_counter: packing time only — do not inflate cook lead time
+        if m["kitchen_station"] in PACKING_STATIONS:
+            continue
+
         cook = effective_cook_time(m, qty)
         station = m["kitchen_station"]
         station_times[station] = station_times.get(station, 0) + cook
-        packing_total += m["packing_time"] * qty
 
     total_cook = max(station_times.values()) if station_times else 0
     return {

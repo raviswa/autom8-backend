@@ -9,7 +9,8 @@ const IST = 'Asia/Kolkata';
 const TAKEAWAY_ROUNDING_MINUTES = 30;
 const DELIVERY_ROUNDING_MINUTES = 15;
 
-const KITCHEN_STATIONS = new Set(['tawa', 'steamer', 'kadai', 'beverages', 'assembly', 'cold']);
+const KITCHEN_STATIONS = new Set(['tawa', 'steamer', 'kadai', 'beverages', 'assembly', 'cold', 'sweets_counter']);
+const PACKING_STATIONS = new Set(['sweets_counter']);
 const MENU_DEFAULTS = {
   prep_time_fixed: 5,
   batch_size: 1,
@@ -51,9 +52,11 @@ function computeOrderTiming(cartLines, menuByRetailerId) {
     const m = menuLine(menuItem);
     const qty = Math.max(1, parseInt(line.qty || line.quantity || 1, 10));
     if (!m.holds_well) allHoldWell = false;
+    packingTotal += m.packing_time * qty;
+    // Pre-packed / sweets_counter: packing time only — do not inflate cook lead time
+    if (PACKING_STATIONS.has(m.kitchen_station)) continue;
     const cook = effectiveCookTime(m, qty);
     stationTimes[m.kitchen_station] = (stationTimes[m.kitchen_station] || 0) + cook;
-    packingTotal += m.packing_time * qty;
   }
 
   const stations = Object.values(stationTimes);

@@ -124,6 +124,7 @@ const LOB_SCHEMAS = {
     templateExamples: [
       ['M001', 'Idli (2 pcs)', 'Soft steamed idlis with sambar and chutney', 30, 'Tiffin', 'Morning Tiffin', 'https://images.unsplash.com/photo-1585937421612-70a008356fbe?w=800', 'TRUE', 5, 1, 10, 'steamer', 1, 'FALSE', 'main'],
       ['M002', 'Ghee Rice + Kurma', 'Fragrant ghee rice with vegetable kurma', 90, 'Rice & Meals', 'Lunch', 'https://images.unsplash.com/photo-1596797038530-2c107229654b?w=800', 'TRUE', 15, 1, 15, 'kadai', 2, 'TRUE', 'main'],
+      ['M003', 'Assorted Sweets Box (500g)', 'Pre-packed sweets — packing counter', 350, 'Sweets', 'all', '', 'TRUE', 0, 1, 0, 'sweets_counter', 2, 'TRUE', 'main'],
     ],
     columnHelp: [
       ['Column guide — Restaurant / Cloud Kitchen / Tiffin'],
@@ -131,7 +132,7 @@ const LOB_SCHEMAS = {
       ['custom_label_0 — menu slot: Morning Tiffin, Lunch, Evening Snacks, Dinner (blank = all day)'],
       ['prep_time_fixed — fixed prep minutes before batch cooking (default 5)'],
       ['batch_size / time_per_batch — batch cook timing for scheduled orders'],
-      ['kitchen_station — tawa, steamer, kadai, beverages, assembly, cold'],
+      ['kitchen_station — tawa, steamer, kadai, beverages, assembly, cold, sweets_counter (pre-packed → packing screen, skips live cooking KDS)'],
       ['packing_time — minutes per item for takeaway packing'],
       ['holds_well — TRUE if item can wait without quality loss'],
       ['fulfillment_section — counter id when multi-counter mode is on (default main)'],

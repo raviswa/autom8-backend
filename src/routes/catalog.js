@@ -572,7 +572,7 @@ function parseBoolCell(raw, defaultVal = false) {
   return s === 'true' || s === '1' || s === 'yes';
 }
 
-const KITCHEN_STATIONS = new Set(['tawa', 'steamer', 'kadai', 'beverages', 'assembly', 'cold']);
+const KITCHEN_STATIONS = new Set(['tawa', 'steamer', 'kadai', 'beverages', 'assembly', 'cold', 'sweets_counter']);
 
 function parseKitchenStation(raw) {
   const s = String(raw || 'assembly').toLowerCase().trim();

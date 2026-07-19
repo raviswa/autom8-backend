@@ -26,6 +26,7 @@ const { broadcastToRestaurant }   = require('../websocket');
 const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../helpers/whatsapp');
 const { applySlotAvailability, getCurrentSlotIST } = require('./catalog');
 const { notifyOrderReady }        = require('../helpers/whatsapp');
+const { notifyPackingTicketAlert } = require('../helpers/packingAlerts');
 const { queueFeedbackForTable }   = require('../helpers/feedback');
 const {
   resolvePickupLocation,
@@ -323,9 +324,10 @@ router.post('/orders', authenticateToken, getRestaurantId, async (req, res) => {
 
     let subtotal   = 0;
     const orderItems = [];
+    const packingAlertItems = [];
     for (const item of items) {
       const { data: menuItem } = await supabaseAdmin.from('menu_items')
-        .select('price').eq('id', item.menu_item_id).single();
+        .select('price, name, kitchen_station').eq('id', item.menu_item_id).single();
       subtotal += menuItem.price * item.quantity;
       const { data: itemData, error: itemError } = await supabaseAdmin.from('order_items')
         .insert({ order_id: orderData.id, menu_item_id: item.menu_item_id, quantity: item.quantity,
@@ -333,9 +335,30 @@ router.post('/orders', authenticateToken, getRestaurantId, async (req, res) => {
         .select().single();
       if (itemError) throw itemError;
       orderItems.push(itemData);
+      const station = String(menuItem.kitchen_station || 'assembly').toLowerCase();
+      const queue = station === 'sweets_counter' ? 'packing' : 'cooking';
       await supabaseAdmin.from('kds_items').insert({
-        restaurant_id: req.restaurant_id, order_item_id: itemData.id, status: 'pending',
+        restaurant_id: req.restaurant_id,
+        order_item_id: itemData.id,
+        status: 'pending',
+        item_name: menuItem.name || 'Item',
+        kitchen_station: station,
+        queue,
       });
+      if (queue === 'packing') {
+        packingAlertItems.push({ name: menuItem.name || 'Item', qty: item.quantity });
+      }
+    }
+
+    if (packingAlertItems.length > 0) {
+      try {
+        await notifyPackingTicketAlert(req.restaurant_id, {
+          tokenNumber: orderNumber,
+          items: packingAlertItems,
+        });
+      } catch (packErr) {
+        console.warn('[pos/orders] packing alert failed (non-fatal):', packErr.message);
+      }
     }
 
     const tax = subtotal * 0.1, total = subtotal + tax;
@@ -473,14 +496,17 @@ router.get('/kds/feed', authenticateToken, getRestaurantId, async (req, res) => 
     }
 
     const { status = 'pending' } = req.query;
+    const queueRaw = String(req.query.queue || 'cooking').toLowerCase();
+    const queue = queueRaw === 'packing' ? 'packing' : 'cooking';
     const statusFilter = status === 'all' ? ['pending', 'in_progress', 'ready'] : [status];
     const { data, error } = await supabaseAdmin.from('kds_items')
       .select(`*, order_item:order_item_id!left(*, menu_item:menu_item_id!left(name, description, prep_time_minutes), order:order_id!left(table:table_id!left(table_number, section), order_number))`)
       .eq('restaurant_id', req.restaurant_id)
+      .eq('queue', queue)
       .in('status', statusFilter)
       .order('created_at', { ascending: true });
     if (error) throw error;
-    res.json({ success: true, items: data });
+    res.json({ success: true, items: data, queue });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -602,10 +628,13 @@ router.get('/kds/history', authenticateToken, getRestaurantId, async (req, res) 
     const fromDate = String(req.query.from || todayIst).slice(0, 10);
     const toDate = String(req.query.to || fromDate).slice(0, 10);
     const { start, end } = istDateRangeBounds(fromDate, toDate);
+    const queueRaw = String(req.query.queue || 'cooking').toLowerCase();
+    const queue = queueRaw === 'packing' ? 'packing' : 'cooking';
 
     const { data, error } = await supabaseAdmin.from('kds_items')
       .select(`*, order_item:order_item_id!left(*, menu_item:menu_item_id!left(name, description, prep_time_minutes), order:order_id!left(table:table_id!left(table_number, section), order_number))`)
       .eq('restaurant_id', req.restaurant_id)
+      .eq('queue', queue)
       .in('status', ['ready', 'cancelled'])
       .gte('updated_at', start)
       .lte('updated_at', end)
@@ -617,6 +646,7 @@ router.get('/kds/history', authenticateToken, getRestaurantId, async (req, res) 
       items: data ?? [],
       from: fromDate,
       to: toDate,
+      queue,
     });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -903,7 +933,7 @@ router.put(
       'city','state','postal_code','country',
       'contact_phone','contact_email','website_url','cuisine_type',
       'logo_url','gstin','opening_hours',
-      'whatsapp_number','waba_id','manager_phone','meta_catalog_id',
+      'whatsapp_number','waba_id','manager_phone','sweets_counter_phone','meta_catalog_id',
       'timezone','dining_duration_minutes','payment_mode','kitchen_workflow',
       'kot_printer_ip','kot_printer_port','kot_printer_enabled',
       'takeaway_fulfillment_mode','fulfillment_sections',

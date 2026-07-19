@@ -28,7 +28,7 @@ function requireOutlet(req, res, next) {
 }
 
 const RESTAURANT_SELECT_FULL = [
-  'id', 'name', 'waba_id', 'whatsapp_number', 'display_name', 'manager_phone', 'meta_catalog_id',
+  'id', 'name', 'waba_id', 'whatsapp_number', 'display_name', 'manager_phone', 'sweets_counter_phone', 'meta_catalog_id',
   'timezone', 'dining_duration_minutes', 'payment_mode', 'kitchen_workflow',
   'kot_printer_ip', 'kot_printer_port', 'kot_printer_enabled',
   'takeaway_fulfillment_mode', 'fulfillment_sections', 'parcel_charge_per_item',
@@ -45,7 +45,7 @@ const RESTAURANT_SELECT_FULL = [
 ].join(', ');
 
 const RESTAURANT_SELECT_BASE = [
-  'id', 'name', 'waba_id', 'whatsapp_number', 'display_name', 'manager_phone', 'meta_catalog_id',
+  'id', 'name', 'waba_id', 'whatsapp_number', 'display_name', 'manager_phone', 'sweets_counter_phone', 'meta_catalog_id',
   'timezone', 'dining_duration_minutes', 'payment_mode',
   'takeaway_fulfillment_mode', 'fulfillment_sections', 'opening_hours',
   'lob_type',   // ← add this

@@ -31,8 +31,14 @@ const router  = express.Router();
 const { supabaseAdmin }       = require('../config/supabase');
 const { broadcastToRestaurant } = require('../websocket');
 const { printKotEscPos, buildKotLines } = require('../helpers/kotEscPos');
+const { notifyPackingTicketAlert } = require('../helpers/packingAlerts');
 
 const { isValidKdsSecret, extractInternalSecret } = require('../config/internalSecret');
+
+/** Classify menu kitchen_station into cooking vs packing staff queue. */
+function queueForStation(station) {
+  return String(station || '').toLowerCase() === 'sweets_counter' ? 'packing' : 'cooking';
+}
 
 // ── POST /api/kds/notify ──────────────────────────────────────────────────────
 
@@ -180,25 +186,39 @@ router.post('/notify', async (req, res) => {
         const oiIds = existingOrderLines.map((r) => r.id);
         const { data: oiDetail } = await supabaseAdmin
           .from('order_items')
-          .select('id, quantity, menu_item:menu_item_id(name)')
+          .select('id, quantity, menu_item:menu_item_id(name, kitchen_station)')
           .in('id', oiIds);
-        const repairInserts = (oiDetail ?? []).map((oi) => ({
-          restaurant_id,
-          order_item_id:        oi.id,
-          status:               'pending',
-          priority:             'normal',
-          item_name:            oi.menu_item?.name || 'Item',
-          token_number:         token_number  || null,
-          customer_phone:       cleanPhone,
-          service_type:         service_type  || null,
-          special_instructions: special_notes || null,
-        }));
+        const repairInserts = (oiDetail ?? []).map((oi) => {
+          const station = String(oi.menu_item?.kitchen_station || 'assembly').toLowerCase();
+          return {
+            restaurant_id,
+            order_item_id:        oi.id,
+            status:               'pending',
+            priority:             'normal',
+            item_name:            oi.menu_item?.name || 'Item',
+            token_number:         token_number  || null,
+            customer_phone:       cleanPhone,
+            service_type:         service_type  || null,
+            special_instructions: special_notes || null,
+            kitchen_station:      station,
+            queue:                queueForStation(station),
+          };
+        });
         if (repairInserts.length > 0) {
           const { error: repairErr } = await supabaseAdmin.from('kds_items').insert(repairInserts);
           if (!repairErr) {
             console.log(
               `[kds-notify] 🔧 repaired ${repairInserts.length} KDS line(s) for ${orderNumber}`
             );
+            const packingRepair = repairInserts.filter((r) => r.queue === 'packing');
+            if (packingRepair.length) {
+              try {
+                await notifyPackingTicketAlert(restaurant_id, {
+                  tokenNumber: token_number,
+                  items: packingRepair.map((r) => ({ name: r.item_name, qty: 1 })),
+                });
+              } catch (_) { /* non-fatal */ }
+            }
             broadcastToRestaurant(restaurant_id, {
               type:           'ORDER_NEW',
               order_id:       existingOrder.id,
@@ -209,6 +229,7 @@ router.post('/notify', async (req, res) => {
               customer_phone: cleanPhone,
               service_type:   service_type ?? null,
               item_count:     repairInserts.length,
+              has_packing:    packingRepair.length > 0,
               source:         'whatsapp_booking',
               repaired:       true,
               timestamp:      new Date().toISOString(),
@@ -293,6 +314,7 @@ router.post('/notify', async (req, res) => {
     }
 
     // ── Step 3: Per-item: resolve menu_item_id → order_item → kds_item ────────
+    // Billing: all lines stay on ONE orders row. Split is kds_items.queue only.
     const kdsInserts      = [];
     let   kdsItemsCreated = 0;
 
@@ -302,24 +324,27 @@ router.post('/notify', async (req, res) => {
       }
       // 3a: Resolve by retailer_id
       let menuItemId = null;
+      let kitchenStation = 'assembly';
 
       if (item.retailer_id && item.retailer_id !== 'manual') {
         const { data: byRetailer } = await supabaseAdmin
-          .from('menu_items').select('id')
+          .from('menu_items').select('id, kitchen_station')
           .eq('restaurant_id', restaurant_id)
           .eq('retailer_id', item.retailer_id)
           .maybeSingle();
         menuItemId = byRetailer?.id ?? null;
+        if (byRetailer?.kitchen_station) kitchenStation = byRetailer.kitchen_station;
       }
 
       // 3b: Resolve by name (case-insensitive fallback)
       if (!menuItemId && item.name) {
         const { data: byName } = await supabaseAdmin
-          .from('menu_items').select('id')
+          .from('menu_items').select('id, kitchen_station')
           .eq('restaurant_id', restaurant_id)
           .ilike('name', item.name.trim())
           .maybeSingle();
         menuItemId = byName?.id ?? null;
+        if (byName?.kitchen_station) kitchenStation = byName.kitchen_station;
       }
 
       // 3c: Ghost item — satisfies FK, keeps KDS accurate, never shown in menu
@@ -339,8 +364,9 @@ router.post('/notify', async (req, res) => {
             is_stocked:   false,
             time_slot:    'all',
             category:     'Manual',
+            kitchen_station: 'assembly',
           })
-          .select('id')
+          .select('id, kitchen_station')
           .single();
 
         if (ghostErr) {
@@ -348,6 +374,7 @@ router.post('/notify', async (req, res) => {
           continue;
         }
         menuItemId = ghost.id;
+        kitchenStation = ghost.kitchen_station || 'assembly';
       }
 
       // 3d: order_items row
@@ -373,8 +400,10 @@ router.post('/notify', async (req, res) => {
         continue;
       }
 
+      const station = String(kitchenStation || 'assembly').toLowerCase();
+      const queue = queueForStation(station);
 
-      // 3e: Stage kds_item for bulk insert
+      // 3e: Stage kds_item for bulk insert (queue splits cooking vs packing screens)
       kdsInserts.push({
         restaurant_id,
         order_item_id:        orderItem.id,
@@ -386,6 +415,9 @@ router.post('/notify', async (req, res) => {
         service_type:         service_type  || null,
         special_instructions: special_notes || null,
         item_category:        item.category || '',
+        kitchen_station:      station,
+        queue,
+        _qty:                 qty, // stripped before insert — packing alert only
       });
     }
 
@@ -421,44 +453,61 @@ router.post('/notify', async (req, res) => {
 
 
     // ── Step 4: Bulk-insert kds_items ─────────────────────────────────────────
-    const kdsItemsAdded = kdsInserts.length;
-    if (kdsInserts.length > 0) {
-      const { error: kdsErr } = await supabaseAdmin.from('kds_items').insert(kdsInserts);
+    const packingForAlert = kdsInserts
+      .filter((r) => r.queue === 'packing')
+      .map((r) => ({ name: r.item_name, qty: r._qty }));
+    const rowsToInsert = kdsInserts.map(({ _qty, ...row }) => row);
+    const kdsItemsAdded = rowsToInsert.length;
+    if (rowsToInsert.length > 0) {
+      const { error: kdsErr } = await supabaseAdmin.from('kds_items').insert(rowsToInsert);
       if (kdsErr) {
         console.error('[kds-notify] kds_items insert failed:', kdsErr.message);
         return res.status(500).json({ error: kdsErr.message });
       }
-      kdsItemsCreated = kdsInserts.length;
+      kdsItemsCreated = rowsToInsert.length;
+    }
+
+    // Packing WhatsApp nudge (non-fatal) — cooking board unchanged
+    if (packingForAlert.length > 0) {
+      try {
+        await notifyPackingTicketAlert(restaurant_id, {
+          tokenNumber: token_number,
+          items: packingForAlert,
+        });
+      } catch (packAlertErr) {
+        console.warn('[kds-notify] packing alert failed (non-fatal):', packAlertErr.message);
+      }
     }
 
     // ── KOT ticket (scheduled orders — AC7 payment/KOT coupling) ─────────────
+    // Thermal KOT links cooking-queue lines only; packing uses packing screen.
     let kotTicketId = null;
     if (create_kot && orderRow?.id) {
-      const ticketNumber = `KOT-${orderRow.order_number.replace(/^ORD-/, '')}`;
-      const { data: kotRow, error: kotErr } = await supabaseAdmin
-        .from('kot_tickets')
-        .insert({
-          restaurant_id,
-          order_id:      orderRow.id,
-          ticket_number: ticketNumber,
-          status:        'pending',
-          priority:      'normal',
-        })
-        .select('id')
-        .maybeSingle();
-      if (kotErr) {
-        console.error('[kds-notify] kot_tickets insert failed:', kotErr.message);
-        return res.status(500).json({ error: `KOT creation failed: ${kotErr.message}` });
-      }
-      kotTicketId = kotRow?.id ?? null;
-      if (kotTicketId && kdsInserts.length > 0) {
-        const { data: oiRows } = await supabaseAdmin
-          .from('order_items').select('id').eq('order_id', orderRow.id);
-        const oiIds = (oiRows ?? []).map((r) => r.id);
-        if (oiIds.length) {
+      const cookingOiIds = rowsToInsert
+        .filter((r) => r.queue === 'cooking')
+        .map((r) => r.order_item_id);
+      if (cookingOiIds.length > 0) {
+        const ticketNumber = `KOT-${orderRow.order_number.replace(/^ORD-/, '')}`;
+        const { data: kotRow, error: kotErr } = await supabaseAdmin
+          .from('kot_tickets')
+          .insert({
+            restaurant_id,
+            order_id:      orderRow.id,
+            ticket_number: ticketNumber,
+            status:        'pending',
+            priority:      'normal',
+          })
+          .select('id')
+          .maybeSingle();
+        if (kotErr) {
+          console.error('[kds-notify] kot_tickets insert failed:', kotErr.message);
+          return res.status(500).json({ error: `KOT creation failed: ${kotErr.message}` });
+        }
+        kotTicketId = kotRow?.id ?? null;
+        if (kotTicketId) {
           await supabaseAdmin.from('kds_items')
             .update({ kot_ticket_id: kotTicketId })
-            .in('order_item_id', oiIds);
+            .in('order_item_id', cookingOiIds);
         }
       }
     }
@@ -507,18 +556,27 @@ router.post('/notify', async (req, res) => {
       (kitchenWorkflow === 'KOT_only' || kitchenWorkflow === 'Both_KOT_and_KDS');
 
     if (shouldPrintKot && kdsItemsAdded > 0) {
-      const kotLines = buildKotLines({
-        restaurant_name: restaurantName,
-        order_number: orderRow.order_number,
-        token_number: token_number ?? null,
-        table_number: table_number ?? null,
-        service_type: service_type ?? null,
-        special_notes: special_notes ?? null,
-        items,
+      const cookingCartItems = items.filter((item) => {
+        // Prefer staged queue when we just inserted; fall back to printing all if unknown
+        const staged = rowsToInsert.find(
+          (r) => String(r.item_name || '').toLowerCase() === String(item.name || '').toLowerCase()
+        );
+        return !staged || staged.queue === 'cooking';
       });
-      printKotEscPos({ ip: kotPrinterIp, port: kotPrinterPort, lines: kotLines })
-        .then(() => console.log(`[kds-notify] 🖨 Network KOT sent to ${kotPrinterIp}:${kotPrinterPort}`))
-        .catch((e) => console.warn(`[kds-notify] Network KOT failed (non-fatal): ${e.message}`));
+      if (cookingCartItems.length > 0) {
+        const kotLines = buildKotLines({
+          restaurant_name: restaurantName,
+          order_number: orderRow.order_number,
+          token_number: token_number ?? null,
+          table_number: table_number ?? null,
+          service_type: service_type ?? null,
+          special_notes: special_notes ?? null,
+          items: cookingCartItems,
+        });
+        printKotEscPos({ ip: kotPrinterIp, port: kotPrinterPort, lines: kotLines })
+          .then(() => console.log(`[kds-notify] 🖨 Network KOT sent to ${kotPrinterIp}:${kotPrinterPort}`))
+          .catch((e) => console.warn(`[kds-notify] Network KOT failed (non-fatal): ${e.message}`));
+      }
     }
 
     broadcastToRestaurant(restaurant_id, {
@@ -533,6 +591,7 @@ router.post('/notify', async (req, res) => {
       special_notes:    special_notes  ?? null,
       advance_credit:   advance_credit || 0,
       item_count:       kdsItemsCreated,
+      has_packing:      packingForAlert.length > 0,
       kitchen_workflow: kitchenWorkflow,
       source:           'whatsapp_booking',
       timestamp:        new Date().toISOString(),
