@@ -124,6 +124,30 @@ router.post('/register', async (req, res) => {
 
     console.log(`[supply/register] ✅ New supplier: ${supplier.business_name} (${supplier.id})`);
 
+    // SaaS trial row FIRST so referral credit (tenant-side) never has to create it.
+    try {
+      const { ensureSupplierSubscription } = require('../../helpers/supplierBilling');
+      await ensureSupplierSubscription(supplier.id);
+    } catch (subErr) {
+      console.error('[supply/register] supplier_subscriptions insert failed (non-fatal):', subErr.message);
+    }
+
+    // Referral activation for suppliers = successful registration (no WhatsApp
+    // first-message equivalent). Credits the referring TENANT's subscription
+    // when a pending tenant_referrals row exists for this supplier.
+    try {
+      const { creditReferralIfPending } = require('../../helpers/referrals');
+      const credit = await creditReferralIfPending('supplier', supplier.id);
+      if (credit?.credited) {
+        console.log(`[supply/register] referral credited for supplier ${supplier.id}`, {
+          referral_id: credit.referral_id,
+          bonus_days: credit.bonus_days,
+        });
+      }
+    } catch (creditErr) {
+      console.error('[supply/register] referral credit failed (non-fatal):', creditErr.message);
+    }
+
     res.status(201).json({
       success:     true,
       message:     'Account created successfully. You can now log in.',

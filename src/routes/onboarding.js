@@ -13,6 +13,7 @@ const router  = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
 const { ensureRestaurantSubscription, DEFAULT_SERVICES } = require('../helpers/subscriptionBilling');
 const { writeAuditLog } = require('../helpers/auditLog');
+const { sendOnboardingWelcomeEmail } = require('../helpers/onboardingEmail');
 
 const DEFAULT_FEATURES = DEFAULT_SERVICES;
 
@@ -215,6 +216,11 @@ async function registerStandalone(req, res, opts) {
 
     console.log(`[onboarding] ✅ Standalone: ${name} (${restaurantId}) — ${email}`);
 
+    // Welcome email — never fail registration if mail is down / missing address.
+    sendOnboardingWelcomeEmail(restaurant).catch((e) =>
+      console.error('[onboarding] welcome email failed (non-fatal):', e.message)
+    );
+
     res.status(201).json({
       success:       true,
       mode:          'standalone',
@@ -387,6 +393,24 @@ async function registerChain(req, res, opts) {
     });
 
     console.log(`[onboarding] ✅ Chain: ${chain_name} (${brandId}) — owner: ${email}${restaurantId ? ` — outlet: ${restaurantId}` : ''}`);
+
+    if (restaurantId) {
+      const { data: outletRow } = await supabaseAdmin
+        .from('tenants')
+        .select('id, name, contact_email, email')
+        .eq('id', restaurantId)
+        .maybeSingle();
+      if (outletRow) {
+        sendOnboardingWelcomeEmail({
+          ...outletRow,
+          // Prefer brand contact email when outlet row has an internal placeholder.
+          email: (outlet_owner_email || email || outletRow.email || '').trim(),
+          contact_email: outletRow.contact_email || outlet_owner_email || email || null,
+        }).catch((e) =>
+          console.error('[onboarding/chain] welcome email failed (non-fatal):', e.message)
+        );
+      }
+    }
 
     res.status(201).json({
       success:         true,

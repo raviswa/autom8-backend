@@ -60,6 +60,7 @@ from tools.phonepe_tools import (
 )
 from tools.booking_mechanisms import notify_manager_order_alert
 from tools.auto_reply_filter import is_whatsapp_auto_reply
+from tools.referral_hooks import notify_first_inbound_message
 from tools.booking_mechanisms import (
     is_catalog_order,
     bridge_catalog_order_to_cart,
@@ -526,6 +527,14 @@ async def _process_meta_payload(payload: dict):
         # Refresh pin on every message — keeps subsequent turns fast
         await pin_active_restaurant_for_phone(restaurant_whatsapp, phone, restaurant["id"])
         lat.mark("resolve_restaurant")
+
+        # First inbound WhatsApp for this tenant → stamp first_message_at + credit referral.
+        # Credit logic lives only in Node (src/helpers/referrals.js). Fired as a
+        # background task — never block the customer-facing reply on this HTTP hop.
+        try:
+            asyncio.create_task(notify_first_inbound_message(str(restaurant["id"])))
+        except Exception as ref_err:
+            logger.error(f"[referrals] notify_first_inbound_message schedule failed: {ref_err}")
 
         # 3e. LOB dispatch — non-restaurant tenants go to their own agent
         lob_type = restaurant.get("lob_type") or "restaurant"

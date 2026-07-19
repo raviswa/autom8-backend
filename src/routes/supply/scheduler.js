@@ -318,6 +318,16 @@ function startSupplySchedulerCron() {
         console.log('[supply-scheduler] cron overdue_reminders starting');
         const results = await runCronJobsForAllSuppliers('overdue_reminders');
         console.log('[supply-scheduler] cron overdue_reminders done', results.length);
+
+        // SaaS subscription billing reminders (supplier entity) — same job as
+        // main server; subscription_reminders_sent dedup prevents double-send.
+        try {
+          const { runReminderCheck } = require('../../helpers/billingReminders');
+          const billing = await runReminderCheck({ entityTypes: ['supplier'] });
+          console.log('[supply-scheduler] cron subscription billing reminders', billing);
+        } catch (billingErr) {
+          console.error('[supply-scheduler] billing reminders failed:', billingErr.message);
+        }
       }
 
       if (day === 1 && hour === 9 && lastRun.monthly !== ymd) {

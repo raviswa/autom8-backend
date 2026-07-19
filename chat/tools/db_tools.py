@@ -2629,7 +2629,10 @@ async def create_walk_in_token_direct(
         logger.error("[walk-in-token] DB session not initialized")
         return None
 
-    if token_type not in ("dinein", "takeaway", "large_party", "scheduled_delivery", "scheduled_takeaway"):
+    if token_type not in (
+        "dinein", "takeaway", "queue", "large_party",
+        "scheduled_delivery", "scheduled_takeaway",
+    ):
         logger.error(f"[walk-in-token] Invalid type: {token_type}")
         return None
 

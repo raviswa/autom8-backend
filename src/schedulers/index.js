@@ -26,6 +26,7 @@ const {
 const { onKitchenOpened } = require('../helpers/kitchenReminders');
 const { runDineInAutoAssignJob } = require('../helpers/dineInAutoAssign');
 const { runDueScheduledJobs } = require('../helpers/scheduledJobs');
+const { runReminderCheck } = require('../helpers/billingReminders');
 
 // Slot helpers live in catalog.js (single source of truth — shared with POST /catalog/slot-sync)
 const {
@@ -414,6 +415,21 @@ function startScheduledJobsRunner() {
   console.log('⏰ Scheduled jobs runner started (every 60s)');
 }
 
+function startSubscriptionReminderScheduler() {
+  const tick = async () => {
+    try {
+      // Unified tenant + supplier SaaS billing reminders (email + WhatsApp).
+      await runReminderCheck({ entityTypes: ['tenant', 'supplier'] });
+    } catch (err) {
+      console.error('[subscription-reminders] Error:', err.message);
+    }
+  };
+  // Daily-ish: run shortly after boot, then every 6 hours (dedup table prevents re-sends).
+  setTimeout(tick, 45 * 1000);
+  setInterval(tick, 6 * 60 * 60 * 1000);
+  console.log('📧 Billing reminder scheduler started (tenants+suppliers, every 6h, IST cadence via dedup)');
+}
+
 function startAllSchedulers() {
   startSlotScheduler();
   startSpecialNotesTimeoutMonitor();
@@ -422,6 +438,7 @@ function startAllSchedulers() {
   startMarketingScheduler();
   startDineInAutoAssignScheduler();
   startScheduledJobsRunner();
+  startSubscriptionReminderScheduler();
 }
 
 module.exports = { startAllSchedulers };

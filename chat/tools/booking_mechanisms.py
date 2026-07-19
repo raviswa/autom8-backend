@@ -736,7 +736,14 @@ async def _send_manager_walk_in_alert(
     arrival = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d-%b-%y, %H:%M")
     portal_url = f"{_os.getenv('FRONTEND_URL', 'https://app.autom8.works').rstrip('/')}/dashboard/manager"
 
-    if token_type == "dinein":
+    if token_type == "queue":
+        body = (
+            f"🎫 *New Queue Token* — *{token_id}*\n"
+            f"👤 {customer_name}, {pax} {'person' if pax == 1 else 'people'}\n"
+            f"🕐 {arrival} IST\n\n"
+            f"Please assist at the counter:\n{portal_url}"
+        )
+    elif token_type == "dinein":
         body = (
             f"🪑 *New Walk-in* — Token *{token_id}*\n"
             f"👤 {customer_name}, {pax} {'person' if pax == 1 else 'people'}\n"

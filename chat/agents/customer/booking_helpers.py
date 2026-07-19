@@ -839,6 +839,14 @@ async def send_service_menu(
             from agents.customer.booking_helpers import clear_cart
             clear_cart(state)
 
+        if service_type == "token_management":
+            state["last_service_type"] = "token_management"
+            await send_whatsapp_message(
+                customer_phone, "How many people in your party?", restaurant_id,
+            )
+            state["booking_step"] = "awaiting_party_size"
+            return
+
         if service_type == "dine_in":
             from agents.customer.dine_in_flow import resume_active_dine_in_token
             resumed = await resume_active_dine_in_token(
@@ -906,9 +914,13 @@ async def send_service_menu(
             state["booking_step"] = "awaiting_party_size"
             return
 
-    # Partition rows into explicit structured sections
-    section1_rows = [r for r in rows if r["id"] in ("dine_in_now", "door_delivery_now", "takeaway_now")]
-    section2_rows = [r for r in rows if r["id"] in ("table_reservation", "scheduled_delivery", "scheduled_pickup")]
+    # Partition rows into explicit structured sections.
+    # Preserve feature_gate order: token_queue before dine_in_now.
+    _sec1_order = ("token_queue", "dine_in_now", "door_delivery_now", "takeaway_now")
+    _sec2_order = ("table_reservation", "scheduled_delivery", "scheduled_pickup")
+    by_id = {r["id"]: r for r in rows}
+    section1_rows = [by_id[i] for i in _sec1_order if i in by_id]
+    section2_rows = [by_id[i] for i in _sec2_order if i in by_id]
     nothing_rows = [r for r in rows if r["id"] == "nothing"]
 
     sections = []

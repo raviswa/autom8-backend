@@ -12,6 +12,9 @@
 #   4. ORDER_STATUS → text/keyword only (not on the 3-button menu)
 #   5. FALLBACK     → main menu buttons
 #
+# Language: preferred_language on supply_clients (en/hi/bn/mr/te/ta). Detected
+# from Unicode script on free-text; replies/buttons come from locales/supply.
+#
 # State is stored in supply_conversation_states (same table as supply_agent.py
 # referenced in db/queries.py).  State is intentionally minimal — supply chat
 # is transactional, not conversational.
@@ -34,6 +37,7 @@ from typing import Optional
 
 from db.queries import (
     get_client_by_phone,
+    get_client_preferred_language,
     get_supply_session,
     save_supply_session,
     get_client_outstanding,
@@ -41,35 +45,46 @@ from db.queries import (
     log_supply_notification,
     get_last_supply_order,
     get_supplier_phone,
+    update_client_preferred_language,
 )
+from locales.supply import reply
 from tools.supply_form_token import build_order_form_url
+from tools.supply_language import resolve_language
 from tools.supply_whatsapp import send_supply_text, send_supply_buttons
 
 logger = logging.getLogger(__name__)
 
 _MENU_ACTIONS = frozenset({'PLACE_ORDER', 'CHECK_BALANCE', 'ORDER_STATUS', 'RECORD_PAYMENT'})
 
-# ── Intent patterns ───────────────────────────────────────────────────────────
+# ── Intent patterns (English / transliteration + native scripts) ──────────────
 
 _BALANCE_RE = re.compile(
-    r'\b(balance|outstanding|baaki|due|kitna|how much|owe|amount due)\b',
-    re.IGNORECASE
+    r'(?i)\b(balance|outstanding|baaki|due|kitna|how much|owe|amount due)\b'
+    '|\u092c\u093e\u0915\u0940|\u092c\u0915\u093e\u092f\u093e|\u0915\u093f\u0924\u0928\u093e|\u0915\u093f\u0924\u0928\u0947|\u09ac\u09be\u0995\u09bf|\u09ac\u09cd\u09af\u09be\u09b2\u09c7\u09a8\u09cd\u09b8|\u0995\u09a4|\u09ac\u0995\u09c7\u09df\u09be|\u0915\u093f\u0924\u0940|\u0925\u0915\u092c\u093e\u0915\u0940|\u092c\u0950\u0932\u0928\u094d\u0938|\u0c2c\u0c4d\u0c2f\u0c3e\u0c32\u0c46\u0c28\u0c4d\u0c38\u0c4d|\u0c2c\u0c3e\u0c15\u0c40|\u0c0e\u0c02\u0c24|\u0bae\u0bc0\u0ba4\u0bbf|\u0baa\u0bc7\u0bb2\u0ba9\u0bcd\u0bb8\u0bcd|\u0b8e\u0bb5\u0bcd\u0bb5\u0bb3\u0bb5\u0bc1|\u0ba8\u0bbf\u0bb2\u0bc1\u0bb5\u0bc8'
 )
 
 _ORDER_STATUS_RE = re.compile(
-    r'\b(order status|last order|my order|kya order|order hua|delivery status)\b',
-    re.IGNORECASE
+    r'(?i)\b(order status|last order|my order|kya order|order hua|delivery status)\b'
+    '|\u0911\u0930\u094d\u0921\u0930 \u0938\u094d\u091f\u0947\u091f\u0938|\u0906\u0916\u093f\u0930\u0940 \u0911\u0930\u094d\u0921\u0930|\u0921\u093f\u0932\u0940\u0935\u0930\u0940 \u0938\u094d\u091f\u0947\u091f\u0938|\u0911\u0930\u094d\u0921\u0930 \u0915\u0939\u093e\u0901|\u0985\u09b0\u09cd\u09a1\u09be\u09b0 \u09b8\u09cd\u099f\u09cd\u09af\u09be\u099f\u09be\u09b8|\u09a1\u09c7\u09b2\u09bf\u09ad\u09be\u09b0\u09bf \u09b8\u09cd\u099f\u09cd\u09af\u09be\u099f\u09be\u09b8|\u09b6\u09c7\u09b7 \u0985\u09b0\u09cd\u09a1\u09be\u09b0|\u0911\u0930\u094d\u0921\u0930 \u0938\u094d\u0925\u093f\u0924\u0940|\u0936\u0947\u0935\u091f\u091a\u093e \u0911\u0930\u094d\u0921\u0930|\u0921\u093f\u0932\u093f\u0935\u094d\u0939\u0930\u0940 \u0938\u094d\u0925\u093f\u0924\u0940|\u0c06\u0c30\u0c4d\u0c21\u0c30\u0c4d \u0c38\u0c4d\u0c1f\u0c47\u0c1f\u0c38\u0c4d|\u0c21\u0c46\u0c32\u0c3f\u0c35\u0c30\u0c40 \u0c38\u0c4d\u0c1f\u0c47\u0c1f\u0c38\u0c4d|\u0c1a\u0c3f\u0c35\u0c30\u0c3f \u0c06\u0c30\u0c4d\u0c21\u0c30\u0c4d|\u0b86\u0bb0\u0bcd\u0b9f\u0bb0\u0bcd \u0ba8\u0bbf\u0bb2\u0bc8|\u0b9f\u0bc6\u0bb2\u0bbf\u0bb5\u0bb0\u0bbf \u0ba8\u0bbf\u0bb2\u0bc8|\u0b95\u0b9f\u0bc8\u0b9a\u0bbf \u0b86\u0bb0\u0bcd\u0b9f\u0bb0\u0bcd'
 )
 
 _PLACE_ORDER_RE = re.compile(
-    r'\b(place order|order now|order form|want to order|new order|webcart)\b',
-    re.IGNORECASE
+    r'(?i)\b(place order|order now|order form|want to order|new order|webcart)\b'
+    r'|नया ऑर्डर|ऑर्डर फॉर्म|ऑर्डर करना'
+    r'|নতুন অর্ডার|অর্ডার ফর্ম|অর্ডার করতে'
+    r'|नवीन ऑर्डर|ऑर्डर फॉर्म|ऑर्डर करायच'
+    r'|కొత్త ఆర్డర్|ఆర్డర్ ఫారం|ఆర్డర్ చేయాలి'
+    r'|புதிய ஆர்டர்|ஆர்டர் படிவம்|ஆர்டர் செய்ய'
 )
 
 # Payment: "paid 5000", "sent ₹2000", "payment done 1500", "gpay 3000 ref 12345"
 _PAYMENT_RE = re.compile(
-    r'\b(paid|sent|payment|transfer|gpay|phonepe|upi|neft|bank|cash|bheja|diya)\b',
-    re.IGNORECASE
+    r'(?i)\b(paid|sent|payment|transfer|gpay|phonepe|upi|neft|bank|cash|bheja|diya)\b'
+    r'|भुगतान|पेमेंट|भेजा|दिया|भेज दिया|पे किया'
+    r'|পেমেন্ট|পাঠিয়েছি|দিয়েছি|টাকা পাঠা'
+    r'|पेमेंट|पाठवले|दिले|भरले'
+    r'|పేమెంట్|చెల్లించా|పంపాను|బదిలీ'
+    r'|பேமெண்ட்|அனுப்பினேன்|செலுத்தினேன்|பணம் அனுப்பி'
 )
 
 # Amount extraction: ₹5000 or 5000 or 5,000
@@ -86,8 +101,29 @@ _METHOD_MAP = {
     'cheque':  'cheque', 'check': 'cheque',
 }
 
-_GREETING_RE = re.compile(r'^(hi|hello|hey|hii|namaste)\b', re.IGNORECASE)
-_SUPPLY_KEYWORD_RE = re.compile(r'\bfnb\b', re.IGNORECASE)
+_GREETING_RE = re.compile(
+    r'(?i)^(hi|hello|hey|hii|namaste|namaskar)\b'
+    r'|^नमस्ते|^नमस्कार|^নমস্কার|^হ্যালো|^నమస్కారం|^వందనం|^வணக்கம்'
+)
+_SUPPLY_KEYWORD_RE = re.compile(r'(?i)\bfnb\b')
+
+
+def _lang(session: dict) -> str:
+    return session.get('lang') or 'en'
+
+
+def _fmt_money(value: float) -> str:
+    return f'{float(value):,.2f}'
+
+
+def _method_label(lang: str, method: str) -> str:
+    key = {
+        'upi': 'method_upi',
+        'bank': 'method_bank',
+        'cash': 'method_cash',
+        'cheque': 'method_cheque',
+    }.get(method, 'method_upi')
+    return reply(lang, key)
 
 
 def _is_supply_greeting(text: str) -> bool:
@@ -98,9 +134,36 @@ def _is_supply_greeting(text: str) -> bool:
     lower = cleaned.lower()
     if lower in {'hi', 'hello', 'hey', 'fnb'}:
         return True
-    if _GREETING_RE.match(lower):
+    if _GREETING_RE.match(cleaned):
         return True
     return bool(_SUPPLY_KEYWORD_RE.search(lower))
+
+
+async def _resolve_client_lang(
+    session: dict,
+    client_id: str,
+    text: str,
+    *,
+    detect: bool,
+) -> str:
+    """
+    Resolve reply language for this turn; persist overrides on the client row.
+    Button taps pass detect=False (no script signal).
+    """
+    stored = session.get('lang')
+    if not stored:
+        stored = await get_client_preferred_language(client_id)
+
+    if detect:
+        lang, changed = resolve_language(stored, text)
+    else:
+        from tools.supply_language import normalize_lang
+        lang, changed = normalize_lang(stored), False
+
+    session['lang'] = lang
+    if changed:
+        await update_client_preferred_language(client_id, lang)
+    return lang
 
 
 async def _dispatch_supply_action(
@@ -122,8 +185,7 @@ async def _dispatch_supply_action(
         session['_state'] = 'awaiting_payment_details'
         await send_supply_text(
             phone,
-            "Please share the payment amount and reference "
-            '(e.g. "Paid ₹5000 GPay ref 123456789").',
+            reply(_lang(session), 'ask_payment_details'),
             supplier_id,
             client_id,
         )
@@ -159,12 +221,11 @@ async def handle_supply_message(
         logger.info(f"[supply-agent] Unknown number {phone} for supplier {supplier_id}")
         await send_supply_text(
             phone       = phone,
-            message     = "Hi! Your number isn't registered with us yet. "
-                          "Please contact your supplier to get set up. 🙏",
+            message     = reply('en', 'unregistered'),
             supplier_id = supplier_id,
             client_id   = None,
         )
-        # Alert supplier so they can onboard this client
+        # Alert supplier so they can onboard this client (always English)
         try:
             supplier_phone = await get_supplier_phone(supplier_id)
             if supplier_phone:
@@ -192,6 +253,7 @@ async def handle_supply_message(
                            .get('button_reply', {})
                            .get('id', '')
         )
+        await _resolve_client_lang(session, client_id, '', detect=False)
         if reply_id.startswith('CONFIRM_PAYMENT:'):
             await _handle_payment_confirmation(
                 phone, supplier_id, client_id, session, reply_id
@@ -201,7 +263,7 @@ async def handle_supply_message(
         if reply_id == 'CANCEL_PAYMENT':
             session['_state'] = 'idle'
             await send_supply_text(
-                phone, "Payment claim cancelled. Let us know if you need anything else.",
+                phone, reply(_lang(session), 'payment_cancelled'),
                 supplier_id, client_id
             )
             await save_supply_session(supplier_id, phone, client_id, session)
@@ -215,6 +277,7 @@ async def handle_supply_message(
 
     # ── Intent detection ──────────────────────────────────────────────────────
     text = message.strip()
+    await _resolve_client_lang(session, client_id, text, detect=True)
 
     if text.upper() in _MENU_ACTIONS:
         await _dispatch_supply_action(text, phone, supplier_id, client_id, session, text)
@@ -247,14 +310,14 @@ async def _handle_place_order(
 ) -> None:
     """Mint a signed /s/:token webcart link and send it over WhatsApp."""
     session['_state'] = 'idle'
+    lang = _lang(session)
     try:
         order_url = await build_order_form_url(supplier_id, client_id)
     except Exception as exc:
         logger.error(f'[supply-agent] place_order token failed: {exc}', exc_info=True)
         await send_supply_text(
             phone,
-            "Sorry, we couldn't generate your order link right now. "
-            "Please try again in a moment or ask your supplier to resend it.",
+            reply(lang, 'order_link_error'),
             supplier_id,
             client_id,
         )
@@ -262,9 +325,7 @@ async def _handle_place_order(
 
     await send_supply_text(
         phone,
-        "Here's your order form — tap the link to reserve stock for the next delivery:\n\n"
-        f"{order_url}\n\n"
-        "This link is valid until tonight's ordering cutoff.",
+        reply(lang, 'order_link', order_url=order_url),
         supplier_id,
         client_id,
     )
@@ -287,15 +348,12 @@ async def _handle_balance(
     """Reply with current outstanding balance from credit ledger."""
     balance = await get_client_outstanding(supplier_id, client_id)
     session['_state'] = 'idle'
+    lang = _lang(session)
 
     if balance <= 0:
-        msg = "✅ Great news — you have no outstanding balance with us right now!"
+        msg = reply(lang, 'balance_zero')
     else:
-        msg = (
-            f"Your current outstanding balance is *₹{balance:,.2f}*.\n\n"
-            f"To record a payment, just send the amount and payment details "
-            f"(e.g. \"Paid ₹5000 GPay ref 123456789\")."
-        )
+        msg = reply(lang, 'balance_due', balance=_fmt_money(balance))
 
     await send_supply_text(phone, msg, supplier_id, client_id)
 
@@ -307,6 +365,8 @@ async def _handle_payment(
     Parse a payment claim from the message text.
     Extracts amount, method, and reference, then asks for confirmation.
     """
+    lang = _lang(session)
+
     # Extract amount
     amounts = _AMOUNT_RE.findall(text)
     amount  = float(amounts[0].replace(',', '')) if amounts else None
@@ -316,9 +376,7 @@ async def _handle_payment(
         session['_state'] = 'awaiting_payment_details'
         await send_supply_text(
             phone,
-            "Got it — you're recording a payment. "
-            "Please share the amount and payment reference "
-            "(e.g. \"₹5000 GPay ref 123456789\").",
+            reply(lang, 'ask_payment_details_got_it'),
             supplier_id, client_id,
         )
         return
@@ -348,19 +406,22 @@ async def _handle_payment(
     }
     session['_state'] = 'awaiting_payment_confirm'
 
-    method_label = {'upi': 'UPI', 'bank': 'Bank transfer', 'cash': 'Cash', 'cheque': 'Cheque'}.get(method, method.upper())
+    method_label = _method_label(lang, method)
     ref_line     = f"\nRef: `{reference}`" if reference else ""
-    confirm_msg  = (
-        f"Recording a payment of *₹{amount:,.2f}* via {method_label}.{ref_line}\n\n"
-        f"Is this correct?"
+    confirm_msg  = reply(
+        lang,
+        'payment_confirm_body',
+        amount=_fmt_money(amount),
+        method_label=method_label,
+        ref_line=ref_line,
     )
 
     await send_supply_buttons(
         phone       = phone,
         body        = confirm_msg,
         buttons     = [
-            {'id': 'CONFIRM_PAYMENT:yes', 'title': '✅ Yes, confirm'},
-            {'id': 'CANCEL_PAYMENT',      'title': '❌ Cancel'},
+            {'id': 'CONFIRM_PAYMENT:yes', 'title': reply(lang, 'btn_confirm_yes')},
+            {'id': 'CANCEL_PAYMENT',      'title': reply(lang, 'btn_confirm_cancel')},
         ],
         supplier_id = supplier_id,
         client_id   = client_id,
@@ -373,10 +434,11 @@ async def _handle_payment_confirmation(
     """Commit the pending payment claim after client confirms."""
     pending = session.pop('_pending_payment', None)
     session['_state'] = 'idle'
+    lang = _lang(session)
 
     if not pending:
         await send_supply_text(
-            phone, "Couldn't find a pending payment to confirm. Please resend the details.",
+            phone, reply(lang, 'payment_no_pending'),
             supplier_id, client_id
         )
         return
@@ -393,8 +455,7 @@ async def _handle_payment_confirmation(
     if claim:
         await send_supply_text(
             phone,
-            f"✅ Payment of *₹{pending['amount']:,.2f}* recorded successfully!\n"
-            f"Your supplier will verify and update your account shortly.",
+            reply(lang, 'payment_recorded', amount=_fmt_money(pending['amount'])),
             supplier_id, client_id,
         )
         logger.info(
@@ -404,8 +465,7 @@ async def _handle_payment_confirmation(
     else:
         await send_supply_text(
             phone,
-            "Sorry, we couldn't record your payment right now. Please try again "
-            "or contact your supplier directly.",
+            reply(lang, 'payment_record_error'),
             supplier_id, client_id,
         )
 
@@ -415,6 +475,7 @@ async def _handle_order_status(
 ) -> None:
     """Return the last order's status and total."""
     session['_state'] = 'idle'
+    lang = _lang(session)
 
     try:
         order = await get_last_supply_order(supplier_id, client_id)
@@ -423,21 +484,19 @@ async def _handle_order_status(
         order = None
 
     if not order:
-        msg = "No recent orders found. Tap *Order* to open your order form."
+        msg = reply(lang, 'order_none')
     else:
-        status_labels = {
-            'requested':           '⏳ Reservation submitted — pending confirmation',
-            'confirmed':           '✅ Confirmed — will be delivered soon',
-            'out_for_delivery':    '🚚 Out for delivery',
-            'delivered':           '✅ Delivered',
-            'partially_delivered': '⚠️ Partially delivered',
-        }
-        status_label = status_labels.get(order['status'], order['status'].replace('_', ' ').title())
-        msg = (
-            f"*Order {order['order_number']}*\n"
-            f"Delivery: {order['delivery_date']}\n"
-            f"Status: {status_label}\n"
-            f"Total: ₹{float(order['total_amount'] or 0):,.2f}"
+        status_key = f"status_{order['status']}"
+        status_label = reply(lang, status_key)
+        if status_label == status_key:
+            status_label = order['status'].replace('_', ' ').title()
+        msg = reply(
+            lang,
+            'order_status_line',
+            order_number=order['order_number'],
+            delivery_date=order['delivery_date'],
+            status_label=status_label,
+            total_amount=_fmt_money(float(order['total_amount'] or 0)),
         )
 
     await send_supply_text(phone, msg, supplier_id, client_id)
@@ -451,16 +510,17 @@ async def _handle_fallback(
     Keeps the bot useful even when intent detection doesn't match.
     """
     session['_state'] = 'idle'
+    lang = _lang(session)
 
     await send_supply_buttons(
         phone   = phone,
-        body    = "Hi! Welcome to Munafe Supply. How can I help you today?",
+        body    = reply(lang, 'menu_body'),
         buttons = [
-            {'id': 'PLACE_ORDER',     'title': '📦 Order'},
-            {'id': 'CHECK_BALANCE',   'title': '💰 My Balance'},
-            {'id': 'RECORD_PAYMENT',  'title': '💳 Record Payment'},
+            {'id': 'PLACE_ORDER',     'title': reply(lang, 'btn_order')},
+            {'id': 'CHECK_BALANCE',   'title': reply(lang, 'btn_balance')},
+            {'id': 'RECORD_PAYMENT',  'title': reply(lang, 'btn_payment')},
         ],
         supplier_id = supplier_id,
         client_id   = client_id,
-        footer      = "Reply with your question or tap an option above.",
+        footer      = reply(lang, 'menu_footer'),
     )
