@@ -322,14 +322,16 @@ async def _dispatch_to_lob(
 
     Current LOBs
     ------------
-    "restaurant"  → handled by caller (booking_agent / dine-in / takeaway / delivery)
-    "supply"      → handle_supply_message (B2B food supply, already live)
-    "retail"      → placeholder — will route to retail_agent when built
-    "jewellery"   → placeholder — will route to jewellery_agent when built
+    "restaurant"     → handled by caller (booking_agent / dine-in / takeaway / delivery)
+    "food_products"  → handle_minimal_order_flow in _process_meta_payload (early return)
+    "psl"            → handle_minimal_order_flow in _process_meta_payload (early return)
+    "retail"         → handle_minimal_order_flow in _process_meta_payload (early return)
+    "supply"         → handle_supply_message (B2B food supply, already live)
+    "jewellery"      → placeholder — will route to jewellery_agent when built
 
     Adding a new LOB
     ----------------
-    1. Add its lob_type string to the elif ladder below.
+    1. Add its lob_type string to the elif ladder below (or wire via minimal agent above).
     2. Import and call its handle_* function.
     3. Set lob_type on the tenant's restaurant row in the DB.
     No changes to the webhook handler or routing logic required.
@@ -377,10 +379,10 @@ async def _dispatch_to_lob(
         )
 
     elif lob_type == "retail":
-        # Placeholder — import and call retail_agent when implemented
-        logger.info(f"[lob-dispatch] retail agent not yet implemented for {restaurant_id}")
-        from tools.whatsapp_tools import send_whatsapp_message as _send
-        await _send(phone, "Our retail ordering service is coming soon! 🛍️", restaurant_id)
+        # Should not run — retail is handled by minimal agent before _dispatch_to_lob.
+        logger.warning(
+            f"[lob-dispatch] retail reached _dispatch_to_lob for {restaurant_id} — check routing"
+        )
 
     elif lob_type == "jewellery":
         # Placeholder
@@ -528,7 +530,40 @@ async def _process_meta_payload(payload: dict):
         lat.mark("resolve_restaurant")
 
         # 3e. LOB dispatch — non-restaurant tenants go to their own agent
-        lob_type = restaurant.get("lob_type") or "restaurant"
+        lob_type      = restaurant.get("lob_type") or "restaurant"
+        restaurant_id = restaurant["id"]
+        profile_name  = (
+            value.get("contacts", [{}])[0].get("profile", {}).get("name", "")
+        )
+
+        # 3e-i. Minimal-message LOBs (packaged food / PSL / retail) — single
+        # webcart-link reply per turn, via the existing (but previously
+        # unwired) handle_minimal_order_flow agent. Without this branch these
+        # tenants fell straight through to the "Unknown lob_type" drop below
+        # (food_products/psl) or a permanent "coming soon" placeholder
+        # (retail) — no functioning agent was ever reached.
+        MINIMAL_MESSAGE_LOBS = ("food_products", "psl", "retail")
+        if lob_type in MINIMAL_MESSAGE_LOBS:
+            logger.info(
+                f"[routing] lob='{lob_type}' for {restaurant['name']} — minimal-message agent"
+            )
+            lat.last = time.monotonic()
+            async with customer_lock(restaurant_id, phone):
+                lat.mark("customer_lock")
+                session_state = await get_session_state(restaurant_id, phone)
+                if session_state is None:
+                    session_state = {}
+                from agents.customer.minimal_order_agent import handle_minimal_order_flow
+                await handle_minimal_order_flow(
+                    restaurant=restaurant,
+                    phone=phone,
+                    message_body=message_body,
+                    session_state=session_state,
+                    profile_name=profile_name,
+                )
+                await save_session_state(restaurant_id, phone, session_state)
+            return
+
         if lob_type != "restaurant":
             logger.info(
                 f"[routing] lob='{lob_type}' for {restaurant['name']} — dispatching"
@@ -544,11 +579,7 @@ async def _process_meta_payload(payload: dict):
             )
             return
 
-        restaurant_id = restaurant["id"]
         manager_phone = restaurant["manager_phone"]
-        profile_name  = (
-            value.get("contacts", [{}])[0].get("profile", {}).get("name", "")
-        )
 
         # 4. Per-customer advisory lock → load → process → save
         # Reset cursor so customer_lock stage = acquisition wait only.
