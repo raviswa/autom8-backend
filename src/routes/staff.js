@@ -29,11 +29,64 @@ const { requestPasswordReset } = require('../helpers/passwordReset');
 const { invalidateRestaurantConfigCache } = require('../helpers/restaurantConfig');
 
 // Roles a manager is allowed to manage (cannot touch own level or above)
-const MANAGER_CAN_MANAGE = ['kitchen_staff', 'captain', 'waiter', 'marketing'];
-const ALL_ROLES           = ['owner', 'manager', 'kitchen_staff', 'captain', 'waiter', 'marketing'];
+const RESTAURANT_MANAGER_ROLES = ['kitchen_staff', 'captain', 'waiter', 'marketing'];
+const PACKAGED_MANAGER_ROLES = ['packing_staff', 'dispatch_staff', 'marketing'];
+const SALES_MANAGER_ROLES = ['sales_staff', 'dispatch_staff', 'marketing'];
 
-// Notification roles — default whatsapp_number collection is relevant for these
-// (canonical list lives in helpers/phoneFormat.js)
+const ALL_ROLES = [
+  'owner', 'manager',
+  'kitchen_staff', 'captain', 'waiter', 'marketing',
+  'packing_staff', 'sales_staff', 'dispatch_staff',
+];
+
+// Legacy alias used by list/create/update when lob is unknown
+const MANAGER_CAN_MANAGE = [
+  ...RESTAURANT_MANAGER_ROLES,
+  'packing_staff', 'sales_staff', 'dispatch_staff',
+];
+
+function isRestaurantLob(lobType) {
+  return !lobType || lobType === 'restaurant';
+}
+
+function rolesForLob(lobType, isOwner) {
+  if (isRestaurantLob(lobType)) {
+    const base = isOwner
+      ? ['owner', 'manager', 'kitchen_staff', 'captain', 'waiter', 'marketing']
+      : RESTAURANT_MANAGER_ROLES;
+    return base;
+  }
+  if (lobType === 'jewellery' || lobType === 'b2b') {
+    return isOwner
+      ? ['owner', 'manager', 'sales_staff', 'dispatch_staff', 'marketing']
+      : SALES_MANAGER_ROLES;
+  }
+  // food_products, retail, psl, and any future packaged LOB
+  return isOwner
+    ? ['owner', 'manager', 'packing_staff', 'dispatch_staff', 'marketing']
+    : PACKAGED_MANAGER_ROLES;
+}
+
+const ROLE_META = {
+  owner:         { label: 'Owner',         description: 'Full access to all features and settings'     },
+  manager:       { label: 'Manager',        description: 'Ops, reports, marketing, staff below manager' },
+  kitchen_staff: { label: 'Kitchen Staff',  description: 'KDS only — orders appear on kitchen display'  },
+  captain:       { label: 'Captain',        description: 'Takeaway fulfillment — WhatsApp pickup alerts' },
+  waiter:        { label: 'Waiter',         description: 'Table service via kitchen display (no WhatsApp ops alerts)' },
+  marketing:     { label: 'Marketing',      description: 'Campaigns, broadcast messages, analytics'    },
+  packing_staff: { label: 'Packing Staff',  description: 'Packing display — pack and mark orders ready' },
+  sales_staff:   { label: 'Sales Staff',    description: 'Manager portal access for order and catalog ops' },
+  dispatch_staff:{ label: 'Dispatch Staff', description: 'Packing / dispatch display for outbound orders' },
+};
+
+async function fetchTenantLob(restaurantId) {
+  const { data } = await supabaseAdmin
+    .from('tenants')
+    .select('lob_type')
+    .eq('id', restaurantId)
+    .maybeSingle();
+  return data?.lob_type || 'restaurant';
+}
 
 // ── GET /api/staff ────────────────────────────────────────────────────────────
 // Returns active + terminated employees for this restaurant.
@@ -90,7 +143,12 @@ router.post('/', authenticateToken, getRestaurantId, async (req, res) => {
     if (!ALL_ROLES.includes(role))
       return res.status(400).json({ error: `Invalid role. Must be one of: ${ALL_ROLES.join(', ')}` });
 
-    if (isManager && !MANAGER_CAN_MANAGE.includes(role))
+    const lobType = await fetchTenantLob(req.restaurant_id);
+    const allowedRoles = rolesForLob(lobType, isOwner);
+    if (!allowedRoles.includes(role))
+      return res.status(400).json({ error: `Role ${role} is not available for this business type` });
+
+    if (isManager && !rolesForLob(lobType, false).includes(role))
       return res.status(403).json({ error: `Managers cannot create a ${role} account` });
 
     const waRequired = roleRequiresWhatsApp(role);
@@ -239,7 +297,12 @@ router.put('/:id', authenticateToken, getRestaurantId, async (req, res) => {
     if (role) {
       if (!ALL_ROLES.includes(role))
         return res.status(400).json({ error: `Invalid role` });
-      if (isManager && !MANAGER_CAN_MANAGE.includes(role))
+      const lobType = await fetchTenantLob(req.restaurant_id);
+      const allowedRoles = rolesForLob(lobType, isOwner);
+      // Allow keeping a legacy role already on the employee after LOB switch
+      if (role !== target.role && !allowedRoles.includes(role))
+        return res.status(400).json({ error: `Role ${role} is not available for this business type` });
+      if (isManager && !rolesForLob(lobType, false).includes(role) && role !== target.role)
         return res.status(403).json({ error: `Managers cannot assign ${role} role` });
       updates.role = role;
     }
@@ -459,28 +522,26 @@ router.put('/:id/terminate', authenticateToken, getRestaurantId, async (req, res
 // Used by the frontend to populate the role dropdown.
 
 router.get('/roles', authenticateToken, getRestaurantId, async (req, res) => {
-  const isOwner   = req.user_role === 'owner';
+  const isOwner   = req.user_role === 'owner' || req.user_role === 'brand_owner';
   const isManager = req.user_role === 'manager';
 
   if (!isOwner && !isManager)
     return res.status(403).json({ error: 'Unauthorized' });
 
-  const roles = isOwner ? ALL_ROLES : MANAGER_CAN_MANAGE;
+  try {
+    const lobType = await fetchTenantLob(req.restaurant_id);
+    const roles = rolesForLob(lobType, isOwner);
 
-  const ROLE_META = {
-    owner:         { label: 'Owner',         description: 'Full access to all features and settings'     },
-    manager:       { label: 'Manager',        description: 'Token management, KDS, reports, marketing'   },
-    kitchen_staff: { label: 'Kitchen Staff',  description: 'KDS only — orders appear on kitchen display'  },
-    captain:       { label: 'Captain',        description: 'Takeaway fulfillment — WhatsApp pickup alerts' },
-    waiter:        { label: 'Waiter',         description: 'Table service via kitchen display (no WhatsApp ops alerts)' },
-    marketing:     { label: 'Marketing',      description: 'Campaigns, broadcast messages, analytics'    },
-  };
-
-  res.json({
-    success: true,
-    roles:   roles.map(r => ({ value: r, ...ROLE_META[r] })),
-    notify_roles: NOTIFY_ROLES,
-  });
+    res.json({
+      success: true,
+      lob_type: lobType,
+      roles:   roles.map(r => ({ value: r, ...(ROLE_META[r] || { label: r, description: '' }) })),
+      notify_roles: NOTIFY_ROLES,
+    });
+  } catch (err) {
+    console.error('[staff/roles]', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 
