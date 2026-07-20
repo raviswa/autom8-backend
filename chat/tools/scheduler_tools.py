@@ -291,7 +291,8 @@ async def dispatch_deferred_scheduled_kds():
 
 
 async def send_prepay_payment_reminders():
-    """Nudge customers who have not completed Razorpay prepay."""
+    """Nudge customers who have not completed prepay (one reminder max)."""
+    from config.settings import settings
     from tools.db_tools import (
         get_pending_prepay_reminder_candidates,
         increment_prepay_reminder_count,
@@ -300,7 +301,8 @@ async def send_prepay_payment_reminders():
 
     logger.info("Running send_prepay_payment_reminders job")
     try:
-        candidates = await get_pending_prepay_reminder_candidates()
+        candidates = await get_pending_prepay_reminder_candidates(max_reminders=1)
+        gateway_label = "Razorpay" if settings.payment_gateway == "razorpay" else "PhonePe"
         sent = 0
         for row in candidates:
             booking_id = row["booking_id"]
@@ -335,12 +337,14 @@ async def send_prepay_payment_reminders():
                     body_text=(
                         f"Hi {name}! 👋\n\n"
                         f"Your {service_type.replace('_', ' ')} order is still awaiting payment.\n\n"
-                        "Tap Confirm & Pay to complete payment securely."
+                        f"Tap Confirm & Pay to complete payment securely via {gateway_label}.\n\n"
+                        "This is our only payment reminder. If the link no longer works, "
+                        "reply *Home* (or *Hi*) to start a fresh order."
                     ),
                     button_text="Confirm & Pay",
                     url=pay_link,
                     header_text="Payment Pending",
-                    footer_text="Secure payment powered by Razorpay",
+                    footer_text=f"Secure payment powered by {gateway_label}",
                 )
 
             if not cta_sent:
@@ -354,7 +358,8 @@ async def send_prepay_payment_reminders():
                     f"Hi {name}! 👋\n\n"
                     f"Your {service_type.replace('_', ' ')} order is still awaiting payment."
                     f"{pay_line}\n\n"
-                    f"Reply *pay* on WhatsApp to get your link again.",
+                    "This is our only payment reminder. If the link no longer works, "
+                    "reply *Home* (or *Hi*) to start a fresh order.",
                     restaurant_id,
                 )
             await increment_prepay_reminder_count(booking_id)

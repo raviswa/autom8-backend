@@ -1155,9 +1155,12 @@ async def get_last_paid_booking_for_customer(
 async def get_pending_prepay_reminder_candidates(
     min_age_minutes: int = 15,
     max_age_hours: int = 24,
-    max_reminders: int = 3,
+    max_reminders: int = 1,
 ) -> list[dict[str, Any]]:
-    """Bookings awaiting Razorpay prepay that may need a WhatsApp payment reminder."""
+    """Bookings awaiting prepay that may need a WhatsApp payment reminder.
+
+    Default max_reminders=1 → one nudge only (job runs every 15 min).
+    """
     if AsyncSessionLocal is None:
         return []
     try:
