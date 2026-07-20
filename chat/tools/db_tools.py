@@ -2319,7 +2319,12 @@ async def create_menu_link_token(
     """
     Persist (or rotate) web-menu token for a restaurant+phone pair.
     Token is valid for 24h by default and tied to restaurant_id + phone + session_token.
+
+    Clears leftover rows for alternate phone forms / the same session_token so a
+    reused menu_url_session_token cannot UniqueViolation after phone canonicalization.
     """
+    from sqlalchemy.exc import IntegrityError
+
     if AsyncSessionLocal is None:
         raise Exception("Database not initialized")
 
@@ -2333,46 +2338,88 @@ async def create_menu_link_token(
         raise ValueError("session_token is required")
 
     expires_at = datetime.utcnow() + timedelta(hours=max(1, int(expires_in_hours or 24)))
+    alt_phones = [p for p in phones if p and p != phone]
 
-    async with AsyncSessionLocal() as session:
+    upsert_sql = text("""
+        INSERT INTO menu_tokens (
+            restaurant_id,
+            phone,
+            session_token,
+            walk_in_token_id,
+            expires_at,
+            is_active
+        )
+        VALUES (
+            CAST(:rid AS uuid),
+            :phone,
+            :session_token,
+            :walk_in_token_id,
+            :expires_at,
+            TRUE
+        )
+        ON CONFLICT (restaurant_id, phone)
+        DO UPDATE SET
+            session_token = EXCLUDED.session_token,
+            -- Always replace. COALESCE(old) kept stale takeaway ids on the
+            -- menu link when a new scheduled_delivery walk-in was omitted,
+            -- so webcart submitted as immediate takeaway.
+            walk_in_token_id = EXCLUDED.walk_in_token_id,
+            expires_at = EXCLUDED.expires_at,
+            is_active = TRUE,
+            updated_at = NOW()
+    """)
+    params = {
+        "rid": restaurant_id,
+        "phone": phone,
+        "session_token": token,
+        "walk_in_token_id": walk_in_token_id,
+        "expires_at": expires_at,
+    }
+
+    async def _clear_collisions(session) -> None:
+        # Drop other phone-form rows for this customer on this restaurant.
+        if alt_phones:
+            await session.execute(
+                text("""
+                    DELETE FROM menu_tokens
+                    WHERE restaurant_id = CAST(:rid AS uuid)
+                      AND phone = ANY(:alt_phones)
+                """),
+                {"rid": restaurant_id, "alt_phones": alt_phones},
+            )
+        # Drop any row that already holds this session_token under a different key.
         await session.execute(
             text("""
-                INSERT INTO menu_tokens (
-                    restaurant_id,
-                    phone,
-                    session_token,
-                    walk_in_token_id,
-                    expires_at,
-                    is_active
-                )
-                VALUES (
-                    CAST(:rid AS uuid),
-                    :phone,
-                    :session_token,
-                    :walk_in_token_id,
-                    :expires_at,
-                    TRUE
-                )
-                ON CONFLICT (restaurant_id, phone)
-                DO UPDATE SET
-                    session_token = EXCLUDED.session_token,
-                    -- Always replace. COALESCE(old) kept stale takeaway ids on the
-                    -- menu link when a new scheduled_delivery walk-in was omitted,
-                    -- so webcart submitted as immediate takeaway.
-                    walk_in_token_id = EXCLUDED.walk_in_token_id,
-                    expires_at = EXCLUDED.expires_at,
-                    is_active = TRUE,
-                    updated_at = NOW()
+                DELETE FROM menu_tokens
+                WHERE session_token = :session_token
+                  AND NOT (
+                    restaurant_id = CAST(:rid AS uuid)
+                    AND phone = :phone
+                  )
             """),
-            {
-                "rid": restaurant_id,
-                "phone": phone,
-                "session_token": token,
-                "walk_in_token_id": walk_in_token_id,
-                "expires_at": expires_at,
-            },
+            {"session_token": token, "rid": restaurant_id, "phone": phone},
         )
-        await session.commit()
+
+    async with AsyncSessionLocal() as session:
+        try:
+            await _clear_collisions(session)
+            await session.execute(upsert_sql, params)
+            await session.commit()
+        except IntegrityError as exc:
+            logger.warning(
+                "[menu-token] IntegrityError on upsert restaurant=%s phone=%s — "
+                "clearing session_token collision and retrying: %s",
+                restaurant_id,
+                phone,
+                exc,
+            )
+            await session.rollback()
+            await session.execute(
+                text("DELETE FROM menu_tokens WHERE session_token = :session_token"),
+                {"session_token": token},
+            )
+            await session.execute(upsert_sql, params)
+            await session.commit()
 
     return {
         "restaurant_id": restaurant_id,

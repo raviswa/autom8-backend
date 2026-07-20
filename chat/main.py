@@ -723,7 +723,7 @@ async def _process_meta_payload(payload: dict):
                     )
                 else:
                     fallback = (
-                        "Sorry, something went wrong while saving your pickup time. "
+                        "Sorry, something went wrong. "
                         "Please try again in a moment, or reply *Home* to start over."
                     )
                 await _latency_send_wa(lat, phone, fallback, restaurant_id)
