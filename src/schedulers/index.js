@@ -27,9 +27,17 @@ const {
 const { onKitchenOpened } = require('../helpers/kitchenReminders');
 const { runDineInAutoAssignJob } = require('../helpers/dineInAutoAssign');
 const { runDueScheduledJobs } = require('../helpers/scheduledJobs');
-const { runReminderCheck } = require('../helpers/billingReminders');
 const { refreshAllAffinities } = require('../helpers/productAffinity');
 const { runDailySettlements } = require('../helpers/dailySettlement');
+
+// Optional — billingReminders + mailer stack may not be deployed yet.
+let runReminderCheck = null;
+try {
+  ({ runReminderCheck } = require('../helpers/billingReminders'));
+} catch (err) {
+  if (err.code !== 'MODULE_NOT_FOUND') throw err;
+  console.warn('[schedulers] billingReminders not installed — subscription reminder scheduler disabled');
+}
 
 // Slot helpers live in catalog.js (single source of truth — shared with POST /catalog/slot-sync)
 const {
@@ -419,6 +427,10 @@ function startScheduledJobsRunner() {
 }
 
 function startSubscriptionReminderScheduler() {
+  if (typeof runReminderCheck !== 'function') {
+    console.log('📧 Billing reminder scheduler skipped (billingReminders module absent)');
+    return;
+  }
   const tick = async () => {
     try {
       // Unified tenant + supplier SaaS billing reminders (email + WhatsApp).
