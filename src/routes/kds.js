@@ -32,13 +32,9 @@ const { supabaseAdmin }       = require('../config/supabase');
 const { broadcastToRestaurant } = require('../websocket');
 const { printKotEscPos, buildKotLines } = require('../helpers/kotEscPos');
 const { notifyPackingTicketAlert } = require('../helpers/packingAlerts');
+const { queueForStation } = require('../helpers/kdsQueue');
 
 const { isValidKdsSecret, extractInternalSecret } = require('../config/internalSecret');
-
-/** Classify menu kitchen_station into cooking vs packing staff queue. */
-function queueForStation(station) {
-  return String(station || '').toLowerCase() === 'sweets_counter' ? 'packing' : 'cooking';
-}
 
 // ── POST /api/kds/notify ──────────────────────────────────────────────────────
 
@@ -71,6 +67,16 @@ router.post('/notify', async (req, res) => {
   if (!items.length)  return res.status(400).json({ error: 'items array must not be empty' });
 
   try {
+
+    let tenantLobType = null;
+    try {
+      const { data: tenantRow } = await supabaseAdmin
+        .from('tenants')
+        .select('lob_type')
+        .eq('id', restaurant_id)
+        .maybeSingle();
+      tenantLobType = tenantRow?.lob_type || null;
+    } catch (_) { /* non-fatal */ }
 
     // ── Step 1: Resolve table_id ──────────────────────────────────────────────
     let tableId = null;
@@ -201,7 +207,7 @@ router.post('/notify', async (req, res) => {
             service_type:         service_type  || null,
             special_instructions: special_notes || null,
             kitchen_station:      station,
-            queue:                queueForStation(station),
+            queue:                queueForStation(station, tenantLobType),
           };
         });
         if (repairInserts.length > 0) {
@@ -401,7 +407,7 @@ router.post('/notify', async (req, res) => {
       }
 
       const station = String(kitchenStation || 'assembly').toLowerCase();
-      const queue = queueForStation(station);
+      const queue = queueForStation(station, tenantLobType);
 
       // 3e: Stage kds_item for bulk insert (queue splits cooking vs packing screens)
       kdsInserts.push({

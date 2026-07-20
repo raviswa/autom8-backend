@@ -9,6 +9,7 @@
 //   startFeedbackScheduler()          — 2-hr post-visit feedback (every 10 min)
 //   startAccountingSyncScheduler()    — nightly Zoho/Tally push at 23:30 IST
 //   startMarketingScheduler()         — scheduled campaigns + automations (every 5 min)
+//   startProductAffinityScheduler()   — refresh co-purchase cache for cart nudges (every 6h)
 // ============================================================================
 
 'use strict';
@@ -26,6 +27,9 @@ const {
 const { onKitchenOpened } = require('../helpers/kitchenReminders');
 const { runDineInAutoAssignJob } = require('../helpers/dineInAutoAssign');
 const { runDueScheduledJobs } = require('../helpers/scheduledJobs');
+const { runReminderCheck } = require('../helpers/billingReminders');
+const { refreshAllAffinities } = require('../helpers/productAffinity');
+const { runDailySettlements } = require('../helpers/dailySettlement');
 
 // Slot helpers live in catalog.js (single source of truth — shared with POST /catalog/slot-sync)
 const {
@@ -414,6 +418,86 @@ function startScheduledJobsRunner() {
   console.log('⏰ Scheduled jobs runner started (every 60s)');
 }
 
+function startSubscriptionReminderScheduler() {
+  const tick = async () => {
+    try {
+      // Unified tenant + supplier SaaS billing reminders (email + WhatsApp).
+      await runReminderCheck({ entityTypes: ['tenant', 'supplier'] });
+    } catch (err) {
+      console.error('[subscription-reminders] Error:', err.message);
+    }
+  };
+  // Daily-ish: run shortly after boot, then every 6 hours (dedup table prevents re-sends).
+  setTimeout(tick, 45 * 1000);
+  setInterval(tick, 6 * 60 * 60 * 1000);
+  console.log('📧 Billing reminder scheduler started (tenants+suppliers, every 6h, IST cadence via dedup)');
+}
+
+function startProductAffinityScheduler() {
+  const tick = async () => {
+    try {
+      const result = await refreshAllAffinities(supabaseAdmin, { lookbackDays: 90 });
+      console.log(
+        `[product-affinity] Refreshed ${result.refreshed}/${result.total}` +
+        (result.failed ? ` (${result.failed} failed)` : ''),
+      );
+    } catch (err) {
+      console.error('[product-affinity] Scheduler error:', err.message);
+    }
+  };
+  // After boot (2 min), then every 6 hours — keeps cart recommendations current
+  // without hitting order_items on every webcart session.
+  setTimeout(tick, 2 * 60 * 1000);
+  setInterval(tick, 6 * 60 * 60 * 1000);
+  console.log('🛒 Product affinity scheduler started (every 6h, 90d lookback)');
+}
+
+function startDailySettlementScheduler() {
+  let lastKey = '';
+  const tick = async () => {
+    try {
+      // Run once per IST evening (~21:00–21:14 window)
+      const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+      const hour = ist.getUTCHours();
+      const minute = ist.getUTCMinutes();
+      const key = `${ist.getUTCFullYear()}-${ist.getUTCMonth()}-${ist.getUTCDate()}`;
+      if (hour !== 21 || minute > 14) return;
+      if (lastKey === key) return;
+      lastKey = key;
+      const result = await runDailySettlements(supabaseAdmin);
+      console.log(`[daily-settlement] sent=${result.sent} skipped=${result.skipped}`);
+    } catch (err) {
+      console.error('[daily-settlement] Scheduler error:', err.message);
+    }
+  };
+  setInterval(tick, 5 * 60 * 1000);
+  console.log('📒 Daily settlement scheduler started (checks every 5m for 21:00 IST)');
+}
+
+function startWeeklyPromoScheduler() {
+  let lastKey = '';
+  const { runWeeklyPromoDrafts } = require('../helpers/weeklyPromo');
+  const tick = async () => {
+    try {
+      // Monday ~10:00 IST
+      const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+      const day = ist.getUTCDay(); // 0=Sun … 1=Mon in UTC+5:30 calendar via getUTC*
+      const hour = ist.getUTCHours();
+      const minute = ist.getUTCMinutes();
+      const key = `${ist.getUTCFullYear()}-W${Math.floor(ist.getTime() / (7 * 86400000))}`;
+      if (day !== 1 || hour !== 10 || minute > 14) return;
+      if (lastKey === key) return;
+      lastKey = key;
+      const result = await runWeeklyPromoDrafts(supabaseAdmin);
+      console.log(`[weekly-promo] sent=${result.sent} skipped=${result.skipped}`);
+    } catch (err) {
+      console.error('[weekly-promo] Scheduler error:', err.message);
+    }
+  };
+  setInterval(tick, 5 * 60 * 1000);
+  console.log('📣 Weekly promo draft scheduler started (Mon 10:00 IST)');
+}
+
 function startAllSchedulers() {
   startSlotScheduler();
   startSpecialNotesTimeoutMonitor();
@@ -422,6 +506,10 @@ function startAllSchedulers() {
   startMarketingScheduler();
   startDineInAutoAssignScheduler();
   startScheduledJobsRunner();
+  startSubscriptionReminderScheduler();
+  startProductAffinityScheduler();
+  startDailySettlementScheduler();
+  startWeeklyPromoScheduler();
 }
 
 module.exports = { startAllSchedulers };

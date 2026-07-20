@@ -40,6 +40,7 @@ const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../helpers/
 const { applySlotAvailability, getCurrentSlotIST } = require('./catalog');
 const { notifyOrderReady }        = require('../helpers/whatsapp');
 const { notifyPackingTicketAlert } = require('../helpers/packingAlerts');
+const { queueForStation } = require('../helpers/kdsQueue');
 const { queueFeedbackForTable }   = require('../helpers/feedback');
 const {
   resolvePickupLocation,
@@ -338,6 +339,16 @@ router.post('/orders', authenticateToken, getRestaurantId, async (req, res) => {
     let subtotal   = 0;
     const orderItems = [];
     const packingAlertItems = [];
+    let tenantLobType = null;
+    try {
+      const { data: tenantRow } = await supabaseAdmin
+        .from('tenants')
+        .select('lob_type')
+        .eq('id', req.restaurant_id)
+        .maybeSingle();
+      tenantLobType = tenantRow?.lob_type || null;
+    } catch (_) { /* non-fatal */ }
+
     for (const item of items) {
       const { data: menuItem } = await supabaseAdmin.from('menu_items')
         .select('price, name, kitchen_station').eq('id', item.menu_item_id).single();
@@ -349,7 +360,7 @@ router.post('/orders', authenticateToken, getRestaurantId, async (req, res) => {
       if (itemError) throw itemError;
       orderItems.push(itemData);
       const station = String(menuItem.kitchen_station || 'assembly').toLowerCase();
-      const queue = station === 'sweets_counter' ? 'packing' : 'cooking';
+      const queue = queueForStation(station, tenantLobType);
       await supabaseAdmin.from('kds_items').insert({
         restaurant_id: req.restaurant_id,
         order_item_id: itemData.id,
@@ -513,7 +524,7 @@ router.get('/kds/feed', authenticateToken, getRestaurantId, async (req, res) => 
     const queue = queueRaw === 'packing' ? 'packing' : 'cooking';
     const statusFilter = status === 'all' ? ['pending', 'in_progress', 'ready'] : [status];
     const { data, error } = await supabaseAdmin.from('kds_items')
-      .select(`*, order_item:order_item_id!left(*, menu_item:menu_item_id!left(name, description, prep_time_minutes), order:order_id!left(table:table_id!left(table_number, section), order_number))`)
+      .select(`*, order_item:order_item_id!left(*, menu_item:menu_item_id!left(name, description, prep_time_minutes, retailer_id, size_label, pack_size_label, weight_grams), order:order_id!left(table:table_id!left(table_number, section), order_number))`)
       .eq('restaurant_id', req.restaurant_id)
       .eq('queue', queue)
       .in('status', statusFilter)
@@ -645,7 +656,7 @@ router.get('/kds/history', authenticateToken, getRestaurantId, async (req, res) 
     const queue = queueRaw === 'packing' ? 'packing' : 'cooking';
 
     const { data, error } = await supabaseAdmin.from('kds_items')
-      .select(`*, order_item:order_item_id!left(*, menu_item:menu_item_id!left(name, description, prep_time_minutes), order:order_id!left(table:table_id!left(table_number, section), order_number))`)
+      .select(`*, order_item:order_item_id!left(*, menu_item:menu_item_id!left(name, description, prep_time_minutes, retailer_id, size_label, pack_size_label, weight_grams), order:order_id!left(table:table_id!left(table_number, section), order_number))`)
       .eq('restaurant_id', req.restaurant_id)
       .eq('queue', queue)
       .in('status', ['ready', 'cancelled'])
@@ -1089,6 +1100,9 @@ router.put(
   'shiprocket_connected','shiprocket_api_key','shiprocket_email','intra_city_charge','outstation_charge','free_delivery_above',
   'cod_enabled_city','cod_enabled_outstation',
   'shipping_provider','courier_name','courier_rate_card',
+  'gstin','fssai_license','sac_code','receipt_tagline',
+  'packaging_weight_grams',
+  'daily_settlement_enabled','weekly_promo_drafts_enabled','instagram_handle',
   'subscribed_features', 'enabled_services',
     ];
 

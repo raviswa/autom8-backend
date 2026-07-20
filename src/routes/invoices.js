@@ -19,6 +19,7 @@ const { supabase, supabaseAdmin }        = require('../config/supabase');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 
 const { getKdsSecret } = require('../config/internalSecret');
+const { buildInvoicePdf } = require('../helpers/invoicePdf');
 
 const GST_RATES = {
   default:          5,   // CGST 2.5% + SGST 2.5%  (restaurant without ITC)
@@ -162,7 +163,7 @@ router.post('/generate', authenticateToken, getRestaurantId, async (req, res) =>
     if (orderErr || !order) return res.status(404).json({ error: 'Order not found' });
 
     const { data: restaurant } = await supabaseAdmin
-      .from('tenants').select('id, name, gstin, brand_id').eq('id', req.restaurant_id).single();
+      .from('tenants').select('id, name, display_name, legal_name, gstin, fssai_license, sac_code, brand_id, address_line1, address_line2, city, state, postal_code').eq('id', req.restaurant_id).single();
 
     const gstRate = gst_rate ?? GST_RATES.default;
     const payload = buildInvoicePayload(order, restaurant ?? {}, gstRate);
@@ -184,6 +185,63 @@ router.post('/generate', authenticateToken, getRestaurantId, async (req, res) =>
 
     res.json({ success: true, invoice_id: invoice.id, payload });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/invoices/:orderId/pdf ────────────────────────────────────────────
+
+router.get('/:orderId/pdf', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const orderId = req.params.orderId;
+    let { data: invoice } = await supabaseAdmin
+      .from('invoices')
+      .select('*')
+      .eq('order_id', orderId)
+      .eq('restaurant_id', req.restaurant_id)
+      .maybeSingle();
+
+    const { data: order } = await supabaseAdmin
+      .from('orders')
+      .select('*, order_items(quantity, unit_price, menu_item:menu_item_id(name, category)), customer_phone, customer_name')
+      .eq('id', orderId)
+      .eq('restaurant_id', req.restaurant_id)
+      .maybeSingle();
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    const { data: restaurant } = await supabaseAdmin
+      .from('tenants')
+      .select('id, name, display_name, legal_name, gstin, fssai_license, sac_code, brand_id, address_line1, address_line2, city, state, postal_code')
+      .eq('id', req.restaurant_id)
+      .maybeSingle();
+
+    if (!invoice) {
+      const payload = buildInvoicePayload(order, restaurant || {}, GST_RATES.default);
+      const { data: created } = await supabaseAdmin.from('invoices').upsert({
+        restaurant_id: req.restaurant_id,
+        order_id: orderId,
+        payload,
+        gst_rate: GST_RATES.default,
+        grand_total: payload.financial_breakdown.grand_total,
+        accounting_sync_status: 'PENDING_DAILY_ROLLUP_ZOHO_TALLY',
+        generated_at: new Date().toISOString(),
+      }, { onConflict: 'order_id', ignoreDuplicates: false }).select().single();
+      invoice = created;
+    }
+
+    const buf = await buildInvoicePdf({
+      restaurant: restaurant || {},
+      payload: invoice.payload,
+      customer: {
+        name: order.customer_name,
+        phone: order.customer_phone,
+      },
+    });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="invoice-${order.order_number || orderId}.pdf"`);
+    res.send(buf);
+  } catch (err) {
+    console.error('[invoices/pdf]', err.message);
     res.status(500).json({ error: err.message });
   }
 });

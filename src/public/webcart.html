@@ -74,6 +74,10 @@
     .brand-text { min-width: 0; }
     #brandName { font-weight: 700; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: .01em; }
     #sessionMeta { color: rgba(255,255,255,0.8); font-size: 11px; }
+    #complianceMeta {
+      color: rgba(255,255,255,0.65); font-size: 10px; margin-top: 2px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
     .slot-pill {
       border-radius: 999px;
       padding: 6px 12px;
@@ -335,6 +339,68 @@
     .delivery-quote-hint {
       font-size: 12px; color: #374151; background: #f9fafb; border: 1px solid var(--line);
       border-radius: 10px; padding: 8px 10px; margin-top: 6px;
+    }
+    .cart-nudge {
+      margin: 10px 0 4px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #fffaf5;
+      display: none;
+    }
+    .cart-nudge.show { display: block; }
+    .cart-nudge.ship {
+      background: linear-gradient(135deg, #ecfdf5 0%, #f0fdf4 100%);
+      border-color: #bbf7d0;
+    }
+    .cart-nudge-title {
+      font-size: 12.5px;
+      font-weight: 700;
+      color: #111827;
+      margin-bottom: 4px;
+    }
+    .cart-nudge-sub {
+      font-size: 12px;
+      color: #4b5563;
+      line-height: 1.35;
+    }
+    .cart-nudge-progress {
+      margin-top: 8px;
+      height: 6px;
+      border-radius: 99px;
+      background: #e5e7eb;
+      overflow: hidden;
+    }
+    .cart-nudge-progress > span {
+      display: block;
+      height: 100%;
+      background: #16a34a;
+      border-radius: 99px;
+      transition: width .25s ease;
+    }
+    .affinity-list { display: grid; gap: 8px; margin-top: 8px; }
+    .affinity-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      background: #fff;
+      border: 1px solid var(--line);
+    }
+    .affinity-row .ar-name { font-size: 13px; font-weight: 600; color: #111827; }
+    .affinity-row .ar-meta { font-size: 11px; color: #6b7280; margin-top: 2px; }
+    .affinity-row .ar-add {
+      border: none;
+      background: var(--brand);
+      color: #fff;
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
     }
     .cart-foot { padding: 12px 16px 16px; border-top: 1px solid var(--line); flex-shrink: 0; }
     .btn-submit {
@@ -614,6 +680,7 @@
       <div class="brand-text">
         <div id="brandName">Munafe</div>
         <div id="sessionMeta"></div>
+        <div id="complianceMeta"></div>
       </div>
     </div>
     <div id="slotPill" class="slot-pill">—</div>
@@ -654,6 +721,8 @@
         </div>
         <div class="cart-body">
           <div id="cartLines"></div>
+          <div id="freeShipNudge" class="cart-nudge ship" aria-live="polite"></div>
+          <div id="affinityNudge" class="cart-nudge" aria-live="polite"></div>
             <div class="totals">
             <div class="line"><span>Subtotal</span><strong id="subtotal">Rs 0</strong></div>
             <div class="line"><span>Discount</span><strong id="discount">- Rs 0</strong></div>
@@ -669,12 +738,22 @@
               <div id="savedAddressesList" class="saved-addresses"></div>
             </div>
             <input class="field" id="shipName" placeholder="Full name" autocomplete="name" />
+            <input class="field" id="shipPhone" placeholder="WhatsApp number" inputmode="tel" autocomplete="tel" style="display:none" />
             <textarea id="shipAddress" rows="2" placeholder="Street, area, landmark" autocomplete="street-address"></textarea>
             <input class="field" id="shipPincode" placeholder="Pincode (6 digits)" inputmode="numeric" maxlength="6" autocomplete="postal-code" />
             <div id="deliveryQuoteHint" class="delivery-quote-hint" style="display:none"></div>
           </div>
         <input class="field" id="promo" placeholder="Promo code (optional)" />
         <textarea id="notes" rows="2" placeholder="Special request (optional)"></textarea>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="giftToggle" />
+          This is a gift — get a shareable link
+        </label>
+        <div id="giftFields" style="display:none;margin-top:8px">
+          <input class="field" id="giftRecipientName" placeholder="Recipient name (optional)" />
+          <input class="field" id="giftRecipientPhone" placeholder="Recipient WhatsApp (optional)" inputmode="tel" />
+          <textarea id="giftMessage" rows="2" placeholder="Gift note (optional)"></textarea>
+        </div>
         </div>
         <div class="cart-foot">
           <button id="submitBtn" class="btn-submit">Continue to WhatsApp</button>
@@ -768,6 +847,8 @@
     if (!token) token = hashParams.get('token') || '';
     if (!phone) phone = hashParams.get('phone') || '';
     const slug = params.get('slug') || '';
+    const isShopPath = /\/shop\/?$/i.test(window.location.pathname || '');
+    const guestStorefront = isShopPath || params.get('guest') === '1' || params.get('mode') === 'shop';
     const isFilePreview = String(window.location.protocol || '').toLowerCase() === 'file:';
     const hostSlug = (() => {
       const host = String(window.location.hostname || '').toLowerCase();
@@ -861,6 +942,8 @@
       deliveryQuoteLoading: false,
       savedAddresses: [],
       deliveryQuoteTimer: null,
+      affinity: { by_item: {}, pairs: [], customer_favourites: [] },
+      pricingConfig: {},
     };
 
     const $ = (id) => document.getElementById(id);
@@ -954,9 +1037,9 @@
     // state survives reloads, the WhatsApp redirect-and-back flow, etc.
     // Without this, state.cart resets to an empty Map on every page load
     // and every item appears to lose its "already added" stepper state.
-    const cartStorageKey = () => `munafe_cart:${token}`;
-    const lastSubmitStorageKey = () => `munafe_last_submit:${token}`;
-    const sessionCacheStorageKey = () => `munafe_session:${slug || hostSlug}:${token}:${phone || state.phone || ''}`;
+    const cartStorageKey = () => `munafe_cart:${token || 'guest'}:${slug || hostSlug}`;
+    const lastSubmitStorageKey = () => `munafe_last_submit:${token || 'guest'}:${slug || hostSlug}`;
+    const sessionCacheStorageKey = () => `munafe_session:${slug || hostSlug}:${token || 'guest'}:${phone || state.phone || ''}`;
     const SESSION_CACHE_TTL_MS = 2 * 60 * 1000;
     function saveCartLocal() {
       try {
@@ -1301,6 +1384,137 @@ function cartTotals() {
                gstRate, gstAmount, total, count, shipped };
     }
 
+    function baseItemName(name) {
+      return String(name || '').replace(/\s*\([^)]*\)\s*$/, '').trim();
+    }
+
+    function resolveMenuByName(name) {
+      const target = baseItemName(name).toLowerCase();
+      if (!target) return null;
+      const matches = (state.menu || []).filter((m) => {
+        const type = (m.item_type || 'PRODUCT').toUpperCase();
+        if (['FLAVOUR', 'ADDON'].includes(type)) return false;
+        if (m.is_publicly_available === false || m.is_available === false || m.is_stocked === false) return false;
+        return baseItemName(m.name).toLowerCase() === target;
+      });
+      if (!matches.length) return null;
+      const cartKeys = new Set([...state.cart.keys()].map(String));
+      const notInCart = matches.filter((m) => !cartKeys.has(String(m.retailer_id || m.id)));
+      const pool = notInCart.length ? notInCart : matches;
+      return pool.slice().sort((a, b) => Number(a.price) - Number(b.price))[0];
+    }
+
+    function renderFreeShipNudge({ afterDiscount, count, shipped }) {
+      const el = $('freeShipNudge');
+      if (!el) return;
+      const threshold = Number(state.pricingConfig?.free_delivery_above || 0);
+      if (!shipped || !count || !(threshold > 0)) {
+        el.classList.remove('show');
+        el.innerHTML = '';
+        return;
+      }
+      if (afterDiscount >= threshold) {
+        el.classList.add('show');
+        el.innerHTML = `
+          <div class="cart-nudge-title">Free shipping unlocked</div>
+          <div class="cart-nudge-sub">You’ve crossed ₹${Math.round(threshold)} — delivery is free on this order.</div>`;
+        return;
+      }
+      const remaining = Math.ceil(threshold - afterDiscount);
+      const pct = Math.max(0, Math.min(100, Math.round((afterDiscount / threshold) * 100)));
+      el.classList.add('show');
+      el.innerHTML = `
+        <div class="cart-nudge-title">Add ₹${remaining} more for free shipping</div>
+        <div class="cart-nudge-sub">Free delivery above ₹${Math.round(threshold)}</div>
+        <div class="cart-nudge-progress" aria-hidden="true"><span style="width:${pct}%"></span></div>`;
+    }
+
+    function affinitySuggestions(limit = 3) {
+      const byItem = state.affinity?.by_item || {};
+      const favourites = state.affinity?.customer_favourites || [];
+      const cartNames = new Set(
+        [...state.cart.values()].map((l) => baseItemName(l.name)).filter(Boolean),
+      );
+      if (!cartNames.size && !favourites.length) return [];
+
+      const scores = new Map();
+      const reasons = new Map();
+
+      const bump = (partnerName, score, reason) => {
+        const key = baseItemName(partnerName);
+        if (!key || cartNames.has(key)) return;
+        scores.set(key, (scores.get(key) || 0) + score);
+        if (!reasons.has(key)) reasons.set(key, reason);
+      };
+
+      for (const seed of cartNames) {
+        for (const p of byItem[seed] || []) {
+          bump(p.name, Number(p.count || 1) * 3, seed);
+        }
+      }
+      for (const fav of favourites) {
+        const seed = baseItemName(fav.name);
+        if (!seed || cartNames.has(seed)) continue;
+        // Soft reorder cue from personal history even without a pair hit
+        bump(seed, Math.max(1, Number(fav.qty || 1)) * 0.8, 'your usuals');
+        for (const p of byItem[seed] || []) {
+          bump(p.name, Number(p.count || 1) * 1.5, seed);
+        }
+      }
+
+      return [...scores.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([name, score]) => {
+          const item = resolveMenuByName(name);
+          if (!item) return null;
+          return {
+            item,
+            score,
+            reason: reasons.get(name) || '',
+          };
+        })
+        .filter(Boolean)
+        .slice(0, limit);
+    }
+
+    function renderAffinityNudge() {
+      const el = $('affinityNudge');
+      if (!el) return;
+      const suggestions = affinitySuggestions(3);
+      if (!suggestions.length) {
+        el.classList.remove('show');
+        el.innerHTML = '';
+        return;
+      }
+      const rows = suggestions.map(({ item, reason }) => {
+        const why = reason && reason !== 'your usuals'
+          ? `Often bought with ${reason}`
+          : (reason === 'your usuals' ? 'From your past orders' : 'Popular together');
+        return `
+          <div class="affinity-row">
+            <div>
+              <div class="ar-name">${item.name}${item.pack_size_label || item.size_label ? ` · ${item.pack_size_label || item.size_label}` : ''}</div>
+              <div class="ar-meta">${why} · ${money(item.price)}</div>
+            </div>
+            <button type="button" class="ar-add" data-affinity-add="${item.id}">Add</button>
+          </div>`;
+      }).join('');
+      const hasPairReason = suggestions.some((s) => s.reason && s.reason !== 'your usuals');
+      const title = hasPairReason
+        ? 'Customers also add'
+        : 'Based on your past orders';
+      el.classList.add('show');
+      el.innerHTML = `
+        <div class="cart-nudge-title">${title}</div>
+        <div class="affinity-list">${rows}</div>`;
+      el.querySelectorAll('[data-affinity-add]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const item = state.menu.find((i) => String(i.id) === String(btn.dataset.affinityAdd));
+          if (item) addToCart(item);
+        });
+      });
+    }
+
     function renderCart() {
       saveCartLocal(); // FIX (4): keep storage in sync on every cart render
 
@@ -1308,6 +1522,7 @@ function cartTotals() {
         lines,
         subtotal,
         promo,
+        afterDiscount,
         parcelCharge,
         deliveryCharge,
         gstRate,
@@ -1343,6 +1558,9 @@ function cartTotals() {
           changeQty(btn.dataset.id, Number(btn.dataset.step));
         });
       });
+
+      renderFreeShipNudge({ afterDiscount, count, shipped });
+      renderAffinityNudge();
 
 $('subtotal').textContent = money(subtotal);
       $('discount').textContent = `- ${money(promo.amount)}`;
@@ -1832,21 +2050,42 @@ $('subtotal').textContent = money(subtotal);
     function isFlatCatalogProduct(item) {
       if (!isCatalogProductLob()) return false;
       const type = (item.item_type || 'PRODUCT').toUpperCase();
-      return type === 'PRODUCT' && !item.variant_group_id;
+      if (['FLAVOUR', 'ADDON', 'CUP', 'CONE', 'SUNDAE'].includes(type)) return false;
+      return !item.variant_group_id;
     }
 
     function itemGalleryUrls(item) {
       return [item.image_url, item.image_url_2, item.image_url_3, item.image_url_4, item.image_url_5].filter(Boolean);
     }
 
+    function bundleComponentsOf(item) {
+      const fromMeta = item.meta && Array.isArray(item.meta.bundle_components) ? item.meta.bundle_components : null;
+      if (fromMeta && fromMeta.length) return fromMeta;
+      return Array.isArray(item.bundle_components) ? item.bundle_components : [];
+    }
+
     function productDetailFieldsHtml(item) {
       const lob = state.lobType;
       const rows = [];
+      let includesHtml = '';
       if (lob === 'food_products') {
-        if (item.pack_size_label) rows.push(['Pack', item.pack_size_label]);
+        if (item.pack_size_label || item.size_label) rows.push(['Pack', item.pack_size_label || item.size_label]);
         if (item.weight_grams) rows.push(['Weight', `${item.weight_grams} g`]);
+        if (item.made_on_date) rows.push(['Made on', String(item.made_on_date).slice(0, 10)]);
         if (item.shelf_life_days) rows.push(['Shelf life', `${item.shelf_life_days} days`]);
+        if (item.ingredients) rows.push(['Ingredients', item.ingredients]);
         if (item.allergens) rows.push(['Allergens', item.allergens]);
+        const comps = bundleComponentsOf(item);
+        if (comps.length) {
+          const lines = comps.map((c) => {
+            const found = (state.menu || []).find((m) => String(m.retailer_id) === String(c.retailer_id));
+            const label = found
+              ? `${found.name}${found.pack_size_label || found.size_label ? ` (${found.pack_size_label || found.size_label})` : ''}`
+              : c.retailer_id;
+            return `${c.qty || 1}× ${label}`;
+          });
+          includesHtml = `<div class="modal-section"><div class="modal-section-title">Includes</div>${lines.map((line) => `<div class="product-detail-row"><strong>${line}</strong></div>`).join('')}</div>`;
+        }
       } else if (lob === 'retail') {
         if (item.condition) rows.push(['Condition', item.condition]);
         if (item.original_mrp && Number(item.original_mrp) > Number(item.price)) {
@@ -1857,8 +2096,10 @@ $('subtotal').textContent = money(subtotal);
         if (item.warranty_days) rows.push(['Warranty', `${item.warranty_days} days`]);
         if (item.colour) rows.push(['Colour', item.colour]);
       }
-      if (!rows.length) return '';
-      return `<div class="modal-section"><div class="modal-section-title">Details</div>${rows.map(([k, v]) => `<div class="product-detail-row"><span>${k}</span><strong>${v}</strong></div>`).join('')}</div>`;
+      const detailsHtml = rows.length
+        ? `<div class="modal-section"><div class="modal-section-title">Details</div>${rows.map(([k, v]) => `<div class="product-detail-row"><span>${k}</span><strong>${v}</strong></div>`).join('')}</div>`
+        : '';
+      return `${detailsHtml}${includesHtml}`;
     }
 
     function galleryHtml(urls, groupId) {
@@ -1888,6 +2129,36 @@ $('subtotal').textContent = money(subtotal);
       }, { passive: true });
     }
 
+    function joinStockWaitlist(item, reason = 'restock') {
+      const notifyPhone = state.phone
+        || ($('shipPhone')?.value || '').trim()
+        || prompt('WhatsApp number for notify-me')
+        || '';
+      if (!notifyPhone) {
+        showStatus('Enter a WhatsApp number so we can notify you.', 'err');
+        return;
+      }
+      const params = new URLSearchParams(window.location.search);
+      const slug = params.get('slug') || '';
+      fetch(`/api/webcart/stock-waitlist?slug=${encodeURIComponent(slug)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: notifyPhone,
+          menu_item_id: item.id,
+          retailer_id: item.retailer_id || null,
+          item_name: item.name,
+          reason: item.is_coming_soon || reason === 'launch' ? 'launch' : 'restock',
+        }),
+      })
+        .then((r) => r.json())
+        .then((data) => {
+          if (!data.ok) throw new Error(data.error || 'Could not join waitlist');
+          showStatus(data.message || 'We will notify you on WhatsApp.', 'ok');
+        })
+        .catch((err) => showStatus(err.message || 'Waitlist failed', 'err'));
+    }
+
     function openProductDetailModal(item) {
       const urls = itemGalleryUrls(item);
       const galleryId = `pd-${item.id}`;
@@ -1897,18 +2168,34 @@ $('subtotal').textContent = money(subtotal);
       const discountBadge = (state.lobType === 'retail' && item.original_mrp && Number(item.original_mrp) > Number(item.price))
         ? `<span class="discount-badge">${Math.round((1 - Number(item.price) / Number(item.original_mrp)) * 100)}% off</span>`
         : '';
+      const soldOut = item.is_publicly_available === false && !item.is_coming_soon;
+      const comingSoon = !!item.is_coming_soon;
+      const waitlistLabel = comingSoon ? 'Notify me at launch' : 'Notify me on WhatsApp';
+      const statusNote = comingSoon
+        ? `<p style="font-size:12px;color:#0369a1;margin:8px 0 0">Coming soon${item.launch_at ? ` · ${new Date(item.launch_at).toLocaleDateString()}` : ''}${item.deposit_amount ? ` · deposit ₹${Math.round(item.deposit_amount)}` : ''}</p>`
+        : (soldOut ? '<p style="font-size:12px;color:#b45309;margin:8px 0 0">Sold out for this batch</p>' : '');
       pslModalBody.innerHTML = `
         ${galleryHtml(urls, galleryId)}
         ${item.description ? `<p style="font-size:13px;color:var(--muted);margin:0 0 10px">${item.description}</p>` : ''}
         ${productDetailFieldsHtml(item)}
-        <div class="modal-price">${money(item.price)}${discountBadge}</div>`;
-      pslModalFoot.innerHTML = `
-        <button class="modal-skip" type="button" id="productDetailClose">Close</button>
-        <button class="modal-confirm" type="button" id="productDetailAdd" ${item.is_publicly_available === false ? 'disabled' : ''}>Add to cart</button>`;
+        <div class="modal-price">${money(item.price)}${discountBadge}</div>
+        ${statusNote}`;
+      pslModalFoot.innerHTML = (soldOut || comingSoon)
+        ? `<button class="modal-skip" type="button" id="productDetailClose">Close</button>
+           <button class="modal-confirm" type="button" id="productDetailWaitlist">${waitlistLabel}</button>`
+        : `<button class="modal-skip" type="button" id="productDetailClose">Close</button>
+           <button class="modal-confirm" type="button" id="productDetailAdd">Add to cart</button>`;
       openPslModalShell(item.name);
       bindProductGallery(galleryId);
       $('productDetailClose').onclick = closePslModal;
-      $('productDetailAdd').onclick = () => { addToCart(item); closePslModal(); };
+      if (soldOut || comingSoon) {
+        $('productDetailWaitlist').onclick = () => {
+          joinStockWaitlist(item, comingSoon ? 'launch' : 'restock');
+          closePslModal();
+        };
+      } else {
+        $('productDetailAdd').onclick = () => { addToCart(item); closePslModal(); };
+      }
     }
 
     function openPslModalShell(title) {
@@ -2145,17 +2432,25 @@ $('subtotal').textContent = money(subtotal);
     function rowCardHtml(item) {
       const qty = rowQty(item);
       const catalogProduct = isFlatCatalogProduct(item);
-      const actions = qty > 0
-        ? `<div class="stepper"><button data-step="-1" data-id="${item.id}">−</button><span>${qty}</span><button data-step="1" data-id="${item.id}">+</button></div>`
-        : `<button class="btn-add" data-add="${item.id}">+</button>`;
+      const comingSoon = !!item.is_coming_soon;
+      const soldOut = item.is_publicly_available === false && !comingSoon;
+      let actions;
+      if ((soldOut || comingSoon) && state.lobType === 'food_products') {
+        actions = `<button class="btn-add" data-waitlist="${item.id}" style="font-size:11px;padding:6px 8px">${comingSoon ? 'Notify' : 'Notify'}</button>`;
+      } else if (qty > 0) {
+        actions = `<div class="stepper"><button data-step="-1" data-id="${item.id}">−</button><span>${qty}</span><button data-step="1" data-id="${item.id}">+</button></div>`;
+      } else {
+        actions = `<button class="btn-add" data-add="${item.id}">+</button>`;
+      }
       const galleryUrls = itemGalleryUrls(item);
       const thumb = galleryUrls[0];
+      const statusSuffix = comingSoon ? ' · Coming soon' : (soldOut ? ' · Sold out' : '');
       return `
-        <div class="row-card${catalogProduct ? ' catalog-product' : ''}"${catalogProduct ? ` data-product-detail="${item.id}"` : ''}>
+        <div class="row-card${catalogProduct ? ' catalog-product' : ''}${(soldOut || comingSoon) ? ' sold-out' : ''}"${catalogProduct ? ` data-product-detail="${item.id}"` : ''} style="${(soldOut || comingSoon) ? 'opacity:.72' : ''}">
           ${thumb ? `<img src="${thumb}" alt="" onerror="this.outerHTML='<div class=\\'img-fallback\\'>No image</div>'" />` : `<div class="img-fallback">No image</div>`}
           <div class="row-info">
             <div class="row-cat">${item.category || 'General'}</div>
-            <div class="row-name">${item.name}</div>
+            <div class="row-name">${item.name}${statusSuffix}</div>
             <div class="row-price">${money(item.price)}</div>
             ${item.special_note ? `<span class="note">${item.special_note}</span>` : ''}
           </div>
@@ -2225,7 +2520,7 @@ $('subtotal').textContent = money(subtotal);
 
       const sizePills = rows.map(r => `
         <button class="size-pill ${r.id === current.id ? 'active' : ''}" data-group="${groupId}" data-row="${r.id}">
-          ${r.size_label || 'Size'}
+          ${r.size_label || r.pack_size_label || 'Size'}
         </button>
       `).join('');
 
@@ -2253,6 +2548,13 @@ $('subtotal').textContent = money(subtotal);
           e.stopPropagation();
           const item = state.menu.find(i => String(i.id) === btn.dataset.add);
           if (item) addToCart(item);
+        });
+      });
+      root.querySelectorAll('button[data-waitlist]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const item = state.menu.find(i => String(i.id) === btn.dataset.waitlist);
+          if (item) joinStockWaitlist(item);
         });
       });
       root.querySelectorAll('button[data-pizza]').forEach(btn => {
@@ -2506,23 +2808,26 @@ $('subtotal').textContent = money(subtotal);
 
       if (!q) {
         if (state.activeTab === 'all') {
-          visible = visible.filter(isItemShoppable);
+          visible = state.lobType === 'food_products' ? visible : visible.filter(isItemShoppable);
         } else if (state.activeTab === 'anytime') {
-          visible = visible.filter(i => isItemShoppable(i) && normalizeItemSlots(i).includes('anytime'));
+          visible = visible.filter(i =>
+            (state.lobType === 'food_products' || isItemShoppable(i)) && normalizeItemSlots(i).includes('anytime'),
+          );
         } else {
           visible = visible.filter(i =>
-            (i.category || 'General') === state.activeTab && isItemShoppable(i)
+            (i.category || 'General') === state.activeTab
+            && (state.lobType === 'food_products' || isItemShoppable(i)),
           );
         }
       } else {
         visible = visible.filter(i =>
-          isItemShoppable(i) && (
+          (state.lobType === 'food_products' || isItemShoppable(i)) && (
             i.name.toLowerCase().includes(q) || (i.category || '').toLowerCase().includes(q)
-          )
+          ),
         );
       }
 
-      if (state.catalogLob) {
+      if (state.catalogLob && state.lobType !== 'food_products') {
         visible = visible.filter(i => i.is_publicly_available !== false);
       }
 
@@ -2568,6 +2873,7 @@ $('subtotal').textContent = money(subtotal);
       syncUrlWithContext();
       state.menu = data.menu_items || [];
       state.pricingConfig = data.pricing_config || {};
+      state.affinity = data.affinity || { by_item: {}, pairs: [], customer_favourites: [] };
       state.todaysSpecial = data.todays_special || [];
       state.availableNow = data.available_now || [];
       state.categorySlots = data.category_slots || {};
@@ -2577,13 +2883,32 @@ $('subtotal').textContent = money(subtotal);
       state.activeTab = 'all';
       state.lobType = data.restaurant?.lob_type || data.lob_type || 'restaurant';
       state.catalogLob = !!data.catalog_lob || state.lobType !== 'restaurant';
+      state.guestStorefront = !!data.guest_storefront;
+      const shipPhoneEl = $('shipPhone');
+      if (shipPhoneEl) {
+        shipPhoneEl.style.display = state.guestStorefront ? '' : 'none';
+        if (state.phone) shipPhoneEl.value = state.phone;
+      }
 
       loadCartLocal();
       document.documentElement.style.setProperty('--brand', '#E36D26');
       document.documentElement.style.setProperty('--header', '#000000');
 
       $('brandName').textContent = data.restaurant.name || 'Munafe';
-      $('sessionMeta').textContent = `Token ${data.session.token} • ${data.session.phone}`;
+      if (data.guest_storefront) {
+        $('sessionMeta').textContent = 'Public storefront · add to cart, then check out with WhatsApp';
+      } else {
+        $('sessionMeta').textContent = `Token ${data.session.token} • ${data.session.phone}`;
+      }
+      const complianceEl = $('complianceMeta');
+      if (complianceEl) {
+        const bits = [];
+        if (data.restaurant.receipt_tagline) bits.push(data.restaurant.receipt_tagline);
+        if (data.restaurant.fssai_license) bits.push(`FSSAI ${data.restaurant.fssai_license}`);
+        if (data.restaurant.gstin) bits.push(`GSTIN ${data.restaurant.gstin}`);
+        complianceEl.textContent = bits.join(' · ');
+        complianceEl.style.display = bits.length ? '' : 'none';
+      }
 
       const logo = $('brandLogo');
       const fallback = $('brandLogoFallback');
@@ -2653,7 +2978,7 @@ $('subtotal').textContent = money(subtotal);
         );
         return;
       }
-      if (!token) {
+      if (!token && !guestStorefront && !slug && !hostSlug) {
         showSessionFallbackStatus();
         return;
       }
@@ -2664,9 +2989,11 @@ $('subtotal').textContent = money(subtotal);
       }
 
       try {
-        const q = new URLSearchParams({ token });
-        if (state.phone) q.set('phone', state.phone);
+        const q = new URLSearchParams();
+        if (token) q.set('token', token);
+        if (state.phone || phone) q.set('phone', state.phone || phone);
         if (slug) q.set('slug', slug);
+        if (guestStorefront || !token) q.set('guest', '1');
         const res = await fetch(`/api/webcart/session?${q.toString()}`);
         const data = await res.json();
 
@@ -2679,10 +3006,9 @@ $('subtotal').textContent = money(subtotal);
         }
         saveSessionCache(data);
         applySessionPayload(data);
-      } catch (_e) {
-        if (!cached) {
-          showStatus('Unable to load the cart session right now. Please try again.', 'err');
-        }
+      } catch (err) {
+        console.error(err);
+        showSessionFallbackStatus();
       }
     }
 
@@ -2723,13 +3049,28 @@ $('subtotal').textContent = money(subtotal);
         return;
       }
 
+      const guestPhone = ($('shipPhone')?.value || '').trim() || state.phone || phone || '';
+      if ((state.guestStorefront || guestStorefront || !token || token === 'guest') && !guestPhone) {
+        showStatus('Enter your WhatsApp number to place the order.', 'err');
+        state.submitting = false;
+        renderCart();
+        return;
+      }
+
       const body = {
-        token,
-        phone: state.phone,
+        token: token || 'guest',
+        phone: guestPhone || state.phone,
+        guest: (state.guestStorefront || guestStorefront || !token || token === 'guest') ? '1' : undefined,
         items: [...state.cart.values()],
         promo_code: ($('promo').value || '').trim() || null,
         special_request: ($('notes').value || '').trim() || null,
       };
+      if ($('giftToggle')?.checked) {
+        body.is_gift = true;
+        body.gift_recipient_name = ($('giftRecipientName')?.value || '').trim() || null;
+        body.gift_recipient_phone = ($('giftRecipientPhone')?.value || '').trim() || null;
+        body.gift_message = ($('giftMessage')?.value || '').trim() || null;
+      }
       if (requiresShipping()) {
         body.customer_name = ($('shipName').value || '').trim();
         body.delivery_address = ($('shipAddress').value || '').trim();
@@ -2757,13 +3098,15 @@ $('subtotal').textContent = money(subtotal);
         const awaitingApproval = !!data.awaiting_approval;
         const paymentLink = data.payment_link || null;
 
-        showStatus(
-          data.message ||
+        let statusMsg = data.message ||
             (awaitingApproval
               ? 'Order submitted for approval. Check WhatsApp.'
-              : 'Confirm & Pay sent to WhatsApp.'),
-          'ok',
-        );
+              : 'Confirm & Pay sent to WhatsApp.');
+        if (data.gift_url) {
+          statusMsg += ` Gift link: ${data.gift_url}`;
+          try { await navigator.clipboard?.writeText(data.gift_url); } catch (_) {}
+        }
+        showStatus(statusMsg, 'ok');
 
         // Keep cart visible after Continue to WhatsApp to prevent accidental
         // reordering when the customer returns before payment completion.
@@ -2790,6 +3133,12 @@ $('subtotal').textContent = money(subtotal);
     }
 
     $('submitBtn').addEventListener('click', submitOrder);
+    if ($('giftToggle')) {
+      $('giftToggle').addEventListener('change', () => {
+        const wrap = $('giftFields');
+        if (wrap) wrap.style.display = $('giftToggle').checked ? '' : 'none';
+      });
+    }
     $('waOpenBtn').addEventListener('click', openWhatsApp);
     $('waCloseBtn').addEventListener('click', hideWhatsAppGuide);
     waGuideOverlay.addEventListener('click', (e) => {

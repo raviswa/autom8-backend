@@ -572,7 +572,7 @@ function parseBoolCell(raw, defaultVal = false) {
   return s === 'true' || s === '1' || s === 'yes';
 }
 
-const KITCHEN_STATIONS = new Set(['tawa', 'steamer', 'kadai', 'beverages', 'assembly', 'cold', 'sweets_counter']);
+const KITCHEN_STATIONS = new Set(['tawa', 'steamer', 'kadai', 'beverages', 'assembly', 'cold', 'sweets_counter', 'packing', 'dispatch']);
 
 function parseKitchenStation(raw) {
   const s = String(raw || 'assembly').toLowerCase().trim();
@@ -693,6 +693,18 @@ async function handleMenuUpload(req, res) {
     let upserted = 0, skipped = 0, purged = 0;
     const errors = [];
 
+    let packagedLob = false;
+    try {
+      const { data: tenantRow } = await supabaseAdmin
+        .from('tenants')
+        .select('lob_type')
+        .eq('id', restaurantId)
+        .maybeSingle();
+      packagedLob = ['food_products', 'retail', 'b2b', 'psl'].includes(
+        String(tenantRow?.lob_type || '').toLowerCase(),
+      );
+    } catch (_) { /* non-fatal */ }
+
     // Phase 0: remove duplicate retailer_id rows (keep newest)
     try {
       const { data: allRows } = await supabaseAdmin.from('menu_items')
@@ -728,6 +740,10 @@ async function handleMenuUpload(req, res) {
         const raw = String(item.is_available).toLowerCase().trim();
         isStocked = raw === 'true' || raw === '1' || raw === 'yes';
       }
+      const stockQty = item.current_stock != null && item.current_stock !== ''
+        ? Math.max(0, parseInt(item.current_stock, 10) || 0)
+        : null;
+      if (stockQty === 0) isStocked = false;
 
       payloadIds.push(String(retailerId).trim());
       const now = new Date().toISOString();
@@ -746,13 +762,21 @@ async function handleMenuUpload(req, res) {
         prep_time_fixed:     Math.max(0, parseInt(item.prep_time_fixed, 10) || 5),
         batch_size:          Math.max(1, parseInt(item.batch_size, 10) || 1),
         time_per_batch:      Math.max(1, parseInt(item.time_per_batch, 10) || 10),
-        kitchen_station:     parseKitchenStation(item.kitchen_station),
+        kitchen_station:     (() => {
+          if (item.kitchen_station) return parseKitchenStation(item.kitchen_station);
+          return packagedLob ? 'sweets_counter' : 'assembly';
+        })(),
         packing_time:        Math.max(0, parseFloat(item.packing_time) || 1),
         holds_well:          parseBoolCell(item.holds_well, false),
         fulfillment_section: String(item.fulfillment_section || 'main').trim() || 'main',
-        item_type:           String(item.item_type || 'PRODUCT').trim().toUpperCase() || 'PRODUCT',
+        item_type:           (() => {
+          const t = String(item.item_type || 'PRODUCT').trim().toUpperCase() || 'PRODUCT';
+          return (t === 'BUNDLE' || t === 'HAMPER') ? 'BUNDLE' : t;
+        })(),
         variant_group_id:    item.variant_group_id ? String(item.variant_group_id).trim() : null,
-        size_label:          item.size_label ? String(item.size_label).trim() : null,
+        size_label:          (item.size_label || item.pack_size_label)
+          ? String(item.size_label || item.pack_size_label).trim()
+          : null,
         flavour_group:       item.flavour_group ? String(item.flavour_group).trim() : null,
         scoop_count:         Math.max(1, parseInt(item.scoop_count, 10) || 1),
         crust_options:       item.crust_options ? String(item.crust_options).trim() : null,
@@ -760,18 +784,40 @@ async function handleMenuUpload(req, res) {
         topping_extra_price: item.topping_extra_price != null ? parseFloat(item.topping_extra_price) || null : null,
         pack_size_label:     item.pack_size_label ? String(item.pack_size_label).trim() : null,
         weight_grams:        item.weight_grams != null && item.weight_grams !== '' ? parseInt(item.weight_grams, 10) || null : null,
+        current_stock:       stockQty,
         shelf_life_days:     item.shelf_life_days != null && item.shelf_life_days !== '' ? parseInt(item.shelf_life_days, 10) || null : null,
+        made_on_date:        item.made_on_date ? String(item.made_on_date).trim().slice(0, 10) : null,
+        ingredients:         item.ingredients ? String(item.ingredients).trim() : null,
         allergens:           item.allergens ? String(item.allergens).trim() : null,
+        availability_status: (() => {
+          const raw = String(item.availability_status || '').toLowerCase().trim();
+          if (['coming_soon', 'preorder', 'sold_out', 'in_stock'].includes(raw)) return raw;
+          if (stockQty === 0) return 'sold_out';
+          return null;
+        })(),
+        launch_at:           item.launch_at ? String(item.launch_at).trim() : null,
+        deposit_amount:      item.deposit_amount != null && item.deposit_amount !== ''
+          ? parseFloat(item.deposit_amount) || null
+          : null,
         condition:           item.condition ? String(item.condition).trim() : null,
         original_mrp:        item.original_mrp != null && item.original_mrp !== '' ? parseFloat(item.original_mrp) || null : null,
         warranty_days:       item.warranty_days != null && item.warranty_days !== '' ? parseInt(item.warranty_days, 10) || null : null,
         colour:              item.colour ? String(item.colour).trim() : null,
+        meta:                (() => {
+          const base = (item.meta && typeof item.meta === 'object' && !Array.isArray(item.meta))
+            ? { ...item.meta }
+            : {};
+          if (Array.isArray(item.bundle_components) && item.bundle_components.length) {
+            base.bundle_components = item.bundle_components;
+          }
+          return Object.keys(base).length ? base : {};
+        })(),
         image_url_2:         item.image_url_2 || item.image_link_2 || null,
         image_url_3:         item.image_url_3 || item.image_link_3 || null,
         image_url_4:         item.image_url_4 || item.image_link_4 || null,
         image_url_5:         item.image_url_5 || item.image_link_5 || null,
         created_at:          now,
-        updated_at:          now,      
+        updated_at:          now,
       });
     }
 
@@ -846,33 +892,73 @@ async function handleMenuItemAvailability(req, res) {
       return res.status(400).json({ error: 'is_available (boolean) required' });
 
     const { data: item, error: fetchErr } = await supabaseAdmin
-      .from('menu_items').select('id, retailer_id, name, is_stocked')
+      .from('menu_items').select('id, retailer_id, name, is_stocked, current_stock')
       .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).single();
 
     if (fetchErr || !item) return res.status(404).json({ error: 'Menu item not found' });
 
-    const { error: updateErr } = await supabaseAdmin.from('menu_items').update({
+    const wasOut = !item.is_stocked;
+    const patch = {
       is_stocked:   is_available,
       is_available: is_available,
       updated_at:   new Date().toISOString(),
-    }).eq('id', req.params.id).eq('restaurant_id', req.restaurant_id);
+    };
+    // Coming back in stock with qty tracking but zero left → bump to at least 1 unless client sends stock
+    if (is_available && item.current_stock != null && Number(item.current_stock) <= 0) {
+      if (req.body.current_stock != null) {
+        patch.current_stock = Math.max(0, parseInt(req.body.current_stock, 10) || 0);
+      }
+    }
+    if (req.body.current_stock != null && req.body.current_stock !== '') {
+      patch.current_stock = Math.max(0, parseInt(req.body.current_stock, 10) || 0);
+      if (patch.current_stock <= 0) {
+        patch.is_stocked = false;
+        patch.is_available = false;
+      }
+    }
+
+    const { error: updateErr } = await supabaseAdmin.from('menu_items').update(patch)
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id);
 
     if (updateErr) throw updateErr;
 
     await writeAuditLog({
       user_id: req.user.sub, restaurant_id: req.restaurant_id,
       action: `Menu item ${is_available ? 'marked in stock' : 'marked out of stock'}`,
-      details: { item_id: req.params.id, item_name: item.name, is_available },
+      details: { item_id: req.params.id, item_name: item.name, is_available, current_stock: patch.current_stock },
     });
 
-    res.json({ success: true, id: req.params.id, is_available, name: item.name });
+    res.json({
+      success: true,
+      id: req.params.id,
+      is_available: patch.is_available !== false && is_available,
+      name: item.name,
+      current_stock: patch.current_stock !== undefined ? patch.current_stock : item.current_stock,
+    });
 
     if (item.retailer_id) {
       pushSingleItemToMetaCatalog({
         retailerId:   item.retailer_id,
-        isAvailable:  is_available,
+        isAvailable:  patch.is_available !== false && !!is_available,
         restaurantId: req.restaurant_id,
       }).catch(e => console.error(`[toggle-meta-sync] Failed for ${item.name}:`, e.message));
+    }
+
+    if (wasOut && is_available && (patch.is_available !== false)) {
+      try {
+        const { notifyStockWaitlist } = require('../helpers/inventory');
+        const result = await notifyStockWaitlist(supabaseAdmin, {
+          restaurantId: req.restaurant_id,
+          menuItemId: item.id,
+          retailerId: item.retailer_id,
+          itemName: item.name,
+        });
+        if (result.notified) {
+          console.log(`[stock-waitlist] Notified ${result.notified} for ${item.name}`);
+        }
+      } catch (wlErr) {
+        console.warn('[stock-waitlist] notify failed:', wlErr.message);
+      }
     }
   } catch (err) {
     console.error('[menu-item-availability]', err.message);
@@ -882,6 +968,65 @@ async function handleMenuItemAvailability(req, res) {
 
 const menuItemAvailabilityMiddleware = [authenticateToken, getRestaurantId, handleMenuItemAvailability];
 router.put('/menu-items/:id/availability', ...menuItemAvailabilityMiddleware);
+
+// ── POST /api/menu-items/:id/restock — Add/set batch qty + waitlist notify ───
+
+async function handleMenuItemRestock(req, res) {
+  try {
+    if (!['owner', 'manager', 'brand_owner'].includes(req.user_role))
+      return res.status(403).json({ error: 'Unauthorized' });
+
+    const { restockItem, notifyStockWaitlist } = require('../helpers/inventory');
+
+    const result = await restockItem(supabaseAdmin, {
+      restaurantId: req.restaurant_id,
+      itemId: req.params.id,
+      addQty: req.body.add_qty,
+      setQty: req.body.set_qty ?? req.body.current_stock,
+    });
+
+    await writeAuditLog({
+      user_id: req.user.sub,
+      restaurant_id: req.restaurant_id,
+      action: 'Menu item restocked',
+      details: { item_id: result.id, item_name: result.name, current_stock: result.current_stock },
+    });
+
+    let waitlistNotified = 0;
+    if (result.was_out && result.now_in_stock) {
+      try {
+        const n = await notifyStockWaitlist(supabaseAdmin, {
+          restaurantId: req.restaurant_id,
+          menuItemId: result.id,
+          retailerId: result.retailer_id,
+          itemName: result.name,
+        });
+        waitlistNotified = n.notified || 0;
+      } catch (wlErr) {
+        console.warn('[restock] waitlist notify:', wlErr.message);
+      }
+    }
+
+    if (result.retailer_id) {
+      pushSingleItemToMetaCatalog({
+        retailerId: result.retailer_id,
+        isAvailable: result.now_in_stock,
+        restaurantId: req.restaurant_id,
+      }).catch((e) => console.error('[restock-meta]', e.message));
+    }
+
+    res.json({
+      success: true,
+      ...result,
+      waitlist_notified: waitlistNotified,
+    });
+  } catch (err) {
+    console.error('[menu-item-restock]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+router.post('/menu-items/:id/restock', authenticateToken, getRestaurantId, handleMenuItemRestock);
 
 // ── PUT /api/menu-items/:id/special-today — Mark special dish (no Meta push) ─
 

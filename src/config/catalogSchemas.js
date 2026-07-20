@@ -1,43 +1,3 @@
-// ============================================================================
-// AUTOM8 — CATALOG LOB SCHEMAS
-// src/config/catalogSchemas.js
-//
-// Single source of truth for catalog Excel upload behaviour per business
-// type (tenants.lob_type), consumed by ManagerPortal.jsx.
-//
-// SCOPE (Step 2, first pass):
-//   restaurant      — unchanged behaviour, existing tenants unaffected
-//   food_products   — flat PRODUCT rows, no new DB columns
-//   retail          — flat PRODUCT rows, no new DB columns
-//   b2b             — flat PRODUCT rows, no new DB columns
-//   psl             — PIZZA size variants, ice-cream flavours, crust/toppings,
-//                      and add-ons (catalog schema + webcart rendering)
-//   jewellery       — intentionally NOT included yet (live gold-rate pricing
-//                      is a separate, unbuilt feature — see conversation).
-//
-// HOW THIS IS WIRED
-// ─────────────────
-// ManagerPortal already parses the uploaded Excel with
-//   XLSX.utils.sheet_to_json(sheet, { defval: '' })
-// which returns an array of OBJECTS keyed by the literal header text in
-// row 1 (e.g. row.id, row.title, row.price). Each schema below operates on
-// that same object shape — no header-row auto-detection or column-index
-// lookup needed, since the header row is always row 1 by convention.
-//
-// The active schema is selected directly from the tenant's lob_type
-// (fetched once via GET /api/dashboard/waba and stored in ManagerPortal
-// state) — NOT auto-detected from file contents. Content-sniffing was
-// considered but rejected: the owner's Settings → Business type choice is
-// the single source of truth, matching "owner decides" from Step 5.
-//
-// TOPPINGS / CRUST / FLAVOURS / ADD-ONS
-// ───────────────────────────────────────
-// Flavours, scoops, crust, toppings, and add-ons are defined in the catalog
-// upload schema (psl LOB) and rendered in webcart at order time.
-// ============================================================================
-
-// ─── Shared utilities ──────────────────────────────────────────────────────
-
 function strOrNull(val) {
   const s = String(val ?? '').trim();
   return s || null;
@@ -56,32 +16,66 @@ function parseBool(val, defaultVal = true) {
   return defaultVal;
 }
 
-// Every schema's mapRow() returns this common shape at minimum. LOB-specific
-// schemas may add extra keys (e.g. psl adds item_type/variant_group_id/
-// size_label) — ManagerPortal passes the whole object through to
-// POST /api/menu/upload, and the backend decides what it persists.
+function parseBundleComponents(raw) {
+  const text = String(raw ?? '').trim();
+  if (!text) return null;
+  const parts = text.split(/[,;|]/).map((p) => p.trim()).filter(Boolean);
+  const out = [];
+  for (const part of parts) {
+    const m = part.match(/^([A-Za-z0-9_-]+)\s*[:=xX×*]?\s*(\d+)?$/);
+    if (!m) continue;
+    const qty = Math.max(1, parseInt(m[2] || '1', 10) || 1);
+    out.push({ retailer_id: m[1], qty });
+  }
+  return out.length ? out : null;
+}
+
+function parseMadeOnDate(raw) {
+  if (raw == null || raw === '') return null;
+  if (raw instanceof Date && !Number.isNaN(raw.getTime())) {
+    return raw.toISOString().slice(0, 10);
+  }
+  const s = String(raw).trim();
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const dmy = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
+  if (dmy) {
+    const dd = dmy[1].padStart(2, '0');
+    const mm = dmy[2].padStart(2, '0');
+    return `${dmy[3]}-${mm}-${dd}`;
+  }
+  const n = Number(s);
+  if (Number.isFinite(n) && n > 20000 && n < 80000) {
+    const epoch = Date.UTC(1899, 11, 30) + Math.round(n) * 86400000;
+    return new Date(epoch).toISOString().slice(0, 10);
+  }
+  return null;
+}
+
 function baseFields(row) {
-  const id     = strOrNull(row['id'] ?? row['ID'] ?? row['sku'] ?? row['SKU']);
-  const name   = strOrNull(row['title'] ?? row['name'] ?? row['Title'] ?? row['Name']);
-  const price  = parsePrice(row['price'] ?? row['Price']);
+  const id = strOrNull(row['id'] ?? row['ID'] ?? row['sku'] ?? row['SKU']);
+  const name = strOrNull(row['title'] ?? row['name'] ?? row['Title'] ?? row['Name']);
+  const price = parsePrice(row['price'] ?? row['Price']);
   const availRaw = row['is_available'] ?? row['Is Available'] ?? row['is_stocked'];
+
   return {
     id,
     name,
     description: strOrNull(row['description'] ?? row['Description']),
     price,
-    category:    strOrNull(row['category'] ?? row['Category']) ?? 'General',
-    image_url:   strOrNull(row['image_link'] ?? row['image_url'] ?? row['Image Link'] ?? row['Image URL']),
-    is_available: availRaw === undefined || availRaw === null || availRaw === ''
-      ? true
-      : !['false', '0', 'no'].includes(String(availRaw).toLowerCase().trim()),
+    category: strOrNull(row['category'] ?? row['Category']) ?? 'General',
+    image_url: strOrNull(row['image_link'] ?? row['image_url'] ?? row['Image Link'] ?? row['Image URL']),
+    is_available:
+      availRaw === undefined || availRaw === null || availRaw === ''
+        ? true
+        : !['false', '0', 'no'].includes(String(availRaw).toLowerCase().trim()),
   };
 }
 
 function baseValidate(item, rowNum) {
   const errors = [];
-  if (!item.id)        errors.push(`Row ${rowNum}: missing id/SKU`);
-  if (!item.name)      errors.push(`Row ${rowNum}: missing title/name`);
+  if (!item.id) errors.push(`Row ${rowNum}: missing id/SKU`);
+  if (!item.name) errors.push(`Row ${rowNum}: missing title/name`);
   if (item.price <= 0) errors.push(`Row ${rowNum} (${item.name || item.id}): price must be > 0`);
   if (item.image_url && !/^https?:\/\//i.test(item.image_url)) {
     errors.push(`Row ${rowNum} (${item.name || item.id}): image_link must start with http:// or https://`);
@@ -90,29 +84,20 @@ function baseValidate(item, rowNum) {
 }
 
 const BASE_PREVIEW_COLUMNS = [
-  { key: 'id',          label: 'SKU',      mono: true,  width: '8%'  },
-  { key: 'name',        label: 'Name',     bold: true,  width: '22%' },
-  { key: 'category',    label: 'Category',              width: '13%' },
-  { key: 'price',       label: 'Price',    price: true, width: '8%'  },
-  { key: 'description', label: 'Description',           width: '29%' },
-  { key: 'image_url',   label: 'Image',    image: true, width: '20%' },
+  { key: 'id', label: 'SKU', mono: true, width: '8%' },
+  { key: 'name', label: 'Name', bold: true, width: '22%' },
+  { key: 'category', label: 'Category', width: '13%' },
+  { key: 'price', label: 'Price', price: true, width: '8%' },
+  { key: 'description', label: 'Description', width: '29%' },
+  { key: 'image_url', label: 'Image', image: true, width: '20%' },
 ];
 
 const BASE_TEMPLATE_HEADERS = ['id', 'title', 'description', 'price', 'category', 'image_link', 'is_available'];
 
-// ─── LOB_SCHEMAS ────────────────────────────────────────────────────────────
-
 const LOB_SCHEMAS = {
-
-  // ══════════════════════════════════════════════════════════════════════
-  // restaurant — unchanged from the original upload behaviour.
-  // Keeps custom_label_0 (time slot) and kitchen-scheduling columns, since
-  // existing tenants' templates already rely on these.
-  // ══════════════════════════════════════════════════════════════════════
   restaurant: {
     id: 'restaurant',
     label: 'Restaurant / Cloud Kitchen / Tiffin',
-
     templateHeaders: [
       'id', 'title', 'description', 'price', 'category', 'custom_label_0', 'image_link', 'is_available',
       'prep_time_fixed', 'batch_size', 'time_per_batch', 'kitchen_station', 'packing_time', 'holds_well', 'fulfillment_section',
@@ -127,27 +112,25 @@ const LOB_SCHEMAS = {
       ['M003', 'Assorted Sweets Box (500g)', 'Pre-packed sweets — packing counter', 350, 'Sweets', 'all', '', 'TRUE', 0, 1, 0, 'sweets_counter', 2, 'TRUE', 'main'],
     ],
     columnHelp: [
-      ['Column guide — Restaurant / Cloud Kitchen / Tiffin'],
+      ['Column guide - Restaurant / Cloud Kitchen / Tiffin'],
       [''],
-      ['custom_label_0 — menu slot: Morning Tiffin, Lunch, Evening Snacks, Dinner (blank = all day)'],
-      ['prep_time_fixed — fixed prep minutes before batch cooking (default 5)'],
-      ['batch_size / time_per_batch — batch cook timing for scheduled orders'],
-      ['kitchen_station — tawa, steamer, kadai, beverages, assembly, cold, sweets_counter (pre-packed → packing screen, skips live cooking KDS)'],
-      ['packing_time — minutes per item for takeaway packing'],
-      ['holds_well — TRUE if item can wait without quality loss'],
-      ['fulfillment_section — counter id when multi-counter mode is on (default main)'],
+      ['custom_label_0 - menu slot: Morning Tiffin, Lunch, Evening Snacks, Dinner (blank = all day)'],
+      ['prep_time_fixed - fixed prep minutes before batch cooking (default 5)'],
+      ['batch_size / time_per_batch - batch cook timing for scheduled orders'],
+      ['kitchen_station - tawa, steamer, kadai, beverages, assembly, cold, sweets_counter (pre-packed → packing screen, skips live cooking KDS)'],
+      ['packing_time - minutes per item for takeaway packing'],
+      ['holds_well - TRUE if item can wait without quality loss'],
+      ['fulfillment_section - counter id when multi-counter mode is on (default main)'],
     ],
-
     previewColumns: [
-      { key: 'id',          label: 'ID',       mono: true,  width: '8%'  },
-      { key: 'name',        label: 'Name',     bold: true,  width: '22%' },
-      { key: 'category',    label: 'Category',              width: '13%' },
-      { key: 'time_slot',   label: 'Slot',                  width: '12%' },
-      { key: 'price',       label: 'Price',    price: true, width: '8%'  },
-      { key: 'description', label: 'Description',           width: '17%' },
-      { key: 'image_url',   label: 'Image',    image: true, width: '20%' },
+      { key: 'id', label: 'ID', mono: true, width: '8%' },
+      { key: 'name', label: 'Name', bold: true, width: '22%' },
+      { key: 'category', label: 'Category', width: '13%' },
+      { key: 'time_slot', label: 'Slot', width: '12%' },
+      { key: 'price', label: 'Price', price: true, width: '8%' },
+      { key: 'description', label: 'Description', width: '17%' },
+      { key: 'image_url', label: 'Image', image: true, width: '20%' },
     ],
-
     mapRow(row) {
       const base = baseFields(row);
       const customSlot = strOrNull(row['custom_label_0'] ?? row['Custom Label 0']);
@@ -164,7 +147,6 @@ const LOB_SCHEMAS = {
         fulfillment_section: row['fulfillment_section'],
       };
     },
-
     validateRow(item, rowNum) {
       const errors = baseValidate(item, rowNum);
       if (!item.category || item.category === 'General') {
@@ -174,65 +156,114 @@ const LOB_SCHEMAS = {
     },
   },
 
-  // ══════════════════════════════════════════════════════════════════════
-  // food_products — flat PRODUCT rows with pack-size, shelf-life, allergens,
-  // and up to five gallery images (image_link + image_url_2 … image_url_5).
-  // ══════════════════════════════════════════════════════════════════════
   food_products: {
     id: 'food_products',
     label: 'Packaged Food / Home Baker',
     templateHeaders: [
       ...BASE_TEMPLATE_HEADERS,
-      'pack_size_label', 'weight_grams', 'shelf_life_days', 'allergens',
+      'item_type', 'variant_group_id', 'pack_size_label', 'weight_grams', 'current_stock',
+      'availability_status', 'launch_at', 'deposit_amount',
+      'shelf_life_days', 'made_on_date', 'ingredients', 'allergens',
+      'bundle_components',
       'image_url_2', 'image_url_3', 'image_url_4', 'image_url_5',
     ],
     templateColWidths: [
-      { wch: 10 }, { wch: 26 }, { wch: 40 }, { wch: 8 }, { wch: 16 }, { wch: 48 }, { wch: 12 },
-      { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 20 },
-      { wch: 48 }, { wch: 48 }, { wch: 48 }, { wch: 48 },
+      { wch: 10 }, { wch: 28 }, { wch: 40 }, { wch: 8 }, { wch: 14 }, { wch: 48 }, { wch: 12 },
+      { wch: 10 }, { wch: 16 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+      { wch: 14 }, { wch: 14 }, { wch: 12 },
+      { wch: 12 }, { wch: 12 }, { wch: 28 }, { wch: 22 },
+      { wch: 28 },
+      { wch: 40 }, { wch: 40 }, { wch: 40 }, { wch: 40 },
     ],
     templateExamples: [
-      ['FP001', 'Homemade Chocolate Brownie (6 pcs)', 'Rich fudgy brownies, baked fresh', 249, 'Bakes', 'https://images.unsplash.com/photo-1606313564200-e75d5e30476c?w=800', 'TRUE', '6 pcs', 300, 3, 'Contains nuts, dairy', '', '', '', ''],
-      ['FP002', 'Mango Pickle (250g)', 'Traditional Andhra-style mango pickle', 150, 'Pickles', '', 'TRUE', '250g', 250, 90, '', '', '', '', ''],
+      ['MP-250', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 150, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '250g', 250, 50, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', ''],
+      ['MP-500', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 280, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '500g', 500, 40, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', ''],
+      ['MP-1KG', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 520, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '1kg', 1000, 20, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', ''],
+      ['MP-100', 'Mango Pickle', '100g jar for samplers', 70, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '100g', 100, 100, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', ''],
+      ['NEW-GINGER', 'Ginger Pickle (launch)', 'Batch cooking next week', 180, 'Pickles', '', 'TRUE', 'PRODUCT', '', '250g', 250, '', 'coming_soon', '2026-08-01', 50, 90, '', 'Ginger, chilli, mustard oil', 'Mustard', '', '', '', '', ''],
+      ['HAMPER-PICKLE-3', 'Pickle Sampler (3×100g)', 'Three favourite pickles in travel jars', 249, 'Hampers', '', 'TRUE', 'BUNDLE', '', '3×100g', 300, 15, '', '', '', 90, '2026-07-15', '', '', 'MP-100:3', '', '', '', ''],
     ],
     columnHelp: [
-      ['Column guide — Packaged Food / Home Baker'],
+      ['Column guide - Packaged Food / Home Baker'],
       [''],
-      ['category — used as the customer-facing menu tab, e.g. Bakes, Pickles, Snacks'],
-      ['image_link — primary image; image_url_2 … image_url_5 for extra gallery photos'],
-      ['pack_size_label — e.g. 250g, 6 pcs'],
-      ['weight_grams / shelf_life_days / allergens — shown in webcart product detail'],
-      ['is_available — TRUE / FALSE. FALSE = greyed out, toggle anytime from Manager Portal'],
+      ['item_type - PRODUCT (default) or BUNDLE (hamper / sampler)'],
+      ['variant_group_id - same ID across pack rows for one product (e.g. MANGO-PICKLE)'],
+      ['pack_size_label - 250g, 500g, 1kg (pack pills when variant_group_id is set)'],
+      ['weight_grams - courier / Shiprocket parcel weight'],
+      ['current_stock - batch jars on hand (blank = unlimited). 0 = sold out + waitlist'],
+      ['availability_status - blank/in_stock | sold_out | coming_soon | preorder'],
+      ['launch_at - ISO date for coming_soon (e.g. 2026-08-01)'],
+      ['deposit_amount - optional preorder deposit (INR)'],
+      ['shelf_life_days / made_on_date (YYYY-MM-DD) / ingredients / allergens - trust fields'],
+      ['bundle_components - for BUNDLE only: retailer_id:qty, e.g. MP-100:3,GARLIC-100:3'],
+      ['is_available - TRUE / FALSE'],
     ],
     previewColumns: [
       ...BASE_PREVIEW_COLUMNS.slice(0, 3),
-      { key: 'pack_size_label', label: 'Pack', width: '10%' },
+      { key: 'pack_size_label', label: 'Pack', width: '8%' },
+      { key: 'variant_group_id', label: 'Group', width: '10%' },
+      { key: 'item_type', label: 'Type', width: '8%' },
+      { key: 'availability_status', label: 'Status', width: '10%' },
       ...BASE_PREVIEW_COLUMNS.slice(3),
     ],
     mapRow(row) {
+      const pack = strOrNull(row['pack_size_label'] ?? row['Pack Size']);
+      const groupId = strOrNull(row['variant_group_id'] ?? row['Variant Group Id']);
+      const itemType = String(row['item_type'] ?? row['Item Type'] ?? 'PRODUCT').trim().toUpperCase() || 'PRODUCT';
+      const components = parseBundleComponents(row['bundle_components'] ?? row['Bundle Components']);
+      const meta = {};
+      if (components) meta.bundle_components = components;
+      const availRaw = String(row['availability_status'] ?? row['Availability Status'] ?? '').toLowerCase().trim();
+      const availability_status = ['coming_soon', 'preorder', 'sold_out', 'in_stock'].includes(availRaw)
+        ? availRaw
+        : null;
+
       return {
         ...baseFields(row),
         time_slot: 'all',
-        pack_size_label: strOrNull(row['pack_size_label'] ?? row['Pack Size']),
+        item_type: itemType === 'BUNDLE' || itemType === 'HAMPER' ? 'BUNDLE' : 'PRODUCT',
+        variant_group_id: groupId,
+        size_label: pack,
+        pack_size_label: pack,
         weight_grams: row['weight_grams'] != null && row['weight_grams'] !== ''
           ? parseInt(String(row['weight_grams']).replace(/\D/g, ''), 10) || null
+          : null,
+        current_stock: row['current_stock'] != null && row['current_stock'] !== ''
+          ? parseInt(String(row['current_stock']).replace(/\D/g, ''), 10)
+          : null,
+        availability_status,
+        launch_at: strOrNull(row['launch_at'] ?? row['Launch At'] ?? row['launch_date']),
+        deposit_amount: row['deposit_amount'] != null && row['deposit_amount'] !== ''
+          ? parseFloat(String(row['deposit_amount']).replace(/[^\d.]/g, '')) || null
           : null,
         shelf_life_days: row['shelf_life_days'] != null && row['shelf_life_days'] !== ''
           ? parseInt(String(row['shelf_life_days']).replace(/\D/g, ''), 10) || null
           : null,
+        made_on_date: parseMadeOnDate(row['made_on_date'] ?? row['Made On'] ?? row['made_on']),
+        ingredients: strOrNull(row['ingredients'] ?? row['Ingredients']),
         allergens: strOrNull(row['allergens'] ?? row['Allergens']),
+        bundle_components: components,
+        meta: Object.keys(meta).length ? meta : undefined,
         image_url_2: strOrNull(row['image_url_2'] ?? row['Image URL 2']),
         image_url_3: strOrNull(row['image_url_3'] ?? row['Image URL 3']),
         image_url_4: strOrNull(row['image_url_4'] ?? row['Image URL 4']),
         image_url_5: strOrNull(row['image_url_5'] ?? row['Image URL 5']),
       };
     },
-    validateRow: baseValidate,
+    validateRow(item, rowNum) {
+      const errors = baseValidate(item, rowNum);
+      if (item.variant_group_id && !item.pack_size_label && !item.size_label) {
+        errors.push(`Row ${rowNum} (${item.name || item.id}): variant_group_id needs pack_size_label (e.g. 250g)`);
+      }
+      if (item.item_type === 'BUNDLE') {
+        if (!item.bundle_components || !item.bundle_components.length) {
+          errors.push(`Row ${rowNum} (${item.name || item.id}): BUNDLE rows need bundle_components (e.g. MP-100:3)`);
+        }
+      }
+      return errors;
+    },
   },
 
-  // ══════════════════════════════════════════════════════════════════════
-  // retail — flat PRODUCT rows with condition, MRP, warranty, colour, gallery.
-  // ══════════════════════════════════════════════════════════════════════
   retail: {
     id: 'retail',
     label: 'Retail / Electronics',
@@ -250,12 +281,12 @@ const LOB_SCHEMAS = {
       ['RT001', 'iPhone 12 (Refurbished, 64GB)', 'Grade A refurbished', 24999, 'Phones', 'https://images.unsplash.com/photo-1592286927505-1def25115558?w=800', 'TRUE', 'Refurbished', 32999, 180, 'Black', '', '', '', ''],
     ],
     columnHelp: [
-      ['Column guide — Retail / Electronics'],
+      ['Column guide - Retail / Electronics'],
       [''],
-      ['category — used as the customer-facing menu tab, e.g. Phones, Accessories'],
-      ['condition — New / Refurbished / Used (shown in webcart product detail)'],
-      ['original_mrp — optional; webcart shows a discount badge when higher than price'],
-      ['image_link — primary image; image_url_2 … image_url_5 for extra gallery photos'],
+      ['category - customer-facing menu tab, e.g. Phones, Accessories'],
+      ['condition - New / Refurbished / Used (shown in webcart product detail)'],
+      ['original_mrp - optional; webcart shows a discount badge when higher than price'],
+      ['image_link - primary image; image_url_2 … image_url_5 for extra gallery photos'],
     ],
     previewColumns: [
       ...BASE_PREVIEW_COLUMNS.slice(0, 3),
@@ -284,24 +315,19 @@ const LOB_SCHEMAS = {
     validateRow: baseValidate,
   },
 
-  // ══════════════════════════════════════════════════════════════════════
-  // b2b — flat PRODUCT rows. Same reasoning as food_products.
-  // ══════════════════════════════════════════════════════════════════════
   b2b: {
     id: 'b2b',
     label: 'B2B Supply',
     templateHeaders: BASE_TEMPLATE_HEADERS,
-    templateColWidths: [
-      { wch: 10 }, { wch: 26 }, { wch: 40 }, { wch: 8 }, { wch: 16 }, { wch: 48 }, { wch: 12 },
-    ],
+    templateColWidths: [{ wch: 10 }, { wch: 26 }, { wch: 40 }, { wch: 8 }, { wch: 16 }, { wch: 48 }, { wch: 12 }],
     templateExamples: [
       ['B001', 'Sunflower Oil (15L Tin)', 'Refined sunflower oil, bulk pack', 1850, 'Cooking Oils', '', 'TRUE'],
     ],
     columnHelp: [
-      ['Column guide — B2B Supply'],
+      ['Column guide - B2B Supply'],
       [''],
-      ['category — used as the customer-facing menu tab, e.g. Cooking Oils, Grains'],
-      ['Include unit size and MOQ in the description for now, e.g. "15L tin, min 2 tins"'],
+      ['category - customer-facing menu tab, e.g. Cooking Oils, Grains'],
+      ['Include unit size and MOQ in description, e.g. "15L tin, min 2 tins"'],
     ],
     previewColumns: BASE_PREVIEW_COLUMNS,
     mapRow(row) {
@@ -310,12 +336,6 @@ const LOB_SCHEMAS = {
     validateRow: baseValidate,
   },
 
-  // ══════════════════════════════════════════════════════════════════════
-  // psl — Pizza & Ice Cream (mixed outlet). Supports size-linked pizzas,
-  // ice-cream flavour groups, crust/topping customization, and add-ons.
-  // Flavours, scoops, crust, toppings, and add-ons are defined in the
-  // catalog upload schema and rendered in webcart at order time.
-  // ══════════════════════════════════════════════════════════════════════
   psl: {
     id: 'psl',
     label: 'Pizza & Ice Cream (mixed outlet)',
@@ -414,14 +434,6 @@ const LOB_SCHEMAS = {
   },
 };
 
-// ─── Resolver ───────────────────────────────────────────────────────────────
-
-/**
- * Resolves the active schema for a tenant. Source of truth is
- * tenants.lob_type (owner-set in Settings → Business type) — NOT content
- * sniffing. Falls back to 'restaurant' for any unrecognised/legacy value,
- * which matches current behaviour for every existing tenant.
- */
 function getSchemaForLob(lobType) {
   return LOB_SCHEMAS[lobType] || LOB_SCHEMAS.restaurant;
 }

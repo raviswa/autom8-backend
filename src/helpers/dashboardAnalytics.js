@@ -471,7 +471,8 @@ function extractItemName(row) {
   return clean || null;
 }
 
-function buildComboPatterns(orderItems) {
+/** Co-purchase index used by OwnerInsights + webcart affinity recommendations. */
+function buildAffinityIndex(orderItems, { minPairCount = 2, topPartners = 8, topPairs = 12 } = {}) {
   const byOrder = {};
   for (const row of orderItems) {
     const oid = row.order_id;
@@ -482,24 +483,50 @@ function buildComboPatterns(orderItems) {
   }
 
   const pairCount = {};
+  const directed = {};
   for (const items of Object.values(byOrder)) {
-    const arr = [...items].sort();
+    const arr = [...items];
     for (let i = 0; i < arr.length; i++) {
       for (let j = i + 1; j < arr.length; j++) {
-        const key = `${arr[i]} + ${arr[j]}`;
+        const a = arr[i];
+        const b = arr[j];
+        const key = [a, b].sort().join(' + ');
         pairCount[key] = (pairCount[key] || 0) + 1;
+        if (!directed[a]) directed[a] = {};
+        if (!directed[b]) directed[b] = {};
+        directed[a][b] = (directed[a][b] || 0) + 1;
+        directed[b][a] = (directed[b][a] || 0) + 1;
       }
     }
   }
 
-  return Object.entries(pairCount)
-    .filter(([, n]) => n >= 2)
+  const pairs = Object.entries(pairCount)
+    .filter(([, n]) => n >= minPairCount)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 12)
+    .slice(0, topPairs)
     .map(([pair, count]) => {
-      const [a, b] = pair.split(' + ');
-      return { itemA: a, itemB: b, count, label: pair };
+      const [itemA, itemB] = pair.split(' + ');
+      return { itemA, itemB, count, label: pair };
     });
+
+  const by_item = {};
+  for (const [item, partners] of Object.entries(directed)) {
+    by_item[item] = Object.entries(partners)
+      .filter(([, n]) => n >= minPairCount)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, topPartners)
+      .map(([name, count]) => ({ name, count }));
+  }
+
+  return {
+    pairs,
+    by_item,
+    order_basket_count: Object.keys(byOrder).length,
+  };
+}
+
+function buildComboPatterns(orderItems) {
+  return buildAffinityIndex(orderItems).pairs;
 }
 
 function buildMenuQuadrant(orderItems) {
@@ -781,5 +808,8 @@ module.exports = {
   nearestTokenForOrder,
   normPhone,
   channelFromSource,
+  buildAffinityIndex,
+  buildComboPatterns,
+  extractItemName,
   ORDER_TOKEN_MATCH_MS,
 };

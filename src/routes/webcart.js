@@ -13,6 +13,15 @@ const {
   normalizeShippingProvider,
 } = require('../helpers/courierRates');
 const { fetchShiprocketCheapestRate } = require('../helpers/shiprocket');
+const { getAffinityForWebcart } = require('../helpers/productAffinity');
+const {
+  cartWeightKg,
+  resolveCartLineWeights,
+} = require('../helpers/cartWeight');
+const {
+  deductStockForLines,
+  joinStockWaitlist,
+} = require('../helpers/inventory');
 
 const ACTIVE_TOKEN_STATUSES = new Set(['waiting', 'pending_approval', 'seated', 'takeaway']);
 const DEFAULT_THEME = {
@@ -142,7 +151,7 @@ async function resolveRestaurantBySlug(req) {
   if (!rows || (now - _restaurantCache.fetchedAt) > RESTAURANT_CACHE_TTL_MS) {
     const { data, error } = await supabaseAdmin
       .from('tenants')
-      .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category, parcel_charge_per_item, delivery_charge_default, delivery_charge_tiers, gst_rate, kitchen_busy, lob_type, postal_code, shiprocket_connected, shiprocket_api_key, shiprocket_email, intra_city_charge, outstation_charge, free_delivery_above, cod_enabled_city, cod_enabled_outstation, shipping_provider, courier_name, courier_rate_card')
+      .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category, parcel_charge_per_item, delivery_charge_default, delivery_charge_tiers, gst_rate, kitchen_busy, lob_type, postal_code, shiprocket_connected, shiprocket_api_key, shiprocket_email, intra_city_charge, outstation_charge, free_delivery_above, packaging_weight_grams, cod_enabled_city, cod_enabled_outstation, shipping_provider, courier_name, courier_rate_card, gstin, fssai_license, sac_code, receipt_tagline')
       .eq('is_active', true)
       .limit(500);
     if (error) throw error;
@@ -204,21 +213,8 @@ async function fetchShiprocketRate({ apiKey, email, password, pickupPincode, del
   });
 }
 
-/** Sum catalog weight_grams × qty → kg. Falls back to 0.5 kg when no weights set. */
-function cartWeightKg(items) {
-  let grams = 0;
-  let weighed = false;
-  for (const line of items || []) {
-    const g = Number(line.weight_grams || 0);
-    const qty = Math.max(0, Math.floor(Number(line.qty || 0)));
-    if (g > 0 && qty > 0) {
-      grams += g * qty;
-      weighed = true;
-    }
-  }
-  if (!weighed) return 0.5;
-  return Math.round((grams / 1000) * 1000) / 1000;
-}
+/** Sum catalog weight_grams × qty → kg (see helpers/cartWeight.js). */
+// cartWeightKg imported from helpers/cartWeight
 
 async function calculateDelivery(restaurant, customerPincode, cartTotal, options = {}) {
   const tenantPincode = normalizePincode(restaurant?.postal_code);
@@ -232,7 +228,11 @@ async function calculateDelivery(restaurant, customerPincode, cartTotal, options
   const zone = intraCity ? 'intra_city' : 'outstation';
   const weightKg = Math.max(
     0.01,
-    Number(options.weightKg) > 0 ? Number(options.weightKg) : cartWeightKg(options.items),
+    Number(options.weightKg) > 0
+      ? Number(options.weightKg)
+      : cartWeightKg(options.items, {
+          packagingGrams: Number(restaurant?.packaging_weight_grams || 0) || 0,
+        }),
   );
   const courierName = String(restaurant?.courier_name || '').trim() || null;
 
@@ -518,7 +518,7 @@ const RESTAURANT_MENU_ITEM_SELECT =
   'id, retailer_id, name, price, category, description, image_url, image_url_2, image_url_3, image_url_4, image_url_5, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked, is_available';
 
 const CATALOG_MENU_ITEM_SELECT =
-  `${RESTAURANT_MENU_ITEM_SELECT}, variant_group_id, size_label, item_type, flavour_group, scoop_count, crust_options, toppings_allowed, topping_extra_price, pack_size_label, weight_grams, shelf_life_days, allergens, condition, original_mrp, warranty_days, colour`;
+  `${RESTAURANT_MENU_ITEM_SELECT}, variant_group_id, size_label, item_type, flavour_group, scoop_count, crust_options, toppings_allowed, topping_extra_price, pack_size_label, weight_grams, shelf_life_days, made_on_date, ingredients, allergens, condition, original_mrp, warranty_days, colour, meta, current_stock, availability_status, launch_at, deposit_amount`;
 
 async function fetchMenuItems(restaurantId, { catalogLob = false } = {}) {
   const cacheKey = `${restaurantId}:${catalogLob ? 'catalog' : 'restaurant'}`;
@@ -559,14 +559,26 @@ async function fetchMenuItems(restaurantId, { catalogLob = false } = {}) {
     categoryRows.map(row => [row.name, normalizeSlots(row.applicable_slots)])
   );
 
-  const items = (itemsRes.data || []).map(item => ({
-    ...item,
-    is_available: !!item.is_available,
-    is_stocked: !!item.is_stocked,
-    is_publicly_available: !!(item.is_available && item.is_stocked),
-    effective_slots: normalizeSlots(item.applicable_slots || categorySlotMap[item.category] || ['anytime']),
-    is_todays_special: !!(item.is_todays_special || item.is_special_today),
-  }));
+  const items = (itemsRes.data || []).map(item => {
+    const qtyOk = item.current_stock == null || Number(item.current_stock) > 0;
+    const status = String(item.availability_status || '').toLowerCase().trim();
+    const comingSoon = status === 'coming_soon' || status === 'preorder';
+    const soldOutStatus = status === 'sold_out';
+    const stocked = comingSoon
+      ? false
+      : (!!item.is_stocked && qtyOk && !soldOutStatus);
+    return {
+      ...item,
+      is_available: !!item.is_available,
+      is_stocked: stocked,
+      current_stock: item.current_stock == null ? null : Number(item.current_stock),
+      availability_status: status || (stocked ? 'in_stock' : 'sold_out'),
+      is_coming_soon: comingSoon,
+      is_publicly_available: !!(item.is_available && stocked && !comingSoon),
+      effective_slots: normalizeSlots(item.applicable_slots || categorySlotMap[item.category] || ['anytime']),
+      is_todays_special: !!(item.is_todays_special || item.is_special_today),
+    };
+  });
 
   _menuCache.set(cacheKey, { items, categorySlotMap, fetchedAt: now });
 
@@ -605,14 +617,8 @@ router.get('/api/webcart/session', async (req, res) => {
   try {
     const token = String(req.query.token || '').trim();
     const phone = String(req.query.phone || '').trim();
-
-    if (!token || !phone) {
-      return res.status(400).json({
-        valid: false,
-        code: 'BAD_REQUEST',
-        message: 'token and phone are required.',
-      });
-    }
+    const guestMode = String(req.query.guest || '').trim() === '1'
+      || String(req.query.mode || '').trim().toLowerCase() === 'shop';
 
     const restaurant = await resolveRestaurantBySlug(req);
     if (!restaurant) {
@@ -626,11 +632,24 @@ router.get('/api/webcart/session', async (req, res) => {
     const lobType = restaurant.lob_type || 'restaurant';
     const catalogLob = !isRestaurantLob(lobType);
 
-    const session = await resolveSession({
-      restaurantId: restaurant.id,
-      token,
-      phone,
-    });
+    // Permanent storefront: packaged LOBs can browse without WhatsApp token.
+    if ((!token || !phone) && !(guestMode && catalogLob)) {
+      return res.status(400).json({
+        valid: false,
+        code: 'BAD_REQUEST',
+        message: catalogLob
+          ? 'Open /shop?slug=… for the public storefront, or provide token and phone.'
+          : 'token and phone are required.',
+      });
+    }
+
+    const session = (token && phone)
+      ? await resolveSession({
+          restaurantId: restaurant.id,
+          token,
+          phone,
+        })
+      : null;
 
     const { items: menuItems, categorySlotMap } = await fetchMenuItems(restaurant.id, { catalogLob });
 
@@ -677,36 +696,73 @@ router.get('/api/webcart/session', async (req, res) => {
 
     const todaysSpecial = catalogLob ? [] : menuItems.filter(i => i.is_todays_special);
 
+    const isGuest = !session && catalogLob && (!token || !phone);
     const sessionPayload = session
       ? {
           token: session.id,
           phone: session.phone,
           type: session.type,
         }
-      : {
-          token,
-          phone,
-          type: 'takeaway',
-        };
+      : isGuest
+        ? {
+            token: 'guest',
+            phone: '',
+            type: 'delivery',
+            guest: true,
+          }
+        : {
+            token,
+            phone,
+            type: 'takeaway',
+          };
 
     const orderingEnabled = true;
+
+    let affinity = {
+      updated_at: null,
+      by_item: {},
+      pairs: [],
+      customer_favourites: [],
+    };
+    try {
+      affinity = await getAffinityForWebcart(supabaseAdmin, restaurant.id, {
+        phone: session?.phone || phone || null,
+      });
+    } catch (affErr) {
+      console.warn('[webcart/session] affinity:', affErr.message);
+    }
+
+    const storefrontSlug = slugify(restaurant.display_name || restaurant.name) || null;
 
     return res.json({
       valid: true,
       ordering_enabled: orderingEnabled,
-      session_expired: !session,
+      session_expired: !session && !isGuest,
+      guest_storefront: isGuest,
+      storefront_url: storefrontSlug ? `/shop?slug=${encodeURIComponent(storefrontSlug)}` : null,
       restaurant: {
         id: restaurant.id,
         name: restaurant.display_name || restaurant.name,
         logo_url: restaurant.logo_url || null,
         support_phone: pickSupportPhone(restaurant) || null,
         lob_type: lobType,
+        gstin: restaurant.gstin || null,
+        fssai_license: restaurant.fssai_license || null,
+        sac_code: restaurant.sac_code || null,
+        receipt_tagline: restaurant.receipt_tagline || null,
       },
-      pricing_config: {                                         // ← ADD THIS BLOCK
+      pricing_config: {
         parcel_charge_per_item: restaurant.parcel_charge_per_item || 0,
         gst_rate: restaurant.gst_rate || 5,
         delivery_charge_default: restaurant.delivery_charge_default || 40,
+        free_delivery_above: Number(restaurant.free_delivery_above) > 0
+          ? Number(restaurant.free_delivery_above)
+          : 0,
+        packaging_weight_grams: Number(restaurant.packaging_weight_grams) > 0
+          ? Number(restaurant.packaging_weight_grams)
+          : 0,
       },
+      affinity,
       
       theme: DEFAULT_THEME,
       session: sessionPayload,
@@ -718,19 +774,15 @@ router.get('/api/webcart/session', async (req, res) => {
       slot_banner: slotInfo.banner || null,
       catalog_lob: catalogLob,
       kitchen_manual_override: !!slotInfo.manager_override,
-      // Informational only — the manager's "busy kitchen" rush-hour flag
-      // (POST /api/catalog/kitchen-busy-toggle) intentionally does not block
-      // ordering here; it's surfaced for future conversational-flow use
-      // (e.g. showing a longer prep-time notice), not as a booking gate.
       kitchen_busy: !!restaurant.kitchen_busy,
-      // preferred_category = manager primary for the active meal slot (chip sort hint).
-      // Webcart always opens on "All Items" — do not force another tab.
       preferred_category: preferredCategory,
       category_slots: categorySlotMap,
       promotions: [],
-      session_message: session
-        ? null
-        : 'Your WhatsApp session expired, but the menu is still available to browse. Please request a fresh link to submit an order.',
+      session_message: isGuest
+        ? 'Browse the storefront. Enter your WhatsApp number at checkout to place the order.'
+        : (session
+          ? null
+          : 'Your WhatsApp session expired, but the menu is still available to browse. Please request a fresh link to submit an order.'),
     });
   } catch (err) {
     console.error('[webcart/session]', err.message);
@@ -864,13 +916,24 @@ router.post('/api/webcart/submit', async (req, res) => {
     } = req.body || {};
     const safeToken = String(token || '').trim();
     const safePhone = String(phone || '').trim();
+    const guestCheckout = String(req.body?.guest || '').trim() === '1'
+      || safeToken === 'guest'
+      || !safeToken;
 
-    if (!safeToken || !safePhone || !Array.isArray(items) || !items.length) {
+    if (!safePhone || !Array.isArray(items) || !items.length) {
+      return res.status(400).json({ ok: false, error: 'phone and at least one item are required.' });
+    }
+    if (!guestCheckout && !safeToken) {
       return res.status(400).json({ ok: false, error: 'token, phone, and at least one item are required.' });
     }
 
     const restaurant = await resolveRestaurantBySlug(req);
     if (!restaurant) return res.status(404).json({ ok: false, error: 'Restaurant not found.' });
+
+    const catalogLob = !isRestaurantLob(restaurant.lob_type);
+    if (guestCheckout && !catalogLob) {
+      return res.status(400).json({ ok: false, error: 'Guest checkout is only available on packaged storefronts.' });
+    }
 
     const shippedOrder = requiresShipping(restaurant.lob_type);
     const safeName = String(customer_name || '').trim();
@@ -889,17 +952,18 @@ router.post('/api/webcart/submit', async (req, res) => {
       }
     }
 
-    const session = await resolveSession({
-      restaurantId: restaurant.id,
-      token: safeToken,
-      phone: safePhone,
-    });
+    const session = (!guestCheckout && safeToken)
+      ? await resolveSession({
+          restaurantId: restaurant.id,
+          token: safeToken,
+          phone: safePhone,
+        })
+      : null;
 
     const { data: liveItems, error: liveErr } = await supabaseAdmin
       .from('menu_items')
-      .select('id, retailer_id, name, price, weight_grams')
+      .select('id, retailer_id, name, price, weight_grams, item_type, meta, current_stock, is_stocked')
       .eq('restaurant_id', restaurant.id)
-      .eq('is_stocked', true)
       .is('archived_at', null);
 
     if (liveErr) throw liveErr;
@@ -910,11 +974,23 @@ router.post('/api/webcart/submit', async (req, res) => {
       if (row.retailer_id) liveMap.set(String(row.retailer_id), row);
     }
 
-    const liveKey = new Set(liveMap.keys());
-    const unavailable = items
-      .filter(i => !liveKey.has(String(i.id || '')))
-      .map(i => i.name)
-      .filter(Boolean);
+    const unavailable = [];
+    const shortages = [];
+    for (const i of items) {
+      const source = liveMap.get(String(i.id || ''));
+      if (!source || source.is_stocked === false) {
+        if (i.name) unavailable.push(i.name);
+        continue;
+      }
+      const qty = Math.max(0, Math.floor(Number(i.qty || 0)));
+      if (source.current_stock != null && qty > Number(source.current_stock)) {
+        shortages.push({
+          name: source.name,
+          asked: qty,
+          available: Number(source.current_stock),
+        });
+      }
+    }
 
     if (unavailable.length) {
       const label = unavailable.slice(0, 3).join(', ');
@@ -925,27 +1001,60 @@ router.post('/api/webcart/submit', async (req, res) => {
       });
     }
 
+    if (shortages.length) {
+      const s = shortages[0];
+      return res.status(409).json({
+        ok: false,
+        error: `Only ${s.available} left of ${s.name} (you asked for ${s.asked}).`,
+        shortages,
+      });
+    }
+
+    const weightedLines = resolveCartLineWeights(items, liveItems || []);
+    const weightByKey = new Map(weightedLines.map((l) => [String(l.id), l.weight_grams]));
+
     const normalizedItems = [];
+    const stockLines = [];
     for (const row of items) {
       const source = liveMap.get(String(row.id || ''));
-      if (!source) continue;
+      if (!source || source.is_stocked === false) continue;
 
       const qty = Math.max(0, Math.floor(Number(row.qty || 0)));
       if (!qty) continue;
 
       const unitPrice = Number(source.price || 0);
+      const key = source.retailer_id || source.id;
       normalizedItems.push({
-        id: source.retailer_id || source.id,
+        id: key,
         name: source.name,
         qty,
         price: unitPrice,
         line_total: unitPrice * qty,
-        weight_grams: Number(source.weight_grams || 0) || 0,
+        weight_grams: weightByKey.get(String(row.id))
+          ?? weightByKey.get(String(key))
+          ?? Number(source.weight_grams || 0)
+          || 0,
+      });
+      stockLines.push({
+        menu_item_id: source.id,
+        id: source.id,
+        qty,
+        name: source.name,
       });
     }
 
     if (!normalizedItems.length) {
       return res.status(400).json({ ok: false, error: 'No valid items to submit.' });
+    }
+
+    const stockResult = await deductStockForLines(supabaseAdmin, restaurant.id, stockLines);
+    if (!stockResult.ok) {
+      const s = stockResult.shortages[0];
+      return res.status(409).json({
+        ok: false,
+        error: `Only ${s.available} left of ${s.name} (you asked for ${s.asked}).`,
+        shortages: stockResult.shortages,
+      });
     }
 
     const subtotal = normalizedItems.reduce((sum, line) => sum + Number(line.line_total || 0), 0);
@@ -1114,11 +1223,30 @@ router.post('/api/webcart/submit', async (req, res) => {
         .eq('phone', session.phone);
     }
 
+    let giftUrl = null;
+    if (req.body?.is_gift) {
+      try {
+        const { createGiftLink } = require('../helpers/giftLinks');
+        const gift = await createGiftLink(supabaseAdmin, {
+          restaurantId: restaurant.id,
+          bookingId: confirmResult?.booking_id || null,
+          gifterPhone: session?.phone || safePhone,
+          recipientPhone: req.body?.gift_recipient_phone || null,
+          recipientName: req.body?.gift_recipient_name || null,
+          giftMessage: req.body?.gift_message || null,
+        });
+        giftUrl = `${req.protocol}://${req.get('host')}/gift/${gift.token}`;
+      } catch (giftErr) {
+        console.warn('[webcart/submit] gift link:', giftErr.message);
+      }
+    }
+
     return res.json({
       ok: true,
       order_ref: orderRef,
       booking_id: confirmResult?.booking_id || null,
       payment_link: confirmResult?.payment_link || null,
+      gift_url: giftUrl,
       awaiting_approval: !!confirmResult?.awaiting_approval,
       message: confirmResult?.awaiting_approval
         ? 'Order submitted for manager approval. Check WhatsApp for updates.'
@@ -1217,27 +1345,11 @@ router.post('/api/webcart/delivery-quote', async (req, res) => {
     if (rawItems.length) {
       const { data: liveItems, error: liveErr } = await supabaseAdmin
         .from('menu_items')
-        .select('id, retailer_id, weight_grams')
+        .select('id, retailer_id, weight_grams, item_type, meta')
         .eq('restaurant_id', restaurant.id)
-        .eq('is_stocked', true)
         .is('archived_at', null);
       if (liveErr) throw liveErr;
-
-      const liveMap = new Map();
-      for (const row of (liveItems || [])) {
-        liveMap.set(String(row.id), row);
-        if (row.retailer_id) liveMap.set(String(row.retailer_id), row);
-      }
-
-      for (const row of rawItems) {
-        const source = liveMap.get(String(row.id || row.baseId || ''));
-        const qty = Math.max(0, Math.floor(Number(row.qty || 0)));
-        if (!source || !qty) continue;
-        weighedItems.push({
-          qty,
-          weight_grams: Number(source.weight_grams || 0) || 0,
-        });
-      }
+      weighedItems = resolveCartLineWeights(rawItems, liveItems || []);
     }
 
     const quote = await calculateDelivery(restaurant, customerPincode, cart_total, {
@@ -1256,6 +1368,61 @@ const SHIPROCKET_STATUS_MAP = {
   out_for_delivery: 'Out for delivery',
   delivered: 'Delivered',
 };
+
+/** Notify-me waitlist when a SKU is sold out. */
+router.post('/api/webcart/stock-waitlist', async (req, res) => {
+  try {
+    const restaurant = await resolveRestaurantBySlug(req);
+    if (!restaurant) return res.status(404).json({ ok: false, error: 'Restaurant not found.' });
+
+    const phone = String(req.body?.phone || req.query.phone || '').trim();
+    const retailerId = String(req.body?.retailer_id || '').trim() || null;
+    const menuItemId = String(req.body?.menu_item_id || '').trim() || null;
+    let itemName = String(req.body?.item_name || '').trim() || null;
+    const reason = String(req.body?.reason || 'restock').toLowerCase() === 'launch' ? 'launch' : 'restock';
+
+    if (!phone) return res.status(400).json({ ok: false, error: 'phone is required.' });
+    if (!retailerId && !menuItemId) {
+      return res.status(400).json({ ok: false, error: 'retailer_id or menu_item_id is required.' });
+    }
+
+    if (!itemName && (menuItemId || retailerId)) {
+      let q = supabaseAdmin
+        .from('menu_items')
+        .select('id, name, retailer_id')
+        .eq('restaurant_id', restaurant.id)
+        .limit(1);
+      if (menuItemId) q = q.eq('id', menuItemId);
+      else q = q.eq('retailer_id', retailerId);
+      const { data: row } = await q.maybeSingle();
+      if (row) {
+        itemName = row.name;
+      }
+    }
+
+    const row = await joinStockWaitlist(supabaseAdmin, {
+      restaurantId: restaurant.id,
+      phone,
+      menuItemId,
+      retailerId: retailerId || menuItemId,
+      itemName,
+      reason,
+    });
+
+    const msg = reason === 'launch'
+      ? `You're on the launch list for ${itemName || 'this item'}. We'll WhatsApp you when it drops.`
+      : `We'll WhatsApp you when ${itemName || 'this item'} is back in stock.`;
+
+    return res.json({
+      ok: true,
+      id: row?.id || null,
+      message: msg,
+    });
+  } catch (err) {
+    console.error('[webcart/stock-waitlist]', err.message);
+    return res.status(500).json({ ok: false, error: err.message || 'Could not join waitlist.' });
+  }
+});
 
 async function triggerShipmentNotify(payload) {
   const secret = getKdsSecret();
@@ -1349,11 +1516,47 @@ router.post('/api/webhooks/shiprocket', async (req, res) => {
   }
 });
 
-router.get(['/cart', '/menu'], (_req, res) => {
+router.get(['/cart', '/menu', '/shop'], (_req, res) => {
   // Webcart behavior changes frequently during debugging and deployment.
   // Disable browser reuse so refreshed pages always pick up the latest UI logic.
   res.setHeader('Cache-Control', 'no-store, max-age=0, must-revalidate');
   res.sendFile(path.join(__dirname, '..', 'public', 'webcart.html'));
+});
+
+router.get('/gift/:token', async (req, res) => {
+  try {
+    const { getGiftByToken, redeemGiftLink } = require('../helpers/giftLinks');
+    const gift = await getGiftByToken(supabaseAdmin, req.params.token);
+    if (!gift) {
+      return res.status(404).type('html').send('<h1>Gift link not found</h1>');
+    }
+    const { data: restaurant } = await supabaseAdmin
+      .from('tenants')
+      .select('id, display_name, name')
+      .eq('id', gift.restaurant_id)
+      .maybeSingle();
+    const brand = restaurant?.display_name || restaurant?.name || 'Kitchen';
+    if (String(req.query.redeem || '') === '1') {
+      await redeemGiftLink(supabaseAdmin, gift.token, {
+        recipientPhone: req.query.phone || null,
+      });
+    }
+    const note = gift.gift_message
+      ? `<p style="font-size:16px;color:#444">“${String(gift.gift_message).replace(/</g, '')}”</p>`
+      : '';
+    res.type('html').send(`<!DOCTYPE html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Gift · ${brand}</title>
+<style>body{font-family:system-ui,sans-serif;max-width:420px;margin:40px auto;padding:0 16px;color:#1a1a1a}
+h1{font-size:22px} .btn{display:inline-block;margin-top:16px;background:#128c7e;color:#fff;padding:12px 18px;border-radius:10px;text-decoration:none}</style></head>
+<body>
+  <h1>A gift from ${brand}</h1>
+  ${note}
+  <p>Status: <strong>${gift.status}</strong></p>
+  <a class="btn" href="/shop?slug=${encodeURIComponent(String(brand).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'shop')}">Browse the shop</a>
+</body></html>`);
+  } catch (err) {
+    console.error('[gift]', err.message);
+    res.status(500).type('html').send('<h1>Could not open gift</h1>');
+  }
 });
 
 router.get('/feedback', (_req, res) => {
