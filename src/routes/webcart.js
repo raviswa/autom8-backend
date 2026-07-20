@@ -13,6 +13,7 @@ const DEFAULT_THEME = {
   accent_color: '#111827',
 };
 const CHAT_SERVICE_URL = (process.env.CHAT_SERVICE_URL || 'http://localhost:8001').replace(/\/$/, '');
+const SHIPPED_LOBS = new Set(['food_products', 'retail', 'psl', 'b2b']);
 
 // Webcart APIs are polled frequently by the frontend. Keep tiny in-memory caches
 // to avoid repeated identical DB reads during launch/refresh loops.
@@ -59,7 +60,31 @@ function pickSupportPhone(restaurant) {
   );
 }
 
-function buildSubmissionFingerprint({ items, promo_code, special_request, total }) {
+function requiresShipping(lobType) {
+  return SHIPPED_LOBS.has(String(lobType || '').toLowerCase());
+}
+
+function parsePincodeFromAddress(address) {
+  const match = String(address || '').match(/\b(\d{6})\b/);
+  return match ? match[1] : '';
+}
+
+function formatDeliveryAddress(address, pincode) {
+  const addr = String(address || '').trim();
+  const pin = normalizePincode(pincode);
+  if (!addr) return '';
+  if (pin && !addr.includes(pin)) return `${addr}, ${pin}`;
+  return addr;
+}
+
+function buildSubmissionFingerprint({
+  items,
+  promo_code,
+  special_request,
+  total,
+  delivery_address,
+  pincode,
+}) {
   const stableLines = (Array.isArray(items) ? items : [])
     .map((line) => ({
       id: String(line?.id || ''),
@@ -73,6 +98,8 @@ function buildSubmissionFingerprint({ items, promo_code, special_request, total 
     items: stableLines,
     promo_code: String(promo_code || '').trim().toUpperCase(),
     special_request: String(special_request || '').trim(),
+    delivery_address: String(delivery_address || '').trim(),
+    pincode: normalizePincode(pincode),
     total: Number(total || 0),
   };
 
@@ -779,7 +806,16 @@ router.get('/api/webcart/payment-status', async (req, res) => {
 
 router.post('/api/webcart/submit', async (req, res) => {
   try {
-    const { token, phone, items, special_request, promo_code } = req.body || {};
+    const {
+      token,
+      phone,
+      items,
+      special_request,
+      promo_code,
+      customer_name,
+      delivery_address,
+      pincode,
+    } = req.body || {};
     const safeToken = String(token || '').trim();
     const safePhone = String(phone || '').trim();
 
@@ -789,6 +825,23 @@ router.post('/api/webcart/submit', async (req, res) => {
 
     const restaurant = await resolveRestaurantBySlug(req);
     if (!restaurant) return res.status(404).json({ ok: false, error: 'Restaurant not found.' });
+
+    const shippedOrder = requiresShipping(restaurant.lob_type);
+    const safeName = String(customer_name || '').trim();
+    const safeAddress = String(delivery_address || '').trim();
+    const safePincode = normalizePincode(pincode);
+
+    if (shippedOrder) {
+      if (!safeName) {
+        return res.status(400).json({ ok: false, error: 'Customer name is required for delivery orders.' });
+      }
+      if (!safeAddress) {
+        return res.status(400).json({ ok: false, error: 'Delivery address is required.' });
+      }
+      if (!safePincode) {
+        return res.status(400).json({ ok: false, error: 'A valid 6-digit pincode is required.' });
+      }
+    }
 
     const session = await resolveSession({
       restaurantId: restaurant.id,
@@ -857,7 +910,9 @@ router.post('/api/webcart/submit', async (req, res) => {
       || ''
     ).toLowerCase();
     let serviceType = rawType;
-    if (rawType === 'scheduled_delivery') serviceType = 'delivery';
+    if (shippedOrder) {
+      serviceType = 'delivery';
+    } else if (rawType === 'scheduled_delivery') serviceType = 'delivery';
     else if (rawType === 'scheduled_takeaway' || rawType === 'scheduled_pickup') serviceType = 'takeaway';
     else if (rawType === 'dinein' || rawType === 'dine-in') serviceType = 'dine_in';
     else if (sessionMeta.service_type) serviceType = String(sessionMeta.service_type).toLowerCase();
@@ -871,9 +926,13 @@ router.post('/api/webcart/submit', async (req, res) => {
       parcelCharge = Math.round(parcelCharge * 100) / 100;
     }
 
-// Delivery charge (only for delivery)
+// Delivery charge — shipped LOBs always re-quote server-side; restaurants use flat default
     let deliveryCharge = 0;
-    if (serviceType === 'delivery') {
+    let deliveryQuote = null;
+    if (shippedOrder) {
+      deliveryQuote = await calculateDelivery(restaurant, safePincode, subtotal);
+      deliveryCharge = Number(deliveryQuote.charge || 0);
+    } else if (serviceType === 'delivery') {
       deliveryCharge = parseFloat(restaurant.delivery_charge_default || 40);
     }
 
@@ -886,11 +945,16 @@ router.post('/api/webcart/submit', async (req, res) => {
     }
 
     const orderRef = `${(session?.id || safeToken)}-${Date.now().toString().slice(-6)}`;
+    const formattedAddress = shippedOrder
+      ? formatDeliveryAddress(safeAddress, safePincode)
+      : '';
     const submissionFingerprint = buildSubmissionFingerprint({
       items: normalizedItems,
       promo_code,
       special_request,
       total: totalAmount,
+      delivery_address: formattedAddress,
+      pincode: safePincode,
     });
 
     const prevSubmission = session?.meta?.web_cart_submission || {};
@@ -915,10 +979,22 @@ router.post('/api/webcart/submit', async (req, res) => {
       service_type: serviceType,
       order_mode: orderMode || sessionMeta.order_mode || null,
       scheduled_at: sessionMeta.scheduled_at || null,
+      customer_name: shippedOrder ? safeName : (sessionMeta.customer_name || sessionMeta.name || null),
+      delivery_address: shippedOrder ? formattedAddress : (sessionMeta.delivery_address || null),
+      delivery_pincode: shippedOrder ? safePincode : (sessionMeta.delivery_pincode || null),
+      delivery_zone: deliveryQuote?.zone || sessionMeta.delivery_zone || null,
+      delivery_source: deliveryQuote?.source || sessionMeta.delivery_source || null,
       web_cart_submission: {
         submitted_at: new Date().toISOString(),
         promo_code: promo_code ? String(promo_code).trim().slice(0, 40) : null,
         special_request: special_request ? String(special_request).trim().slice(0, 500) : null,
+        customer_name: shippedOrder ? safeName : null,
+        delivery_address: shippedOrder ? formattedAddress : null,
+        delivery_pincode: shippedOrder ? safePincode : null,
+        delivery_zone: deliveryQuote?.zone || null,
+        delivery_source: deliveryQuote?.source || null,
+        free_delivery_applied: !!deliveryQuote?.free_delivery_applied,
+        cod_enabled: deliveryQuote?.cod_enabled ?? null,
         item_count: normalizedItems.length,
         items: normalizedItems,
         parcel_charge: parcelCharge,
@@ -947,9 +1023,11 @@ router.post('/api/webcart/submit', async (req, res) => {
     const confirmResult = await triggerConfirmAndPay({
       restaurant_id: restaurant.id,
       customer_phone: session?.phone || safePhone,
-      customer_name:
-        String(sessionMeta?.customer_name || sessionMeta?.name || '').trim() ||
-        'Guest',
+      customer_name: shippedOrder
+        ? safeName
+        : (String(sessionMeta?.customer_name || sessionMeta?.name || '').trim() || 'Guest'),
+      delivery_address: shippedOrder ? formattedAddress : undefined,
+      pincode: shippedOrder ? safePincode : undefined,
       token: String(session?.id || safeToken),
       order_ref: orderRef,
       // Send the walk-in type when scheduled so chat can gate approval;
@@ -963,6 +1041,9 @@ router.post('/api/webcart/submit', async (req, res) => {
       items: normalizedItems,
       promo_code: promo_code ? String(promo_code).trim().slice(0, 40) : null,
       special_request: special_request ? String(special_request).trim().slice(0, 500) : null,
+      delivery_charge: deliveryCharge,
+      delivery_zone: deliveryQuote?.zone || undefined,
+      delivery_source: deliveryQuote?.source || undefined,
     });
 
     if (session) {
@@ -999,6 +1080,74 @@ router.post('/api/webcart/submit', async (req, res) => {
   } catch (err) {
     console.error('[webcart/submit]', err.message);
     return res.status(500).json({ ok: false, error: 'Failed to submit order.' });
+  }
+});
+
+router.get('/api/webcart/saved-addresses', async (req, res) => {
+  try {
+    const token = String(req.query.token || '').trim();
+    const phone = String(req.query.phone || '').trim();
+    if (!token || !phone) {
+      return res.status(400).json({ ok: false, error: 'token and phone are required.' });
+    }
+
+    const restaurant = await resolveRestaurantBySlug(req);
+    if (!restaurant) return res.status(404).json({ ok: false, error: 'Restaurant not found.' });
+
+    await resolveSession({
+      restaurantId: restaurant.id,
+      token,
+      phone,
+    });
+
+    const variants = phoneVariants(phone);
+    if (!variants.length) {
+      return res.json({ ok: true, addresses: [] });
+    }
+
+    const { data: customers, error: custErr } = await supabaseAdmin
+      .from('customers')
+      .select('id')
+      .eq('restaurant_id', restaurant.id)
+      .in('phone', variants);
+    if (custErr) throw custErr;
+
+    const customerIds = (customers || []).map((row) => row.id).filter(Boolean);
+    if (!customerIds.length) {
+      return res.json({ ok: true, addresses: [] });
+    }
+
+    const { data: bookings, error: bookErr } = await supabaseAdmin
+      .from('bookings')
+      .select('delivery_address, created_at')
+      .eq('restaurant_id', restaurant.id)
+      .in('customer_id', customerIds)
+      .not('delivery_address', 'is', null)
+      .order('created_at', { ascending: false })
+      .limit(40);
+    if (bookErr) throw bookErr;
+
+    const seen = new Set();
+    const addresses = [];
+    for (const row of (bookings || [])) {
+      const raw = String(row.delivery_address || '').trim();
+      if (!raw) continue;
+      const key = raw.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const pin = parsePincodeFromAddress(raw);
+      let address = raw;
+      if (pin) {
+        address = raw.replace(new RegExp(`[,\\s]*${pin}\\s*$`), '').trim() || raw;
+      }
+      addresses.push({ address, pincode: pin || '' });
+      if (addresses.length >= 5) break;
+    }
+
+    return res.json({ ok: true, addresses });
+  } catch (err) {
+    console.error('[webcart/saved-addresses]', err.message);
+    return res.status(500).json({ ok: false, error: 'Failed to load saved addresses.' });
   }
 });
 

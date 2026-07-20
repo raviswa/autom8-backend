@@ -893,6 +893,8 @@ async def internal_webcart_confirm_pay(request: Request):
     restaurant_id = str(body.get("restaurant_id") or "").strip()
     customer_phone = str(body.get("customer_phone") or "").strip()
     customer_name = str(body.get("customer_name") or "Guest").strip() or "Guest"
+    body_delivery_address = str(body.get("delivery_address") or "").strip()
+    body_pincode = "".join(ch for ch in str(body.get("pincode") or "") if ch.isdigit()).strip()[:6]
     raw_service = str(body.get("service_type") or "takeaway").strip().lower()
     token_label = str(body.get("token") or "").strip()
     order_ref = str(body.get("order_ref") or "").strip()
@@ -949,7 +951,9 @@ async def internal_webcart_confirm_pay(request: Request):
             break
 
     session_service = str(session_state.get("service_type") or "").strip().lower()
-    if session_service in ("delivery", "takeaway", "dine_in"):
+    if body_delivery_address:
+        service_type, _ = _normalize_webcart_service_type(raw_service or "delivery")
+    elif session_service in ("delivery", "takeaway", "dine_in"):
         service_type = session_service
 
     is_scheduled = bool(
@@ -982,7 +986,7 @@ async def internal_webcart_confirm_pay(request: Request):
         session_state["scheduled_at"] = portal_meta.get("scheduled_at")
         is_scheduled = True
         session_state["order_mode"] = "scheduled"
-    if portal_meta.get("service_type") in ("delivery", "takeaway", "dine_in"):
+    if portal_meta.get("service_type") in ("delivery", "takeaway", "dine_in") and not body_delivery_address:
         service_type = str(portal_meta["service_type"])
 
     session_state["payment_mode"] = "prepay"
@@ -993,6 +997,20 @@ async def internal_webcart_confirm_pay(request: Request):
         or session_state.get("customer_name")
         or "Guest"
     )
+    if body_delivery_address:
+        formatted_address = body_delivery_address
+        if body_pincode and body_pincode not in formatted_address:
+            formatted_address = f"{formatted_address}, {body_pincode}"
+        session_state["delivery_address"] = formatted_address
+        if body_pincode:
+            session_state["delivery_pincode"] = body_pincode
+    if body.get("delivery_charge") is not None:
+        try:
+            session_state["delivery_charge"] = float(body.get("delivery_charge") or 0)
+        except Exception:
+            pass
+    if body.get("delivery_zone"):
+        session_state["delivery_zone"] = str(body.get("delivery_zone"))
     session_state["order_total"] = total
     if token_label:
         session_state["menu_session_token"] = token_label

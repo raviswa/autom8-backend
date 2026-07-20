@@ -2278,18 +2278,32 @@ async def get_reservation_reminder_candidates(
 
 
 def _phone_variants(phone: str) -> list[str]:
-    """Build phone variants for walk_in_tokens / conversation_states lookup."""
+    """Build phone variants for walk_in_tokens / conversation_states / menu_tokens.
+
+    Order is deterministic (no set hashing). Prefer the 12-digit 91-prefixed
+    form first so create_menu_link_token's phones[0] upsert key is stable
+    across process restarts — otherwise a reused session_token can collide
+    on menu_tokens_session_token_key when the canonical phone flips.
+    """
     digits = "".join(c for c in str(phone) if c.isdigit())
     if not digits:
         return []
-    variants = {digits}
+
+    candidates: list[str] = []
     if len(digits) == 10:
-        variants.add(f"91{digits}")
-    if len(digits) > 10:
-        variants.add(digits[-10:])
-        if digits.startswith("91") and len(digits) == 12:
-            variants.add(digits[2:])
-    return list(variants)
+        candidates.append(f"91{digits}")
+        candidates.append(digits)
+    elif len(digits) == 12 and digits.startswith("91"):
+        candidates.append(digits)
+        candidates.append(digits[2:])
+    else:
+        candidates.append(digits)
+        if len(digits) > 10:
+            candidates.append(digits[-10:])
+            if digits.startswith("91") and len(digits) >= 12:
+                candidates.append(digits[2:12] if len(digits) > 12 else digits[2:])
+
+    return list(dict.fromkeys(c for c in candidates if c))
 
 
 async def create_menu_link_token(
@@ -2629,7 +2643,10 @@ async def create_walk_in_token_direct(
         logger.error("[walk-in-token] DB session not initialized")
         return None
 
-    if token_type not in ("dinein", "takeaway", "large_party", "scheduled_delivery", "scheduled_takeaway"):
+    if token_type not in (
+        "dinein", "takeaway", "queue", "large_party",
+        "scheduled_delivery", "scheduled_takeaway",
+    ):
         logger.error(f"[walk-in-token] Invalid type: {token_type}")
         return None
 

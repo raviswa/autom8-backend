@@ -326,6 +326,16 @@
       width: 100%; border: 1px solid var(--line); border-radius: 10px;
       padding: 10px; font: inherit; background: #fff;
     }
+    .saved-addresses { display: flex; flex-direction: column; gap: 6px; }
+    .saved-address-btn {
+      width: 100%; text-align: left; border: 1px solid var(--line); border-radius: 10px;
+      background: #fff; padding: 8px 10px; font: inherit; font-size: 12px; cursor: pointer;
+    }
+    .saved-address-btn.active { border-color: var(--brand); background: #fff7ed; }
+    .delivery-quote-hint {
+      font-size: 12px; color: #374151; background: #f9fafb; border: 1px solid var(--line);
+      border-radius: 10px; padding: 8px 10px; margin-top: 6px;
+    }
     .cart-foot { padding: 12px 16px 16px; border-top: 1px solid var(--line); flex-shrink: 0; }
     .btn-submit {
       width: 100%; border: none; background: var(--header); color: #fff;
@@ -651,7 +661,18 @@
             <div class="line" id="deliveryRow" style="display:none"><span>Delivery charge</span><strong id="deliveryAmt">Rs 0</strong></div>
             <div class="line" id="gstRow" style="display:none"><span id="gstLabel">GST (5%)</span><strong id="gstAmt">Rs 0</strong></div>
             <div class="line grand"><span>Total</span><strong id="grand">Rs 0</strong></div>
-          </div>          
+          </div>
+          <div id="deliveryDetailsWrap" style="display:none">
+            <div class="section-title" style="margin-top:12px">Delivery details</div>
+            <div id="savedAddressesWrap" style="display:none;margin-bottom:8px">
+              <div style="font-size:12px;color:#6b7280;margin-bottom:6px">Ship to a previous address</div>
+              <div id="savedAddressesList" class="saved-addresses"></div>
+            </div>
+            <input class="field" id="shipName" placeholder="Full name" autocomplete="name" />
+            <textarea id="shipAddress" rows="2" placeholder="Street, area, landmark" autocomplete="street-address"></textarea>
+            <input class="field" id="shipPincode" placeholder="Pincode (6 digits)" inputmode="numeric" maxlength="6" autocomplete="postal-code" />
+            <div id="deliveryQuoteHint" class="delivery-quote-hint" style="display:none"></div>
+          </div>
         <input class="field" id="promo" placeholder="Promo code (optional)" />
         <textarea id="notes" rows="2" placeholder="Special request (optional)"></textarea>
         </div>
@@ -836,6 +857,10 @@
       lobType: 'restaurant',
       catalogLob: false,
       productGalleryIndex: 0,
+      deliveryQuote: null,
+      deliveryQuoteLoading: false,
+      savedAddresses: [],
+      deliveryQuoteTimer: null,
     };
 
     const $ = (id) => document.getElementById(id);
@@ -1007,6 +1032,151 @@
       state.lastSubmitAwaitingApproval = false;
       try { sessionStorage.removeItem(lastSubmitStorageKey()); } catch (_e) {}
     }
+    function requiresShipping() {
+      return state.catalogLob || ['food_products', 'retail', 'psl', 'b2b'].includes(state.lobType);
+    }
+
+    function deliveryStorageKey() {
+      return `munafe_delivery_${token || 'anon'}`;
+    }
+
+    function saveDeliveryLocal() {
+      if (!requiresShipping()) return;
+      try {
+        sessionStorage.setItem(deliveryStorageKey(), JSON.stringify({
+          name: ($('shipName')?.value || '').trim(),
+          address: ($('shipAddress')?.value || '').trim(),
+          pincode: ($('shipPincode')?.value || '').trim(),
+        }));
+      } catch (_e) {}
+    }
+
+    function loadDeliveryLocal() {
+      if (!requiresShipping()) return;
+      try {
+        const raw = sessionStorage.getItem(deliveryStorageKey());
+        if (!raw) return;
+        const data = JSON.parse(raw);
+        if ($('shipName') && data.name) $('shipName').value = data.name;
+        if ($('shipAddress') && data.address) $('shipAddress').value = data.address;
+        if ($('shipPincode') && data.pincode) $('shipPincode').value = data.pincode;
+      } catch (_e) {}
+    }
+
+    function normalizePincode(value) {
+      const digits = String(value || '').replace(/\D/g, '');
+      return digits.length >= 6 ? digits.slice(0, 6) : '';
+    }
+
+    function deliveryFieldsValid() {
+      if (!requiresShipping()) return true;
+      const name = ($('shipName')?.value || '').trim();
+      const address = ($('shipAddress')?.value || '').trim();
+      const pincode = normalizePincode($('shipPincode')?.value || '');
+      return !!(name && address && pincode);
+    }
+
+    function renderSavedAddresses() {
+      const wrap = $('savedAddressesWrap');
+      const list = $('savedAddressesList');
+      if (!wrap || !list) return;
+      const rows = Array.isArray(state.savedAddresses) ? state.savedAddresses : [];
+      if (!requiresShipping() || !rows.length) {
+        wrap.style.display = 'none';
+        list.innerHTML = '';
+        return;
+      }
+      wrap.style.display = '';
+      list.innerHTML = rows.map((row, idx) => `
+        <button type="button" class="saved-address-btn" data-idx="${idx}">
+          ${String(row.address || '').replace(/</g, '&lt;')}${row.pincode ? `, ${row.pincode}` : ''}
+        </button>
+      `).join('');
+      list.querySelectorAll('.saved-address-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const row = rows[Number(btn.dataset.idx)];
+          if (!row) return;
+          if ($('shipAddress')) $('shipAddress').value = row.address || '';
+          if ($('shipPincode')) $('shipPincode').value = row.pincode || '';
+          saveDeliveryLocal();
+          scheduleDeliveryQuote();
+          renderCart();
+        });
+      });
+    }
+
+    async function loadSavedAddresses() {
+      if (!requiresShipping() || !token || !state.phone) return;
+      try {
+        const q = new URLSearchParams({ token, phone: state.phone });
+        if (slug) q.set('slug', slug);
+        const res = await fetch(`/api/webcart/saved-addresses?${q.toString()}`);
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          state.savedAddresses = Array.isArray(data.addresses) ? data.addresses : [];
+          renderSavedAddresses();
+        }
+      } catch (_e) {}
+    }
+
+    function scheduleDeliveryQuote() {
+      if (!requiresShipping()) return;
+      if (state.deliveryQuoteTimer) clearTimeout(state.deliveryQuoteTimer);
+      state.deliveryQuoteTimer = setTimeout(fetchDeliveryQuote, 350);
+    }
+
+    async function fetchDeliveryQuote() {
+      if (!requiresShipping()) return;
+      const pincode = normalizePincode($('shipPincode')?.value || '');
+      const hint = $('deliveryQuoteHint');
+      if (!pincode) {
+        state.deliveryQuote = null;
+        if (hint) {
+          hint.style.display = 'none';
+          hint.textContent = '';
+        }
+        renderCart();
+        return;
+      }
+
+      const { afterDiscount } = cartTotals();
+      state.deliveryQuoteLoading = true;
+      if (hint) {
+        hint.style.display = '';
+        hint.textContent = 'Calculating shipping…';
+      }
+      try {
+        const q = new URLSearchParams();
+        if (slug) q.set('slug', slug);
+        const res = await fetch(`/api/webcart/delivery-quote?${q.toString()}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pincode, cart_total: afterDiscount }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          state.deliveryQuote = null;
+          if (hint) hint.textContent = data.error || 'Could not calculate shipping.';
+        } else {
+          state.deliveryQuote = data;
+          if (hint) {
+            const zoneLabel = data.zone === 'intra_city' ? 'Local delivery' : 'Courier shipping';
+            const chargeText = data.free_delivery_applied
+              ? 'Free delivery applied'
+              : `Shipping: ${money(data.charge || 0)}`;
+            const codText = data.cod_enabled ? ' · Cash on delivery available' : '';
+            hint.textContent = `${zoneLabel} · ${chargeText}${codText}`;
+          }
+        }
+      } catch (_e) {
+        state.deliveryQuote = null;
+        if (hint) hint.textContent = 'Could not calculate shipping.';
+      } finally {
+        state.deliveryQuoteLoading = false;
+        renderCart();
+      }
+    }
+
     function cartFingerprint() {
       const lines = [...state.cart.values()]
         .map((l) => ({
@@ -1020,7 +1190,14 @@
         .sort((a, b) => a.id.localeCompare(b.id));
       const promo = ($('promo').value || '').trim().toUpperCase();
       const notes = ($('notes').value || '').trim();
-      return JSON.stringify({ lines, promo, notes });
+      const ship = requiresShipping()
+        ? {
+            name: ($('shipName')?.value || '').trim(),
+            address: ($('shipAddress')?.value || '').trim(),
+            pincode: normalizePincode($('shipPincode')?.value || ''),
+          }
+        : null;
+      return JSON.stringify({ lines, promo, notes, ship });
     }
 
     function openCart() {
@@ -1074,7 +1251,10 @@ function cartTotals() {
 
       // Pricing config from session (populated in loadSession)
       const cfg = state.pricingConfig || {};
-      const serviceType = (state.session && state.session.type) || 'takeaway';
+      const shipped = requiresShipping();
+      const serviceType = shipped
+        ? 'delivery'
+        : ((state.session && state.session.type) || 'takeaway');
       const parcelPerItem = parseFloat(cfg.parcel_charge_per_item || 0);
       const gstRate = parseFloat(cfg.gst_rate || 5);
       const deliveryDefault = parseFloat(cfg.delivery_charge_default || 40);
@@ -1085,15 +1265,22 @@ function cartTotals() {
         parcelCharge = Math.round(lines.reduce((s, l) => s + l.qty * parcelPerItem, 0) * 100) / 100;
       }
 
-      // Delivery charge: only for delivery
-      const deliveryCharge = serviceType === 'delivery' ? deliveryDefault : 0;
+      // Delivery charge — live quote for shipped LOBs, flat default for restaurant delivery
+      let deliveryCharge = 0;
+      if (shipped) {
+        if (state.deliveryQuote && normalizePincode($('shipPincode')?.value || '')) {
+          deliveryCharge = Number(state.deliveryQuote.charge || 0);
+        }
+      } else if (serviceType === 'delivery') {
+        deliveryCharge = deliveryDefault;
+      }
 
       const preGst = Math.round((afterDiscount + parcelCharge + deliveryCharge) * 100) / 100;
       const gstAmount = Math.round(preGst * gstRate / 100 * 100) / 100;
       const total = Math.round((preGst + gstAmount) * 100) / 100;
 
       return { lines, subtotal, promo, afterDiscount, parcelCharge, deliveryCharge,
-               gstRate, gstAmount, total, count };
+               gstRate, gstAmount, total, count, shipped };
     }
 
     function renderCart() {
@@ -1109,7 +1296,13 @@ function cartTotals() {
         gstAmount,
         total,
         count,
+        shipped,
       } = cartTotals();
+
+      const deliveryWrap = $('deliveryDetailsWrap');
+      if (deliveryWrap) {
+        deliveryWrap.style.display = shipped ? '' : 'none';
+      }
 
       cartLines.innerHTML = lines.length
         ? lines.map(l => `
@@ -1145,7 +1338,11 @@ $('subtotal').textContent = money(subtotal);
       }
 
       // Delivery row
-      if (deliveryCharge > 0) {
+      if (shipped || deliveryCharge > 0) {
+        const label = shipped && state.deliveryQuote?.free_delivery_applied
+          ? 'Delivery (free)'
+          : 'Delivery charge';
+        $('deliveryRow').querySelector('span').textContent = label;
         $('deliveryAmt').textContent = money(deliveryCharge);
         $('deliveryRow').style.display = '';
       } else {
@@ -1179,9 +1376,11 @@ $('subtotal').textContent = money(subtotal);
         state.lastSubmittedFingerprint &&
         state.lastSubmittedFingerprint === cartFingerprint() &&
         now - Number(state.lastSubmittedAt || 0) < 20 * 60 * 1000;
+      const needsDelivery = shipped && !deliveryFieldsValid();
       // Keep re-tappable after submit so customers can reopen the WhatsApp guide.
-      submitBtn.disabled = count === 0 || state.submitting;
+      submitBtn.disabled = count === 0 || state.submitting || needsDelivery;
       if (state.submitting) submitBtn.textContent = 'Submitting…';
+      else if (needsDelivery) submitBtn.textContent = 'Add delivery details to continue';
       else if (state.sessionExpired) submitBtn.textContent = 'Checkout Now';
       else if (sameAsLast) submitBtn.textContent = 'Open WhatsApp again';
       else submitBtn.textContent = 'Continue to WhatsApp';
@@ -2407,7 +2606,18 @@ $('subtotal').textContent = money(subtotal);
       renderTopSections();
       renderChips();
       renderMenuList();
-      renderCart();
+      loadDeliveryLocal();
+      renderSavedAddresses();
+      if (requiresShipping()) {
+        if (normalizePincode($('shipPincode')?.value || '')) {
+          scheduleDeliveryQuote();
+        } else {
+          renderCart();
+        }
+      } else {
+        renderCart();
+      }
+      loadSavedAddresses();
 
       if (isDesktop()) openCart();
     }
@@ -2483,6 +2693,13 @@ $('subtotal').textContent = money(subtotal);
       state.submitting = true;
       renderCart();
 
+      if (requiresShipping() && !deliveryFieldsValid()) {
+        showStatus('Please enter your name, delivery address, and a valid 6-digit pincode.', 'err');
+        state.submitting = false;
+        renderCart();
+        return;
+      }
+
       const body = {
         token,
         phone: state.phone,
@@ -2490,6 +2707,12 @@ $('subtotal').textContent = money(subtotal);
         promo_code: ($('promo').value || '').trim() || null,
         special_request: ($('notes').value || '').trim() || null,
       };
+      if (requiresShipping()) {
+        body.customer_name = ($('shipName').value || '').trim();
+        body.delivery_address = ($('shipAddress').value || '').trim();
+        body.pincode = normalizePincode($('shipPincode').value || '');
+      }
+      saveDeliveryLocal();
 
       try {
         const q = new URLSearchParams();
@@ -2552,8 +2775,17 @@ $('subtotal').textContent = money(subtotal);
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') hideWhatsAppGuide();
     });
-    $('promo').addEventListener('input', renderCart);
+    $('promo').addEventListener('input', () => { renderCart(); if (requiresShipping()) scheduleDeliveryQuote(); });
     $('notes').addEventListener('input', renderCart);
+    if ($('shipName')) $('shipName').addEventListener('input', () => { saveDeliveryLocal(); renderCart(); });
+    if ($('shipAddress')) $('shipAddress').addEventListener('input', () => { saveDeliveryLocal(); renderCart(); });
+    if ($('shipPincode')) {
+      $('shipPincode').addEventListener('input', () => {
+        saveDeliveryLocal();
+        scheduleDeliveryQuote();
+        renderCart();
+      });
+    }
     window.addEventListener('resize', () => { if (isDesktop()) openCart(); });
     window.addEventListener('beforeunload', stopPaymentPolling);
     loadLastSubmitLocal();

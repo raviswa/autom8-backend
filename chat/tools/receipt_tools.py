@@ -89,9 +89,12 @@ async def cleanup_expired_receipts() -> None:
                     to_delete.append(name)
 
             if to_delete:
-                dresp = await client.delete(
+                # httpx.AsyncClient.delete() does not accept json=; use request().
+                # Supabase Storage bulk-delete expects {"prefixes": [...]}.
+                dresp = await client.request(
+                    "DELETE",
                     f"{base}/storage/v1/object/{bucket}",
-                    json=to_delete,
+                    json={"prefixes": to_delete},
                     headers=headers,
                 )
                 if dresp.status_code not in (200, 204):
