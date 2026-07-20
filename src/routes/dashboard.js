@@ -40,7 +40,7 @@ const RESTAURANT_SELECT_FULL = [
   'scheduled_delivery_enabled', 'scheduled_takeaway_enabled', 'scheduled_kds_lead_minutes', 'max_delivery_radius_km',
   'lob_type',   // ← add this
   'allow_manager_menu_upload',    //expose allow_manager_menu_upload to the frontend
-  'shiprocket_connected', 'intra_city_charge', 'outstation_charge', 'free_delivery_above',
+  'shiprocket_connected', 'shiprocket_email', 'intra_city_charge', 'outstation_charge', 'free_delivery_above',
   'cod_enabled_city', 'cod_enabled_outstation',
   'shipping_provider', 'courier_name', 'courier_rate_card',
 ].join(', ');

@@ -142,7 +142,7 @@ async function resolveRestaurantBySlug(req) {
   if (!rows || (now - _restaurantCache.fetchedAt) > RESTAURANT_CACHE_TTL_MS) {
     const { data, error } = await supabaseAdmin
       .from('tenants')
-      .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category, parcel_charge_per_item, delivery_charge_default, delivery_charge_tiers, gst_rate, kitchen_busy, lob_type, postal_code, shiprocket_connected, shiprocket_api_key, intra_city_charge, outstation_charge, free_delivery_above, cod_enabled_city, cod_enabled_outstation, shipping_provider, courier_name, courier_rate_card')
+      .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category, parcel_charge_per_item, delivery_charge_default, delivery_charge_tiers, gst_rate, kitchen_busy, lob_type, postal_code, shiprocket_connected, shiprocket_api_key, shiprocket_email, intra_city_charge, outstation_charge, free_delivery_above, cod_enabled_city, cod_enabled_outstation, shipping_provider, courier_name, courier_rate_card')
       .eq('is_active', true)
       .limit(500);
     if (error) throw error;
@@ -193,8 +193,15 @@ function isRestaurantLob(lobType) {
   return !lobType || lobType === 'restaurant';
 }
 
-async function fetchShiprocketRate({ apiKey, pickupPincode, deliveryPincode, weightKg = 0.5 }) {
-  return fetchShiprocketCheapestRate({ apiKey, pickupPincode, deliveryPincode, weightKg });
+async function fetchShiprocketRate({ apiKey, email, password, pickupPincode, deliveryPincode, weightKg = 0.5 }) {
+  return fetchShiprocketCheapestRate({
+    apiKey,
+    email,
+    password,
+    pickupPincode,
+    deliveryPincode,
+    weightKg,
+  });
 }
 
 /** Sum catalog weight_grams × qty → kg. Falls back to 0.5 kg when no weights set. */
@@ -284,10 +291,14 @@ async function calculateDelivery(restaurant, customerPincode, cartTotal, options
 
   let charge = Number(restaurant?.outstation_charge || 0) || 0;
   let source = 'outstation_flat';
-  const useShiprocket = restaurant?.shiprocket_api_key && tenantPincode && customer;
+  const useShiprocket = (restaurant?.shiprocket_api_key || restaurant?.shiprocket_email)
+    && tenantPincode
+    && customer;
   if (useShiprocket) {
     const shiprocketRate = await fetchShiprocketRate({
       apiKey: restaurant.shiprocket_api_key,
+      email: restaurant.shiprocket_email,
+      password: restaurant.shiprocket_api_key,
       pickupPincode: tenantPincode,
       deliveryPincode: customer,
       weightKg,

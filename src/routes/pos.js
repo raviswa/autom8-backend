@@ -23,6 +23,11 @@ const {
 } = require('../helpers/courierRates');
 const { fetchShiprocketCourierOptions } = require('../helpers/shiprocket');
 
+function looksLikeShiprocketJwt(value) {
+  const s = String(value || '').trim();
+  return s.startsWith('eyJ') && s.split('.').length >= 3;
+}
+
 function requireSettingsAccess(req, res, next) {
   if (!canManageRestaurantSettings(req.user_role))
     return res.status(403).json({ error: 'Unauthorized' });
@@ -952,7 +957,7 @@ router.post('/restaurants/shipping-rate-compare', authenticateToken, getRestaura
 
     const { data: tenant, error } = await supabaseAdmin
       .from('tenants')
-      .select('postal_code, shiprocket_api_key, courier_name, courier_rate_card, outstation_charge, intra_city_charge')
+      .select('postal_code, shiprocket_api_key, shiprocket_email, courier_name, courier_rate_card, outstation_charge, intra_city_charge')
       .eq('id', req.restaurant_id)
       .maybeSingle();
     if (error) throw error;
@@ -971,8 +976,10 @@ router.post('/restaurants/shipping-rate-compare', authenticateToken, getRestaura
       : normalizeRateCard(tenant.courier_rate_card);
     const courierName = String(body.courier_name || tenant.courier_name || 'Your courier').trim() || 'Your courier';
 
-    // Optional one-time token from the form (not yet saved)
-    const apiKey = String(body.shiprocket_api_key || '').trim() || tenant.shiprocket_api_key || '';
+    // Draft credentials from form take precedence over saved tenant values
+    const shipEmail = String(body.shiprocket_email || '').trim() || tenant.shiprocket_email || '';
+    const shipPassword = String(body.shiprocket_api_key || '').trim() || tenant.shiprocket_api_key || '';
+    const hasShipCreds = !!(shipEmail && shipPassword) || looksLikeShiprocketJwt(shipPassword);
 
     const ZONE_LABEL = {
       local: 'Local',
@@ -986,15 +993,21 @@ router.post('/restaurants/shipping-rate-compare', authenticateToken, getRestaura
     for (const dest of destinations) {
       const zone = resolveCourierZone(pickup, dest.pincode);
       for (const weightKg of weights) {
-        const ship = apiKey
+        const ship = hasShipCreds
           ? await fetchShiprocketCourierOptions({
-              apiKey,
+              email: shipEmail,
+              password: shipPassword,
+              apiKey: shipPassword,
               pickupPincode: pickup,
               deliveryPincode: dest.pincode,
               weightKg,
               limit: 5,
             })
-          : { cheapest: null, couriers: [], error: 'Add a Shiprocket API token to fetch live rates.' };
+          : {
+              cheapest: null,
+              couriers: [],
+              error: 'Add Shiprocket API User email + password (Shiprocket panel → Settings → API).',
+            };
 
         let yourRate = chargeFromRateCard(rateCard, zone, weightKg);
         let yourSource = 'rate_card';
@@ -1035,7 +1048,7 @@ router.post('/restaurants/shipping-rate-compare', authenticateToken, getRestaura
       success: true,
       pickup_pincode: pickup,
       courier_name: courierName,
-      shiprocket_available: !!apiKey,
+      shiprocket_available: hasShipCreds,
       rows,
     });
   } catch (err) {
@@ -1073,7 +1086,7 @@ router.put(
   'min_delivery_order_amount','min_takeaway_order_amount',
   'scheduled_delivery_enabled','scheduled_takeaway_enabled','scheduled_kds_lead_minutes','max_delivery_radius_km',
   'scheduled_slot_max_orders','schedule_buffer_minutes','schedule_rounding_minutes','schedule_early_start_max_minutes',
-  'shiprocket_connected','shiprocket_api_key','intra_city_charge','outstation_charge','free_delivery_above',
+  'shiprocket_connected','shiprocket_api_key','shiprocket_email','intra_city_charge','outstation_charge','free_delivery_above',
   'cod_enabled_city','cod_enabled_outstation',
   'shipping_provider','courier_name','courier_rate_card',
   'subscribed_features', 'enabled_services',
@@ -1083,7 +1096,7 @@ router.put(
 // settings access (whitelisted above), but must not be able to change the
 // business type or grant themselves menu-upload rights via direct API call,
 // even though the UI already hides these controls from managers.
-const OWNER_ONLY_FIELDS = ['lob_type', 'allow_manager_menu_upload', 'shiprocket_api_key'];
+const OWNER_ONLY_FIELDS = ['lob_type', 'allow_manager_menu_upload', 'shiprocket_api_key', 'shiprocket_email'];
 const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
     
     const updates = Object.fromEntries(
@@ -1173,7 +1186,7 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
 
     if (updates.shipping_provider !== undefined) {
       updates.shipping_provider = normalizeShippingProvider(updates.shipping_provider);
-      if (updates.shipping_provider === 'shiprocket' && updates.shiprocket_api_key) {
+      if (updates.shipping_provider === 'shiprocket' && (updates.shiprocket_api_key || updates.shiprocket_email)) {
         updates.shiprocket_connected = true;
       }
       if (updates.shipping_provider === 'custom') {
