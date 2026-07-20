@@ -326,20 +326,10 @@ function resolveCurrentSlot(restaurant) {
   const opening = restaurant?.opening_hours || {};
   const { hour, total } = minutesInTimezone(restaurant?.timezone || 'Asia/Kolkata');
   const lob = restaurant?.lob_type || 'restaurant';
-  const useOrderHours = opening.order_hours === true || (lob && lob !== 'restaurant');
 
-  if (useOrderHours) {
-    const start = parseHm(opening.order_start || opening.breakfast_start, '09:00');
-    const end = parseHm(opening.order_end || opening.dinner_end || opening.breakfast_end, '21:00');
-    if (inWindow(total, start, end)) {
-      return { current_slot: 'anytime', slot_state: 'open', hour };
-    }
-    return {
-      current_slot: null,
-      slot_state: 'closed',
-      hour,
-      banner: 'Orders are closed right now — browse and schedule for later.',
-    };
+  // Packaged / retail LOBs: accept orders anytime (no meal slots / open-close window)
+  if (lob && lob !== 'restaurant') {
+    return { current_slot: 'anytime', slot_state: 'open', hour };
   }
 
   const tiffinEnabled = opening.breakfast !== false;
