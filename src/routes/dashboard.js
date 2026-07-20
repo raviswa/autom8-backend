@@ -42,6 +42,7 @@ const RESTAURANT_SELECT_FULL = [
   'allow_manager_menu_upload',    //expose allow_manager_menu_upload to the frontend
   'shiprocket_connected', 'intra_city_charge', 'outstation_charge', 'free_delivery_above',
   'cod_enabled_city', 'cod_enabled_outstation',
+  'shipping_provider', 'courier_name', 'courier_rate_card',
 ].join(', ');
 
 const RESTAURANT_SELECT_BASE = [
@@ -61,7 +62,7 @@ async function fetchRestaurantRow(restaurantId) {
 
   if (!error) return { data, error: null };
 
-  if (/kitchen_workflow|kot_printer|meta_catalog_id|parcel_charge_per_item|takeaway_ready_range|delivery_ready_range|kitchen_busy|restaurant_type|delivery_charge|scheduled_delivery|scheduled_takeaway|max_delivery_radius/i.test(error.message)) {
+  if (/kitchen_workflow|kot_printer|meta_catalog_id|parcel_charge_per_item|takeaway_ready_range|delivery_ready_range|kitchen_busy|restaurant_type|delivery_charge|scheduled_delivery|scheduled_takeaway|max_delivery_radius|shipping_provider|courier_rate_card|courier_name/i.test(error.message)) {
     const fallback = await supabaseAdmin
       .from('tenants')
       .select(RESTAURANT_SELECT_BASE)

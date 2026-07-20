@@ -1140,6 +1140,12 @@
       }
 
       const { afterDiscount } = cartTotals();
+      const cartItems = [...state.cart.values()]
+        .filter((l) => Number(l.qty || 0) > 0)
+        .map((l) => ({
+          id: String(l.baseId || l.id || ''),
+          qty: Math.max(0, Math.floor(Number(l.qty || 0))),
+        }));
       state.deliveryQuoteLoading = true;
       if (hint) {
         hint.style.display = '';
@@ -1151,7 +1157,7 @@
         const res = await fetch(`/api/webcart/delivery-quote?${q.toString()}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pincode, cart_total: afterDiscount }),
+          body: JSON.stringify({ pincode, cart_total: afterDiscount, items: cartItems }),
         });
         const data = await res.json();
         if (!res.ok || !data.ok) {
@@ -1160,12 +1166,24 @@
         } else {
           state.deliveryQuote = data;
           if (hint) {
-            const zoneLabel = data.zone === 'intra_city' ? 'Local delivery' : 'Courier shipping';
+            const zoneLabels = {
+              local: 'Local',
+              within_state: 'Within state',
+              metro: 'Metro',
+              rest_of_india: 'Non-metro',
+              special: 'Special zone',
+            };
+            const courierZone = data.courier_zone || (data.zone === 'intra_city' ? 'local' : 'rest_of_india');
+            const zoneLabel = data.courier_name
+              ? `${data.courier_name} · ${zoneLabels[courierZone] || 'Shipping'}`
+              : (data.zone === 'intra_city' ? 'Local delivery' : 'Courier shipping');
             const chargeText = data.free_delivery_applied
               ? 'Free delivery applied'
               : `Shipping: ${money(data.charge || 0)}`;
+            const w = Number(data.weight_kg || 0);
+            const weightText = w > 0 ? ` · Parcel ${w} kg` : '';
             const codText = data.cod_enabled ? ' · Cash on delivery available' : '';
-            hint.textContent = `${zoneLabel} · ${chargeText}${codText}`;
+            hint.textContent = `${zoneLabel} · ${chargeText}${weightText}${codText}`;
           }
         }
       } catch (_e) {
@@ -1688,9 +1706,11 @@ $('subtotal').textContent = money(subtotal);
           price: computedPrice,
           qty: 1,
           customization,
+          weight_grams: Number(item.weight_grams || 0) || 0,
         });
       }
       renderCart();
+      if (requiresShipping()) scheduleDeliveryQuote();
     }
 
     function addPlainToCart(item) {
@@ -1705,9 +1725,11 @@ $('subtotal').textContent = money(subtotal);
           name: item.name,
           price: Number(item.price || 0),
           qty: nextQty,
+          weight_grams: Number(item.weight_grams || 0) || 0,
         });
       }
       renderCart();
+      if (requiresShipping()) scheduleDeliveryQuote();
     }
 
     function changeQty(id, delta) {
@@ -1731,6 +1753,7 @@ $('subtotal').textContent = money(subtotal);
         if (nextQty <= 0) state.cart.delete(resolvedKey);
         else prev.qty = nextQty;
         renderCart();
+        if (requiresShipping()) scheduleDeliveryQuote();
         return;
       }
 

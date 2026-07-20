@@ -6,6 +6,13 @@ const path = require('path');
 
 const { supabaseAdmin } = require('../config/supabase');
 const { getKdsSecret } = require('../config/internalSecret');
+const {
+  normalizePincode,
+  resolveCourierZone,
+  chargeFromRateCard,
+  normalizeShippingProvider,
+} = require('../helpers/courierRates');
+const { fetchShiprocketCheapestRate } = require('../helpers/shiprocket');
 
 const ACTIVE_TOKEN_STATUSES = new Set(['waiting', 'pending_approval', 'seated', 'takeaway']);
 const DEFAULT_THEME = {
@@ -135,7 +142,7 @@ async function resolveRestaurantBySlug(req) {
   if (!rows || (now - _restaurantCache.fetchedAt) > RESTAURANT_CACHE_TTL_MS) {
     const { data, error } = await supabaseAdmin
       .from('tenants')
-      .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category, parcel_charge_per_item, delivery_charge_default, delivery_charge_tiers, gst_rate, kitchen_busy, lob_type, postal_code, shiprocket_connected, shiprocket_api_key, intra_city_charge, outstation_charge, free_delivery_above, cod_enabled_city, cod_enabled_outstation')
+      .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category, parcel_charge_per_item, delivery_charge_default, delivery_charge_tiers, gst_rate, kitchen_busy, lob_type, postal_code, shiprocket_connected, shiprocket_api_key, intra_city_charge, outstation_charge, free_delivery_above, cod_enabled_city, cod_enabled_outstation, shipping_provider, courier_name, courier_rate_card')
       .eq('is_active', true)
       .limit(500);
     if (error) throw error;
@@ -186,87 +193,104 @@ function isRestaurantLob(lobType) {
   return !lobType || lobType === 'restaurant';
 }
 
-function normalizePincode(value) {
-  const digits = String(value || '').replace(/\D/g, '');
-  return digits.length >= 6 ? digits.slice(0, 6) : '';
-}
-
-function isSameCityPincode(tenantPincode, customerPincode) {
-  const tenant = normalizePincode(tenantPincode);
-  const customer = normalizePincode(customerPincode);
-  if (!tenant || !customer) return false;
-  if (tenant === customer) return true;
-  // India pincode: first 3 digits identify the sorting district / city area.
-  return tenant.slice(0, 3) === customer.slice(0, 3);
-}
-
 async function fetchShiprocketRate({ apiKey, pickupPincode, deliveryPincode, weightKg = 0.5 }) {
-  if (!apiKey || !pickupPincode || !deliveryPincode) return null;
-  try {
-    const url = new URL('https://apiv2.shiprocket.in/v1/external/courier/serviceability/');
-    url.searchParams.set('pickup_postcode', pickupPincode);
-    url.searchParams.set('delivery_postcode', deliveryPincode);
-    url.searchParams.set('weight', String(weightKg));
-    url.searchParams.set('cod', '0');
-
-    const rateRes = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-    const data = await rateRes.json().catch(() => ({}));
-    if (!rateRes.ok) {
-      console.warn('[webcart/shiprocket]', data?.message || rateRes.status);
-      return null;
-    }
-    const couriers = data?.data?.available_courier_companies || data?.data || [];
-    const list = Array.isArray(couriers) ? couriers : [];
-    if (!list.length) return null;
-    const cheapest = list.reduce((min, row) => {
-      const charge = Number(row.rate || row.freight_charge || row.charge || 0);
-      return charge > 0 && charge < min ? charge : min;
-    }, Number.POSITIVE_INFINITY);
-    return Number.isFinite(cheapest) && cheapest < Number.POSITIVE_INFINITY ? cheapest : null;
-  } catch (err) {
-    console.warn('[webcart/shiprocket]', err.message);
-    return null;
-  }
+  return fetchShiprocketCheapestRate({ apiKey, pickupPincode, deliveryPincode, weightKg });
 }
 
-async function calculateDelivery(restaurant, customerPincode, cartTotal) {
+/** Sum catalog weight_grams × qty → kg. Falls back to 0.5 kg when no weights set. */
+function cartWeightKg(items) {
+  let grams = 0;
+  let weighed = false;
+  for (const line of items || []) {
+    const g = Number(line.weight_grams || 0);
+    const qty = Math.max(0, Math.floor(Number(line.qty || 0)));
+    if (g > 0 && qty > 0) {
+      grams += g * qty;
+      weighed = true;
+    }
+  }
+  if (!weighed) return 0.5;
+  return Math.round((grams / 1000) * 1000) / 1000;
+}
+
+async function calculateDelivery(restaurant, customerPincode, cartTotal, options = {}) {
   const tenantPincode = normalizePincode(restaurant?.postal_code);
   const customer = normalizePincode(customerPincode);
   const subtotal = Math.max(0, Number(cartTotal || 0));
   const freeAbove = Number(restaurant?.free_delivery_above || 0);
-  const intraCity = isSameCityPincode(tenantPincode, customer);
+  const provider = normalizeShippingProvider(restaurant?.shipping_provider);
+  const courierZone = resolveCourierZone(tenantPincode, customer);
+  const intraCity = courierZone === 'local';
+  // Keep legacy zone labels for webcart UI; expose courier_zone for rate cards.
   const zone = intraCity ? 'intra_city' : 'outstation';
+  const weightKg = Math.max(
+    0.01,
+    Number(options.weightKg) > 0 ? Number(options.weightKg) : cartWeightKg(options.items),
+  );
+  const courierName = String(restaurant?.courier_name || '').trim() || null;
 
   if (freeAbove > 0 && subtotal >= freeAbove) {
     return {
       zone,
+      courier_zone: courierZone,
+      courier_name: provider === 'custom' ? courierName : null,
       charge: 0,
       free_delivery_applied: true,
       cod_enabled: intraCity ? !!restaurant?.cod_enabled_city : !!restaurant?.cod_enabled_outstation,
       source: 'free_delivery_above',
+      shipping_provider: provider,
+      weight_kg: weightKg,
     };
   }
 
+  // Custom courier: weight × zone rate card for all destinations
+  if (provider === 'custom') {
+    let charge = chargeFromRateCard(restaurant?.courier_rate_card, courierZone, weightKg);
+    let source = 'custom_rate_card';
+    if (charge == null) {
+      charge = intraCity
+        ? Number(restaurant?.intra_city_charge ?? restaurant?.delivery_charge_default ?? 0) || 0
+        : Number(restaurant?.outstation_charge || 0) || 0;
+      source = intraCity ? 'intra_city_flat' : 'outstation_flat';
+    }
+    return {
+      zone,
+      courier_zone: courierZone,
+      courier_name: courierName,
+      charge: Math.round(charge * 100) / 100,
+      free_delivery_applied: false,
+      cod_enabled: intraCity ? !!restaurant?.cod_enabled_city : !!restaurant?.cod_enabled_outstation,
+      source,
+      shipping_provider: provider,
+      weight_kg: weightKg,
+    };
+  }
+
+  // Default: Shiprocket for outstation; flat intra-city
   if (intraCity) {
     const charge = Number(restaurant?.intra_city_charge ?? restaurant?.delivery_charge_default ?? 0) || 0;
     return {
       zone,
+      courier_zone: courierZone,
+      courier_name: null,
       charge: Math.round(charge * 100) / 100,
       free_delivery_applied: false,
       cod_enabled: !!restaurant?.cod_enabled_city,
       source: 'intra_city_flat',
+      shipping_provider: provider,
+      weight_kg: weightKg,
     };
   }
 
   let charge = Number(restaurant?.outstation_charge || 0) || 0;
   let source = 'outstation_flat';
-  if (restaurant?.shiprocket_connected && restaurant?.shiprocket_api_key && tenantPincode && customer) {
+  const useShiprocket = restaurant?.shiprocket_api_key && tenantPincode && customer;
+  if (useShiprocket) {
     const shiprocketRate = await fetchShiprocketRate({
       apiKey: restaurant.shiprocket_api_key,
       pickupPincode: tenantPincode,
       deliveryPincode: customer,
+      weightKg,
     });
     if (shiprocketRate != null) {
       charge = shiprocketRate;
@@ -276,10 +300,14 @@ async function calculateDelivery(restaurant, customerPincode, cartTotal) {
 
   return {
     zone,
+    courier_zone: courierZone,
+    courier_name: null,
     charge: Math.round(charge * 100) / 100,
     free_delivery_applied: false,
     cod_enabled: !!restaurant?.cod_enabled_outstation,
     source,
+    shipping_provider: provider,
+    weight_kg: weightKg,
   };
 }
 
@@ -851,7 +879,7 @@ router.post('/api/webcart/submit', async (req, res) => {
 
     const { data: liveItems, error: liveErr } = await supabaseAdmin
       .from('menu_items')
-      .select('id, retailer_id, name, price')
+      .select('id, retailer_id, name, price, weight_grams')
       .eq('restaurant_id', restaurant.id)
       .eq('is_stocked', true)
       .is('archived_at', null);
@@ -894,6 +922,7 @@ router.post('/api/webcart/submit', async (req, res) => {
         qty,
         price: unitPrice,
         line_total: unitPrice * qty,
+        weight_grams: Number(source.weight_grams || 0) || 0,
       });
     }
 
@@ -930,7 +959,9 @@ router.post('/api/webcart/submit', async (req, res) => {
     let deliveryCharge = 0;
     let deliveryQuote = null;
     if (shippedOrder) {
-      deliveryQuote = await calculateDelivery(restaurant, safePincode, subtotal);
+      deliveryQuote = await calculateDelivery(restaurant, safePincode, subtotal, {
+        items: normalizedItems,
+      });
       deliveryCharge = Number(deliveryQuote.charge || 0);
     } else if (serviceType === 'delivery') {
       deliveryCharge = parseFloat(restaurant.delivery_charge_default || 40);
@@ -1153,7 +1184,7 @@ router.get('/api/webcart/saved-addresses', async (req, res) => {
 
 router.post('/api/webcart/delivery-quote', async (req, res) => {
   try {
-    const { pincode, cart_total } = req.body || {};
+    const { pincode, cart_total, items } = req.body || {};
     const customerPincode = normalizePincode(pincode);
     if (!customerPincode) {
       return res.status(400).json({ ok: false, error: 'A valid 6-digit pincode is required.' });
@@ -1162,7 +1193,38 @@ router.post('/api/webcart/delivery-quote', async (req, res) => {
     const restaurant = await resolveRestaurantBySlug(req);
     if (!restaurant) return res.status(404).json({ ok: false, error: 'Restaurant not found.' });
 
-    const quote = await calculateDelivery(restaurant, customerPincode, cart_total);
+    // Resolve catalog weights server-side (client qty × menu weight_grams)
+    let weighedItems = [];
+    const rawItems = Array.isArray(items) ? items : [];
+    if (rawItems.length) {
+      const { data: liveItems, error: liveErr } = await supabaseAdmin
+        .from('menu_items')
+        .select('id, retailer_id, weight_grams')
+        .eq('restaurant_id', restaurant.id)
+        .eq('is_stocked', true)
+        .is('archived_at', null);
+      if (liveErr) throw liveErr;
+
+      const liveMap = new Map();
+      for (const row of (liveItems || [])) {
+        liveMap.set(String(row.id), row);
+        if (row.retailer_id) liveMap.set(String(row.retailer_id), row);
+      }
+
+      for (const row of rawItems) {
+        const source = liveMap.get(String(row.id || row.baseId || ''));
+        const qty = Math.max(0, Math.floor(Number(row.qty || 0)));
+        if (!source || !qty) continue;
+        weighedItems.push({
+          qty,
+          weight_grams: Number(source.weight_grams || 0) || 0,
+        });
+      }
+    }
+
+    const quote = await calculateDelivery(restaurant, customerPincode, cart_total, {
+      items: weighedItems,
+    });
     return res.json({ ok: true, ...quote });
   } catch (err) {
     console.error('[webcart/delivery-quote]', err.message);

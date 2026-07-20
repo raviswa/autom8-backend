@@ -65,21 +65,23 @@ def build_welcome_message(
     period, _ = get_time_period(timezone)
     display = (store_name or "our store").strip()
     greet = f"Good {period.capitalize()} 👋"
-    welcome = "Welcome to" if not is_returning else "Welcome back to"
 
-    name_bit = ""
-    if is_returning and customer_name:
+    first = ""
+    if customer_name:
         first = customer_name.strip().split()[0]
-        if first:
-            name_bit = f", {first}"
+
+    if is_returning and first:
+        welcome_line = f"Welcome back, {first}! *{display}* {meta['icon']}"
+    elif first:
+        welcome_line = f"Welcome, {first}! *{display}* {meta['icon']}"
+    else:
+        welcome_line = f"Welcome to *{display}* {meta['icon']}"
 
     lines = [
         greet,
-        f"{welcome} *{display}* {meta['icon']}",
+        welcome_line,
         f"{meta['hook']}",
     ]
-    if name_bit:
-        lines[1] = f"{welcome}{name_bit} *{display}* {meta['icon']}"
 
     lines.append("")
     lines.append(

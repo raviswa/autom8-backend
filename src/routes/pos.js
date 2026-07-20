@@ -14,6 +14,14 @@ const {
 } = require('../middleware/auth');
 const { withAudit, auditOwnerDashboardContext } = require('../middleware/audit');
 const { estimateKitchenStartFromTotals, assignScheduledBucket } = require('../helpers/kitchenScheduler');
+const {
+  normalizeShippingProvider,
+  normalizeRateCard,
+  normalizePincode,
+  resolveCourierZone,
+  chargeFromRateCard,
+} = require('../helpers/courierRates');
+const { fetchShiprocketCourierOptions } = require('../helpers/shiprocket');
 
 function requireSettingsAccess(req, res, next) {
   if (!canManageRestaurantSettings(req.user_role))
@@ -916,6 +924,126 @@ router.post('/restaurants/resolve-pickup', authenticateToken, getRestaurantId, r
   }
 });
 
+/**
+ * Compare Shiprocket live courier quotes vs the tenant's custom rate card
+ * for selected destination pincodes × weights (settings tool).
+ */
+router.post('/restaurants/shipping-rate-compare', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const weights = (Array.isArray(body.weights) ? body.weights : [0.5, 1, 2])
+      .map((w) => Math.round(Number(w) * 1000) / 1000)
+      .filter((w) => w > 0)
+      .slice(0, 6);
+    const destinations = (Array.isArray(body.destinations) ? body.destinations : [])
+      .map((d) => ({
+        label: String(d.label || d.city || d.pincode || '').trim() || 'Destination',
+        pincode: normalizePincode(d.pincode),
+      }))
+      .filter((d) => d.pincode)
+      .slice(0, 8);
+
+    if (!weights.length) {
+      return res.status(400).json({ error: 'Add at least one parcel weight (kg).' });
+    }
+    if (!destinations.length) {
+      return res.status(400).json({ error: 'Add at least one destination pincode.' });
+    }
+
+    const { data: tenant, error } = await supabaseAdmin
+      .from('tenants')
+      .select('postal_code, shiprocket_api_key, courier_name, courier_rate_card, outstation_charge, intra_city_charge')
+      .eq('id', req.restaurant_id)
+      .maybeSingle();
+    if (error) throw error;
+    if (!tenant) return res.status(404).json({ error: 'Restaurant not found.' });
+
+    const pickup = normalizePincode(body.pickup_pincode || tenant.postal_code);
+    if (!pickup) {
+      return res.status(400).json({
+        error: 'Set your restaurant postal code (or pass pickup_pincode) before comparing rates.',
+      });
+    }
+
+    // Prefer unsaved draft card from the settings form when provided
+    const rateCard = body.courier_rate_card != null
+      ? normalizeRateCard(body.courier_rate_card)
+      : normalizeRateCard(tenant.courier_rate_card);
+    const courierName = String(body.courier_name || tenant.courier_name || 'Your courier').trim() || 'Your courier';
+
+    // Optional one-time token from the form (not yet saved)
+    const apiKey = String(body.shiprocket_api_key || '').trim() || tenant.shiprocket_api_key || '';
+
+    const ZONE_LABEL = {
+      local: 'Local',
+      within_state: 'Within state',
+      metro: 'Metro',
+      rest_of_india: 'Non-metro',
+      special: 'Special',
+    };
+
+    const rows = [];
+    for (const dest of destinations) {
+      const zone = resolveCourierZone(pickup, dest.pincode);
+      for (const weightKg of weights) {
+        const ship = apiKey
+          ? await fetchShiprocketCourierOptions({
+              apiKey,
+              pickupPincode: pickup,
+              deliveryPincode: dest.pincode,
+              weightKg,
+              limit: 5,
+            })
+          : { cheapest: null, couriers: [], error: 'Add a Shiprocket API token to fetch live rates.' };
+
+        let yourRate = chargeFromRateCard(rateCard, zone, weightKg);
+        let yourSource = 'rate_card';
+        if (yourRate == null) {
+          yourRate = zone === 'local'
+            ? Number(tenant.intra_city_charge || 0) || null
+            : Number(tenant.outstation_charge || 0) || null;
+          yourSource = zone === 'local' ? 'intra_city_fallback' : 'outstation_fallback';
+        }
+
+        const shipCheapest = ship.cheapest;
+        let diff = null;
+        let cheaper = null;
+        if (shipCheapest != null && yourRate != null) {
+          diff = Math.round((yourRate - shipCheapest) * 100) / 100;
+          cheaper = diff < 0 ? 'yours' : diff > 0 ? 'shiprocket' : 'tie';
+        }
+
+        rows.push({
+          destination: dest.label,
+          pincode: dest.pincode,
+          zone,
+          zone_label: ZONE_LABEL[zone] || zone,
+          weight_kg: weightKg,
+          shiprocket_cheapest: shipCheapest,
+          shiprocket_couriers: ship.couriers,
+          shiprocket_error: ship.error,
+          your_courier_name: courierName,
+          your_rate: yourRate,
+          your_source: yourSource,
+          diff,
+          cheaper,
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      pickup_pincode: pickup,
+      courier_name: courierName,
+      shiprocket_available: !!apiKey,
+      rows,
+    });
+  } catch (err) {
+    console.error('[shipping-rate-compare]', err.message);
+    return res.status(500).json({ error: err.message || 'Rate compare failed.' });
+  }
+});
+
 // ── Owner self-service restaurant update ──────────────────────────────────────
 // Used by SettingsPanel tabs: Restaurant, Services, Kitchen, WhatsApp
 
@@ -947,6 +1075,7 @@ router.put(
   'scheduled_slot_max_orders','schedule_buffer_minutes','schedule_rounding_minutes','schedule_early_start_max_minutes',
   'shiprocket_connected','shiprocket_api_key','intra_city_charge','outstation_charge','free_delivery_above',
   'cod_enabled_city','cod_enabled_outstation',
+  'shipping_provider','courier_name','courier_rate_card',
   'subscribed_features', 'enabled_services',
     ];
 
@@ -1040,6 +1169,22 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
     if (updates.pickup_longitude !== undefined) {
       const lng = parseFloat(updates.pickup_longitude);
       updates.pickup_longitude = Number.isFinite(lng) ? lng : null;
+    }
+
+    if (updates.shipping_provider !== undefined) {
+      updates.shipping_provider = normalizeShippingProvider(updates.shipping_provider);
+      if (updates.shipping_provider === 'shiprocket' && updates.shiprocket_api_key) {
+        updates.shiprocket_connected = true;
+      }
+      if (updates.shipping_provider === 'custom') {
+        updates.shiprocket_connected = false;
+      }
+    }
+    if (updates.courier_name !== undefined) {
+      updates.courier_name = String(updates.courier_name || '').trim() || null;
+    }
+    if (updates.courier_rate_card !== undefined) {
+      updates.courier_rate_card = normalizeRateCard(updates.courier_rate_card);
     }
 
     const pickupWarning = (
