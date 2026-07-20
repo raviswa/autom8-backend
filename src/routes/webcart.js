@@ -1030,10 +1030,12 @@ router.post('/api/webcart/submit', async (req, res) => {
         qty,
         price: unitPrice,
         line_total: unitPrice * qty,
-        weight_grams: weightByKey.get(String(row.id))
+        weight_grams: Number(
+          weightByKey.get(String(row.id))
           ?? weightByKey.get(String(key))
-          ?? Number(source.weight_grams || 0)
-          || 0,
+          ?? source.weight_grams
+          ?? 0,
+        ) || 0,
       });
       stockLines.push({
         menu_item_id: source.id,
