@@ -1958,7 +1958,7 @@ $('subtotal').textContent = money(subtotal);
           iceCreamBases.push(item);
           continue;
         }
-        if (type === 'PIZZA' && item.variant_group_id) {
+        if (item.variant_group_id) {
           if (!variantGroups.has(item.variant_group_id)) variantGroups.set(item.variant_group_id, []);
           variantGroups.get(item.variant_group_id).push(item);
           continue;
@@ -2311,7 +2311,7 @@ $('subtotal').textContent = money(subtotal);
       for (const item of visible) {
         const type = (item.item_type || 'PRODUCT').toUpperCase();
         if (type === 'FLAVOUR' || type === 'ADDON') continue;
-        if (type === 'PIZZA' && item.variant_group_id) {
+        if (item.variant_group_id) {
           if (seenGroups.has(item.variant_group_id)) continue;
           seenGroups.add(item.variant_group_id);
           cards.push(variantCardHtml(variantGroups.get(item.variant_group_id)));
