@@ -2874,7 +2874,7 @@ $('subtotal').textContent = money(subtotal);
 
       menuList.innerHTML = cards.length
         ? cards.join('')
-        : '<div class="empty-state">No dishes match your search.</div>';
+        : `<div class="empty-state">${state.catalogLob ? 'No products to show yet.' : 'No dishes match your search.'}</div>`;
       bindRowHandlers(menuList);
     }
 
@@ -3019,6 +3019,11 @@ $('subtotal').textContent = money(subtotal);
         const data = await res.json();
 
         if (!res.ok || !data.valid) {
+          // Schema / server failures are not "session expired" — show the real message.
+          if (data && (data.code === 'SERVER_ERROR' || res.status >= 500)) {
+            showStatus(data.message || 'Could not load the menu. Please try again in a moment.', 'err');
+            return;
+          }
           showSessionFallbackStatus({
             restaurantName: data && (data.restaurant_name || data.restaurant || data.name),
             supportPhone: data && data.support_phone,

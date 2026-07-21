@@ -42,6 +42,54 @@ function digitsOnly(value) {
   return String(value || '').replace(/\D/g, '');
 }
 
+/** PostgREST "column missing from schema cache" (migration not applied yet). */
+function isMissingColumnError(err) {
+  const hay = `${err?.code || ''} ${err?.message || ''} ${err?.details || ''} ${err?.hint || ''}`.toLowerCase();
+  return (
+    hay.includes('pgrst204')
+    || (hay.includes('could not find') && hay.includes('column'))
+    || /column .+ does not exist/.test(hay)
+  );
+}
+
+function columnFromSchemaError(err) {
+  const msg = String(err?.message || '');
+  const m =
+    msg.match(/Could not find the '([a-z0-9_]+)' column/i)
+    || msg.match(/column\s+(?:\w+\.)?([a-z0-9_]+)\s+does not exist/i)
+    || msg.match(/'([a-z0-9_]+)' column of/i);
+  return m ? m[1] : null;
+}
+
+/**
+ * Run a Supabase select, dropping any columns the live DB doesn't have yet.
+ * Prevents a single unapplied migration from 500-ing the whole webcart session.
+ */
+async function selectDroppingMissingColumns(label, columnsCsv, runSelect) {
+  let columns = String(columnsCsv || '')
+    .split(',')
+    .map((c) => c.trim())
+    .filter(Boolean);
+
+  for (let attempt = 0; attempt < 40 && columns.length; attempt += 1) {
+    const select = columns.join(', ');
+    const result = await runSelect(select);
+    if (!result.error) return result;
+
+    if (!isMissingColumnError(result.error)) return result;
+
+    const bad = columnFromSchemaError(result.error);
+    if (!bad || !columns.includes(bad)) {
+      console.error(`[webcart] ${label}: schema error but could not map column — ${result.error.message}`);
+      return result;
+    }
+    console.warn(`[webcart] ${label}: live DB missing column "${bad}" — dropping and retrying (run pending migrations)`);
+    columns = columns.filter((c) => c !== bad);
+  }
+
+  return { data: null, error: new Error(`${label}: no selectable columns left after schema fallback`) };
+}
+
 function phoneVariants(phone) {
   const digits = digitsOnly(phone);
   if (!digits) return [];
@@ -149,11 +197,27 @@ async function resolveRestaurantBySlug(req) {
   const now = Date.now();
   let rows = _restaurantCache.rows;
   if (!rows || (now - _restaurantCache.fetchedAt) > RESTAURANT_CACHE_TTL_MS) {
-    const { data, error } = await supabaseAdmin
-      .from('tenants')
-      .select('id, name, display_name, logo_url, contact_phone, manager_phone, whatsapp_number, timezone, opening_hours, primary_slot_category, parcel_charge_per_item, delivery_charge_default, delivery_charge_tiers, gst_rate, kitchen_busy, lob_type, postal_code, shiprocket_connected, shiprocket_api_key, shiprocket_email, intra_city_charge, outstation_charge, free_delivery_above, packaging_weight_grams, cod_enabled_city, cod_enabled_outstation, shipping_provider, courier_name, courier_rate_card, gstin, fssai_license, sac_code, receipt_tagline')
-      .eq('is_active', true)
-      .limit(500);
+    const TENANT_SELECT = [
+      'id', 'name', 'display_name', 'logo_url', 'contact_phone', 'manager_phone',
+      'whatsapp_number', 'timezone', 'opening_hours', 'primary_slot_category',
+      'parcel_charge_per_item', 'delivery_charge_default', 'delivery_charge_tiers',
+      'gst_rate', 'kitchen_busy', 'lob_type', 'postal_code',
+      'shiprocket_connected', 'shiprocket_api_key', 'shiprocket_email',
+      'intra_city_charge', 'outstation_charge', 'free_delivery_above',
+      'packaging_weight_grams', 'cod_enabled_city', 'cod_enabled_outstation',
+      'shipping_provider', 'courier_name', 'courier_rate_card',
+      'gstin', 'fssai_license', 'sac_code', 'receipt_tagline',
+    ].join(', ');
+
+    const { data, error } = await selectDroppingMissingColumns(
+      'tenants',
+      TENANT_SELECT,
+      (select) => supabaseAdmin
+        .from('tenants')
+        .select(select)
+        .eq('is_active', true)
+        .limit(500),
+    );
     if (error) throw error;
     rows = data || [];
     _restaurantCache = { rows, fetchedAt: now };
@@ -544,13 +608,17 @@ async function fetchMenuItems(restaurantId, { catalogLob = false } = {}) {
   const itemColumns = catalogLob ? CATALOG_MENU_ITEM_SELECT : RESTAURANT_MENU_ITEM_SELECT;
 
   const [itemsRes, categoriesRes] = await Promise.all([
-    supabaseAdmin
-      .from('menu_items')
-      .select(itemColumns)
-      .eq('restaurant_id', restaurantId)
-      .is('archived_at', null)
-      .order('category', { ascending: true })
-      .order('name', { ascending: true }),
+    selectDroppingMissingColumns(
+      `menu_items:${catalogLob ? 'catalog' : 'restaurant'}`,
+      itemColumns,
+      (select) => supabaseAdmin
+        .from('menu_items')
+        .select(select)
+        .eq('restaurant_id', restaurantId)
+        .is('archived_at', null)
+        .order('category', { ascending: true })
+        .order('name', { ascending: true }),
+    ),
     supabaseAdmin
       .from('menu_categories')
       .select('name, applicable_slots')
@@ -792,8 +860,19 @@ router.get('/api/webcart/session', async (req, res) => {
           : 'Your WhatsApp session expired, but the menu is still available to browse. Please request a fresh link to submit an order.'),
     });
   } catch (err) {
-    console.error('[webcart/session]', err.message);
-    return res.status(500).json({ valid: false, code: 'SERVER_ERROR', message: 'Failed to load cart session.' });
+    console.error('[webcart/session]', err.message || err);
+    if (err?.details) console.error('[webcart/session] details:', err.details);
+    if (err?.hint) console.error('[webcart/session] hint:', err.hint);
+    if (err?.code) console.error('[webcart/session] code:', err.code);
+    const schemaHint = isMissingColumnError(err)
+      ? 'Database is missing a column this build expects — run pending migrations (especially 20260720_*).'
+      : null;
+    return res.status(500).json({
+      valid: false,
+      code: 'SERVER_ERROR',
+      message: schemaHint || 'Failed to load cart session.',
+      detail: process.env.NODE_ENV === 'production' ? undefined : (err.message || String(err)),
+    });
   }
 });
 
