@@ -1461,12 +1461,13 @@ router.get('/reports/sales', authenticateToken, getRestaurantId, async (req, res
         .eq('status', 'completed')
         .gte('created_at', fromIso)
         .lte('created_at', toIso),
+      // bookings has no updated_at in many deployments — use created_at for range + daily buckets.
       supabaseAdmin.from('bookings')
-        .select('id, service_type, payment_status, schedule_meta, created_at, updated_at, token_number')
+        .select('id, service_type, payment_status, schedule_meta, created_at, token_number')
         .eq('restaurant_id', req.restaurant_id)
         .eq('payment_status', 'paid')
-        .gte('updated_at', fromIso)
-        .lte('updated_at', toIso),
+        .gte('created_at', fromIso)
+        .lte('created_at', toIso),
     ]);
 
     if (ordersErr) throw ordersErr;
@@ -1514,7 +1515,7 @@ router.get('/reports/sales', authenticateToken, getRestaurantId, async (req, res
       row.orders += ordersCount;
     };
     (orders ?? []).forEach((o) => bumpDay(istDateKey(o.created_at), Number(o.total_amount) || 0, 1));
-    (bookings ?? []).forEach((b) => bumpDay(istDateKey(b.updated_at || b.created_at), bookingRevenueTotal(b), 1));
+    (bookings ?? []).forEach((b) => bumpDay(istDateKey(b.created_at), bookingRevenueTotal(b), 1));
 
     const daily = [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date));
 

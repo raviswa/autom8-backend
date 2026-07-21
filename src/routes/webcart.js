@@ -24,7 +24,7 @@ const {
 } = require('../helpers/inventory');
 const { deriveMenuDiscount } = require('../helpers/menuDiscount');
 
-const ACTIVE_TOKEN_STATUSES = new Set(['waiting', 'pending_approval', 'seated', 'takeaway']);
+const ACTIVE_TOKEN_STATUSES = new Set(['waiting', 'pending_approval', 'seated', 'takeaway', 'delivery']);
 const DEFAULT_THEME = {
   primary_color: '#C2410C',
   accent_color: '#111827',
@@ -473,26 +473,28 @@ function isActiveWalkInRow(data) {
  * menu link across orders — requiring a live walk-in made every revisit look
  * "expired" even while menu_tokens.expires_at was still in the future.
  */
-function menuTokenSoftSession(menuToken, fallbackPhone) {
+function menuTokenSoftSession(menuToken, fallbackPhone, { shipped = false } = {}) {
   const phone = String(menuToken?.phone || fallbackPhone || '').trim();
   if (!phone) return null;
+  const kind = shipped ? 'delivery' : 'takeaway';
   return {
     id: String(menuToken.walk_in_token_id || menuToken.session_token || '').trim() || null,
     phone,
-    status: 'takeaway',
-    type: 'takeaway',
+    status: kind,
+    type: kind,
     arrived_at: new Date().toISOString(),
     completed_at: null,
     meta: {
       source: 'menu_token_soft_session',
       session_token: menuToken.session_token || null,
       soft_session: true,
+      service_type: kind,
     },
     _soft: true,
   };
 }
 
-async function resolveSession({ restaurantId, token, phone, allowSoftMenuSession = false }) {
+async function resolveSession({ restaurantId, token, phone, allowSoftMenuSession = false, preferDelivery = false }) {
   const rawVariants = phoneVariants(phone);
   if (!restaurantId || !token) return null;
 
@@ -538,7 +540,7 @@ async function resolveSession({ restaurantId, token, phone, allowSoftMenuSession
     const walkTokenId = String(menuToken.walk_in_token_id || '').trim();
     if (!walkTokenId) {
       if (allowSoftMenuSession) {
-        return menuTokenSoftSession(menuToken, variants[0]);
+        return menuTokenSoftSession(menuToken, variants[0], { shipped: preferDelivery });
       }
       console.error(
         '[webcart/session] menu_tokens row missing walk_in_token_id — refusing phone fallback',
@@ -574,13 +576,13 @@ async function resolveSession({ restaurantId, token, phone, allowSoftMenuSession
           '[webcart/session] walk_in_token_id phone mismatch — refusing to bind',
           { restaurantId, walkTokenId, menuPhone: variants[0], walkPhone: byId.phone }
         );
-        return allowSoftMenuSession ? menuTokenSoftSession(menuToken, variants[0]) : null;
+        return allowSoftMenuSession ? menuTokenSoftSession(menuToken, variants[0], { shipped: preferDelivery }) : null;
       }
     }
 
     if (!byId) {
       if (allowSoftMenuSession) {
-        return menuTokenSoftSession(menuToken, variants[0]);
+        return menuTokenSoftSession(menuToken, variants[0], { shipped: preferDelivery });
       }
       console.error(
         '[webcart/session] menu_tokens.walk_in_token_id not found — refusing phone fallback',
@@ -592,14 +594,19 @@ async function resolveSession({ restaurantId, token, phone, allowSoftMenuSession
     if (!isActiveWalkInRow(byId)) {
       if (allowSoftMenuSession) {
         // Menu link itself is still valid — keep checkout usable for packaged LOBs.
+        const kind = preferDelivery ? 'delivery' : 'takeaway';
         return {
           ...byId,
-          status: ACTIVE_TOKEN_STATUSES.has(byId.status) ? byId.status : 'takeaway',
+          status: preferDelivery ? 'delivery' : (ACTIVE_TOKEN_STATUSES.has(byId.status) ? byId.status : 'takeaway'),
+          type: preferDelivery ? 'delivery' : (byId.type || 'takeaway'),
           completed_at: null,
           meta: {
             ...(typeof byId.meta === 'object' && byId.meta ? byId.meta : {}),
             soft_session: true,
             source: 'menu_token_stale_walk_in',
+            service_type: preferDelivery
+              ? 'delivery'
+              : (byId.meta?.service_type || byId.type || 'takeaway'),
           },
           _soft: true,
         };
@@ -801,6 +808,7 @@ router.get('/api/webcart/session', async (req, res) => {
           token,
           phone,
           allowSoftMenuSession: catalogLob,
+          preferDelivery: catalogLob,
         })
       : null;
 
@@ -1141,6 +1149,7 @@ router.post('/api/webcart/submit', async (req, res) => {
           token: safeToken,
           phone: safePhone,
           allowSoftMenuSession: catalogLob,
+          preferDelivery: catalogLob || shippedOrder,
         })
       : null;
 
@@ -1363,7 +1372,10 @@ router.post('/api/webcart/submit', async (req, res) => {
     if (session && !session._soft) {
       const { error } = await supabaseAdmin
         .from('walk_in_tokens')
-        .update({ meta: nextMeta })
+        .update({
+          meta: nextMeta,
+          ...(shippedOrder ? { type: 'delivery', status: 'delivery' } : {}),
+        })
         .eq('restaurant_id', restaurant.id)
         .eq('id', session.id)
         .eq('phone', session.phone);
