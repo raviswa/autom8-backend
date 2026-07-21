@@ -1200,6 +1200,83 @@ async function handleMenuItemSpecialToday(req, res) {
 const menuItemSpecialTodayMiddleware = [authenticateToken, getRestaurantId, handleMenuItemSpecialToday];
 router.put('/menu-items/:id/special-today', ...menuItemSpecialTodayMiddleware);
 
+// ── PUT /api/menu-items/:id/discount — X% off for next Y days ───────────────
+
+async function handleMenuItemDiscount(req, res) {
+  try {
+    if (!['owner', 'manager', 'brand_owner'].includes(req.user_role)) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    const { buildDiscountPatch, deriveMenuDiscount } = require('../helpers/menuDiscount');
+    const built = buildDiscountPatch(req.body || {});
+    if (built.error) return res.status(400).json({ error: built.error });
+
+    const { data: item, error: fetchErr } = await supabaseAdmin
+      .from('menu_items')
+      .select('id, name, price, discount_percent, discount_ends_at')
+      .eq('id', req.params.id)
+      .eq('restaurant_id', req.restaurant_id)
+      .single();
+
+    if (fetchErr || !item) return res.status(404).json({ error: 'Menu item not found' });
+
+    const { error: updateErr } = await supabaseAdmin
+      .from('menu_items')
+      .update(built.patch)
+      .eq('id', req.params.id)
+      .eq('restaurant_id', req.restaurant_id);
+
+    if (updateErr) {
+      if (/discount_percent|discount_ends_at/i.test(updateErr.message || '')) {
+        return res.status(500).json({
+          error: 'Discount columns missing — run migrations/20260721_menu_item_discounts.sql in Supabase.',
+        });
+      }
+      throw updateErr;
+    }
+
+    const next = {
+      ...item,
+      price: item.price,
+      discount_percent: built.patch.discount_percent,
+      discount_ends_at: built.patch.discount_ends_at,
+    };
+    const derived = deriveMenuDiscount(next);
+
+    await writeAuditLog({
+      user_id: req.user.sub,
+      restaurant_id: req.restaurant_id,
+      action: built.cleared ? 'Cleared item discount' : 'Set item discount',
+      details: {
+        item_id: req.params.id,
+        item_name: item.name,
+        discount_percent: derived.discount_percent,
+        discount_ends_at: derived.discount_ends_at,
+        duration_days: built.duration_days || null,
+      },
+    });
+
+    res.json({
+      success: true,
+      id: req.params.id,
+      name: item.name,
+      cleared: !!built.cleared,
+      discount_percent: derived.discount_percent,
+      discount_ends_at: derived.discount_ends_at,
+      discount_active: derived.discount_active,
+      discount_days_left: derived.discount_days_left,
+      list_price: derived.list_price,
+      effective_price: derived.effective_price,
+    });
+  } catch (err) {
+    console.error('[menu-item-discount]', err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+}
+
+router.put('/menu-items/:id/discount', authenticateToken, getRestaurantId, handleMenuItemDiscount);
+
 /** Clear all is_special_today flags (called daily at midnight IST). */
 async function resetDailySpecialDishes() {
   const { data, error } = await supabaseAdmin

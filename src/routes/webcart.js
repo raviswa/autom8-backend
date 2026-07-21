@@ -22,6 +22,7 @@ const {
   deductStockForLines,
   joinStockWaitlist,
 } = require('../helpers/inventory');
+const { deriveMenuDiscount } = require('../helpers/menuDiscount');
 
 const ACTIVE_TOKEN_STATUSES = new Set(['waiting', 'pending_approval', 'seated', 'takeaway']);
 const DEFAULT_THEME = {
@@ -645,7 +646,7 @@ async function resolveSession({ restaurantId, token, phone, allowSoftMenuSession
 // Restaurant LOBs (Munafe etc.) never use PSL/catalog fields — selecting them
 // breaks PostgREST when those columns are not migrated (e.g. scoop_count).
 const RESTAURANT_MENU_ITEM_SELECT =
-  'id, retailer_id, name, price, category, description, image_url, image_url_2, image_url_3, image_url_4, image_url_5, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked, is_available';
+  'id, retailer_id, name, price, category, description, image_url, image_url_2, image_url_3, image_url_4, image_url_5, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked, is_available, discount_percent, discount_ends_at';
 
 const CATALOG_MENU_ITEM_SELECT =
   `${RESTAURANT_MENU_ITEM_SELECT}, variant_group_id, size_label, item_type, flavour_group, scoop_count, crust_options, toppings_allowed, topping_extra_price, pack_size_label, weight_grams, shelf_life_days, made_on_date, ingredients, allergens, condition, original_mrp, warranty_days, colour, meta, current_stock, availability_status, launch_at, deposit_amount`;
@@ -708,6 +709,7 @@ async function fetchMenuItems(restaurantId, { catalogLob = false } = {}) {
 
   const items = (itemsRes.data || []).map(item => {
     const { stocked, comingSoon, status } = deriveStockStatus(item);
+    const discount = deriveMenuDiscount(item);
     return {
       ...item,
       is_available: !!item.is_available,
@@ -718,6 +720,15 @@ async function fetchMenuItems(restaurantId, { catalogLob = false } = {}) {
       is_publicly_available: !!(item.is_available && stocked && !comingSoon),
       effective_slots: normalizeSlots(item.applicable_slots || categorySlotMap[item.category] || ['anytime']),
       is_todays_special: !!(item.is_todays_special || item.is_special_today),
+      list_price: discount.list_price,
+      price: discount.effective_price,
+      base_price: discount.list_price,
+      effective_price: discount.effective_price,
+      discount_active: discount.discount_active,
+      discount_percent: discount.discount_active ? discount.discount_percent : null,
+      discount_ends_at: discount.discount_active ? discount.discount_ends_at : null,
+      discount_days_left: discount.discount_days_left,
+      discount_hours_left: discount.discount_hours_left,
     };
   });
 
@@ -1135,7 +1146,7 @@ router.post('/api/webcart/submit', async (req, res) => {
 
     const { data: liveItems, error: liveErr } = await selectDroppingMissingColumns(
       'menu_items:submit',
-      'id, retailer_id, name, price, weight_grams, item_type, meta, current_stock, is_stocked, availability_status',
+      'id, retailer_id, name, price, weight_grams, item_type, meta, current_stock, is_stocked, availability_status, discount_percent, discount_ends_at',
       (select) => supabaseAdmin
         .from('menu_items')
         .select(select)
@@ -1199,13 +1210,16 @@ router.post('/api/webcart/submit', async (req, res) => {
       const qty = Math.max(0, Math.floor(Number(row.qty || 0)));
       if (!qty) continue;
 
-      const unitPrice = Number(source.price || 0);
+      const discount = deriveMenuDiscount(source);
+      const unitPrice = Number(discount.effective_price || source.price || 0);
       const key = source.retailer_id || source.id;
       normalizedItems.push({
         id: key,
         name: source.name,
         qty,
         price: unitPrice,
+        list_price: Number(source.price || 0),
+        discount_percent: discount.discount_active ? discount.discount_percent : null,
         line_total: unitPrice * qty,
         weight_grams: Number(
           weightByKey.get(String(row.id))

@@ -675,6 +675,11 @@
       display: inline-block; font-size: 11px; font-weight: 700; color: #fff;
       background: #16a34a; padding: 2px 8px; border-radius: 999px; margin-left: 6px; vertical-align: middle;
     }
+    .price-sale { color: var(--brand); font-weight: 700; }
+    .price-list {
+      margin-left: 6px; color: var(--muted); font-weight: 500; font-size: 12px;
+      text-decoration: line-through;
+    }
     .row-card.catalog-product { cursor: pointer; }
   </style>
 </head>
@@ -1043,7 +1048,31 @@
       statusBox.className = type || '';
       statusBox.textContent = text;
     }
-    function money(v) { return `Rs ${Math.max(0, Number(v || 0)).toFixed(0)}`; }
+    function discountCopy(item) {
+      if (!item || !item.discount_active || !item.discount_percent) return '';
+      const pct = Number(item.discount_percent);
+      if (item.discount_days_left <= 1 && item.discount_hours_left != null) {
+        return `${pct}% off · ${item.discount_hours_left}h left`;
+      }
+      const d = Number(item.discount_days_left) || 1;
+      return `${pct}% off for the next ${d} day${d === 1 ? '' : 's'}`;
+    }
+
+    function priceHtml(item, { compact = false } = {}) {
+      const sale = Number(item.effective_price != null ? item.effective_price : item.price || 0);
+      const list = Number(item.list_price != null ? item.list_price : item.base_price != null ? item.base_price : item.price || 0);
+      if (item.discount_active && list > sale) {
+        const badge = discountCopy(item);
+        return `<span class="price-sale">${money(sale)}</span>
+          <span class="price-list">${money(list)}</span>
+          ${badge ? `<span class="discount-badge">${badge}</span>` : ''}`;
+      }
+      if (state.lobType === 'retail' && item.original_mrp && Number(item.original_mrp) > sale) {
+        const pct = Math.round((1 - sale / Number(item.original_mrp)) * 100);
+        return `${money(sale)}${compact ? '' : ` <span class="discount-badge">${pct}% off</span>`}`;
+      }
+      return money(sale);
+    }
 
     // FIX (4): persist cart per-token in sessionStorage so the +/- stepper
     // state survives reloads, the WhatsApp redirect-and-back flow, etc.
@@ -2240,9 +2269,6 @@ $('subtotal').textContent = money(subtotal);
       state.productGalleryIndex = 0;
       state.pslModal = { type: 'productDetail', item, galleryId };
       pslModalTitle.textContent = item.name;
-      const discountBadge = (state.lobType === 'retail' && item.original_mrp && Number(item.original_mrp) > Number(item.price))
-        ? `<span class="discount-badge">${Math.round((1 - Number(item.price) / Number(item.original_mrp)) * 100)}% off</span>`
-        : '';
       const soldOut = item.is_publicly_available === false && !item.is_coming_soon;
       const comingSoon = !!item.is_coming_soon;
       const waitlistLabel = comingSoon ? 'Notify me at launch' : 'Notify me on WhatsApp';
@@ -2253,7 +2279,7 @@ $('subtotal').textContent = money(subtotal);
         ${galleryHtml(urls, galleryId)}
         ${item.description ? `<p style="font-size:13px;color:var(--muted);margin:0 0 10px">${item.description}</p>` : ''}
         ${productDetailFieldsHtml(item)}
-        <div class="modal-price">${money(item.price)}${discountBadge}</div>
+        <div class="modal-price">${priceHtml(item)}</div>
         ${statusNote}`;
       pslModalFoot.innerHTML = (soldOut || comingSoon)
         ? `<button class="modal-skip" type="button" id="productDetailClose">Close</button>
@@ -2526,7 +2552,7 @@ $('subtotal').textContent = money(subtotal);
           <div class="row-info">
             <div class="row-cat">${item.category || 'General'}</div>
             <div class="row-name">${item.name}${statusSuffix}</div>
-            <div class="row-price">${money(item.price)}</div>
+            <div class="row-price">${priceHtml(item)}</div>
             ${item.special_note ? `<span class="note">${item.special_note}</span>` : ''}
           </div>
           <div class="add-zone">${actions}</div>
@@ -2580,7 +2606,7 @@ $('subtotal').textContent = money(subtotal);
             <div class="row-cat">${item.category || 'General'}</div>
             <div class="row-name">${item.name}</div>
             <div class="row-hint">${scoopHint}</div>
-            <div class="row-price">${money(item.price)}</div>
+            <div class="row-price">${priceHtml(item)}</div>
           </div>
           <div class="add-zone">${actions}</div>
         </div>`;
@@ -2610,7 +2636,7 @@ $('subtotal').textContent = money(subtotal);
             <div class="row-cat">${base.category || 'General'}</div>
             <div class="row-name">${base.name}</div>
             <div class="size-pills">${sizePills}</div>
-            <div class="row-price">${money(current.price)}</div>
+            <div class="row-price">${priceHtml(current)}</div>
             ${customized ? '<div class="row-hint">Customize crust & toppings</div>' : ''}
           </div>
           <div class="add-zone">${actions}</div>
