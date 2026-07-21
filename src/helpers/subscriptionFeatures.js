@@ -1,21 +1,23 @@
 'use strict';
 
-// Customer-facing order services (toggleable in Settings → Services)
-const ORDER_SERVICES = ['dine_in', 'takeaway', 'delivery', 'reserve_table'];
+// Customer-facing services (toggleable in Settings → Services).
+// Token / Queue is the lead default offering — listed first.
+const ORDER_SERVICES = ['token_management', 'dine_in', 'takeaway', 'delivery', 'reserve_table'];
 
 // Platform capabilities billed alongside services (not toggled in Services tab)
 const INFRA_FEATURES = [
-  'token_management', 'kds', 'analytics', 'marketing',
+  'kds', 'analytics', 'marketing',
   'whatsapp_ordering', 'catalog_sync', 'reporting',
 ];
 
 const ALL_FEATURES = [...ORDER_SERVICES, ...INFRA_FEATURES];
 
 const SERVICE_LABELS = {
-  dine_in:       'Dine-in',
-  takeaway:      'Takeaway',
-  delivery:      'Door delivery',
-  reserve_table: 'Table reservation',
+  token_management: 'Token / Queue',
+  dine_in:          'Dine-in',
+  takeaway:         'Takeaway',
+  delivery:         'Door delivery',
+  reserve_table:    'Table reservation',
 };
 
 function isOrderService(feature) {

@@ -28,7 +28,7 @@ function requireOutlet(req, res, next) {
 }
 
 const RESTAURANT_SELECT_FULL = [
-  'id', 'name', 'waba_id', 'whatsapp_number', 'display_name', 'manager_phone', 'sweets_counter_phone', 'meta_catalog_id',
+  'id', 'name', 'display_name', 'logo_url', 'waba_id', 'whatsapp_number', 'manager_phone', 'sweets_counter_phone', 'meta_catalog_id',
   'timezone', 'dining_duration_minutes', 'payment_mode', 'kitchen_workflow',
   'kot_printer_ip', 'kot_printer_port', 'kot_printer_enabled',
   'takeaway_fulfillment_mode', 'fulfillment_sections', 'parcel_charge_per_item',
@@ -40,7 +40,7 @@ const RESTAURANT_SELECT_FULL = [
   'scheduled_delivery_enabled', 'scheduled_takeaway_enabled', 'scheduled_kds_lead_minutes', 'max_delivery_radius_km',
   'lob_type',   // ← add this
   'allow_manager_menu_upload',    //expose allow_manager_menu_upload to the frontend
-  'shiprocket_connected', 'shiprocket_email', 'intra_city_charge', 'outstation_charge', 'free_delivery_above',
+  'shiprocket_connected', 'shiprocket_email', 'shiprocket_api_key', 'intra_city_charge', 'outstation_charge', 'free_delivery_above',
   'cod_enabled_city', 'cod_enabled_outstation',
   'shipping_provider', 'courier_name', 'courier_rate_card',
   'gstin', 'fssai_license', 'sac_code', 'receipt_tagline',
@@ -63,9 +63,11 @@ async function fetchRestaurantRow(restaurantId) {
     .eq('id', restaurantId)
     .maybeSingle();
 
-  if (!error) return { data, error: null };
+  if (!error) {
+    return { data: sanitizeRestaurantForClient(data), error: null };
+  }
 
-  if (/kitchen_workflow|kot_printer|meta_catalog_id|parcel_charge_per_item|takeaway_ready_range|delivery_ready_range|kitchen_busy|restaurant_type|delivery_charge|scheduled_delivery|scheduled_takeaway|max_delivery_radius|shipping_provider|courier_rate_card|courier_name|fssai_license|sac_code|receipt_tagline|gstin/i.test(error.message)) {
+  if (/kitchen_workflow|kot_printer|meta_catalog_id|parcel_charge_per_item|takeaway_ready_range|delivery_ready_range|kitchen_busy|restaurant_type|delivery_charge|scheduled_delivery|scheduled_takeaway|max_delivery_radius|shipping_provider|courier_rate_card|courier_name|fssai_license|sac_code|receipt_tagline|gstin|shiprocket_api_key/i.test(error.message)) {
     const fallback = await supabaseAdmin
       .from('tenants')
       .select(RESTAURANT_SELECT_BASE)
@@ -90,9 +92,19 @@ async function fetchRestaurantRow(restaurantId) {
       fallback.data.allow_manager_menu_upload = fallback.data.allow_manager_menu_upload ?? false;
 
     }
-    return fallback;
+    return { data: sanitizeRestaurantForClient(fallback.data), error: fallback.error };
   }
   return { data: null, error };
+}
+
+/** Never send Shiprocket password (stored in shiprocket_api_key) to the browser. */
+function sanitizeRestaurantForClient(row) {
+  if (!row) return row;
+  const { shiprocket_api_key, ...rest } = row;
+  return {
+    ...rest,
+    shiprocket_has_password: !!String(shiprocket_api_key || '').trim(),
+  };
 }
 
 // ── GET /api/dashboard/waba ───────────────────────────────────────────────────

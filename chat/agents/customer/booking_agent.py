@@ -96,6 +96,7 @@ from agents.customer.conversation_helpers import (
     background_analytics,
 )
 from agents.customer.dine_in_flow import handle_dine_in_flow
+from agents.customer.token_queue_flow import handle_token_queue_flow
 from agents.customer.takeaway_flow import handle_takeaway_flow
 from agents.customer.delivery_flow import handle_delivery_flow
 from agents.customer.reserve_table_flow import handle_reserve_table_flow
@@ -447,6 +448,9 @@ async def handle_booking_flow(
         _SERVICE_TEXT_MAP = {
             "1":"dine_in_now", "2":"takeaway_now", "3":"door_delivery_now", "4":"table_reservation",
             "5":"scheduled_delivery", "6":"scheduled_pickup",
+            "token":"token_queue", "queue":"token_queue", "token queue":"token_queue",
+            "token/queue":"token_queue", "token / queue":"token_queue", "walk in":"token_queue",
+            "walk-in":"token_queue", "walkin":"token_queue",
             "dine":"dine_in_now","dine in":"dine_in_now","dinein":"dine_in_now","dine-in":"dine_in_now",
             "dine in now":"dine_in_now","dining":"dine_in_now","table":"dine_in_now","eat in":"dine_in_now",
             "takeaway now":"takeaway_now","take-away now":"takeaway_now","take away now":"takeaway_now",
@@ -523,7 +527,8 @@ async def handle_booking_flow(
             refresh_kitchen_acceptance,
         )
         await refresh_kitchen_acceptance(session_state, restaurant_id)
-        if not kitchen_accepting_orders(session_state):
+        # Token / Queue is a walk-in handoff — still available when kitchen ordering is closed.
+        if service_type != "token_management" and not kitchen_accepting_orders(session_state):
             await send_whatsapp_message(
                 customer_phone, build_blanket_closed_message(), restaurant_id,
             )
@@ -552,7 +557,13 @@ async def handle_booking_flow(
                 )
                 return {"status": "awaiting_service_selection"}
 
-        if service_type == "dine_in":
+        if service_type == "token_management":
+            session_state["last_service_type"] = "token_management"
+            await send_whatsapp_message(
+                customer_phone, "How many people in your party?", restaurant_id,
+            )
+            session_state["booking_step"] = "awaiting_party_size"
+        elif service_type == "dine_in":
             from agents.customer.dine_in_flow import resume_active_dine_in_token
 
             resumed = await resume_active_dine_in_token(
@@ -815,6 +826,11 @@ async def _dispatch_to_flow(
     session_state: Dict[str, Any], table_number: int | None,
 ) -> Dict[str, Any] | None:
     """Route to the appropriate service flow handler."""
+    if service_type == "token_management":
+        return await handle_token_queue_flow(
+            restaurant_id, customer_id, customer_name, customer_phone,
+            manager_phone, message, session_state, table_number,
+        )
     if service_type == "dine_in":
         return await handle_dine_in_flow(
             restaurant_id, customer_id, customer_name, customer_phone,

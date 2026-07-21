@@ -182,6 +182,28 @@ async function computeCampaignRoi(restaurantId, campaign) {
 // ─── Execute broadcast ────────────────────────────────────────────────────────
 
 async function executeBroadcast(campaignId, restaurantId, { name, segment, template_name, custom_message }) {
+  try {
+    const { isSubscriptionSoftLocked, buildLapsedPayload } = require('./subscriptionAccess');
+    const { data: sub } = await supabaseAdmin
+      .from('tenant_subscriptions')
+      .select('status, trial_ends_at, renews_at')
+      .eq('restaurant_id', restaurantId)
+      .maybeSingle();
+    if (isSubscriptionSoftLocked(sub)) {
+      const payload = buildLapsedPayload(sub || {});
+      console.warn('[marketing] blocked broadcast — subscription_lapsed', {
+        restaurantId,
+        campaignId,
+        ...payload,
+      });
+      await supabaseAdmin.from('broadcast_campaigns').update({
+        status: 'failed',
+      }).eq('id', campaignId);
+      return { ok: false, ...payload };
+    }
+  } catch (gateErr) {
+    console.error('[marketing] soft-lock check failed (continuing):', gateErr.message);
+  }
   const map        = await buildCustomerMap(restaurantId);
   const recipients = filterSegment(map, segment);
   if (recipients.length === 0) {

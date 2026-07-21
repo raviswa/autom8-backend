@@ -520,6 +520,19 @@ const RESTAURANT_MENU_ITEM_SELECT =
 const CATALOG_MENU_ITEM_SELECT =
   `${RESTAURANT_MENU_ITEM_SELECT}, variant_group_id, size_label, item_type, flavour_group, scoop_count, crust_options, toppings_allowed, topping_extra_price, pack_size_label, weight_grams, shelf_life_days, made_on_date, ingredients, allergens, condition, original_mrp, warranty_days, colour, meta, current_stock, availability_status, launch_at, deposit_amount`;
 
+// Single source of truth for "can this item actually be bought right now" —
+// used both when rendering the storefront AND when validating checkout server-side,
+// so a coming-soon / preorder / sold-out item can never slip through the API
+// even if the client sends a stale cart.
+function deriveStockStatus(item) {
+  const qtyOk = item.current_stock == null || Number(item.current_stock) > 0;
+  const status = String(item.availability_status || '').toLowerCase().trim();
+  const comingSoon = status === 'coming_soon' || status === 'preorder';
+  const soldOutStatus = status === 'sold_out';
+  const stocked = comingSoon ? false : (!!item.is_stocked && qtyOk && !soldOutStatus);
+  return { stocked, comingSoon, status: status || (stocked ? 'in_stock' : 'sold_out') };
+}
+
 async function fetchMenuItems(restaurantId, { catalogLob = false } = {}) {
   const cacheKey = `${restaurantId}:${catalogLob ? 'catalog' : 'restaurant'}`;
   const cached = _menuCache.get(cacheKey);
@@ -560,19 +573,13 @@ async function fetchMenuItems(restaurantId, { catalogLob = false } = {}) {
   );
 
   const items = (itemsRes.data || []).map(item => {
-    const qtyOk = item.current_stock == null || Number(item.current_stock) > 0;
-    const status = String(item.availability_status || '').toLowerCase().trim();
-    const comingSoon = status === 'coming_soon' || status === 'preorder';
-    const soldOutStatus = status === 'sold_out';
-    const stocked = comingSoon
-      ? false
-      : (!!item.is_stocked && qtyOk && !soldOutStatus);
+    const { stocked, comingSoon, status } = deriveStockStatus(item);
     return {
       ...item,
       is_available: !!item.is_available,
       is_stocked: stocked,
       current_stock: item.current_stock == null ? null : Number(item.current_stock),
-      availability_status: status || (stocked ? 'in_stock' : 'sold_out'),
+      availability_status: status,
       is_coming_soon: comingSoon,
       is_publicly_available: !!(item.is_available && stocked && !comingSoon),
       effective_slots: normalizeSlots(item.applicable_slots || categorySlotMap[item.category] || ['anytime']),
@@ -935,6 +942,17 @@ router.post('/api/webcart/submit', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Guest checkout is only available on packaged storefronts.' });
     }
 
+    // Server-side FSSAI gate — defense in depth in case a row was published
+    // before the license was on file, or was set stocked via an older client.
+    const needsFssai = String(restaurant.lob_type || '').toLowerCase() === 'food_products'
+      && !String(restaurant.fssai_license || '').trim();
+    if (needsFssai) {
+      return res.status(409).json({
+        ok: false,
+        error: 'This store cannot accept orders yet — FSSAI license is missing on file.',
+      });
+    }
+
     const shippedOrder = requiresShipping(restaurant.lob_type);
     const safeName = String(customer_name || '').trim();
     const safeAddress = String(delivery_address || '').trim();
@@ -962,7 +980,7 @@ router.post('/api/webcart/submit', async (req, res) => {
 
     const { data: liveItems, error: liveErr } = await supabaseAdmin
       .from('menu_items')
-      .select('id, retailer_id, name, price, weight_grams, item_type, meta, current_stock, is_stocked')
+      .select('id, retailer_id, name, price, weight_grams, item_type, meta, current_stock, is_stocked, availability_status')
       .eq('restaurant_id', restaurant.id)
       .is('archived_at', null);
 
@@ -978,7 +996,7 @@ router.post('/api/webcart/submit', async (req, res) => {
     const shortages = [];
     for (const i of items) {
       const source = liveMap.get(String(i.id || ''));
-      if (!source || source.is_stocked === false) {
+      if (!source || !deriveStockStatus(source).stocked) {
         if (i.name) unavailable.push(i.name);
         continue;
       }
@@ -1017,7 +1035,7 @@ router.post('/api/webcart/submit', async (req, res) => {
     const stockLines = [];
     for (const row of items) {
       const source = liveMap.get(String(row.id || ''));
-      if (!source || source.is_stocked === false) continue;
+      if (!source || !deriveStockStatus(source).stocked) continue;
 
       const qty = Math.max(0, Math.floor(Number(row.qty || 0)));
       if (!qty) continue;
@@ -1236,6 +1254,11 @@ router.post('/api/webcart/submit', async (req, res) => {
           recipientPhone: req.body?.gift_recipient_phone || null,
           recipientName: req.body?.gift_recipient_name || null,
           giftMessage: req.body?.gift_message || null,
+          // The order actually ships to whatever address/pincode was submitted
+          // for delivery — recorded here so gift orders stay traceable even
+          // though the gifter (not the recipient) is the paying customer.
+          recipientAddress: shippedOrder ? formattedAddress : null,
+          recipientPincode: shippedOrder ? safePincode : null,
         });
         giftUrl = `${req.protocol}://${req.get('host')}/gift/${gift.token}`;
       } catch (giftErr) {

@@ -13,6 +13,8 @@ async function createGiftLink(supabaseAdmin, {
   recipientPhone = null,
   recipientName = null,
   giftMessage = null,
+  recipientAddress = null,
+  recipientPincode = null,
 }) {
   const token = makeGiftToken();
   const { data, error } = await supabaseAdmin
@@ -25,6 +27,8 @@ async function createGiftLink(supabaseAdmin, {
       recipient_phone: recipientPhone,
       recipient_name: recipientName,
       gift_message: giftMessage,
+      recipient_address: recipientAddress,
+      recipient_pincode: recipientPincode,
       status: 'pending',
     })
     .select('id, token, status, created_at')
@@ -36,7 +40,7 @@ async function createGiftLink(supabaseAdmin, {
 async function getGiftByToken(supabaseAdmin, token) {
   const { data, error } = await supabaseAdmin
     .from('gift_links')
-    .select('id, restaurant_id, token, booking_id, gifter_phone, recipient_phone, recipient_name, gift_message, status, created_at, redeemed_at')
+    .select('id, restaurant_id, token, booking_id, gifter_phone, recipient_phone, recipient_name, gift_message, recipient_address, recipient_pincode, status, created_at, redeemed_at')
     .eq('token', String(token || '').trim())
     .maybeSingle();
   if (error) throw error;

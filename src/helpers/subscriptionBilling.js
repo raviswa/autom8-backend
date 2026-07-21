@@ -5,7 +5,8 @@ const {
   mergeEnabledFeatures,
 } = require('./subscriptionFeatures');
 
-const DEFAULT_SERVICES = ['dine_in', 'takeaway', 'delivery', 'reserve_table'];
+// Lead offering across all verticals. Dine-in is opt-in (sit-down restaurants).
+const DEFAULT_SERVICES = ['token_management', 'takeaway', 'delivery'];
 
 /**
  * Create or skip billing record for a restaurant outlet.

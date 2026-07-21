@@ -32,7 +32,7 @@ const { ensureRestaurantSubscription } = require('../helpers/subscriptionBilling
 const { writeAuditLog } = require('../helpers/auditLog');
 
 const BRAND_ROLES       = ['brand_owner', 'brand_manager'];
-const DEFAULT_FEATURES  = ['dine_in', 'takeaway', 'delivery', 'reserve_table'];
+const DEFAULT_FEATURES  = ['token_management', 'takeaway', 'delivery'];
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
 
@@ -756,6 +756,18 @@ async function createOutlet(brandId, opts) {
   }
 
   console.log(`[brands] ✅ Outlet created: ${name} (${restaurantId}) under brand ${brandId}`);
+
+  try {
+    const { sendOnboardingWelcomeEmail } = require('../helpers/onboardingEmail');
+    await sendOnboardingWelcomeEmail({
+      ...restaurant,
+      // Prefer real owner email when provided; placeholder outlet-* emails are skipped inside helper.
+      email: owner_email || restaurant.email,
+      contact_email: owner_email || restaurant.contact_email || null,
+    });
+  } catch (mailErr) {
+    console.error('[brands/createOutlet] welcome email failed (non-fatal):', mailErr.message);
+  }
 
   return {
     restaurant_id:  restaurantId,

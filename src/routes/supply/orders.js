@@ -95,6 +95,21 @@ router.post('/', async (req, res) => {
     if (!client_id) return res.status(400).json({ error: 'client_id is required for manual orders.' });
   }
 
+  // Soft-lock: block new order creation when supplier SaaS grace has expired.
+  try {
+    const { isSubscriptionSoftLocked, buildLapsedPayload } = require('../../helpers/subscriptionAccess');
+    const { data: sub } = await supabaseAdmin
+      .from('supplier_subscriptions')
+      .select('status, trial_ends_at, renews_at')
+      .eq('supplier_id', supplier_id)
+      .maybeSingle();
+    if (isSubscriptionSoftLocked(sub)) {
+      return res.status(402).json(buildLapsedPayload(sub || {}));
+    }
+  } catch (gateErr) {
+    console.error('[supply/orders] soft-lock check failed (continuing):', gateErr.message);
+  }
+
   // ── Validate items ────────────────────────────────────────────────────────
   if (!items || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'Order must contain at least one item.' });

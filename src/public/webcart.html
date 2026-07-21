@@ -750,9 +750,15 @@
           This is a gift — get a shareable link
         </label>
         <div id="giftFields" style="display:none;margin-top:8px">
-          <input class="field" id="giftRecipientName" placeholder="Recipient name (optional)" />
+          <input class="field" id="giftRecipientName" placeholder="Recipient name" />
           <input class="field" id="giftRecipientPhone" placeholder="Recipient WhatsApp (optional)" inputmode="tel" />
           <textarea id="giftMessage" rows="2" placeholder="Gift note (optional)"></textarea>
+          <div id="giftShipWrap" style="display:none;margin-top:8px">
+            <div style="font-size:12px;color:#6b7280;margin-bottom:6px">Ship this gift to</div>
+            <textarea id="giftRecipientAddress" rows="2" placeholder="Recipient's street, area, landmark"></textarea>
+            <input class="field" id="giftRecipientPincode" placeholder="Recipient's pincode (6 digits)" inputmode="numeric" maxlength="6" />
+            <div id="giftDeliveryQuoteHint" class="delivery-quote-hint" style="display:none"></div>
+          </div>
         </div>
         </div>
         <div class="cart-foot">
@@ -1151,8 +1157,18 @@
       return digits.length >= 6 ? digits.slice(0, 6) : '';
     }
 
+    function isGiftOrder() {
+      return !!$('giftToggle')?.checked;
+    }
+
     function deliveryFieldsValid() {
       if (!requiresShipping()) return true;
+      if (isGiftOrder()) {
+        const name = ($('giftRecipientName')?.value || '').trim();
+        const address = ($('giftRecipientAddress')?.value || '').trim();
+        const pincode = normalizePincode($('giftRecipientPincode')?.value || '');
+        return !!(name && address && pincode);
+      }
       const name = ($('shipName')?.value || '').trim();
       const address = ($('shipAddress')?.value || '').trim();
       const pincode = normalizePincode($('shipPincode')?.value || '');
@@ -1210,8 +1226,11 @@
 
     async function fetchDeliveryQuote() {
       if (!requiresShipping()) return;
-      const pincode = normalizePincode($('shipPincode')?.value || '');
-      const hint = $('deliveryQuoteHint');
+      const giftOrder = isGiftOrder();
+      const pincode = normalizePincode(
+        (giftOrder ? $('giftRecipientPincode')?.value : $('shipPincode')?.value) || ''
+      );
+      const hint = giftOrder ? $('giftDeliveryQuoteHint') : $('deliveryQuoteHint');
       if (!pincode) {
         state.deliveryQuote = null;
         if (hint) {
@@ -1534,7 +1553,9 @@ function cartTotals() {
 
       const deliveryWrap = $('deliveryDetailsWrap');
       if (deliveryWrap) {
-        deliveryWrap.style.display = shipped ? '' : 'none';
+        // A gift ships to the recipient's address (captured in the gift
+        // fields below), not the buyer's own "Delivery details".
+        deliveryWrap.style.display = (shipped && !isGiftOrder()) ? '' : 'none';
       }
 
       cartLines.innerHTML = lines.length
@@ -3065,18 +3086,26 @@ $('subtotal').textContent = money(subtotal);
         promo_code: ($('promo').value || '').trim() || null,
         special_request: ($('notes').value || '').trim() || null,
       };
-      if ($('giftToggle')?.checked) {
+      const giftOrder = isGiftOrder();
+      if (giftOrder) {
         body.is_gift = true;
         body.gift_recipient_name = ($('giftRecipientName')?.value || '').trim() || null;
         body.gift_recipient_phone = ($('giftRecipientPhone')?.value || '').trim() || null;
         body.gift_message = ($('giftMessage')?.value || '').trim() || null;
       }
       if (requiresShipping()) {
-        body.customer_name = ($('shipName').value || '').trim();
-        body.delivery_address = ($('shipAddress').value || '').trim();
-        body.pincode = normalizePincode($('shipPincode').value || '');
+        if (giftOrder) {
+          // Ship to the recipient, not the buyer — the buyer stays the payer/phone of record.
+          body.customer_name = ($('giftRecipientName')?.value || '').trim();
+          body.delivery_address = ($('giftRecipientAddress')?.value || '').trim();
+          body.pincode = normalizePincode($('giftRecipientPincode')?.value || '');
+        } else {
+          body.customer_name = ($('shipName').value || '').trim();
+          body.delivery_address = ($('shipAddress').value || '').trim();
+          body.pincode = normalizePincode($('shipPincode').value || '');
+        }
       }
-      saveDeliveryLocal();
+      if (!giftOrder) saveDeliveryLocal();
 
       try {
         const q = new URLSearchParams();
@@ -3135,10 +3164,23 @@ $('subtotal').textContent = money(subtotal);
     $('submitBtn').addEventListener('click', submitOrder);
     if ($('giftToggle')) {
       $('giftToggle').addEventListener('change', () => {
+        const checked = $('giftToggle').checked;
         const wrap = $('giftFields');
-        if (wrap) wrap.style.display = $('giftToggle').checked ? '' : 'none';
+        if (wrap) wrap.style.display = checked ? '' : 'none';
+        const shipWrap = $('giftShipWrap');
+        if (shipWrap) shipWrap.style.display = (checked && requiresShipping()) ? '' : 'none';
+        renderCart();
+        scheduleDeliveryQuote();
       });
     }
+    if ($('giftRecipientPincode')) {
+      $('giftRecipientPincode').addEventListener('input', () => {
+        scheduleDeliveryQuote();
+        renderCart();
+      });
+    }
+    if ($('giftRecipientAddress')) $('giftRecipientAddress').addEventListener('input', renderCart);
+    if ($('giftRecipientName')) $('giftRecipientName').addEventListener('input', renderCart);
     $('waOpenBtn').addEventListener('click', openWhatsApp);
     $('waCloseBtn').addEventListener('click', hideWhatsAppGuide);
     waGuideOverlay.addEventListener('click', (e) => {

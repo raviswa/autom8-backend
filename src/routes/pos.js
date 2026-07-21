@@ -28,6 +28,16 @@ function looksLikeShiprocketJwt(value) {
   return s.startsWith('eyJ') && s.split('.').length >= 3;
 }
 
+/** Never send Shiprocket API User password (shiprocket_api_key) to the browser. */
+function sanitizeRestaurantForClient(row) {
+  if (!row) return row;
+  const { shiprocket_api_key, ...rest } = row;
+  return {
+    ...rest,
+    shiprocket_has_password: !!String(shiprocket_api_key || '').trim(),
+  };
+}
+
 function requireSettingsAccess(req, res, next) {
   if (!canManageRestaurantSettings(req.user_role))
     return res.status(403).json({ error: 'Unauthorized' });
@@ -972,12 +982,12 @@ router.post('/restaurants/shipping-rate-compare', authenticateToken, getRestaura
       .eq('id', req.restaurant_id)
       .maybeSingle();
     if (error) throw error;
-    if (!tenant) return res.status(404).json({ error: 'Restaurant not found.' });
+    if (!tenant) return res.status(404).json({ error: 'Business not found.' });
 
     const pickup = normalizePincode(body.pickup_pincode || tenant.postal_code);
     if (!pickup) {
       return res.status(400).json({
-        error: 'Set your restaurant postal code (or pass pickup_pincode) before comparing rates.',
+        error: 'Set your business postal code in the Business tab (or pass pickup_pincode) before comparing rates.',
       });
     }
 
@@ -1017,7 +1027,7 @@ router.post('/restaurants/shipping-rate-compare', authenticateToken, getRestaura
           : {
               cheapest: null,
               couriers: [],
-              error: 'Add Shiprocket API User email + password (Shiprocket panel → Settings → API).',
+              error: 'Save Shiprocket API User email + password above, then Compare again.',
             };
 
         let yourRate = chargeFromRateCard(rateCard, zone, weightKg);
@@ -1200,13 +1210,47 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
 
     if (updates.shipping_provider !== undefined) {
       updates.shipping_provider = normalizeShippingProvider(updates.shipping_provider);
-      if (updates.shipping_provider === 'shiprocket' && (updates.shiprocket_api_key || updates.shiprocket_email)) {
-        updates.shiprocket_connected = true;
-      }
-      if (updates.shipping_provider === 'custom') {
-        updates.shiprocket_connected = false;
+    }
+
+    // shiprocket_api_key stores the Shiprocket API User password (misnamed historically).
+    // TODO: encrypt at rest — other tenant secrets are also plaintext today; keep the pattern consistent.
+    if (updates.shiprocket_api_key !== undefined) {
+      const pw = String(updates.shiprocket_api_key || '').trim();
+      if (!pw) {
+        // Blank means "leave existing password" — never wipe on empty form field.
+        delete updates.shiprocket_api_key;
+      } else {
+        updates.shiprocket_api_key = pw;
       }
     }
+    if (updates.shiprocket_email !== undefined) {
+      updates.shiprocket_email = String(updates.shiprocket_email || '').trim().toLowerCase() || null;
+    }
+
+    // Connected = credentials present (useful for Rate Compare even when provider is "custom").
+    // Do not force disconnected merely because the maker switched to their own rate card.
+    if (
+      updates.shipping_provider !== undefined
+      || updates.shiprocket_api_key !== undefined
+      || updates.shiprocket_email !== undefined
+      || updates.shiprocket_connected !== undefined
+    ) {
+      const { data: existingCreds } = await supabaseAdmin
+        .from('tenants')
+        .select('shiprocket_email, shiprocket_api_key')
+        .eq('id', req.restaurant_id)
+        .maybeSingle();
+      const nextEmail = updates.shiprocket_email !== undefined
+        ? updates.shiprocket_email
+        : (existingCreds?.shiprocket_email || null);
+      const nextPassword = updates.shiprocket_api_key !== undefined
+        ? updates.shiprocket_api_key
+        : (existingCreds?.shiprocket_api_key || null);
+      updates.shiprocket_connected = !!(
+        String(nextEmail || '').trim() && String(nextPassword || '').trim()
+      );
+    }
+
     if (updates.courier_name !== undefined) {
       updates.courier_name = String(updates.courier_name || '').trim() || null;
     }
@@ -1244,7 +1288,7 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
       if (!error) {
         return res.json({
           success: true,
-          restaurant: data,
+          restaurant: sanitizeRestaurantForClient(data),
           warning: skippedKitchen.length
             ? 'Kitchen settings not saved — run migrations/add_restaurant_kitchen_settings.sql in Supabase first.'
             : pickupWarning,
@@ -1257,12 +1301,13 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
 
     await writeAuditLog({
       user_id: req.user.sub, restaurant_id: req.restaurant_id,
+      // Field names only — never log shiprocket_api_key values (API User password).
       action: 'Restaurant settings updated', details: { fields: Object.keys(updates) },
     });
 
     res.json({
       success: true,
-      restaurant: data,
+      restaurant: sanitizeRestaurantForClient(data),
       warning: pickupWarning,
     });
   } catch (err) {

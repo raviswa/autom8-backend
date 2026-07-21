@@ -6,6 +6,11 @@
 
 const { sendWhatsAppMessage } = require('./whatsapp');
 
+// Below this many units sold across the week, calling anything a "bestseller"
+// would be a fabricated claim sent unattended over WhatsApp — send a generic
+// reminder instead so the maker's brand never states something false.
+const MIN_QTY_FOR_BESTSELLER_CLAIM = 3;
+
 async function buildWeeklyPromoDraft(supabaseAdmin, restaurantId, { lookbackDays = 7 } = {}) {
   const since = new Date(Date.now() - lookbackDays * 86400000).toISOString();
   const { data: restaurant } = await supabaseAdmin
@@ -41,19 +46,27 @@ async function buildWeeklyPromoDraft(supabaseAdmin, restaurantId, { lookbackDays
   }
 
   const brand = restaurant.display_name || restaurant.name || 'Our kitchen';
-  const lines = top.length
-    ? top.map((t, i) => `${i + 1}. ${t.name}`).join('\n')
-    : '1. This week’s batch favourites\n2. Fresh jars ready to ship';
+  const totalQty = top.reduce((sum, t) => sum + (Number(t.qty) || 0), 0);
+  const hasRealBestsellers = top.length > 0 && totalQty >= MIN_QTY_FOR_BESTSELLER_CLAIM;
 
-  const caption =
-    `✨ ${brand} — this week’s bestsellers\n\n${lines}\n\n` +
-    `Order on WhatsApp or open our shop link.\n` +
-    `Homemade · small batch · ships pan-India`;
+  const caption = hasRealBestsellers
+    ? (
+      `✨ ${brand} — this week’s bestsellers\n\n` +
+      `${top.map((t, i) => `${i + 1}. ${t.name}`).join('\n')}\n\n` +
+      `Order on WhatsApp or open our shop link.\n` +
+      `Homemade · small batch · ships pan-India`
+    )
+    : (
+      `✨ ${brand} — fresh this week\n\n` +
+      `New batches ready to ship. Order on WhatsApp or open our shop link.\n` +
+      `Homemade · small batch · ships pan-India`
+    );
 
   return {
     restaurant_id: restaurantId,
     brand,
     top_sellers: top,
+    has_real_bestsellers: hasRealBestsellers,
     caption,
     lookback_days: lookbackDays,
   };

@@ -1,27 +1,23 @@
-// src/middleware/supplyAuth.js
-// ============================================================================
-// Munafe Supply — Supplier context middleware
-//
-// getSupplierContext:
-//   Must run AFTER authenticateToken (which populates req.user from the
-//   Supabase JWT). Looks up the suppliers row for req.user.sub and attaches:
-//     req.supplier    — full supplier profile row
-//     req.supplier_id — suppliers.id (UUID, not auth user id)
-//
-// NOTE: authenticateToken sets req.user = { sub: user.id, email }
-//       Always use req.user.sub (NOT req.user.id) to get the Supabase auth UUID.
-//
-// Usage (in supply route handlers):
-//   router.get('/me', authenticateToken, getSupplierContext, handler)
-// ============================================================================
-
 'use strict';
 
+/**
+ * Soft-lock attach for supply routes.
+ *
+ * Soft-lock condition (must match billingReminders + feature_gate):
+ *   daysPast(cycleAnchor) >= GRACE_PERIOD_DAYS  (default 15, env SUBSCRIPTION_GRACE_PERIOD_DAYS)
+ * Status set by reminder job when unpaid: supplier_subscriptions.status = 'overdue'
+ * (date math is authoritative — status alone does not unlock/lock).
+ */
+
 const { supabaseAdmin } = require('../config/supabase');
+const {
+  isSubscriptionSoftLocked,
+  buildLapsedPayload,
+  LAPSED_ERROR,
+} = require('../helpers/subscriptionAccess');
 
 async function getSupplierContext(req, res, next) {
   try {
-    // FIX: authenticateToken sets req.user = { sub, email } — use .sub not .id
     const authUserId = req.user?.sub;
 
     if (!authUserId) {
@@ -57,8 +53,25 @@ async function getSupplierContext(req, res, next) {
       });
     }
 
-    req.supplier    = supplier;
+    req.supplier = supplier;
     req.supplier_id = supplier.id;
+
+    try {
+      const { data: sub } = await supabaseAdmin
+        .from('supplier_subscriptions')
+        .select('id, status, trial_ends_at, renews_at')
+        .eq('supplier_id', supplier.id)
+        .maybeSingle();
+      req.supplier_subscription = sub || null;
+      req.subscription_lapsed = isSubscriptionSoftLocked(sub);
+      if (req.subscription_lapsed) {
+        req.subscription_lapsed_payload = buildLapsedPayload(sub || {});
+      }
+    } catch (subErr) {
+      console.warn('[supplyAuth] subscription lookup failed (non-fatal):', subErr.message);
+      req.supplier_subscription = null;
+      req.subscription_lapsed = false;
+    }
 
     next();
   } catch (err) {
@@ -67,8 +80,22 @@ async function getSupplierContext(req, res, next) {
   }
 }
 
+/**
+ * Soft-lock write gate — 402 with machine-readable subscription_lapsed.
+ * Apply on new orders, order-link sends, marketing — not on reads/payments.
+ */
+function requireSubscriptionWrite(req, res, next) {
+  if (!req.subscription_lapsed) return next();
+  const body = req.subscription_lapsed_payload || {
+    error: LAPSED_ERROR,
+    message: 'Subscription expired. Please renew to continue.',
+  };
+  return res.status(402).json(body);
+}
+
 module.exports = {
   getSupplierContext,
-  supplyAuthMiddleware:     getSupplierContext,
-  authenticateSupplyToken:  getSupplierContext,
+  supplyAuthMiddleware: getSupplierContext,
+  authenticateSupplyToken: getSupplierContext,
+  requireSubscriptionWrite,
 };

@@ -67,6 +67,8 @@ async def get_client_by_phone(supplier_id: str, phone: str) -> Optional[dict]:
                     "supplier_id": f"eq.{supplier_id}",
                     "phone":       f"eq.{variant}",
                     "is_active":   "eq.true",
+                    # preferred_language is fetched separately so lookup still
+                    # works before the language migration is applied.
                     "select":      "id,name,phone",
                     "limit":       "1",
                 },
@@ -81,6 +83,50 @@ async def get_client_by_phone(supplier_id: str, phone: str) -> Optional[dict]:
                 )
                 return None
     return None
+
+
+async def get_client_preferred_language(client_id: str) -> str:
+    """Return supply_clients.preferred_language, defaulting to 'en'."""
+    if not client_id:
+        return 'en'
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            _url("supply_clients"),
+            headers=_headers(),
+            params={
+                "id":     f"eq.{client_id}",
+                "select": "preferred_language",
+                "limit":  "1",
+            },
+        )
+    if resp.status_code == 200:
+        rows = resp.json()
+        if rows:
+            lang = (rows[0].get("preferred_language") or "en").strip().lower()
+            if lang in {"en", "hi", "bn", "mr", "te", "ta"}:
+                return lang
+    else:
+        logger.error(
+            f"[queries] get_client_preferred_language HTTP {resp.status_code}: {resp.text[:200]}"
+        )
+    return "en"
+
+
+async def update_client_preferred_language(client_id: str, lang: str) -> None:
+    """Persist preferred_language on the client row (fire-and-forget safe)."""
+    if not client_id or lang not in {"en", "hi", "bn", "mr", "te", "ta"}:
+        return
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.patch(
+            _url("supply_clients"),
+            headers=_headers(prefer="return=minimal"),
+            params={"id": f"eq.{client_id}"},
+            json={"preferred_language": lang},
+        )
+    if resp.status_code not in (200, 204):
+        logger.error(
+            f"[queries] update_client_preferred_language HTTP {resp.status_code}: {resp.text[:200]}"
+        )
 
 
 async def get_supply_client_by_restaurant_id(restaurant_id: str) -> Optional[dict]:

@@ -174,10 +174,11 @@ async function notifyStockWaitlist(supabaseAdmin, {
   menuItemId = null,
   retailerId = null,
   itemName = 'your item',
+  reason = null,
 }) {
   let query = supabaseAdmin
     .from('stock_waitlist')
-    .select('id, customer_phone, item_name, retailer_id')
+    .select('id, customer_phone, item_name, retailer_id, reason')
     .eq('restaurant_id', restaurantId)
     .is('notified_at', null)
     .limit(200);
@@ -185,6 +186,8 @@ async function notifyStockWaitlist(supabaseAdmin, {
   if (retailerId) query = query.eq('retailer_id', String(retailerId));
   else if (menuItemId) query = query.eq('menu_item_id', menuItemId);
   else return { notified: 0 };
+
+  if (reason) query = query.eq('reason', reason);
 
   const { data: rows, error } = await query;
   if (error) throw error;
@@ -195,9 +198,11 @@ async function notifyStockWaitlist(supabaseAdmin, {
   const now = new Date().toISOString();
 
   for (const row of rows) {
-    const msg =
-      `Good news! *${label}* is back in stock.\n` +
-      `Reply or open your cart link to order before this batch sells out.`;
+    const msg = reason === 'launch'
+      ? `It's here! *${label}* just launched.\n` +
+        `Reply or open your cart link to be among the first to order.`
+      : `Good news! *${label}* is back in stock.\n` +
+        `Reply or open your cart link to order before this batch sells out.`;
     try {
       const ok = await sendWhatsAppMessage(row.customer_phone, msg, restaurantId);
       if (ok) {

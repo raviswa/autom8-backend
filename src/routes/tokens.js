@@ -531,8 +531,8 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
     if (!name?.trim())    return res.status(400).json({ error: 'name is required' });
     if (!type)            return res.status(400).json({ error: 'type is required' });
     if (!restaurant_id)   return res.status(400).json({ error: 'restaurant_id is required' });
-    if (!['dinein', 'takeaway', 'large_party', 'scheduled_delivery', 'scheduled_takeaway'].includes(type))
-      return res.status(400).json({ error: 'type must be dinein, takeaway, large_party, scheduled_delivery, or scheduled_takeaway' });
+    if (!['dinein', 'takeaway', 'queue', 'large_party', 'scheduled_delivery', 'scheduled_takeaway'].includes(type))
+      return res.status(400).json({ error: 'type must be dinein, takeaway, queue, large_party, scheduled_delivery, or scheduled_takeaway' });
 
     if ((type === 'scheduled_delivery' || type === 'scheduled_takeaway') && meta?.scheduled_at) {
       const slotCheck = validateScheduledDeliverySlot(meta.scheduled_at);
@@ -542,7 +542,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
     }
 
     const cleanPhone = phone ? String(phone).replace(/\D/g, '') : null;
-    if (cleanPhone && ['dinein', 'large_party', 'takeaway', 'scheduled_delivery', 'scheduled_takeaway'].includes(type)) {
+    if (cleanPhone && ['dinein', 'queue', 'large_party', 'takeaway', 'scheduled_delivery', 'scheduled_takeaway'].includes(type)) {
       const reuse = await findReusableTokenForPhone(restaurant_id, cleanPhone, type, meta || {});
       if (reuse) {
         return res.status(200).json({
@@ -558,6 +558,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
       : (parseInt(pax, 10) || 1);
 
     // Manager walk-in sends type=dinein; large parties need multi-table combo + approval flow.
+    // type=queue is Token/Queue handoff — never auto-promoted to large_party.
     let resolvedType = type;
     let resolvedMeta = { ...(meta || {}) };
     if (resolvedType === 'dinein' && partySize > LARGE_PARTY_THRESHOLD) {
@@ -729,6 +730,14 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
             },
           },
         });
+      } else if (resolvedType === 'queue') {
+        sendOperationalAlerts(
+          restaurant_id,
+          `🎫 *New Queue Token* — *${token.id}*\n` +
+          `👤 ${token.name}, ${token.pax} ${token.pax === 1 ? 'person' : 'people'}\n` +
+          `🕐 ${arrivalTime} IST\n\n` +
+          `Please assist at the counter:\n${portalUrl}`,
+        );
       } else if (resolvedType === 'dinein') {
         sendOperationalAlerts(
           restaurant_id,

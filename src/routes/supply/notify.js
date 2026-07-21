@@ -230,6 +230,195 @@ const TEMPLATES = {
       },
     ],
   },
+
+  // ── SaaS subscription billing (supplier account holder, not B2B client) ─────
+  // Meta template names must match Business Manager once approved.
+  supply_subscription_ending_soon: {
+    name: 'supply_subscription_ending_soon',
+    language: 'en',
+    components: ({ business_name, amount, anchor_date }) => [
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: business_name || 'your account' },
+          { type: 'text', text: `₹${parseFloat(amount || 0).toFixed(0)}` },
+          { type: 'text', text: String(anchor_date || '') },
+        ],
+      },
+    ],
+  },
+  supply_subscription_ending_soon_final: {
+    name: 'supply_subscription_ending_soon_final',
+    language: 'en',
+    components: ({ business_name, amount, anchor_date, payment_link }) => [
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: business_name || 'your account' },
+          { type: 'text', text: `₹${parseFloat(amount || 0).toFixed(0)}` },
+          { type: 'text', text: String(anchor_date || '') },
+          { type: 'text', text: payment_link || '—' },
+        ],
+      },
+    ],
+  },
+  supply_subscription_due_today: {
+    name: 'supply_subscription_due_today',
+    language: 'en',
+    components: ({ business_name, amount, payment_link }) => [
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: business_name || 'your account' },
+          { type: 'text', text: `₹${parseFloat(amount || 0).toFixed(0)}` },
+          { type: 'text', text: payment_link || '—' },
+        ],
+      },
+    ],
+  },
+  supply_subscription_overdue_1: {
+    name: 'supply_subscription_overdue_1',
+    language: 'en',
+    components: ({ business_name, amount, payment_link }) => [
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: business_name || 'your account' },
+          { type: 'text', text: `₹${parseFloat(amount || 0).toFixed(0)}` },
+          { type: 'text', text: payment_link || '—' },
+        ],
+      },
+    ],
+  },
+  supply_subscription_overdue_2: {
+    name: 'supply_subscription_overdue_2',
+    language: 'en',
+    components: ({ business_name, amount, payment_link }) => [
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: business_name || 'your account' },
+          { type: 'text', text: `₹${parseFloat(amount || 0).toFixed(0)}` },
+          { type: 'text', text: payment_link || '—' },
+        ],
+      },
+    ],
+  },
+  supply_subscription_grace_expired: {
+    name: 'supply_subscription_grace_expired',
+    language: 'en',
+    components: ({ business_name, amount, payment_link }) => [
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: business_name || 'your account' },
+          { type: 'text', text: `₹${parseFloat(amount || 0).toFixed(0)}` },
+          { type: 'text', text: payment_link || '—' },
+        ],
+      },
+    ],
+  },
+
+  // Tenant SaaS (sent via restaurant WABA to manager_phone)
+  tenant_subscription_ending_soon: {
+    name: 'tenant_subscription_ending_soon',
+    language: 'en',
+    components: ({ business_name, amount, anchor_date }) => [
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: business_name || 'your restaurant' },
+          { type: 'text', text: `₹${parseFloat(amount || 0).toFixed(0)}` },
+          { type: 'text', text: String(anchor_date || '') },
+        ],
+      },
+    ],
+  },
+  tenant_subscription_ending_soon_final: {
+    name: 'tenant_subscription_ending_soon_final',
+    language: 'en',
+    components: ({ business_name, amount, anchor_date, payment_link }) => [
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: business_name || 'your restaurant' },
+          { type: 'text', text: `₹${parseFloat(amount || 0).toFixed(0)}` },
+          { type: 'text', text: String(anchor_date || '') },
+          { type: 'text', text: payment_link || '—' },
+        ],
+      },
+    ],
+  },
+  tenant_subscription_due_today: {
+    name: 'tenant_subscription_due_today',
+    language: 'en',
+    components: ({ business_name, amount, payment_link }) => [
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: business_name || 'your restaurant' },
+          { type: 'text', text: `₹${parseFloat(amount || 0).toFixed(0)}` },
+          { type: 'text', text: payment_link || '—' },
+        ],
+      },
+    ],
+  },
+  tenant_subscription_overdue_1: {
+    name: 'tenant_subscription_overdue_1',
+    language: 'en',
+    components: ({ business_name, amount, payment_link }) => [
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: business_name || 'your restaurant' },
+          { type: 'text', text: `₹${parseFloat(amount || 0).toFixed(0)}` },
+          { type: 'text', text: payment_link || '—' },
+        ],
+      },
+    ],
+  },
+  tenant_subscription_overdue_2: {
+    name: 'tenant_subscription_overdue_2',
+    language: 'en',
+    components: ({ business_name, amount, payment_link }) => [
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: business_name || 'your restaurant' },
+          { type: 'text', text: `₹${parseFloat(amount || 0).toFixed(0)}` },
+          { type: 'text', text: payment_link || '—' },
+        ],
+      },
+    ],
+  },
+  tenant_subscription_grace_expired: {
+    name: 'tenant_subscription_grace_expired',
+    language: 'en',
+    components: ({ business_name, amount, payment_link }) => [
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: business_name || 'your restaurant' },
+          { type: 'text', text: `₹${parseFloat(amount || 0).toFixed(0)}` },
+          { type: 'text', text: payment_link || '—' },
+        ],
+      },
+    ],
+  },
+
+  // One-time notice after token_management backfill (account holder / manager)
+  token_queue_feature_live: {
+    name: 'token_queue_feature_live',
+    language: 'en',
+    components: ({ business_name }) => [
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: business_name || 'your business' },
+        ],
+      },
+    ],
+  },
 };
 
 // ── Core send function ────────────────────────────────────────────────────────
@@ -406,4 +595,153 @@ router.get('/log', auth, async (req, res) => {
   }
 });
 
-module.exports = Object.assign(router, { notifyClient });
+module.exports = Object.assign(router, { notifyClient, TEMPLATES, sendSubscriptionWhatsAppTemplate });
+
+/**
+ * Send a SaaS subscription billing WhatsApp template to an account holder.
+ * Reuses TEMPLATES map (tenant_* / supply_subscription_*). Falls back to plain
+ * text via sendWhatsAppMessage / sendSupplyWhatsAppMessage if the Meta template
+ * is not yet approved (API error) — never invents a third messaging stack.
+ *
+ * @param {object} opts
+ * @param {'tenant'|'supplier'} opts.entityType
+ * @param {string} opts.templateKey
+ * @param {object} opts.params
+ * @param {string} opts.toPhone
+ * @param {string} [opts.restaurantId]  — tenant WABA resolution
+ * @param {string} [opts.supplierId]    — unused for account-holder path; kept for logs
+ * @param {string} [opts.fallbackText]  — plain text if template send fails
+ */
+async function sendSubscriptionWhatsAppTemplate({
+  entityType,
+  templateKey,
+  params = {},
+  toPhone,
+  restaurantId = null,
+  fallbackText = null,
+}) {
+  const template = TEMPLATES[templateKey];
+  if (!toPhone || !String(toPhone).trim()) {
+    return { ok: false, skipped: true, reason: 'no_phone' };
+  }
+  if (!template) {
+    console.error('[notify] Unknown subscription template:', templateKey);
+    return { ok: false, error: `Unknown template: ${templateKey}` };
+  }
+
+  const phone = String(toPhone).replace(/^\+/, '').trim();
+  const wabaToken =
+    process.env.META_WABA_TOKEN
+    || process.env.WHATSAPP_ACCESS_TOKEN
+    || process.env.SUPPLY_WHATSAPP_ACCESS_TOKEN;
+  let phoneNumberId =
+    process.env.WHATSAPP_PHONE_NUMBER_ID
+    || process.env.SUPPLY_WHATSAPP_PHONE_NUMBER_ID
+    || null;
+
+  if (entityType === 'tenant' && restaurantId) {
+    try {
+      const { getWhatsAppIntegration } = require('../../helpers/restaurantConfig');
+      const creds = await getWhatsAppIntegration(restaurantId);
+      if (creds?.phoneNumberId) phoneNumberId = creds.phoneNumberId;
+    } catch (err) {
+      console.warn('[notify] tenant WABA lookup failed:', err.message);
+    }
+  }
+
+  if (!wabaToken || !phoneNumberId) {
+    // Fall back to plain-text helpers already in the repo.
+    return sendSubscriptionWhatsAppFallback({
+      entityType,
+      toPhone: phone,
+      restaurantId,
+      fallbackText,
+      reason: 'missing_waba_credentials',
+    });
+  }
+
+  const body = {
+    messaging_product: 'whatsapp',
+    to: phone,
+    type: 'template',
+    template: {
+      name: template.name,
+      language: { code: template.language },
+      components: template.components(params),
+    },
+  };
+
+  try {
+    const res = await fetch(`${META_API}/${phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${wabaToken}`,
+      },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      const errMsg = data.error?.message || `HTTP ${res.status}`;
+      console.error('[notify] subscription template send failed', {
+        templateKey,
+        entityType,
+        error: errMsg,
+      });
+      return sendSubscriptionWhatsAppFallback({
+        entityType,
+        toPhone: phone,
+        restaurantId,
+        fallbackText,
+        reason: errMsg,
+      });
+    }
+    return { ok: true, wa_message_id: data.messages?.[0]?.id || null };
+  } catch (err) {
+    console.error('[notify] subscription template send error', {
+      templateKey,
+      error: err.message,
+    });
+    return sendSubscriptionWhatsAppFallback({
+      entityType,
+      toPhone: phone,
+      restaurantId,
+      fallbackText,
+      reason: err.message,
+    });
+  }
+}
+
+async function sendSubscriptionWhatsAppFallback({
+  entityType,
+  toPhone,
+  restaurantId,
+  fallbackText,
+  reason,
+}) {
+  if (!fallbackText) {
+    return { ok: false, error: reason || 'template_failed_no_fallback' };
+  }
+  try {
+    if (entityType === 'tenant') {
+      const { sendWhatsAppMessage } = require('../../helpers/whatsapp');
+      const sent = await sendWhatsAppMessage(toPhone, fallbackText, restaurantId);
+      return sent
+        ? { ok: true, fallback: true, reason }
+        : { ok: false, error: reason || 'whatsapp_text_failed' };
+    }
+    const { sendSupplyWhatsAppMessage } = require('./supplyWhatsapp');
+    // Platform → supplier phone: use global supply WABA (supplierId null).
+    const sent = await sendSupplyWhatsAppMessage(toPhone, fallbackText, null);
+    return sent
+      ? { ok: true, fallback: true, reason }
+      : { ok: false, error: reason || 'supply_whatsapp_text_failed' };
+  } catch (err) {
+    console.error('[notify] subscription WA fallback failed', {
+      entityType,
+      error: err.message,
+      prior: reason,
+    });
+    return { ok: false, error: err.message };
+  }
+}

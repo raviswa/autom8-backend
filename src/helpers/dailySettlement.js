@@ -22,6 +22,21 @@ function moneyInr(n) {
   return `₹${Math.round(Number(n || 0)).toLocaleString('en-IN')}`;
 }
 
+function isPaidStatus(status) {
+  const ps = String(status || '').toLowerCase();
+  return ps === 'paid' || ps === 'captured' || ps === 'success';
+}
+
+function lineAmount(meta, keys) {
+  const m = meta || {};
+  const sub = m.web_cart_submission || m;
+  for (const key of keys) {
+    const val = Number(sub[key] ?? m[key] ?? 0);
+    if (val > 0) return val;
+  }
+  return 0;
+}
+
 async function computeDailySettlement(supabaseAdmin, restaurantId, { startISO, endISO } = {}) {
   const bounds = startISO && endISO ? { startISO, endISO } : dayBoundsIST();
 
@@ -31,60 +46,59 @@ async function computeDailySettlement(supabaseAdmin, restaurantId, { startISO, e
     .eq('restaurant_id', restaurantId)
     .gte('created_at', bounds.startISO)
     .lt('created_at', bounds.endISO)
+    .neq('status', 'cancelled')
     .limit(500);
   if (error) throw error;
 
-  const paid = (bookings || []).filter((b) => {
-    const ps = String(b.payment_status || '').toLowerCase();
-    return ps === 'paid' || ps === 'captured' || ps === 'success';
-  });
+  const rows = bookings || [];
 
-  let collected = 0;
-  let shipping = 0;
-  for (const b of paid) {
-    const meta = b.meta || {};
-    const sub = meta.web_cart_submission || meta;
-    const total = Number(
-      sub.total
-      || sub.grand_total
-      || meta.amount_paid
-      || meta.razorpay_amount
-      || 0,
-    );
-    const ship = Number(
-      sub.delivery_charge
-      || sub.shipping_charge
-      || meta.delivery_charge
-      || 0,
-    );
-    collected += total > 0 ? total : 0;
-    shipping += ship > 0 ? ship : 0;
-  }
-
-  // Fallback: orders table totals if booking meta sparse
-  if (!paid.length) {
+  // Fallback: orders table if this tenant doesn't populate bookings for web-cart orders
+  if (!rows.length) {
     const { data: orders } = await supabaseAdmin
       .from('orders')
-      .select('id, total_amount, status, created_at')
+      .select('id, total_amount, status, payment_status, created_at')
       .eq('restaurant_id', restaurantId)
       .gte('created_at', bounds.startISO)
       .lt('created_at', bounds.endISO)
       .neq('status', 'cancelled')
       .limit(500);
     const list = orders || [];
+    let collectedFb = 0;
+    let codPendingFb = 0;
+    for (const o of list) {
+      const amt = Number(o.total_amount) || 0;
+      if (isPaidStatus(o.payment_status)) collectedFb += amt;
+      else codPendingFb += amt;
+    }
     return {
       order_count: list.length,
-      collected: list.reduce((s, o) => s + (Number(o.total_amount) || 0), 0),
+      collected: collectedFb,
+      cod_pending: codPendingFb,
       shipping: 0,
-      net: list.reduce((s, o) => s + (Number(o.total_amount) || 0), 0),
+      net: collectedFb,
       ...bounds,
     };
   }
 
+  let collected = 0;
+  let shipping = 0;
+  let codPending = 0;
+  for (const b of rows) {
+    const total = lineAmount(b.meta, ['total', 'grand_total', 'amount_paid', 'razorpay_amount']);
+    if (isPaidStatus(b.payment_status)) {
+      collected += total;
+      shipping += lineAmount(b.meta, ['delivery_charge', 'shipping_charge']);
+    } else {
+      // Cash-on-delivery / not-yet-paid — still a real order, just not Razorpay money yet.
+      codPending += total;
+    }
+  }
+
   const net = Math.max(0, collected - shipping);
   return {
-    order_count: paid.length,
+    order_count: rows.length,
     collected,
+    cod_pending: codPending,
     shipping,
     net,
     ...bounds,
@@ -93,19 +107,24 @@ async function computeDailySettlement(supabaseAdmin, restaurantId, { startISO, e
 
 function formatSettlementMessage(restaurantName, summary) {
   const name = restaurantName || 'Your store';
-  return (
-    `*${name} — today's settlement*\n` +
-    `${summary.order_count} order${summary.order_count === 1 ? '' : 's'}\n` +
-    `${moneyInr(summary.collected)} collected via Razorpay\n` +
-    `${moneyInr(summary.shipping)} in shipping passed through\n` +
-    `*${moneyInr(summary.net)} net*\n` +
-    `_Auto-reconciled by Autom8_`
-  );
+  const codPending = Number(summary.cod_pending || 0);
+  const lines = [
+    `*${name} — today's settlement*`,
+    `${summary.order_count} order${summary.order_count === 1 ? '' : 's'}`,
+    `${moneyInr(summary.collected)} collected via Razorpay`,
+  ];
+  if (codPending > 0) {
+    lines.push(`${moneyInr(codPending)} COD — to collect on delivery`);
+  }
+  lines.push(`${moneyInr(summary.shipping)} in shipping passed through`);
+  lines.push(`*${moneyInr(summary.net)} net*`);
+  lines.push('_Auto-reconciled by Autom8_');
+  return lines.join('\n');
 }
 
 async function sendDailySettlementForRestaurant(supabaseAdmin, restaurant) {
   const summary = await computeDailySettlement(supabaseAdmin, restaurant.id);
-  if (summary.order_count === 0 && summary.collected === 0) {
+  if (summary.order_count === 0) {
     return { skipped: true, reason: 'no_orders' };
   }
   const phone = restaurant.manager_phone

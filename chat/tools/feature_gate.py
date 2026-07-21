@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from db.models import Feature
 
@@ -14,10 +17,152 @@ logger = logging.getLogger(__name__)
 ORDER_MODE_IMMEDIATE = "immediate"
 ORDER_MODE_SCHEDULED = "scheduled"
 
+# Must match Node src/helpers/subscriptionAccess.js
+GRACE_PERIOD_DAYS = max(1, int(os.getenv("SUBSCRIPTION_GRACE_PERIOD_DAYS", "15") or "15"))
+LAPSED_ERROR = "subscription_lapsed"
+# Reminder job sets this on unpaid tenants at T+0 / T+15
+OVERDUE_STATUS_TENANT = "past_due"
+
+_IST = ZoneInfo("Asia/Kolkata")
+
 _CACHE: dict[str, tuple[list[str], float]] = {}
 _TTL = 300
+_SUB_CACHE: dict[str, tuple[dict | None, float]] = {}
+_SUB_TTL = 60
+
+
+def _ist_date_key(dt: datetime | None = None) -> str:
+    d = dt or datetime.now(_IST)
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc).astimezone(_IST)
+    else:
+        d = d.astimezone(_IST)
+    return d.strftime("%Y-%m-%d")
+
+
+def _to_date_key(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if len(value) >= 10 and value[4] == "-" and value[7] == "-":
+            return value[:10]
+        try:
+            return _to_date_key(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        except Exception:
+            return None
+    if isinstance(value, datetime):
+        return _ist_date_key(value)
+    return None
+
+
+def days_relative_to_anchor(anchor: Any, now: datetime | None = None) -> int | None:
+    """Negative = before anchor, 0 = due today, positive = days past (IST calendar)."""
+    anchor_key = _to_date_key(anchor)
+    today_key = _ist_date_key(now)
+    if not anchor_key or not today_key:
+        return None
+    ay, am, ad = map(int, anchor_key.split("-"))
+    ty, tm, td = map(int, today_key.split("-"))
+    return (datetime(ty, tm, td) - datetime(ay, am, ad)).days
+
+
+def get_cycle_anchor(sub: dict | None) -> Any:
+    if not sub:
+        return None
+    if sub.get("status") == "trial":
+        return sub.get("trial_ends_at")
+    return sub.get("renews_at") or sub.get("trial_ends_at")
+
+
+def is_subscription_soft_locked(sub: dict | None, now: datetime | None = None) -> bool:
+    """Authoritative soft-lock: daysPast(anchor) >= GRACE_PERIOD_DAYS."""
+    if not sub:
+        return False
+    if sub.get("status") == "cancelled":
+        return True
+    anchor = get_cycle_anchor(sub)
+    if not anchor:
+        return False
+    relative = days_relative_to_anchor(anchor, now)
+    if relative is None:
+        return False
+    return relative >= GRACE_PERIOD_DAYS
+
+
+def build_lapsed_payload(sub: dict | None = None) -> dict:
+    sub = sub or {}
+    anchor = get_cycle_anchor(sub)
+    grace_ends_at = None
+    key = _to_date_key(anchor)
+    if key:
+        y, m, d = map(int, key.split("-"))
+        grace_ends_at = (
+            datetime(y, m, d, tzinfo=timezone.utc) + timedelta(days=GRACE_PERIOD_DAYS)
+        ).isoformat()
+    return {
+        "error": LAPSED_ERROR,
+        "message": (
+            "Subscription expired. Please renew to create new orders or send campaigns. "
+            "You can still view history and complete payments."
+        ),
+        "grace_ends_at": grace_ends_at,
+        "renews_at": sub.get("renews_at"),
+        "trial_ends_at": sub.get("trial_ends_at"),
+        "status": sub.get("status"),
+    }
+
+
+async def fetch_tenant_subscription(restaurant_id: str) -> dict | None:
+    cached = _SUB_CACHE.get(restaurant_id)
+    if cached and time.monotonic() - cached[1] < _SUB_TTL:
+        return cached[0]
+    try:
+        from tools.db_tools import AsyncSessionLocal
+        from sqlalchemy import text
+
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    "SELECT id, status, trial_ends_at, renews_at "
+                    "FROM tenant_subscriptions "
+                    "WHERE restaurant_id = :rid LIMIT 1"
+                ),
+                {"rid": restaurant_id},
+            )
+            row = result.mappings().first()
+            data = dict(row) if row else None
+    except Exception as e:
+        logger.warning("fetch_tenant_subscription failed restaurant_id=%s: %s", restaurant_id, e)
+        data = None
+    _SUB_CACHE[restaurant_id] = (data, time.monotonic())
+    return data
+
+
+async def assert_tenant_subscription_allows(
+    restaurant_id: str,
+    action: str,
+) -> tuple[bool, dict | None]:
+    """
+    Soft-lock write gate for tenants.
+    Blocked actions: create_order, send_order_link, send_marketing
+    Allowed: reads, payment flows, balance/status checks.
+    """
+    blocked = {"create_order", "send_order_link", "send_marketing"}
+    if action not in blocked:
+        return True, None
+    sub = await fetch_tenant_subscription(restaurant_id)
+    if not is_subscription_soft_locked(sub):
+        return True, None
+    return False, build_lapsed_payload(sub)
+
 
 SERVICE_ROW_CONFIG: dict[str, dict[str, str]] = {
+    "token_queue": {
+        "title": "🎫 Token / Queue",
+        "description": "Get a queue token, we'll take it from there",
+    },
     "dine_in_now": {
         "title": "🍽️ Dine-In Now",
         "description": "Order food at your table",
@@ -171,6 +316,7 @@ def _service_row(row_id: str) -> dict[str, str]:
 
 def _parse_row_id(row_id: str) -> tuple[str | None, str | None]:
     mapping: dict[str, tuple[str | None, str | None]] = {
+        "token_queue": (Feature.TOKEN_MANAGEMENT, None),
         "dine_in_now": (Feature.DINE_IN, None),
         "door_delivery_now": (Feature.DELIVERY, ORDER_MODE_IMMEDIATE),
         "takeaway_now": (Feature.TAKEAWAY, ORDER_MODE_IMMEDIATE),
@@ -189,6 +335,10 @@ def build_service_selection_payload(restaurant: dict) -> dict | None:
 
     rows_sec1 = []
     rows_sec2 = []
+
+    # Token / Queue is the lead option — listed before Dine-In when both enabled.
+    if Feature.TOKEN_MANAGEMENT in services_enabled:
+        rows_sec1.append(_service_row("token_queue"))
 
     if Feature.DINE_IN in services_enabled:
         rows_sec1.append(_service_row("dine_in_now"))
@@ -212,7 +362,7 @@ def build_service_selection_payload(restaurant: dict) -> dict | None:
         return {
             "type": "text",
             "text": {
-                "body": "We're not accepting orders right now. Please check back later or contact us directly.",
+                "body": "We're not taking walk-ins right now. Please check back later or contact us directly.",
             },
         }
 
@@ -227,7 +377,7 @@ def build_service_selection_payload(restaurant: dict) -> dict | None:
         "interactive": {
             "type": "list",
             "body": {
-                "text": "How would you like to receive your order?",
+                "text": "How can we help you today?",
             },
             "action": {
                 "button": "👉 Select Service",
@@ -247,9 +397,6 @@ async def build_service_menu_rows(
     state = session_state or {}
     await refresh_kitchen_acceptance(state, restaurant_id)
 
-    if not kitchen_accepting_orders(state):
-        return []
-
     info = await fetch_restaurant_info(restaurant_id)
     payload = build_service_selection_payload(info)
 
@@ -257,7 +404,13 @@ async def build_service_menu_rows(
         return []
 
     sections = payload["interactive"]["action"]["sections"]
-    return [row for section in sections for row in section["rows"]]
+    rows = [row for section in sections for row in section["rows"]]
+
+    # Kitchen closed: still offer Token / Queue (walk-in handoff), hide order flows.
+    if not kitchen_accepting_orders(state):
+        rows = [r for r in rows if r.get("id") == "token_queue"]
+
+    return rows
 
 
 def _resolve_choice_from_rows(

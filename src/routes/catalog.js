@@ -694,15 +694,20 @@ async function handleMenuUpload(req, res) {
     const errors = [];
 
     let packagedLob = false;
+    let blockNoFssai = false;
     try {
       const { data: tenantRow } = await supabaseAdmin
         .from('tenants')
-        .select('lob_type')
+        .select('lob_type, fssai_license')
         .eq('id', restaurantId)
         .maybeSingle();
       packagedLob = ['food_products', 'retail', 'b2b', 'psl'].includes(
         String(tenantRow?.lob_type || '').toLowerCase(),
       );
+      // Packaged food cannot go live for sale without an FSSAI license on file —
+      // block publish rather than let it slip through as a checklist afterthought.
+      blockNoFssai = String(tenantRow?.lob_type || '').toLowerCase() === 'food_products'
+        && !String(tenantRow?.fssai_license || '').trim();
     } catch (_) { /* non-fatal */ }
 
     // Phase 0: remove duplicate retailer_id rows (keep newest)
@@ -744,6 +749,7 @@ async function handleMenuUpload(req, res) {
         ? Math.max(0, parseInt(item.current_stock, 10) || 0)
         : null;
       if (stockQty === 0) isStocked = false;
+      if (blockNoFssai) isStocked = false;
 
       payloadIds.push(String(retailerId).trim());
       const now = new Date().toISOString();
@@ -870,6 +876,13 @@ try {
 
     const response = { success: true, upserted, skipped, purged, total: items.length };
     if (errors.length) response.errors = errors;
+    if (blockNoFssai) {
+      response.warnings = [
+        ...(response.warnings || []),
+        'No FSSAI license on file — all items were uploaded as out-of-stock. '
+          + 'Add your FSSAI license number in Settings, then re-upload to publish.',
+      ];
+    }
     res.json(response);
   } catch (err) {
     console.error('[menu/upload]', err.message);
@@ -896,6 +909,19 @@ async function handleMenuItemAvailability(req, res) {
       .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).single();
 
     if (fetchErr || !item) return res.status(404).json({ error: 'Menu item not found' });
+
+    if (is_available) {
+      const { data: tenantRow } = await supabaseAdmin
+        .from('tenants').select('lob_type, fssai_license')
+        .eq('id', req.restaurant_id).maybeSingle();
+      const needsFssai = String(tenantRow?.lob_type || '').toLowerCase() === 'food_products'
+        && !String(tenantRow?.fssai_license || '').trim();
+      if (needsFssai) {
+        return res.status(400).json({
+          error: 'Add your FSSAI license number in Settings before marking packaged food items in stock.',
+        });
+      }
+    }
 
     const wasOut = !item.is_stocked;
     const patch = {
@@ -1027,6 +1053,77 @@ async function handleMenuItemRestock(req, res) {
 }
 
 router.post('/menu-items/:id/restock', authenticateToken, getRestaurantId, handleMenuItemRestock);
+
+// ── POST /api/menu-items/:id/launch — Flip coming-soon/preorder item live now ─
+
+async function handleMenuItemLaunch(req, res) {
+  try {
+    if (!['owner', 'manager', 'brand_owner'].includes(req.user_role))
+      return res.status(403).json({ error: 'Unauthorized' });
+
+    const { data: item, error: fetchErr } = await supabaseAdmin
+      .from('menu_items')
+      .select('id, retailer_id, name, availability_status, current_stock')
+      .eq('id', req.params.id).eq('restaurant_id', req.restaurant_id).single();
+    if (fetchErr || !item) return res.status(404).json({ error: 'Menu item not found' });
+
+    const { data: tenantRow } = await supabaseAdmin
+      .from('tenants').select('lob_type, fssai_license')
+      .eq('id', req.restaurant_id).maybeSingle();
+    const needsFssai = String(tenantRow?.lob_type || '').toLowerCase() === 'food_products'
+      && !String(tenantRow?.fssai_license || '').trim();
+    if (needsFssai) {
+      return res.status(400).json({
+        error: 'Add your FSSAI license number in Settings before launching packaged food items.',
+      });
+    }
+
+    const stockQty = item.current_stock != null ? Math.max(0, parseInt(item.current_stock, 10) || 0) : null;
+    const { error: updateErr } = await supabaseAdmin.from('menu_items').update({
+      availability_status: 'in_stock',
+      is_stocked: stockQty === 0 ? false : true,
+      is_available: stockQty === 0 ? false : true,
+      launch_at: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', item.id).eq('restaurant_id', req.restaurant_id);
+    if (updateErr) throw updateErr;
+
+    await writeAuditLog({
+      user_id: req.user.sub, restaurant_id: req.restaurant_id,
+      action: 'Menu item launched (coming soon → live)', details: { item_id: item.id, item_name: item.name },
+    });
+
+    let waitlistNotified = 0;
+    try {
+      const { notifyStockWaitlist } = require('../helpers/inventory');
+      const n = await notifyStockWaitlist(supabaseAdmin, {
+        restaurantId: req.restaurant_id,
+        menuItemId: item.id,
+        retailerId: item.retailer_id,
+        itemName: item.name,
+        reason: 'launch',
+      });
+      waitlistNotified = n.notified || 0;
+    } catch (wlErr) {
+      console.warn('[launch] waitlist notify:', wlErr.message);
+    }
+
+    res.json({ success: true, id: item.id, name: item.name, availability_status: 'in_stock', waitlist_notified: waitlistNotified });
+
+    if (item.retailer_id) {
+      pushSingleItemToMetaCatalog({
+        retailerId: item.retailer_id,
+        isAvailable: stockQty !== 0,
+        restaurantId: req.restaurant_id,
+      }).catch((e) => console.error('[launch-meta]', e.message));
+    }
+  } catch (err) {
+    console.error('[menu-item-launch]', err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+}
+
+router.post('/menu-items/:id/launch', authenticateToken, getRestaurantId, handleMenuItemLaunch);
 
 // ── PUT /api/menu-items/:id/special-today — Mark special dish (no Meta push) ─
 

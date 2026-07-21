@@ -60,8 +60,15 @@ async function buildInvoicePdf(opts) {
   if (r.sac_code) doc.text(`SAC: ${r.sac_code}`);
 
   doc.moveDown(0.5);
-  doc.fontSize(10).text(`Invoice / Order: ${meta.order_number || meta.order_id || '—'}`);
+  doc.fontSize(10).text(`Invoice #: ${meta.invoice_number || meta.order_number || meta.order_id || '—'}`);
+  if (meta.order_number && meta.invoice_number && meta.invoice_number !== meta.order_number) {
+    doc.fontSize(9).fillColor('#666').text(`Order: ${meta.order_number}`);
+    doc.fillColor('#000').fontSize(10);
+  }
   doc.text(`Date: ${(meta.invoice_date || new Date().toISOString()).slice(0, 10)}`);
+  if (hasGstin && meta.place_of_supply && meta.place_of_supply !== 'unknown') {
+    doc.text(`Place of supply: ${meta.place_of_supply === 'inter_state' ? 'Inter-state' : 'Intra-state'}`);
+  }
 
   doc.moveDown(0.5);
   doc.fontSize(10).text('Bill to', { underline: true });
@@ -73,16 +80,28 @@ async function buildInvoicePdf(opts) {
   doc.fontSize(10).text('Items', { underline: true });
   doc.moveDown(0.2);
   for (const line of lines) {
-    doc.text(
+    doc.fontSize(10).fillColor('#000').text(
       `${line.quantity || 1}× ${line.name || 'Item'} @ ${money(line.unit_price)} = ${money(line.line_total)}`,
     );
+    const subDetails = [
+      line.pack_size_label ? `Pack: ${line.pack_size_label}` : null,
+      line.made_on_date ? `Made on: ${String(line.made_on_date).slice(0, 10)}` : null,
+    ].filter(Boolean).join(' · ');
+    if (subDetails) {
+      doc.fontSize(8).fillColor('#666').text(subDetails);
+      doc.fillColor('#000');
+    }
   }
 
   doc.moveDown();
   doc.text(`Subtotal: ${money(fin.subtotal_base_price)}`);
   if (hasGstin) {
-    doc.text(`CGST (${fin.cgst_rate_pct || 0}%): ${money(fin.cgst_amount)}`);
-    doc.text(`SGST (${fin.sgst_rate_pct || 0}%): ${money(fin.sgst_amount)}`);
+    if (fin.igst_amount != null) {
+      doc.text(`IGST (${fin.igst_rate_pct || 0}%): ${money(fin.igst_amount)}`);
+    } else {
+      doc.text(`CGST (${fin.cgst_rate_pct || 0}%): ${money(fin.cgst_amount)}`);
+      doc.text(`SGST (${fin.sgst_rate_pct || 0}%): ${money(fin.sgst_amount)}`);
+    }
   }
   if (fin.packaging_or_delivery_charge) {
     doc.text(`Delivery / packaging: ${money(fin.packaging_or_delivery_charge)}`);
