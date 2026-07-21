@@ -825,6 +825,23 @@ async function handleMenuUpload(req, res) {
         created_at:          now,
         updated_at:          now,
       });
+
+      // Optional Excel discount_percent + discount_days → ends_at from upload time
+      if (item.discount_percent && item.discount_days) {
+        try {
+          const { buildDiscountPatch } = require('../helpers/menuDiscount');
+          const built = buildDiscountPatch({
+            discount_percent: item.discount_percent,
+            duration_days: item.discount_days,
+          });
+          if (!built.error && built.patch) {
+            Object.assign(validRows[validRows.length - 1], {
+              discount_percent: built.patch.discount_percent,
+              discount_ends_at: built.patch.discount_ends_at,
+            });
+          }
+        } catch (_e) { /* non-fatal */ }
+      }
     }
 
     if (!validRows.length) return res.status(400).json({ error: 'No valid rows found', skipped, errors });
@@ -1275,7 +1292,8 @@ async function handleMenuItemDiscount(req, res) {
   }
 }
 
-router.put('/menu-items/:id/discount', authenticateToken, getRestaurantId, handleMenuItemDiscount);
+const menuItemDiscountMiddleware = [authenticateToken, getRestaurantId, handleMenuItemDiscount];
+router.put('/menu-items/:id/discount', ...menuItemDiscountMiddleware);
 
 /** Clear all is_special_today flags (called daily at midnight IST). */
 async function resetDailySpecialDishes() {
@@ -1374,6 +1392,7 @@ module.exports.handleMenuUpload = handleMenuUpload;
 module.exports.menuUploadMiddleware = menuUploadMiddleware;
 module.exports.menuItemAvailabilityMiddleware = menuItemAvailabilityMiddleware;
 module.exports.menuItemSpecialTodayMiddleware = menuItemSpecialTodayMiddleware;
+module.exports.menuItemDiscountMiddleware = menuItemDiscountMiddleware;
 module.exports.resetDailySpecialDishes = resetDailySpecialDishes;
 module.exports.nextOpenSlotDescriptionIST = nextOpenSlotDescriptionIST;
 module.exports.currentSlotLabelIST = currentSlotLabelIST;

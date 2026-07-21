@@ -1112,7 +1112,7 @@ router.put(
   'shipping_provider','courier_name','courier_rate_card',
   'gstin','fssai_license','sac_code','receipt_tagline',
   'packaging_weight_grams',
-  'daily_settlement_enabled','weekly_promo_drafts_enabled','instagram_handle',
+  'daily_settlement_enabled','weekly_promo_drafts_enabled','instagram_handle','instagram_user_id',
   'subscribed_features', 'enabled_services',
     ];
 

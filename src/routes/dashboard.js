@@ -45,7 +45,7 @@ const RESTAURANT_SELECT_FULL = [
   'shipping_provider', 'courier_name', 'courier_rate_card',
   'gstin', 'fssai_license', 'sac_code', 'receipt_tagline',
   'packaging_weight_grams',
-  'daily_settlement_enabled', 'weekly_promo_drafts_enabled', 'instagram_handle',
+  'daily_settlement_enabled', 'weekly_promo_drafts_enabled', 'instagram_handle', 'instagram_user_id',
 ].join(', ');
 
 const RESTAURANT_SELECT_BASE = [
@@ -633,9 +633,10 @@ router.post('/gift-links', authenticateToken, getRestaurantId, requireOutlet, as
 router.get('/sku-story/:itemId', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
   try {
     const { buildSkuStorySvg } = require('../helpers/skuStory');
+    const { deriveMenuDiscount } = require('../helpers/menuDiscount');
     const { data: item, error } = await supabaseAdmin
       .from('menu_items')
-      .select('id, name, price, pack_size_label, size_label, image_url')
+      .select('id, name, price, pack_size_label, size_label, image_url, discount_percent, discount_ends_at, is_special_today, is_todays_special, special_note')
       .eq('id', req.params.itemId)
       .eq('restaurant_id', req.restaurant_id)
       .maybeSingle();
@@ -648,13 +649,21 @@ router.get('/sku-story/:itemId', authenticateToken, getRestaurantId, requireOutl
       .eq('id', req.restaurant_id)
       .maybeSingle();
 
+    const discount = deriveMenuDiscount(item);
     const svg = buildSkuStorySvg({
       brand: restaurant?.display_name || restaurant?.name || 'Kitchen',
       productName: item.name,
-      price: item.price,
+      price: discount.discount_active ? discount.effective_price : discount.list_price,
+      compareAtPrice: discount.discount_active ? discount.list_price : null,
       packLabel: item.pack_size_label || item.size_label,
       tagline: restaurant?.receipt_tagline || 'Homemade · small batch',
       shopHint: 'Order on WhatsApp · link in bio',
+      promoHeadline: discount.discount_active
+        ? `${Math.round(discount.discount_percent)}% OFF`
+        : ((item.is_special_today || item.is_todays_special) ? "TODAY'S SPECIAL" : null),
+      promoSubcopy: item.special_note || null,
+      discountPercent: discount.discount_active ? discount.discount_percent : null,
+      isSpecial: !!(item.is_special_today || item.is_todays_special),
     });
     res.setHeader('Content-Type', 'image/svg+xml');
     res.setHeader('Content-Disposition', `inline; filename="story-${item.id}.svg"`);

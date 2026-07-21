@@ -25,6 +25,7 @@ const {
   menuUploadMiddleware,
   menuItemAvailabilityMiddleware,
   menuItemSpecialTodayMiddleware,
+  menuItemDiscountMiddleware,
 } = require('./src/routes/catalog');
 const { logKdsSecretStatus } = require('./src/config/internalSecret');
 const { verifyScheduledDeliveryTokenType, verifyMigrationColumns } = require('./src/helpers/schemaChecks');
@@ -70,9 +71,11 @@ app.use('/api/brands',      require('./src/routes/brands'));
 // ── Specific /api sub-paths (must come before the catch-all pos router) ──────
 app.use('/api/kds',         require('./src/routes/kds'));
 app.use('/api/catalog',     require('./src/routes/catalog'));
+app.use('/api/instagram',   require('./src/routes/instagram'));
 app.post('/api/menu/upload', ...menuUploadMiddleware);
 app.put('/api/menu-items/:id/availability', ...menuItemAvailabilityMiddleware);
 app.put('/api/menu-items/:id/special-today', ...menuItemSpecialTodayMiddleware);
+app.put('/api/menu-items/:id/discount', ...menuItemDiscountMiddleware);
 app.get('/api/internal/menu-items', handleInternalMenuItems);
 app.use('/api/tokens',      require('./src/routes/tokens'));
 app.use('/api/feedback',    require('./src/routes/feedback'));

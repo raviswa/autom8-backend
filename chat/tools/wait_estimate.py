@@ -5,6 +5,7 @@ Static walk-in wait estimate at token issuance (mirrors src/helpers/waitEstimate
 from __future__ import annotations
 
 import math
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -16,6 +17,19 @@ DEFAULT_DINING_MINUTES = 45
 TURNOVER_MINUTES = 5
 MIN_REMAINING_FLOOR = 5
 RANGE_BUFFER = 10
+
+
+def _auto_assign_time_message() -> str:
+    """Mirror the Node auto-assign grace-period configuration."""
+    try:
+        low = max(1, int(os.getenv("DINEIN_AUTO_ASSIGN_MIN_MINUTES", "2")))
+    except (TypeError, ValueError):
+        low = 2
+    try:
+        high = max(low, int(os.getenv("DINEIN_AUTO_ASSIGN_MAX_MINUTES", "4")))
+    except (TypeError, ValueError):
+        high = max(low, 4)
+    return f"{low} minutes" if low == high else f"{low}–{high} minutes"
 
 
 def _dropout_rate(party_size: int) -> float:
@@ -48,7 +62,9 @@ def build_dinein_customer_message(party_size: int, token_id: str, estimate: dict
         return (
             f"Your token is *{token_id}* 🎟\n"
             f"Party of {people}\n"
-            f"*Your table is ready — please approach the host.*"
+            f"A suitable table is available. The manager can assign it now; if they "
+            f"haven't responded, we'll automatically assign it within about "
+            f"*{_auto_assign_time_message()}* and send your table number here."
         )
     if est_min < 0:
         return (

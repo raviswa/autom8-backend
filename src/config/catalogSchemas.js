@@ -166,6 +166,7 @@ const LOB_SCHEMAS = {
       'shelf_life_days', 'made_on_date', 'ingredients', 'allergens',
       'bundle_components',
       'image_url_2', 'image_url_3', 'image_url_4', 'image_url_5',
+      'discount_percent', 'discount_days',
     ],
     templateColWidths: [
       { wch: 10 }, { wch: 28 }, { wch: 40 }, { wch: 8 }, { wch: 14 }, { wch: 48 }, { wch: 12 },
@@ -174,14 +175,15 @@ const LOB_SCHEMAS = {
       { wch: 12 }, { wch: 12 }, { wch: 28 }, { wch: 22 },
       { wch: 28 },
       { wch: 40 }, { wch: 40 }, { wch: 40 }, { wch: 40 },
+      { wch: 14 }, { wch: 12 },
     ],
     templateExamples: [
-      ['MP-250', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 150, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '250g', 250, 50, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', ''],
-      ['MP-500', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 280, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '500g', 500, 40, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', ''],
-      ['MP-1KG', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 520, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '1kg', 1000, 20, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', ''],
-      ['MP-100', 'Mango Pickle', '100g jar for samplers', 70, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '100g', 100, 100, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', ''],
-      ['NEW-GINGER', 'Ginger Pickle (launch)', 'Batch cooking next week', 180, 'Pickles', '', 'TRUE', 'PRODUCT', '', '250g', 250, '', 'coming_soon', '2026-08-01', 50, 90, '', 'Ginger, chilli, mustard oil', 'Mustard', '', '', '', '', ''],
-      ['HAMPER-PICKLE-3', 'Pickle Sampler (3×100g)', 'Three favourite pickles in travel jars', 249, 'Hampers', '', 'TRUE', 'BUNDLE', '', '3×100g', 300, 15, '', '', '', 90, '2026-07-15', '', '', 'MP-100:3', '', '', '', ''],
+      ['MP-250', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 150, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '250g', 250, 50, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', '', 20, 7],
+      ['MP-500', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 280, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '500g', 500, 40, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', '', '', ''],
+      ['MP-1KG', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 520, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '1kg', 1000, 20, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', '', '', ''],
+      ['MP-100', 'Mango Pickle', '100g jar for samplers', 70, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '100g', 100, 100, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', '', '', ''],
+      ['NEW-GINGER', 'Ginger Pickle (launch)', 'Batch cooking next week', 180, 'Pickles', '', 'TRUE', 'PRODUCT', '', '250g', 250, '', 'coming_soon', '2026-08-01', 50, 90, '', 'Ginger, chilli, mustard oil', 'Mustard', '', '', '', '', '', '', ''],
+      ['HAMPER-PICKLE-3', 'Pickle Sampler (3×100g)', 'Three favourite pickles in travel jars', 249, 'Hampers', '', 'TRUE', 'BUNDLE', '', '3×100g', 300, 15, '', '', '', 90, '2026-07-15', '', '', 'MP-100:3', '', '', '', '', '', ''],
     ],
     columnHelp: [
       ['Column guide - Packaged Food / Home Baker'],
@@ -196,6 +198,8 @@ const LOB_SCHEMAS = {
       ['deposit_amount - optional preorder deposit (INR)'],
       ['shelf_life_days / made_on_date (YYYY-MM-DD) / ingredients / allergens - trust fields'],
       ['bundle_components - for BUNDLE only: retailer_id:qty, e.g. MP-100:3,GARLIC-100:3'],
+      ['image_url_2 … image_url_5 - extra gallery photos for storefront / Instagram carousel'],
+      ['discount_percent + discount_days - optional time-bound sale (e.g. 20 and 7 = 20% off for 7 days from upload)'],
       ['is_available - TRUE / FALSE'],
     ],
     previewColumns: [
@@ -217,6 +221,8 @@ const LOB_SCHEMAS = {
       const availability_status = ['coming_soon', 'preorder', 'sold_out', 'in_stock'].includes(availRaw)
         ? availRaw
         : null;
+      const discountPctRaw = row['discount_percent'] ?? row['Discount Percent'] ?? row['Discount %'];
+      const discountDaysRaw = row['discount_days'] ?? row['Discount Days'] ?? row['duration_days'];
 
       return {
         ...baseFields(row),
@@ -248,6 +254,12 @@ const LOB_SCHEMAS = {
         image_url_3: strOrNull(row['image_url_3'] ?? row['Image URL 3']),
         image_url_4: strOrNull(row['image_url_4'] ?? row['Image URL 4']),
         image_url_5: strOrNull(row['image_url_5'] ?? row['Image URL 5']),
+        discount_percent: discountPctRaw != null && discountPctRaw !== ''
+          ? parseFloat(String(discountPctRaw).replace(/[^\d.]/g, '')) || null
+          : null,
+        discount_days: discountDaysRaw != null && discountDaysRaw !== ''
+          ? parseInt(String(discountDaysRaw).replace(/\D/g, ''), 10) || null
+          : null,
       };
     },
     validateRow(item, rowNum) {
@@ -259,6 +271,12 @@ const LOB_SCHEMAS = {
         if (!item.bundle_components || !item.bundle_components.length) {
           errors.push(`Row ${rowNum} (${item.name || item.id}): BUNDLE rows need bundle_components (e.g. MP-100:3)`);
         }
+      }
+      if (item.discount_percent != null && (item.discount_percent < 1 || item.discount_percent > 100)) {
+        errors.push(`Row ${rowNum} (${item.name || item.id}): discount_percent must be 1–100`);
+      }
+      if (item.discount_percent && (!item.discount_days || item.discount_days < 1)) {
+        errors.push(`Row ${rowNum} (${item.name || item.id}): discount_percent needs discount_days (1–365)`);
       }
       return errors;
     },
