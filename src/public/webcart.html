@@ -331,6 +331,11 @@
       padding: 10px; font: inherit; background: #fff;
     }
     .saved-addresses { display: flex; flex-direction: column; gap: 6px; }
+    .saved-address-select {
+      width: 100%; text-align: left; border: 1px solid var(--line); border-radius: 10px;
+      background: #fff; padding: 10px 12px; font: inherit; font-size: 13px; cursor: pointer;
+      color: var(--ink); appearance: auto;
+    }
     .saved-address-btn {
       width: 100%; text-align: left; border: 1px solid var(--line); border-radius: 10px;
       background: #fff; padding: 8px 10px; font: inherit; font-size: 12px; cursor: pointer;
@@ -340,6 +345,7 @@
       font-size: 12px; color: #374151; background: #f9fafb; border: 1px solid var(--line);
       border-radius: 10px; padding: 8px 10px; margin-top: 6px;
     }
+    .delivery-quote-hint.err { color: #991b1b; background: #fef2f2; border-color: #fecaca; }
     .cart-nudge {
       margin: 10px 0 4px;
       padding: 10px 12px;
@@ -1175,6 +1181,15 @@
       return !!(name && address && pincode);
     }
 
+    function applySavedAddress(row) {
+      if (!row) return;
+      if ($('shipAddress')) $('shipAddress').value = row.address || '';
+      if ($('shipPincode')) $('shipPincode').value = row.pincode || '';
+      saveDeliveryLocal();
+      scheduleDeliveryQuote();
+      renderCart();
+    }
+
     function renderSavedAddresses() {
       const wrap = $('savedAddressesWrap');
       const list = $('savedAddressesList');
@@ -1186,22 +1201,34 @@
         return;
       }
       wrap.style.display = '';
-      list.innerHTML = rows.map((row, idx) => `
-        <button type="button" class="saved-address-btn" data-idx="${idx}">
-          ${String(row.address || '').replace(/</g, '&lt;')}${row.pincode ? `, ${row.pincode}` : ''}
-        </button>
-      `).join('');
-      list.querySelectorAll('.saved-address-btn').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const row = rows[Number(btn.dataset.idx)];
-          if (!row) return;
-          if ($('shipAddress')) $('shipAddress').value = row.address || '';
-          if ($('shipPincode')) $('shipPincode').value = row.pincode || '';
-          saveDeliveryLocal();
-          scheduleDeliveryQuote();
-          renderCart();
-        });
+      const currentPin = normalizePincode($('shipPincode')?.value || '');
+      const currentAddr = String($('shipAddress')?.value || '').trim().toLowerCase();
+      const selectedIdx = rows.findIndex((row) => {
+        const pin = normalizePincode(row.pincode || '');
+        const addr = String(row.address || '').trim().toLowerCase();
+        return pin && pin === currentPin && addr && addr === currentAddr;
       });
+
+      // Native <select> so shoppers get a real dropdown (the old button looked
+      // like a locked text field and felt broken when fields were already filled).
+      list.innerHTML = `
+        <select id="savedAddressSelect" class="saved-address-select" aria-label="Ship to a previous address">
+          <option value="">Choose a previous address…</option>
+          ${rows.map((row, idx) => {
+            const label = `${String(row.address || '').replace(/</g, '&lt;')}${row.pincode ? `, ${row.pincode}` : ''}`;
+            const selected = idx === selectedIdx ? ' selected' : '';
+            return `<option value="${idx}"${selected}>${label}</option>`;
+          }).join('')}
+        </select>
+      `;
+      const sel = $('savedAddressSelect');
+      if (sel) {
+        sel.addEventListener('change', () => {
+          const idx = sel.value === '' ? -1 : Number(sel.value);
+          if (idx < 0) return;
+          applySavedAddress(rows[idx]);
+        });
+      }
     }
 
     async function loadSavedAddresses() {
@@ -1251,6 +1278,7 @@
       state.deliveryQuoteLoading = true;
       if (hint) {
         hint.style.display = '';
+        hint.classList.remove('err');
         hint.textContent = 'Calculating shipping…';
       }
       try {
@@ -1264,10 +1292,14 @@
         const data = await res.json();
         if (!res.ok || !data.ok) {
           state.deliveryQuote = null;
-          if (hint) hint.textContent = data.error || 'Could not calculate shipping.';
+          if (hint) {
+            hint.classList.add('err');
+            hint.textContent = data.error || data.detail || 'Could not calculate shipping.';
+          }
         } else {
           state.deliveryQuote = data;
           if (hint) {
+            hint.classList.remove('err');
             const zoneLabels = {
               local: 'Local',
               within_state: 'Within state',
@@ -1290,7 +1322,10 @@
         }
       } catch (_e) {
         state.deliveryQuote = null;
-        if (hint) hint.textContent = 'Could not calculate shipping.';
+        if (hint) {
+          hint.classList.add('err');
+          hint.textContent = 'Could not calculate shipping.';
+        }
       } finally {
         state.deliveryQuoteLoading = false;
         renderCart();
@@ -1595,11 +1630,25 @@ $('subtotal').textContent = money(subtotal);
       }
 
       // Delivery row
-      if (shipped || deliveryCharge > 0) {
-        const label = shipped && state.deliveryQuote?.free_delivery_applied
+      if (shipped) {
+        const hasPin = !!normalizePincode($('shipPincode')?.value || '');
+        const hasQuote = !!state.deliveryQuote;
+        const label = hasQuote && state.deliveryQuote?.free_delivery_applied
           ? 'Delivery (free)'
           : 'Delivery charge';
         $('deliveryRow').querySelector('span').textContent = label;
+        if (state.deliveryQuoteLoading) {
+          $('deliveryAmt').textContent = '…';
+        } else if (hasQuote) {
+          $('deliveryAmt').textContent = money(deliveryCharge);
+        } else if (hasPin) {
+          $('deliveryAmt').textContent = '—';
+        } else {
+          $('deliveryAmt').textContent = money(0);
+        }
+        $('deliveryRow').style.display = '';
+      } else if (deliveryCharge > 0) {
+        $('deliveryRow').querySelector('span').textContent = 'Delivery charge';
         $('deliveryAmt').textContent = money(deliveryCharge);
         $('deliveryRow').style.display = '';
       } else {
@@ -1634,10 +1683,15 @@ $('subtotal').textContent = money(subtotal);
         state.lastSubmittedFingerprint === cartFingerprint() &&
         now - Number(state.lastSubmittedAt || 0) < 20 * 60 * 1000;
       const needsDelivery = shipped && !deliveryFieldsValid();
+      const needsQuote = shipped
+        && !!normalizePincode($('shipPincode')?.value || '')
+        && !state.deliveryQuote
+        && !state.deliveryQuoteLoading;
       // Keep re-tappable after submit so customers can reopen the WhatsApp guide.
-      submitBtn.disabled = count === 0 || state.submitting || needsDelivery;
+      submitBtn.disabled = count === 0 || state.submitting || needsDelivery || needsQuote;
       if (state.submitting) submitBtn.textContent = 'Submitting…';
       else if (needsDelivery) submitBtn.textContent = 'Add delivery details to continue';
+      else if (needsQuote) submitBtn.textContent = 'Fix delivery charge to continue';
       else if (state.sessionExpired) submitBtn.textContent = 'Checkout Now';
       else if (sameAsLast) submitBtn.textContent = 'Open WhatsApp again';
       else submitBtn.textContent = 'Continue to WhatsApp';
@@ -2887,7 +2941,9 @@ $('subtotal').textContent = money(subtotal);
       state.restaurant = data.restaurant;
       state.session = data.session;
       state.sessionExpired = !!data.session_expired;
-      state.phone = (data.session && data.session.phone) ? data.session.phone : (phone || '');
+      state.phone = (data.session && data.session.phone)
+        ? data.session.phone
+        : (phone || state.phone || '');
       phone = state.phone || phone;
       state.orderingEnabled = true;
       persistLinkContext();
@@ -2904,11 +2960,13 @@ $('subtotal').textContent = money(subtotal);
       state.activeTab = 'all';
       state.lobType = data.restaurant?.lob_type || data.lob_type || 'restaurant';
       state.catalogLob = !!data.catalog_lob || state.lobType !== 'restaurant';
-      state.guestStorefront = !!data.guest_storefront;
+      state.guestStorefront = !!(data.guest_storefront || (data.session && data.session.guest));
       const shipPhoneEl = $('shipPhone');
       if (shipPhoneEl) {
-        shipPhoneEl.style.display = state.guestStorefront ? '' : 'none';
+        // Prefill WhatsApp from the link; only force the field visible when the
+        // shopper must type a number (true public storefront with no phone yet).
         if (state.phone) shipPhoneEl.value = state.phone;
+        shipPhoneEl.style.display = (state.guestStorefront && !state.phone) ? '' : 'none';
       }
 
       loadCartLocal();
@@ -2970,6 +3028,10 @@ $('subtotal').textContent = money(subtotal);
 
       if (data.session_expired && data.session_message) {
         showStatus(data.session_message, 'ok');
+      } else if (!data.session_expired && statusBox && /session expired/i.test(statusBox.textContent || '')) {
+        // Clear a stale expired banner after a soft-session / guest recovery.
+        statusBox.className = '';
+        statusBox.textContent = '';
       }
 
       renderTopSections();
@@ -3076,17 +3138,33 @@ $('subtotal').textContent = money(subtotal);
       }
 
       const guestPhone = ($('shipPhone')?.value || '').trim() || state.phone || phone || '';
-      if ((state.guestStorefront || guestStorefront || !token || token === 'guest') && !guestPhone) {
+      const useGuestCheckout = !!(
+        state.guestStorefront
+        || guestStorefront
+        || !token
+        || token === 'guest'
+        || (state.session && state.session.guest)
+        || (state.sessionExpired && requiresShipping())
+      );
+      if (useGuestCheckout && !guestPhone) {
         showStatus('Enter your WhatsApp number to place the order.', 'err');
         state.submitting = false;
         renderCart();
         return;
       }
 
+      if (requiresShipping() && normalizePincode($('shipPincode')?.value || '') && !state.deliveryQuote) {
+        showStatus('Delivery charge could not be calculated. Check the pincode and try again.', 'err');
+        state.submitting = false;
+        scheduleDeliveryQuote();
+        renderCart();
+        return;
+      }
+
       const body = {
-        token: token || 'guest',
+        token: useGuestCheckout ? 'guest' : (token || 'guest'),
         phone: guestPhone || state.phone,
-        guest: (state.guestStorefront || guestStorefront || !token || token === 'guest') ? '1' : undefined,
+        guest: useGuestCheckout ? '1' : undefined,
         items: [...state.cart.values()],
         promo_code: ($('promo').value || '').trim() || null,
         special_request: ($('notes').value || '').trim() || null,

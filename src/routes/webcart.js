@@ -283,25 +283,37 @@ async function fetchShiprocketRate({ apiKey, email, password, pickupPincode, del
 async function calculateDelivery(restaurant, customerPincode, cartTotal, options = {}) {
   const tenantPincode = normalizePincode(restaurant?.postal_code);
   const customer = normalizePincode(customerPincode);
-  const subtotal = Math.max(0, Number(cartTotal || 0));
+  const subtotal = Math.max(0, Number(cartTotal) || 0);
   const freeAbove = Number(restaurant?.free_delivery_above || 0);
   const provider = normalizeShippingProvider(restaurant?.shipping_provider);
   const courierZone = resolveCourierZone(tenantPincode, customer);
   const intraCity = courierZone === 'local';
   // Keep legacy zone labels for webcart UI; expose courier_zone for rate cards.
   const zone = intraCity ? 'intra_city' : 'outstation';
-  const weightKg = Math.max(
-    0.01,
-    Number(options.weightKg) > 0
-      ? Number(options.weightKg)
-      : cartWeightKg(options.items, {
-          packagingGrams: Number(restaurant?.packaging_weight_grams || 0) || 0,
-        }),
-  );
+  let weightKg = 0.5;
+  try {
+    weightKg = Math.max(
+      0.01,
+      Number(options.weightKg) > 0
+        ? Number(options.weightKg)
+        : cartWeightKg(options.items, {
+            packagingGrams: Number(restaurant?.packaging_weight_grams || 0) || 0,
+          }),
+    );
+  } catch (weightErr) {
+    console.warn('[webcart/delivery] weight calc failed, using 0.5kg:', weightErr.message);
+    weightKg = 0.5;
+  }
   const courierName = String(restaurant?.courier_name || '').trim() || null;
 
+  const finish = (payload) => ({
+    ...payload,
+    charge: Math.round((Number(payload.charge) || 0) * 100) / 100,
+    weight_kg: weightKg,
+  });
+
   if (freeAbove > 0 && subtotal >= freeAbove) {
-    return {
+    return finish({
       zone,
       courier_zone: courierZone,
       courier_name: provider === 'custom' ? courierName : null,
@@ -310,47 +322,50 @@ async function calculateDelivery(restaurant, customerPincode, cartTotal, options
       cod_enabled: intraCity ? !!restaurant?.cod_enabled_city : !!restaurant?.cod_enabled_outstation,
       source: 'free_delivery_above',
       shipping_provider: provider,
-      weight_kg: weightKg,
-    };
+    });
   }
 
   // Custom courier: weight × zone rate card for all destinations
   if (provider === 'custom') {
-    let charge = chargeFromRateCard(restaurant?.courier_rate_card, courierZone, weightKg);
+    let charge = null;
     let source = 'custom_rate_card';
+    try {
+      charge = chargeFromRateCard(restaurant?.courier_rate_card, courierZone, weightKg);
+    } catch (cardErr) {
+      console.warn('[webcart/delivery] rate card failed:', cardErr.message);
+      charge = null;
+    }
     if (charge == null) {
       charge = intraCity
         ? Number(restaurant?.intra_city_charge ?? restaurant?.delivery_charge_default ?? 0) || 0
         : Number(restaurant?.outstation_charge || 0) || 0;
       source = intraCity ? 'intra_city_flat' : 'outstation_flat';
     }
-    return {
+    return finish({
       zone,
       courier_zone: courierZone,
       courier_name: courierName,
-      charge: Math.round(charge * 100) / 100,
+      charge,
       free_delivery_applied: false,
       cod_enabled: intraCity ? !!restaurant?.cod_enabled_city : !!restaurant?.cod_enabled_outstation,
       source,
       shipping_provider: provider,
-      weight_kg: weightKg,
-    };
+    });
   }
 
   // Default: Shiprocket for outstation; flat intra-city
   if (intraCity) {
     const charge = Number(restaurant?.intra_city_charge ?? restaurant?.delivery_charge_default ?? 0) || 0;
-    return {
+    return finish({
       zone,
       courier_zone: courierZone,
       courier_name: null,
-      charge: Math.round(charge * 100) / 100,
+      charge,
       free_delivery_applied: false,
       cod_enabled: !!restaurant?.cod_enabled_city,
       source: 'intra_city_flat',
       shipping_provider: provider,
-      weight_kg: weightKg,
-    };
+    });
   }
 
   let charge = Number(restaurant?.outstation_charge || 0) || 0;
@@ -359,31 +374,34 @@ async function calculateDelivery(restaurant, customerPincode, cartTotal, options
     && tenantPincode
     && customer;
   if (useShiprocket) {
-    const shiprocketRate = await fetchShiprocketRate({
-      apiKey: restaurant.shiprocket_api_key,
-      email: restaurant.shiprocket_email,
-      password: restaurant.shiprocket_api_key,
-      pickupPincode: tenantPincode,
-      deliveryPincode: customer,
-      weightKg,
-    });
-    if (shiprocketRate != null) {
-      charge = shiprocketRate;
-      source = 'shiprocket';
+    try {
+      const shiprocketRate = await fetchShiprocketRate({
+        apiKey: restaurant.shiprocket_api_key,
+        email: restaurant.shiprocket_email,
+        password: restaurant.shiprocket_api_key,
+        pickupPincode: tenantPincode,
+        deliveryPincode: customer,
+        weightKg,
+      });
+      if (shiprocketRate != null) {
+        charge = shiprocketRate;
+        source = 'shiprocket';
+      }
+    } catch (srErr) {
+      console.warn('[webcart/delivery] Shiprocket quote failed, using flat fallback:', srErr.message);
     }
   }
 
-  return {
+  return finish({
     zone,
     courier_zone: courierZone,
     courier_name: null,
-    charge: Math.round(charge * 100) / 100,
+    charge,
     free_delivery_applied: false,
     cod_enabled: !!restaurant?.cod_enabled_outstation,
     source,
     shipping_provider: provider,
-    weight_kg: weightKg,
-  };
+  });
 }
 
 function resolveCurrentSlot(restaurant) {
@@ -436,16 +454,44 @@ function normalizeSlots(input) {
   return clean;
 }
 
+// Keep walk-in "active" window aligned with menu_tokens default TTL (24h).
+const WALK_IN_ACTIVE_MS = 1000 * 60 * 60 * 24;
+
 function isActiveWalkInRow(data) {
   if (!data) return false;
   if (!ACTIVE_TOKEN_STATUSES.has(data.status) || data.completed_at) return false;
   const arrivedAt = data.arrived_at ? new Date(data.arrived_at) : null;
   const ageMs = arrivedAt ? Date.now() - arrivedAt.getTime() : Number.POSITIVE_INFINITY;
-  if (!arrivedAt || ageMs > 1000 * 60 * 60 * 12) return false;
+  if (!arrivedAt || ageMs > WALK_IN_ACTIVE_MS) return false;
   return true;
 }
 
-async function resolveSession({ restaurantId, token, phone }) {
+/**
+ * Soft session from a still-valid menu_tokens row when the linked walk-in is
+ * gone/completed. Packaged LOBs (food_products etc.) reuse the same WhatsApp
+ * menu link across orders — requiring a live walk-in made every revisit look
+ * "expired" even while menu_tokens.expires_at was still in the future.
+ */
+function menuTokenSoftSession(menuToken, fallbackPhone) {
+  const phone = String(menuToken?.phone || fallbackPhone || '').trim();
+  if (!phone) return null;
+  return {
+    id: String(menuToken.walk_in_token_id || menuToken.session_token || '').trim() || null,
+    phone,
+    status: 'takeaway',
+    type: 'takeaway',
+    arrived_at: new Date().toISOString(),
+    completed_at: null,
+    meta: {
+      source: 'menu_token_soft_session',
+      session_token: menuToken.session_token || null,
+      soft_session: true,
+    },
+    _soft: true,
+  };
+}
+
+async function resolveSession({ restaurantId, token, phone, allowSoftMenuSession = false }) {
   const rawVariants = phoneVariants(phone);
   if (!restaurantId || !token) return null;
 
@@ -490,6 +536,9 @@ async function resolveSession({ restaurantId, token, phone }) {
   if (menuToken) {
     const walkTokenId = String(menuToken.walk_in_token_id || '').trim();
     if (!walkTokenId) {
+      if (allowSoftMenuSession) {
+        return menuTokenSoftSession(menuToken, variants[0]);
+      }
       console.error(
         '[webcart/session] menu_tokens row missing walk_in_token_id — refusing phone fallback',
         { restaurantId, token: String(token).slice(0, 12), phone: variants[0] }
@@ -524,11 +573,14 @@ async function resolveSession({ restaurantId, token, phone }) {
           '[webcart/session] walk_in_token_id phone mismatch — refusing to bind',
           { restaurantId, walkTokenId, menuPhone: variants[0], walkPhone: byId.phone }
         );
-        return null;
+        return allowSoftMenuSession ? menuTokenSoftSession(menuToken, variants[0]) : null;
       }
     }
 
     if (!byId) {
+      if (allowSoftMenuSession) {
+        return menuTokenSoftSession(menuToken, variants[0]);
+      }
       console.error(
         '[webcart/session] menu_tokens.walk_in_token_id not found — refusing phone fallback',
         { restaurantId, walkTokenId, phone: variants[0] }
@@ -537,6 +589,20 @@ async function resolveSession({ restaurantId, token, phone }) {
     }
 
     if (!isActiveWalkInRow(byId)) {
+      if (allowSoftMenuSession) {
+        // Menu link itself is still valid — keep checkout usable for packaged LOBs.
+        return {
+          ...byId,
+          status: ACTIVE_TOKEN_STATUSES.has(byId.status) ? byId.status : 'takeaway',
+          completed_at: null,
+          meta: {
+            ...(typeof byId.meta === 'object' && byId.meta ? byId.meta : {}),
+            soft_session: true,
+            source: 'menu_token_stale_walk_in',
+          },
+          _soft: true,
+        };
+      }
       console.error(
         '[webcart/session] linked walk_in token inactive/stale — refusing phone fallback',
         {
@@ -723,6 +789,7 @@ router.get('/api/webcart/session', async (req, res) => {
           restaurantId: restaurant.id,
           token,
           phone,
+          allowSoftMenuSession: catalogLob,
         })
       : null;
 
@@ -771,17 +838,23 @@ router.get('/api/webcart/session', async (req, res) => {
 
     const todaysSpecial = catalogLob ? [] : menuItems.filter(i => i.is_todays_special);
 
-    const isGuest = !session && catalogLob && (!token || !phone);
+    // Packaged storefronts can always check out with a phone — even when the
+    // WhatsApp menu_tokens row has expired. Don't scare the shopper with a
+    // false "session expired" banner; fall through to guest checkout.
+    const publicGuest = !session && catalogLob && (!token || !phone);
+    const expiredLinkGuest = !session && catalogLob && !!(token && phone);
+    const isGuest = publicGuest || expiredLinkGuest;
     const sessionPayload = session
       ? {
           token: session.id,
           phone: session.phone,
           type: session.type,
+          soft_session: !!session._soft,
         }
       : isGuest
         ? {
             token: 'guest',
-            phone: '',
+            phone: expiredLinkGuest ? phone : '',
             type: 'delivery',
             guest: true,
           }
@@ -854,7 +927,9 @@ router.get('/api/webcart/session', async (req, res) => {
       category_slots: categorySlotMap,
       promotions: [],
       session_message: isGuest
-        ? 'Browse the storefront. Enter your WhatsApp number at checkout to place the order.'
+        ? (expiredLinkGuest
+          ? null
+          : 'Browse the storefront. Enter your WhatsApp number at checkout to place the order.')
         : (session
           ? null
           : 'Your WhatsApp session expired, but the menu is still available to browse. Please request a fresh link to submit an order.'),
@@ -1054,14 +1129,19 @@ router.post('/api/webcart/submit', async (req, res) => {
           restaurantId: restaurant.id,
           token: safeToken,
           phone: safePhone,
+          allowSoftMenuSession: catalogLob,
         })
       : null;
 
-    const { data: liveItems, error: liveErr } = await supabaseAdmin
-      .from('menu_items')
-      .select('id, retailer_id, name, price, weight_grams, item_type, meta, current_stock, is_stocked, availability_status')
-      .eq('restaurant_id', restaurant.id)
-      .is('archived_at', null);
+    const { data: liveItems, error: liveErr } = await selectDroppingMissingColumns(
+      'menu_items:submit',
+      'id, retailer_id, name, price, weight_grams, item_type, meta, current_stock, is_stocked, availability_status',
+      (select) => supabaseAdmin
+        .from('menu_items')
+        .select(select)
+        .eq('restaurant_id', restaurant.id)
+        .is('archived_at', null),
+    );
 
     if (liveErr) throw liveErr;
 
@@ -1266,7 +1346,7 @@ router.post('/api/webcart/submit', async (req, res) => {
       },
     };
 
-    if (session) {
+    if (session && !session._soft) {
       const { error } = await supabaseAdmin
         .from('walk_in_tokens')
         .update({ meta: nextMeta })
@@ -1303,7 +1383,7 @@ router.post('/api/webcart/submit', async (req, res) => {
       delivery_source: deliveryQuote?.source || undefined,
     });
 
-    if (session) {
+    if (session && !session._soft) {
       const confirmedMeta = {
         ...(nextMeta || {}),
         web_cart_submission: {
@@ -1379,6 +1459,7 @@ router.get('/api/webcart/saved-addresses', async (req, res) => {
       restaurantId: restaurant.id,
       token,
       phone,
+      allowSoftMenuSession: !isRestaurantLob(restaurant.lob_type),
     });
 
     const variants = phoneVariants(phone);
@@ -1447,13 +1528,21 @@ router.post('/api/webcart/delivery-quote', async (req, res) => {
     let weighedItems = [];
     const rawItems = Array.isArray(items) ? items : [];
     if (rawItems.length) {
-      const { data: liveItems, error: liveErr } = await supabaseAdmin
-        .from('menu_items')
-        .select('id, retailer_id, weight_grams, item_type, meta')
-        .eq('restaurant_id', restaurant.id)
-        .is('archived_at', null);
-      if (liveErr) throw liveErr;
-      weighedItems = resolveCartLineWeights(rawItems, liveItems || []);
+      const { data: liveItems, error: liveErr } = await selectDroppingMissingColumns(
+        'menu_items:delivery-quote',
+        'id, retailer_id, weight_grams, item_type, meta',
+        (select) => supabaseAdmin
+          .from('menu_items')
+          .select(select)
+          .eq('restaurant_id', restaurant.id)
+          .is('archived_at', null),
+      );
+      if (liveErr) {
+        // Weight enrichment is best-effort — still quote with default parcel weight.
+        console.warn('[webcart/delivery-quote] menu weight lookup failed:', liveErr.message);
+      } else {
+        weighedItems = resolveCartLineWeights(rawItems, liveItems || []);
+      }
     }
 
     const quote = await calculateDelivery(restaurant, customerPincode, cart_total, {
@@ -1462,7 +1551,13 @@ router.post('/api/webcart/delivery-quote', async (req, res) => {
     return res.json({ ok: true, ...quote });
   } catch (err) {
     console.error('[webcart/delivery-quote]', err.message);
-    return res.status(500).json({ ok: false, error: 'Failed to calculate delivery charge.' });
+    if (err?.details) console.error('[webcart/delivery-quote] details:', err.details);
+    if (err?.hint) console.error('[webcart/delivery-quote] hint:', err.hint);
+    return res.status(500).json({
+      ok: false,
+      error: 'Failed to calculate delivery charge.',
+      detail: process.env.NODE_ENV === 'production' ? undefined : (err.message || String(err)),
+    });
   }
 });
 
