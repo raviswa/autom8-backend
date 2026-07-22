@@ -1229,6 +1229,90 @@ async def increment_prepay_reminder_count(booking_id: str) -> None:
         logger.warning(f"[prepay] increment_prepay_reminder_count failed for {booking_id}: {e}")
 
 
+# Unpaid prepay bookings older than this are cancelled + session PhonePe fields scrubbed.
+# Ordered after the 15-min reminder and PhonePe's 20-min checkout expiry.
+STALE_UNPAID_PREPAY_MINUTES = 45
+
+
+async def get_stale_unpaid_prepay_bookings(
+    min_age_minutes: int = STALE_UNPAID_PREPAY_MINUTES,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Pending unpaid prepay bookings past the abandon window."""
+    if AsyncSessionLocal is None:
+        return []
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    SELECT
+                      b.id::text AS booking_id,
+                      b.restaurant_id::text AS restaurant_id,
+                      b.service_type,
+                      b.token_number,
+                      c.phone AS customer_phone,
+                      c.name AS customer_name
+                    FROM bookings b
+                    JOIN customers c ON c.id = b.customer_id
+                    JOIN tenants r ON r.id = b.restaurant_id
+                    WHERE b.payment_status = 'pending'
+                      AND b.status = 'pending'
+                      AND COALESCE(r.payment_mode, 'prepay') = 'prepay'
+                      AND b.prepay_fulfillment_payload IS NOT NULL
+                      AND b.kds_sent_at IS NULL
+                      AND b.created_at < NOW() - (:min_age || ' minutes')::interval
+                    ORDER BY b.created_at ASC
+                    LIMIT :lim
+                """),
+                {"min_age": str(min_age_minutes), "lim": int(limit)},
+            )
+            return [dict(r) for r in result.mappings().all()]
+    except Exception as e:
+        logger.warning(f"[prepay] get_stale_unpaid_prepay_bookings failed: {e}")
+        return []
+
+
+async def cancel_stale_unpaid_prepay_booking(
+    booking_id: str,
+    *,
+    reason: str = "unpaid_timeout",
+) -> bool:
+    """Cancel a still-pending unpaid prepay booking and clear its fulfillment payload.
+
+    Returns True only when the row was still pending/unpaid and got cancelled
+    (safe under concurrent payment webhooks).
+    """
+    if AsyncSessionLocal is None or not booking_id:
+        return False
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    UPDATE bookings
+                    SET status = 'cancelled',
+                        prepay_fulfillment_payload = NULL,
+                        schedule_meta = COALESCE(schedule_meta, '{}'::jsonb)
+                          || jsonb_build_object(
+                               'abandoned_at', to_char(NOW() AT TIME ZONE 'UTC',
+                                                       'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                               'abandon_reason', CAST(:reason AS text)
+                             )
+                    WHERE id = CAST(:bid AS uuid)
+                      AND payment_status = 'pending'
+                      AND status = 'pending'
+                      AND kds_sent_at IS NULL
+                    RETURNING id::text AS booking_id
+                """),
+                {"bid": booking_id, "reason": reason},
+            )
+            row = result.mappings().first()
+            await session.commit()
+            return bool(row)
+    except Exception as e:
+        logger.warning(f"[prepay] cancel_stale_unpaid_prepay_booking failed for {booking_id}: {e}")
+        return False
+
+
 async def mark_booking_kds_sent(booking_id: str) -> None:
     """Record that this booking was pushed to KDS."""
     if AsyncSessionLocal is None:

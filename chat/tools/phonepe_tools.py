@@ -273,6 +273,47 @@ def _is_hosted_checkout_url(url: str) -> bool:
         return "/pay/" in (url or "")
 
 
+def _merchant_order_matches_booking(merchant_order_id: str | None, booking_id: str) -> bool:
+    """merchant_order_id is bk{booking_uuid_nodash[:20]}{timestamp} — must match this booking."""
+    if not merchant_order_id or not booking_id:
+        return False
+    prefix = f"bk{str(booking_id).replace('-', '')[:20]}"
+    return str(merchant_order_id).startswith(prefix)
+
+
+def clear_stale_phonepe_session(
+    session_state: dict[str, Any] | None,
+    booking_id: str,
+) -> bool:
+    """Drop cached PhonePe redirect/order when it belongs to a different booking.
+
+    Returns True if anything was cleared. Safe to call on every new checkout.
+    """
+    if not session_state or not booking_id:
+        return False
+    existing_merchant = session_state.get("phonepe_merchant_order_id")
+    existing_booking = session_state.get("phonepe_booking_id")
+    existing_redirect = session_state.get("phonepe_redirect_url")
+    if not (existing_merchant or existing_booking or existing_redirect):
+        return False
+
+    belongs_here = True
+    if existing_booking:
+        belongs_here = str(existing_booking) == str(booking_id)
+    if belongs_here and existing_merchant:
+        belongs_here = _merchant_order_matches_booking(existing_merchant, booking_id)
+    if belongs_here and not existing_booking and not existing_merchant:
+        # Orphan redirect with no booking/order binding — never reuse.
+        belongs_here = False
+
+    if belongs_here:
+        return False
+
+    for key in ("phonepe_redirect_url", "phonepe_merchant_order_id", "phonepe_booking_id"):
+        session_state.pop(key, None)
+    return True
+
+
 async def prepare_phonepe_redirect(booking_id: str, token: str) -> dict[str, Any]:
     """Resolve booking + amount, create the PhonePe order, return its redirect_url.
 
@@ -309,7 +350,12 @@ async def prepare_phonepe_redirect(booking_id: str, token: str) -> dict[str, Any
     if amount < 1:
         return {"error": "amount_missing"}
 
-    # Reuse a real PhonePe gateway URL from an earlier create in this session.
+    if clear_stale_phonepe_session(session, booking_id):
+        logger.info(
+            f"[phonepe] Cleared stale PhonePe session fields before checkout for {booking_id}"
+        )
+
+    # Reuse a real PhonePe gateway URL from an earlier create for THIS booking only.
     # Never reuse our hosted /pay/{booking_id} page — reminders and ensure_prepay
     # store that under payment_link for WhatsApp CTAs; treating it as the gateway
     # URL causes GET /pay → 303 → /pay → net::ERR_TOO_MANY_REDIRECTS.
@@ -322,11 +368,20 @@ async def prepare_phonepe_redirect(booking_id: str, token: str) -> dict[str, Any
     if (
         existing_redirect
         and existing_merchant
+        and _merchant_order_matches_booking(existing_merchant, booking_id)
         and session.get("payment_gateway") == "phonepe"
         and not _is_hosted_checkout_url(existing_redirect)
     ):
         logger.info(f"[phonepe] Reusing existing redirect for booking {booking_id}")
         return {"redirect_url": existing_redirect}
+    if existing_redirect and existing_merchant and not _merchant_order_matches_booking(
+        existing_merchant, booking_id
+    ):
+        logger.info(
+            f"[phonepe] Ignoring redirect for other booking "
+            f"(merchant={existing_merchant}) while checking out {booking_id}; "
+            "creating a fresh PhonePe order"
+        )
     if existing_redirect and _is_hosted_checkout_url(existing_redirect):
         logger.info(
             f"[phonepe] Ignoring hosted /pay URL as redirect for booking {booking_id}; "
@@ -346,6 +401,7 @@ async def prepare_phonepe_redirect(booking_id: str, token: str) -> dict[str, Any
 
     session["payment_gateway"] = "phonepe"
     session["phonepe_merchant_order_id"] = order["merchant_order_id"]
+    session["phonepe_booking_id"] = str(booking_id)
     # Keep payment_link as our hosted checkout (WhatsApp CTA); store gateway separately.
     session["phonepe_redirect_url"] = order["redirect_url"]
     session["payment_link"] = build_checkout_page_url(str(booking_id))
@@ -353,6 +409,73 @@ async def prepare_phonepe_redirect(booking_id: str, token: str) -> dict[str, Any
         await save_session_state(restaurant_id, phone, session)
 
     return {"redirect_url": order["redirect_url"]}
+
+
+async def scrub_session_for_abandoned_booking(
+    restaurant_id: str,
+    customer_phone: str,
+    booking_id: str,
+) -> bool:
+    """Remove PhonePe/checkout fields tied to an abandoned unpaid booking.
+
+    Safe no-op when the session already moved on to a newer booking.
+    """
+    from tools.db_tools import get_session_state, save_session_state
+
+    if not restaurant_id or not customer_phone or not booking_id:
+        return False
+
+    state = dict(await get_session_state(restaurant_id, customer_phone) or {})
+    if not state:
+        return False
+
+    bid = str(booking_id)
+    tied = (
+        str(state.get("phonepe_booking_id") or "") == bid
+        or str(state.get("booking_id") or "") == bid
+        or _merchant_order_matches_booking(state.get("phonepe_merchant_order_id"), bid)
+    )
+
+    changed = False
+    pending = dict(state.get("pending_prepay_fulfillment") or {})
+    if bid in pending:
+        pending.pop(bid, None)
+        state["pending_prepay_fulfillment"] = pending
+        changed = True
+
+    if tied:
+        for key in (
+            "phonepe_redirect_url",
+            "phonepe_merchant_order_id",
+            "phonepe_booking_id",
+            "payment_link",
+            "razorpay_payment_link_id",
+            "razorpay_order_id",
+            "payment_gateway",
+        ):
+            if key in state:
+                state.pop(key, None)
+                changed = True
+        if str(state.get("booking_id") or "") == bid:
+            state.pop("booking_id", None)
+            changed = True
+        if state.get("booking_step") in ("awaiting_prepay", "awaiting_payment"):
+            state["booking_step"] = "visit_complete"
+            changed = True
+        if state.get("minimal_step") == "awaiting_repeat_payment":
+            state.pop("minimal_step", None)
+            changed = True
+        state.pop("_prepay_blocks_kitchen", None)
+
+    if not changed:
+        return False
+
+    await save_session_state(restaurant_id, customer_phone, state)
+    logger.info(
+        f"[phonepe] Scrubbed session checkout state for abandoned booking {bid} "
+        f"({customer_phone})"
+    )
+    return True
 
 
 async def confirm_phonepe_return(booking_id: str, token: str) -> dict[str, Any]:

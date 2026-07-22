@@ -1609,17 +1609,22 @@ async def _fulfill_dine_in(payload: dict[str, Any]) -> bool:
         token,
         table_number=str(table_number) if table_number is not None else None,
     )
-    await _send_receipt(
-        restaurant_id=restaurant_id,
-        customer_phone=customer_phone,
-        customer_name=customer_name,
-        token=token,
-        service_type="dine_in",
-        cart_snapshot=cart_snapshot,
-        totals=totals,
-        table_number=str(table_number or ""),
-        order_text=order_text_display,
-    )
+    # Kitchen finalize already sends the receipt via _fire_kitchen_and_receipt;
+    # only send here if that path did not (e.g. missing pending kitchen payload).
+    if not state.get("_receipt_sent"):
+        await _send_receipt(
+            restaurant_id=restaurant_id,
+            customer_phone=customer_phone,
+            customer_name=customer_name,
+            token=token,
+            service_type="dine_in",
+            cart_snapshot=cart_snapshot,
+            totals=totals,
+            table_number=str(table_number or ""),
+            order_text=order_text_display,
+        )
+        state["_receipt_sent"] = True
+        await save_session_state(restaurant_id, customer_phone, state)
     await update_booking_status(booking_id, "confirmed")
     logger.info(
         f"[prepay-fulfill] Dine-in booking {booking_id} payment received "

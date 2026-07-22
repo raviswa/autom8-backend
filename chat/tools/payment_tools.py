@@ -578,8 +578,17 @@ def _record_prepay_gateway(
     detail = f" ({reason})" if reason else ""
     logger.info(f"[prepay] booking={booking_id} checkout_gateway={gw}{detail}")
     if session_state is not None:
+        if gw == "phonepe":
+            from tools.phonepe_tools import clear_stale_phonepe_session
+
+            if clear_stale_phonepe_session(session_state, booking_id):
+                logger.info(
+                    f"[prepay] Cleared stale PhonePe redirect for prior booking "
+                    f"before checkout {booking_id}"
+                )
         session_state["payment_gateway"] = gw
         session_state.setdefault("payment_link", build_checkout_page_url(str(booking_id)))
+        session_state["booking_id"] = str(booking_id)
 
 
 async def phonepe_prepay_available() -> bool:

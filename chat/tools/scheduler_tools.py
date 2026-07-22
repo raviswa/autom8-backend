@@ -170,6 +170,13 @@ async def start_scheduler():
     )
 
     scheduler.add_job(
+        abandon_stale_unpaid_prepay_bookings,
+        trigger=CronTrigger(minute="*/15"),  # Every 15 minutes
+        id="abandon_stale_unpaid_prepay_bookings",
+        name="Cancel unpaid prepay bookings past timeout",
+    )
+
+    scheduler.add_job(
         reconcile_paid_orders_without_kds,
         trigger=CronTrigger(minute="*/10"),  # Every 10 minutes
         id="reconcile_paid_orders_without_kds",
@@ -368,6 +375,66 @@ async def send_prepay_payment_reminders():
         logger.info(f"[prepay-reminder] Sent {sent} payment reminders")
     except Exception as e:
         logger.error(f"Error in send_prepay_payment_reminders: {e}")
+
+
+async def abandon_stale_unpaid_prepay_bookings():
+    """Cancel unpaid prepay bookings past the timeout and scrub checkout session state.
+
+    Timeline:
+      ~15 min — payment reminder (send_prepay_payment_reminders)
+      ~20 min — PhonePe hosted checkout expires (expireAfter=1200)
+      ~45 min — this job cancels the booking + clears stale PhonePe session fields
+    """
+    from tools.db_tools import (
+        STALE_UNPAID_PREPAY_MINUTES,
+        cancel_scheduled_jobs_for_booking,
+        cancel_stale_unpaid_prepay_booking,
+        get_stale_unpaid_prepay_bookings,
+    )
+    from tools.phonepe_tools import scrub_session_for_abandoned_booking
+
+    logger.info("Running abandon_stale_unpaid_prepay_bookings job")
+    try:
+        candidates = await get_stale_unpaid_prepay_bookings(
+            min_age_minutes=STALE_UNPAID_PREPAY_MINUTES,
+        )
+        cancelled = 0
+        for row in candidates:
+            booking_id = row["booking_id"]
+            restaurant_id = row["restaurant_id"]
+            phone = row.get("customer_phone") or ""
+            ok = await cancel_stale_unpaid_prepay_booking(
+                booking_id, reason="unpaid_timeout",
+            )
+            if not ok:
+                # Likely paid/confirmed concurrently — leave session alone.
+                continue
+            cancelled += 1
+            try:
+                await cancel_scheduled_jobs_for_booking(booking_id)
+            except Exception as job_err:
+                logger.warning(
+                    f"[prepay-abandon] cancel jobs failed for {booking_id}: {job_err}"
+                )
+            if phone:
+                try:
+                    await scrub_session_for_abandoned_booking(
+                        restaurant_id, phone, booking_id,
+                    )
+                except Exception as scrub_err:
+                    logger.warning(
+                        f"[prepay-abandon] session scrub failed for {booking_id}: {scrub_err}"
+                    )
+            logger.info(
+                f"[prepay-abandon] Cancelled unpaid booking {booking_id} "
+                f"(service={row.get('service_type')}, token={row.get('token_number')})"
+            )
+        logger.info(
+            f"[prepay-abandon] Cancelled {cancelled}/{len(candidates)} stale unpaid bookings "
+            f"(>{STALE_UNPAID_PREPAY_MINUTES}m)"
+        )
+    except Exception as e:
+        logger.error(f"Error in abandon_stale_unpaid_prepay_bookings: {e}")
 
 
 async def detect_no_shows():

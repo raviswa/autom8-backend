@@ -244,6 +244,13 @@ def expire_session_if_stale(
         session_state["order_confirmed_summary"] = _order_summary
     if _order_total is not None:
         session_state["order_total"] = _order_total
+    # Drop any leftover PhonePe gateway cache — never resume a stale hosted checkout.
+    for _pp_key in (
+        "phonepe_redirect_url",
+        "phonepe_merchant_order_id",
+        "phonepe_booking_id",
+    ):
+        session_state.pop(_pp_key, None)
     # Never resume prepay UX after idle — visit is over; webhooks still use preserved ids.
     session_state["booking_step"] = (
         "visit_complete" if step in ("awaiting_prepay", "awaiting_payment") else "ask_service"
