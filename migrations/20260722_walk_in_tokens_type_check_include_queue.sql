@@ -1,6 +1,11 @@
--- Add walk_in_tokens.type = 'scheduled_takeaway' to the canonical type check.
--- Run in Supabase SQL Editor after scheduled_delivery is already allowed.
--- Safe to re-run.
+-- Canonical walk_in_tokens.type check — must include ALL app-accepted types:
+--   dinein, takeaway, queue, large_party, scheduled_delivery, scheduled_takeaway
+--
+-- WHY: Older fix_walk_in_tokens_scheduled_* migrations recreated the check
+-- WITHOUT 'queue', so Token/Queue inserts fail with walk_in_tokens_type_check
+-- even though Node validates type=queue as valid.
+--
+-- Run in Supabase SQL Editor. Safe to re-run.
 
 -- 1) Inspect current type checks
 SELECT conname, pg_get_constraintdef(oid) AS definition
@@ -26,7 +31,7 @@ BEGIN
   END LOOP;
 END $$;
 
--- 3) Single canonical type check (queue + delivery + takeaway scheduling)
+-- 3) Single canonical type check
 ALTER TABLE public.walk_in_tokens
   ADD CONSTRAINT walk_in_tokens_type_check
   CHECK (type = ANY (ARRAY[
@@ -38,25 +43,25 @@ ALTER TABLE public.walk_in_tokens
     'scheduled_takeaway'::text
   ]));
 
--- 4) Verify — expect exactly ONE row including scheduled_takeaway
+-- 4) Verify — expect exactly ONE row including queue + scheduled_*
 SELECT conname, pg_get_constraintdef(oid) AS definition
 FROM pg_constraint
 WHERE conrelid = 'public.walk_in_tokens'::regclass
   AND contype = 'c'
   AND pg_get_constraintdef(oid) ILIKE '%type%';
 
--- 5) Live insert test (rolls back via delete)
+-- 5) Live insert smoke test for queue (delete after)
 INSERT INTO public.walk_in_tokens
   (id, restaurant_id, name, type, pax, status, meta)
 VALUES
   (
-    'T-MIGTEST-TAKEAWAY',
-    (SELECT id FROM public.tenants WHERE is_active = true LIMIT 1),
+    'T-MIGTEST-QUEUE',
+    '46fb9b9e-431a-43c9-9edb-d316b0fef216',
     'migration test',
-    'scheduled_takeaway',
+    'queue',
     1,
-    'pending_approval',
+    'waiting',
     '{}'::jsonb
   );
 
-DELETE FROM public.walk_in_tokens WHERE id = 'T-MIGTEST-TAKEAWAY';
+DELETE FROM public.walk_in_tokens WHERE id = 'T-MIGTEST-QUEUE';

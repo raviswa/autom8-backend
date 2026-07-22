@@ -922,7 +922,7 @@ async def send_service_menu(
             return
 
     # Partition rows into explicit structured sections.
-    # Preserve feature_gate order: token_queue before dine_in_now.
+    # Preserve feature_gate order (token_queue only when dine_in is off).
     _sec1_order = ("token_queue", "dine_in_now", "door_delivery_now", "takeaway_now")
     _sec2_order = ("table_reservation", "scheduled_delivery", "scheduled_pickup")
     by_id = {r["id"]: r for r in rows}

@@ -57,12 +57,13 @@ BEGIN
   END LOOP;
 END $$;
 
--- 4) Single canonical type check (includes scheduled_delivery + scheduled_takeaway)
+-- 4) Single canonical type check (queue + scheduled_delivery + scheduled_takeaway)
 ALTER TABLE public.walk_in_tokens
   ADD CONSTRAINT walk_in_tokens_type_check
   CHECK (type = ANY (ARRAY[
     'dinein'::text,
     'takeaway'::text,
+    'queue'::text,
     'large_party'::text,
     'scheduled_delivery'::text,
     'scheduled_takeaway'::text

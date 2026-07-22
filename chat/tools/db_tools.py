@@ -67,12 +67,19 @@ async def init_db():
                   AND conname = 'walk_in_tokens_type_check'
             """))
             defn = row.scalar() or ""
-            if "scheduled_delivery" in defn:
-                logger.info("[boot] ✅ walk_in_tokens_type_check allows scheduled_delivery")
+            required = ("queue", "scheduled_delivery", "scheduled_takeaway")
+            missing = [t for t in required if t not in defn]
+            if not missing:
+                logger.info(
+                    "[boot] ✅ walk_in_tokens_type_check allows queue + scheduled types"
+                )
             else:
                 logger.error(
-                    "[boot] ❌ walk_in_tokens_type_check on THIS DB connection "
-                    f"does NOT allow scheduled_delivery: {defn or '(missing)'}"
+                    "[boot] ❌ walk_in_tokens_type_check missing %s — run "
+                    "migrations/20260722_walk_in_tokens_type_check_include_queue.sql. "
+                    "defn=%s",
+                    missing,
+                    defn or "(missing)",
                 )
         print("Database connection successful")
     except Exception as e:

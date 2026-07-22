@@ -147,8 +147,9 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
       const detail = insertError.message || String(insertError);
       if (detail.includes('walk_in_tokens_type_check')) {
         throw new Error(
-          'Database migration required: run migrations/fix_walk_in_tokens_scheduled_delivery_check.sql '
-          + 'in Supabase SQL editor (walk_in_tokens.type must allow scheduled_delivery)'
+          'Database migration required: run migrations/20260722_walk_in_tokens_type_check_include_queue.sql '
+          + 'in Supabase SQL editor (walk_in_tokens.type must allow dinein, takeaway, queue, '
+          + 'large_party, scheduled_delivery, scheduled_takeaway)'
         );
       }
       throw insertError;

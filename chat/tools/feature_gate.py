@@ -336,14 +336,15 @@ def build_service_selection_payload(restaurant: dict) -> dict | None:
     rows_sec1 = []
     rows_sec2 = []
 
-    # Token / Queue is the lead option — listed before Dine-In when both enabled.
-    if Feature.TOKEN_MANAGEMENT in services_enabled:
+    dine_in_on = Feature.DINE_IN in services_enabled
+
+    # Token / Queue is a walk-in handoff for restaurants WITHOUT Dine-In ordering.
+    # When Dine-In is opted in, hide Token / Queue — customers should use Dine-In Now.
+    if Feature.TOKEN_MANAGEMENT in services_enabled and not dine_in_on:
         rows_sec1.append(_service_row("token_queue"))
 
-    if Feature.DINE_IN in services_enabled:
+    if dine_in_on:
         rows_sec1.append(_service_row("dine_in_now"))
-
-    if Feature.DINE_IN in services_enabled:
         rows_sec2.append(_service_row("table_reservation"))
 
     if Feature.DELIVERY in services_enabled:
