@@ -302,8 +302,11 @@
     .cart-overlay.open { display: block; }
     .cart-panel {
       position: fixed; left: 0; right: 0; bottom: 0;
-      height: min(92vh, 100dvh);
-      max-height: min(92vh, 100dvh);
+      /* Prefer visual viewport height so the sheet fits above Android/iOS chrome */
+      height: 90vh;
+      height: 90dvh;
+      max-height: 90vh;
+      max-height: 90dvh;
       background: var(--panel);
       border-radius: 18px 18px 0 0;
       z-index: 50;
@@ -320,23 +323,39 @@
     }
     .cart-head strong { font-size: 16px; font-weight: 700; }
     .icon-btn { border: none; background: #f3f4f6; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; font-size: 16px; }
-    /* flex:1 + min-height:0 is required or overflow-y never engages on mobile sheets */
+    /*
+      Scroll region MUST use flex-basis 0% (not auto). With basis:auto, mobile
+      WebViews (WhatsApp in-app browser) size the body to its content and clip
+      Special request / gift under the fixed footer with no working scrollbar.
+    */
     .cart-body {
-      padding: 12px 16px 20px;
-      overflow-y: auto;
+      padding: 12px 16px 48px;
       overflow-x: hidden;
+      overflow-y: scroll;
       overscroll-behavior: contain;
-      display: grid;
+      display: flex;
+      flex-direction: column;
       gap: 10px;
-      flex: 1 1 auto;
+      flex: 1 1 0%;
       min-height: 0;
+      height: 0; /* forces flex child to take only leftover panel height */
       -webkit-overflow-scrolling: touch;
-      scrollbar-width: thin;
-      scrollbar-color: #d1d5db transparent;
+      touch-action: pan-y;
+      scrollbar-gutter: stable;
+      scrollbar-width: auto;
+      scrollbar-color: #9ca3af #f3f4f6;
     }
-    .cart-body::-webkit-scrollbar { width: 6px; }
+    .cart-body::-webkit-scrollbar { width: 8px; }
+    .cart-body::-webkit-scrollbar-track { background: #f3f4f6; border-radius: 999px; }
     .cart-body::-webkit-scrollbar-thumb {
-      background: #d1d5db; border-radius: 999px;
+      background: #9ca3af; border-radius: 999px;
+    }
+    body.cart-open {
+      overflow: hidden !important;
+      touch-action: none;
+    }
+    body.cart-open .cart-body {
+      touch-action: pan-y;
     }
     .cart-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .cart-line .cl-name { font-size: 13.5px; font-weight: 600; }
@@ -625,10 +644,19 @@
         position: sticky !important;
         top: 86px;
         transform: none !important;
-        height: auto;
-        max-height: calc(100vh - 110px);
+        height: auto !important;
+        max-height: calc(100vh - 110px) !important;
         border-radius: var(--radius); border: 1px solid var(--line); box-shadow: none;
         z-index: 1;
+      }
+      .cart-body {
+        height: auto;
+        flex: 1 1 auto;
+        overflow-y: auto;
+      }
+      body.cart-open {
+        overflow: auto !important;
+        touch-action: auto;
       }
       .header { position: sticky; top: 0; border-radius: 0; }
     }
@@ -1430,19 +1458,48 @@
       return JSON.stringify({ lines, promo, notes, ship });
     }
 
+    function syncCartPanelToViewport() {
+      if (!cartPanel || isDesktop() || !cartPanel.classList.contains('open')) {
+        if (cartPanel) {
+          cartPanel.style.height = '';
+          cartPanel.style.maxHeight = '';
+        }
+        return;
+      }
+      // Shrink the sheet to the visible viewport when the soft keyboard opens,
+      // otherwise Special request stays trapped under the keyboard with no scroll room.
+      const vv = window.visualViewport;
+      const visible = vv ? Math.round(vv.height) : window.innerHeight;
+      const h = Math.max(280, Math.min(visible - 8, Math.round(window.innerHeight * 0.92)));
+      cartPanel.style.height = `${h}px`;
+      cartPanel.style.maxHeight = `${h}px`;
+    }
+
     function openCart() {
       cartPanel.classList.add('open');
-      if (!isDesktop()) cartOverlay.classList.add('open');
+      if (!isDesktop()) {
+        cartOverlay.classList.add('open');
+        document.body.classList.add('cart-open');
+        syncCartPanelToViewport();
+      }
     }
     function closeCart() {
       if (isDesktop()) return; // always open on desktop
       cartPanel.classList.remove('open');
       cartOverlay.classList.remove('open');
+      document.body.classList.remove('cart-open');
+      cartPanel.style.height = '';
+      cartPanel.style.maxHeight = '';
     }
     $('closeCartBtn').addEventListener('click', closeCart);
     cartOverlay.addEventListener('click', closeCart);
     floatBar.addEventListener('click', openCart);
     $('navCart').addEventListener('click', openCart);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', syncCartPanelToViewport);
+      window.visualViewport.addEventListener('scroll', syncCartPanelToViewport);
+    }
+    window.addEventListener('resize', syncCartPanelToViewport);
     $('navMenu').addEventListener('click', () => openCategoriesSheet());
     $('navSearch').addEventListener('click', () => { $('searchBox').focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
     $('navHelp').addEventListener('click', () => {
