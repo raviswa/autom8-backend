@@ -367,6 +367,18 @@
     textarea, input.field {
       width: 100%; border: 1px solid var(--line); border-radius: 10px;
       padding: 10px; font: inherit; background: #fff;
+      box-sizing: border-box;
+    }
+    /* Flex column cart-body shrinks bare textareas to ~0px on mobile WebViews. */
+    .cart-body > input.field,
+    .cart-body input.field,
+    .cart-body > textarea,
+    .cart-body textarea {
+      flex-shrink: 0;
+    }
+    .cart-body textarea {
+      min-height: 64px;
+      resize: vertical;
     }
     .saved-addresses { display: flex; flex-direction: column; gap: 6px; }
     .saved-address-select {
