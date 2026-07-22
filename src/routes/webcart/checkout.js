@@ -44,6 +44,8 @@ const {
   triggerConfirmAndPay,
   SHIPROCKET_STATUS_MAP,
   triggerShipmentNotify,
+  selectDroppingMissingColumns,
+  isMissingColumnError,
 } = require('./shared');
 
 router.get('/api/webcart/payment-status', async (req, res) => {

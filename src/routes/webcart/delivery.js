@@ -44,6 +44,8 @@ const {
   triggerConfirmAndPay,
   SHIPROCKET_STATUS_MAP,
   triggerShipmentNotify,
+  selectDroppingMissingColumns,
+  isMissingColumnError,
 } = require('./shared');
 
 router.get('/api/webcart/saved-addresses', async (req, res) => {
@@ -117,6 +119,9 @@ router.get('/api/webcart/saved-addresses', async (req, res) => {
 
 router.post('/api/webcart/delivery-quote', async (req, res) => {
   try {
+    // #region agent log
+    fetch('http://127.0.0.1:7380/ingest/982e28a2-86ba-4a90-a485-a232585f9d4f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'26a250'},body:JSON.stringify({sessionId:'26a250',runId:'post-fix',hypothesisId:'A',location:'delivery.js:delivery-quote:entry',message:'delivery-quote entered',data:{hasSelectDropping:typeof selectDroppingMissingColumns,hasCalculateDelivery:typeof calculateDelivery,hasResolveCartLineWeights:typeof resolveCartLineWeights,pincodeLen:String((req.body||{}).pincode||'').length,itemCount:Array.isArray((req.body||{}).items)?(req.body||{}).items.length:0},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     const { pincode, cart_total, items } = req.body || {};
     const customerPincode = normalizePincode(pincode);
     if (!customerPincode) {
@@ -124,12 +129,18 @@ router.post('/api/webcart/delivery-quote', async (req, res) => {
     }
 
     const restaurant = await resolveRestaurantBySlug(req);
+    // #region agent log
+    fetch('http://127.0.0.1:7380/ingest/982e28a2-86ba-4a90-a485-a232585f9d4f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'26a250'},body:JSON.stringify({sessionId:'26a250',runId:'post-fix',hypothesisId:'C',location:'delivery.js:delivery-quote:restaurant',message:'restaurant resolved',data:{found:!!restaurant,lob:restaurant?.lob_type||null,provider:restaurant?.shipping_provider||null,hasPostal:!!restaurant?.postal_code,hasRateCard:!!restaurant?.courier_rate_card},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     if (!restaurant) return res.status(404).json({ ok: false, error: 'Restaurant not found.' });
 
     // Resolve catalog weights server-side (client qty × menu weight_grams)
     let weighedItems = [];
     const rawItems = Array.isArray(items) ? items : [];
     if (rawItems.length) {
+      // #region agent log
+      fetch('http://127.0.0.1:7380/ingest/982e28a2-86ba-4a90-a485-a232585f9d4f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'26a250'},body:JSON.stringify({sessionId:'26a250',runId:'post-fix',hypothesisId:'A',location:'delivery.js:delivery-quote:before-weight',message:'about to call selectDroppingMissingColumns',data:{typeofFn:typeof selectDroppingMissingColumns,rawItemCount:rawItems.length},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       const { data: liveItems, error: liveErr } = await selectDroppingMissingColumns(
         'menu_items:delivery-quote',
         'id, retailer_id, weight_grams, item_type, meta',
@@ -150,8 +161,14 @@ router.post('/api/webcart/delivery-quote', async (req, res) => {
     const quote = await calculateDelivery(restaurant, customerPincode, cart_total, {
       items: weighedItems,
     });
+    // #region agent log
+    fetch('http://127.0.0.1:7380/ingest/982e28a2-86ba-4a90-a485-a232585f9d4f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'26a250'},body:JSON.stringify({sessionId:'26a250',runId:'post-fix',hypothesisId:'B',location:'delivery.js:delivery-quote:success',message:'quote computed',data:{charge:quote?.charge,source:quote?.source,zone:quote?.zone,weight_kg:quote?.weight_kg},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     return res.json({ ok: true, ...quote });
   } catch (err) {
+    // #region agent log
+    fetch('http://127.0.0.1:7380/ingest/982e28a2-86ba-4a90-a485-a232585f9d4f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'26a250'},body:JSON.stringify({sessionId:'26a250',runId:'post-fix',hypothesisId:'A',location:'delivery.js:delivery-quote:catch',message:'delivery-quote threw',data:{name:err?.name||null,message:String(err?.message||err),stackTop:String(err?.stack||'').split('\\n').slice(0,4)},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     console.error('[webcart/delivery-quote]', err.message);
     if (err?.details) console.error('[webcart/delivery-quote] details:', err.details);
     if (err?.hint) console.error('[webcart/delivery-quote] hint:', err.hint);
