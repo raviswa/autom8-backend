@@ -6,21 +6,9 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-_CUISINE_LINES: dict[str, str] = {
-    "veg": "Serving fresh, flavourful vegetarian food every day!",
-    "non_veg": "Serving fresh, flavourful non-vegetarian favourites every day!",
-    "asian": "Serving bold, wok-fresh Asian flavours every day!",
-    "continental": "Serving fresh, flavourful continental classics every day!",
-    "fast_food": "Serving hot, fresh comfort bites every day!",
-}
+from locales.customer import reply, session_lang
 
-_CUISINE_MENU_HOOKS: dict[str, str] = {
-    "veg": "Everything on our menu is 100% vegetarian.",
-    "non_veg": "From starters to mains — all made fresh.",
-    "asian": "Wok-fresh, every order.",
-    "continental": "Made to order, plated with care.",
-    "fast_food": "Fast, fresh, and exactly how you like it.",
-}
+_CUISINE_KEYS = ("veg", "non_veg", "asian", "continental", "fast_food")
 
 
 def parse_cuisine_tags(cuisine_type: str | None) -> list[str]:
@@ -38,20 +26,26 @@ def parse_cuisine_tags(cuisine_type: str | None) -> list[str]:
     return tags
 
 
-def get_time_period(timezone: str) -> tuple[str, str]:
-    """Returns (period_name, emoji) based on restaurant local time."""
+def get_time_period(timezone: str, lang: str | None = None) -> tuple[str, str]:
+    """Returns (localized period_name, emoji) based on restaurant local time."""
     try:
         tz = ZoneInfo(timezone or "Asia/Kolkata")
     except Exception:
         tz = ZoneInfo("Asia/Kolkata")
     hour = datetime.now(tz).hour
     if 5 <= hour < 12:
-        return "morning", "🌅"
-    if 12 <= hour < 17:
-        return "afternoon", "☀️"
-    if 17 <= hour < 21:
-        return "evening", "🌆"
-    return "night", "🌙"
+        key = "period_morning"
+        emoji = "🌅"
+    elif 12 <= hour < 17:
+        key = "period_afternoon"
+        emoji = "☀️"
+    elif 17 <= hour < 21:
+        key = "period_evening"
+        emoji = "🌆"
+    else:
+        key = "period_night"
+        emoji = "🌙"
+    return reply(lang, key), emoji
 
 
 def build_greeting(
@@ -60,25 +54,24 @@ def build_greeting(
     restaurant_display_name: str,
     restaurant_cuisine: list[str],
     timezone: str,
+    lang: str | None = None,
 ) -> str:
     """Structured greeting for service menu opening."""
-    period, _ = get_time_period(timezone)
+    period, _ = get_time_period(timezone, lang)
     display = (restaurant_display_name or "our restaurant").strip()
 
     primary_cuisine = next(
-        (c for c in (restaurant_cuisine or []) if c in _CUISINE_LINES),
+        (c for c in (restaurant_cuisine or []) if c in _CUISINE_KEYS),
         None,
     )
-    warmth = _CUISINE_LINES.get(primary_cuisine, "Good food, your way.")
+    warmth_key = f"cuisine_{primary_cuisine}" if primary_cuisine else "cuisine_default"
+    warmth = reply(lang, warmth_key)
 
-    greet = f"Good {period.capitalize()}"
-    welcome = "Welcome to" if is_new else "Welcome back to"
+    period_display = period.capitalize() if (lang or "en") == "en" else period
+    greet = reply(lang, "greet_good_period", period=period_display)
+    welcome = reply(lang, "welcome_new" if is_new else "welcome_back", display=display)
 
-    return (
-        f"{greet} 👋\n"
-        f"{welcome} *{display}* 🍽️\n"
-        f"{warmth}"
-    )
+    return f"{greet}\n{welcome}\n{warmth}"
 
 
 def build_menu_intro(
@@ -86,26 +79,28 @@ def build_menu_intro(
     restaurant_cuisine: list[str],
     customer_name: str | None,
     is_new: bool,
+    lang: str | None = None,
 ) -> str:
     """Warm menu opening message. Cuisine-aware, not generic."""
     display = (restaurant_display_name or "our restaurant").strip()
     primary = next(
-        (c for c in (restaurant_cuisine or []) if c in _CUISINE_MENU_HOOKS),
+        (c for c in (restaurant_cuisine or []) if c in _CUISINE_KEYS),
         None,
     )
-    hook = _CUISINE_MENU_HOOKS.get(primary, "Fresh and made to order.")
+    hook_key = f"menu_hook_{primary}" if primary else "menu_hook_default"
+    hook = reply(lang, hook_key)
 
     name_line = ""
     db_name = (customer_name or "").strip()
     if db_name and not is_new:
         first = db_name.split()[0]
-        name_line = f"Here's what's on today, {first}:\n"
+        name_line = reply(lang, "menu_intro_named", first=first)
 
     return (
-        f"🍽️ *{display}*\n"
+        f"{reply(lang, 'menu_intro_header', display=display)}\n"
         f"{name_line}"
         f"{hook}\n\n"
-        f"Browse the menu below, pick your items, and we'll take care of the rest."
+        f"{reply(lang, 'menu_intro_cta')}"
     )
 
 
@@ -182,4 +177,5 @@ async def build_conversation_greeting(
         restaurant_display_name=session_state.get("_restaurant_display_name", "our restaurant"),
         restaurant_cuisine=session_state.get("_restaurant_cuisine", []),
         timezone=session_state.get("_restaurant_timezone", "Asia/Kolkata"),
+        lang=session_lang(session_state),
     )

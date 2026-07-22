@@ -22,6 +22,7 @@ const router  = express.Router();
 
 const { supabaseAdmin } = require('../../config/supabase');
 const { supplyAuthMiddleware } = require('../../middleware/supplyAuth');
+const { estimateDaysOfStock } = require('../../helpers/supplyConsumption');
 const {
   DEFAULT_LOB,
   VALID_UNIT_TYPES,
@@ -72,6 +73,18 @@ router.get('/meta', supplyAuthMiddleware, async (req, res) => {
     res.json(schemaMeta(schema));
   } catch (err) {
     console.error('[supply/catalog] GET /meta', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/supply/catalog/stock-estimates ───────────────────────────────────
+// Read-only days-of-stock estimates from opt-in POS consumption bridge.
+router.get('/stock-estimates', supplyAuthMiddleware, async (req, res) => {
+  try {
+    const estimates = await estimateDaysOfStock(req.supplier_id);
+    res.json({ estimates });
+  } catch (err) {
+    console.error('[supply/catalog] GET /stock-estimates', err.message);
     res.status(500).json({ error: err.message });
   }
 });

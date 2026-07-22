@@ -72,6 +72,7 @@ app.use('/api/brands',      require('./src/routes/brands'));
 app.use('/api/kds',         require('./src/routes/kds'));
 app.use('/api/catalog',     require('./src/routes/catalog'));
 app.use('/api/instagram',   require('./src/routes/instagram'));
+app.use('/api/loyalty',     require('./src/routes/loyalty').router);
 app.post('/api/menu/upload', ...menuUploadMiddleware);
 app.put('/api/menu-items/:id/availability', ...menuItemAvailabilityMiddleware);
 app.put('/api/menu-items/:id/special-today', ...menuItemSpecialTodayMiddleware);

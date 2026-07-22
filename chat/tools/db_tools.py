@@ -1313,6 +1313,134 @@ async def cancel_stale_unpaid_prepay_booking(
         return False
 
 
+ABANDONED_CART_MINUTES = 30
+
+_ACTIVE_BOOKING_STEPS = (
+    "awaiting_order",
+    "awaiting_category_selection",
+    "awaiting_item_selection",
+    "awaiting_quantity",
+    "awaiting_cart_action",
+    "awaiting_special_notes",
+    "awaiting_prepay",
+    "awaiting_payment",
+    "confirming_order",
+)
+
+
+async def get_abandoned_webcart_drafts(
+    min_age_minutes: int = ABANDONED_CART_MINUTES,
+    limit: int = 40,
+) -> list[dict[str, Any]]:
+    """Cart drafts idle >N minutes with no reminder and no conversion."""
+    if AsyncSessionLocal is None:
+        return []
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    SELECT
+                      d.id::text AS draft_id,
+                      d.restaurant_id::text AS restaurant_id,
+                      d.phone,
+                      d.session_token,
+                      d.item_count,
+                      d.opened_at,
+                      d.updated_at,
+                      COALESCE(r.display_name, r.name, 'our store') AS store_name
+                    FROM webcart_drafts d
+                    JOIN tenants r ON r.id = d.restaurant_id
+                    WHERE d.reminder_sent_at IS NULL
+                      AND d.converted_at IS NULL
+                      AND d.item_count > 0
+                      AND d.updated_at < NOW() - (:min_age || ' minutes')::interval
+                      AND NOT EXISTS (
+                        SELECT 1 FROM bookings b
+                        JOIN customers c ON c.id = b.customer_id
+                        WHERE b.restaurant_id = d.restaurant_id
+                          AND (
+                            c.phone = d.phone
+                            OR RIGHT(REGEXP_REPLACE(c.phone, '\\D', '', 'g'), 10)
+                               = RIGHT(REGEXP_REPLACE(d.phone, '\\D', '', 'g'), 10)
+                          )
+                          AND b.created_at >= d.opened_at
+                      )
+                    ORDER BY d.updated_at ASC
+                    LIMIT :lim
+                """),
+                {"min_age": str(min_age_minutes), "lim": int(limit)},
+            )
+            return [dict(r) for r in result.mappings().all()]
+    except Exception as e:
+        logger.warning(f"[webcart-abandon] get_abandoned_webcart_drafts failed: {e}")
+        return []
+
+
+async def is_customer_mid_conversation(restaurant_id: str, phone: str) -> bool:
+    """True when WhatsApp session is actively ordering (skip abandon nudge)."""
+    if AsyncSessionLocal is None or not restaurant_id or not phone:
+        return False
+    try:
+        digits = "".join(ch for ch in str(phone) if ch.isdigit())
+        variants = list({phone, digits, digits[-10:] if len(digits) >= 10 else "", f"91{digits[-10:]}" if len(digits) >= 10 else ""})
+        variants = [v for v in variants if v]
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    SELECT context, current_state, updated_at
+                    FROM conversation_states
+                    WHERE restaurant_id = CAST(:rid AS uuid)
+                      AND customer_phone = ANY(:phones)
+                    ORDER BY updated_at DESC NULLS LAST
+                    LIMIT 1
+                """),
+                {"rid": restaurant_id, "phones": variants},
+            )
+            row = result.mappings().first()
+            if not row:
+                return False
+            ctx = row.get("context") or {}
+            if isinstance(ctx, str):
+                try:
+                    ctx = json.loads(ctx)
+                except Exception:
+                    ctx = {}
+            step = str(ctx.get("booking_step") or "").strip().lower()
+            if step in _ACTIVE_BOOKING_STEPS:
+                return True
+            state = str(row.get("current_state") or "").strip().lower()
+            if state in ("awaiting_prepay", "awaiting_payment", "confirming_order"):
+                return True
+            return False
+    except Exception as e:
+        logger.warning(f"[webcart-abandon] mid-conversation check failed: {e}")
+        return False
+
+
+async def mark_webcart_draft_reminded(draft_id: str) -> bool:
+    if AsyncSessionLocal is None or not draft_id:
+        return False
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("""
+                    UPDATE webcart_drafts
+                    SET reminder_sent_at = NOW()
+                    WHERE id = CAST(:id AS uuid)
+                      AND reminder_sent_at IS NULL
+                      AND converted_at IS NULL
+                    RETURNING id::text AS draft_id
+                """),
+                {"id": draft_id},
+            )
+            row = result.mappings().first()
+            await session.commit()
+            return bool(row)
+    except Exception as e:
+        logger.warning(f"[webcart-abandon] mark reminded failed for {draft_id}: {e}")
+        return False
+
+
 async def mark_booking_kds_sent(booking_id: str) -> None:
     """Record that this booking was pushed to KDS."""
     if AsyncSessionLocal is None:

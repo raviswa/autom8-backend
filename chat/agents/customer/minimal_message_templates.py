@@ -6,46 +6,61 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-_LOB_HOOKS: dict[str, dict[str, str]] = {
+from locales.customer import reply, session_lang
+
+_LOB_META: dict[str, dict[str, str]] = {
     "psl": {
         "icon": "🍕",
-        "hook": "Pizza, ice cream & more — browse and order online.",
-        "cta_header": "Start Your Order",
-        "cta_button": "Browse & Order",
+        "hook_key": "lob_psl_hook",
+        "header_key": "lob_cta_header_order",
+        "button_key": "lob_cta_button_order",
     },
     "food_products": {
         "icon": "🧁",
-        "hook": "Fresh bakes & treats — browse and order online.",
-        "cta_header": "Start Your Order",
-        "cta_button": "Browse & Order",
+        "hook_key": "lob_food_products_hook",
+        "header_key": "lob_cta_header_order",
+        "button_key": "lob_cta_button_order",
     },
     "retail": {
         "icon": "🛍️",
-        "hook": "Shop our catalog — browse and order online.",
-        "cta_header": "Start Shopping",
-        "cta_button": "Browse Catalog",
+        "hook_key": "lob_retail_hook",
+        "header_key": "lob_cta_header_shop",
+        "button_key": "lob_cta_button_shop",
     },
 }
 
 
-def get_time_period(timezone: str) -> tuple[str, str]:
-    """Returns (period_name, emoji) based on tenant local time."""
+def get_time_period(timezone: str, lang: str | None = None) -> tuple[str, str]:
+    """Returns (localized period_name, emoji) based on tenant local time."""
     try:
         tz = ZoneInfo(timezone or "Asia/Kolkata")
     except Exception:
         tz = ZoneInfo("Asia/Kolkata")
     hour = datetime.now(tz).hour
     if 5 <= hour < 12:
-        return "morning", "🌅"
-    if 12 <= hour < 17:
-        return "afternoon", "☀️"
-    if 17 <= hour < 21:
-        return "evening", "🌆"
-    return "night", "🌙"
+        key, emoji = "period_morning", "🌅"
+    elif 12 <= hour < 17:
+        key, emoji = "period_afternoon", "☀️"
+    elif 17 <= hour < 21:
+        key, emoji = "period_evening", "🌆"
+    else:
+        key, emoji = "period_night", "🌙"
+    period = reply(lang, key)
+    if (lang or "en") == "en":
+        # Match historic English capitalization in "Good Morning"
+        period = {"period_morning": "morning", "period_afternoon": "afternoon",
+                  "period_evening": "evening", "period_night": "night"}[key]
+    return period, emoji
 
 
-def lob_hook(lob_type: str) -> dict[str, str]:
-    return _LOB_HOOKS.get(lob_type, _LOB_HOOKS["retail"])
+def lob_hook(lob_type: str, lang: str | None = None) -> dict[str, str]:
+    meta = _LOB_META.get(lob_type, _LOB_META["retail"])
+    return {
+        "icon": meta["icon"],
+        "hook": reply(lang, meta["hook_key"]),
+        "cta_header": reply(lang, meta["header_key"]),
+        "cta_button": reply(lang, meta["button_key"]),
+    }
 
 
 def build_welcome_message(
@@ -56,52 +71,50 @@ def build_welcome_message(
     is_returning: bool,
     can_repeat: bool,
     timezone: str = "Asia/Kolkata",
+    lang: str | None = None,
 ) -> tuple[str, str, str]:
     """
     Returns (body_text, cta_header, cta_button) for the webcart link message.
     Single outbound message — no follow-up bubbles.
     """
-    meta = lob_hook(lob_type)
-    period, _ = get_time_period(timezone)
+    meta = lob_hook(lob_type, lang)
+    period, _ = get_time_period(timezone, lang)
     display = (store_name or "our store").strip()
-    greet = f"Good {period.capitalize()} 👋"
+    period_display = period.capitalize() if (lang or "en") == "en" else period
+    greet = reply(lang, "greet_good_period", period=period_display)
 
     first = ""
     if customer_name:
         first = customer_name.strip().split()[0]
 
     if is_returning and first:
-        welcome_line = f"Welcome back, {first}! *{display}* {meta['icon']}"
+        welcome_line = reply(
+            lang, "welcome_returning_named", first=first, display=display, icon=meta["icon"],
+        )
     elif first:
-        welcome_line = f"Welcome, {first}! *{display}* {meta['icon']}"
+        welcome_line = reply(
+            lang, "welcome_named", first=first, display=display, icon=meta["icon"],
+        )
     else:
-        welcome_line = f"Welcome to *{display}* {meta['icon']}"
+        welcome_line = reply(lang, "welcome_anon", display=display, icon=meta["icon"])
 
     lines = [
         greet,
         welcome_line,
         f"{meta['hook']}",
+        "",
+        reply(lang, "welcome_browse_cta"),
     ]
-
-    lines.append("")
-    lines.append(
-        "Tap below to browse, pick items, and pay securely — all on our online menu."
-    )
     if can_repeat:
         lines.append("")
-        lines.append(
-            "Ordered before? Reply *REPEAT* anytime to reorder your last purchase."
-        )
+        lines.append(reply(lang, "welcome_repeat_hint"))
 
     return "\n".join(lines), meta["cta_header"], meta["cta_button"]
 
 
-def build_repeat_unavailable_message(store_name: str) -> str:
+def build_repeat_unavailable_message(store_name: str, lang: str | None = None) -> str:
     display = (store_name or "our store").strip()
-    return (
-        f"We couldn't find a previous order for you at *{display}*. 🙏\n\n"
-        "Tap the menu link when we send it, or reply *Hi* to get started."
-    )
+    return reply(lang, "repeat_unavailable", display=display)
 
 
 def build_repeat_confirm_body(
@@ -111,19 +124,25 @@ def build_repeat_confirm_body(
     total: float,
     preview_lines: list[str],
     gateway_label: str,
+    lang: str | None = None,
 ) -> str:
     order_preview = "\n".join(preview_lines)
-    return (
-        "Your repeat order is almost ready.\n\n"
-        f"Order ref: {order_ref}\n"
-        f"Token: {token_label}\n"
-        f"Total: INR {total:.0f}\n\n"
-        f"{order_preview}\n\n"
-        f"Tap Confirm & Pay to complete payment securely via {gateway_label}."
+    return reply(
+        lang,
+        "repeat_confirm",
+        order_ref=order_ref,
+        token_label=token_label,
+        total=total,
+        order_preview=order_preview,
+        gateway_label=gateway_label,
     ).strip()
 
 
-def build_short_redirect_message(can_repeat: bool) -> str:
-    hint = "Reply *REPEAT* to reorder your last purchase." if can_repeat else ""
-    base = "Browse and checkout on the menu link we sent. Need a fresh link? Reply *Hi*."
-    return f"{base}\n{hint}".strip() if hint else base
+def build_short_redirect_message(can_repeat: bool, lang: str | None = None) -> str:
+    if can_repeat:
+        return reply(lang, "short_redirect_repeat")
+    return reply(lang, "short_redirect")
+
+
+def lang_from_session(session_state: dict[str, Any] | None) -> str:
+    return session_lang(session_state)

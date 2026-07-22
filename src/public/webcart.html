@@ -819,6 +819,12 @@
             <div id="deliveryQuoteHint" class="delivery-quote-hint" style="display:none"></div>
           </div>
         <input class="field" id="promo" placeholder="Promo code (optional)" />
+        <div id="loyaltyWrap" style="display:none;margin-top:4px">
+          <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="loyaltyRedeem" style="margin-top:3px" />
+            <span id="loyaltyLabel">Loyalty points</span>
+          </label>
+        </div>
         <textarea id="notes" rows="2" placeholder="Special request (optional)"></textarea>
         <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;cursor:pointer">
           <input type="checkbox" id="giftToggle" />
@@ -1026,6 +1032,7 @@
       deliveryQuoteTimer: null,
       affinity: { by_item: {}, pairs: [], customer_favourites: [] },
       pricingConfig: {},
+      loyalty: { balance: 0, redeem_points: 100, redeem_inr: 50, points_per_100: 1 },
     };
 
     const $ = (id) => document.getElementById(id);
@@ -1160,6 +1167,35 @@
       try {
         sessionStorage.setItem(cartStorageKey(), JSON.stringify([...state.cart.entries()]));
       } catch (_e) { /* storage unavailable — fail silently, cart still works in-memory */ }
+    }
+    let _draftTimer = null;
+    function scheduleDraftSave() {
+      if (_draftTimer) clearTimeout(_draftTimer);
+      _draftTimer = setTimeout(persistCartDraft, 1200);
+    }
+    async function persistCartDraft() {
+      const phoneVal = state.phone || phone || ($('shipPhone')?.value || '').trim();
+      if (!phoneVal && !token) return;
+      if (isFilePreview) return;
+      try {
+        const q = new URLSearchParams();
+        if (slug) q.set('slug', slug);
+        const items = [...state.cart.values()].map((l) => ({
+          id: l.id,
+          name: l.name,
+          qty: l.qty,
+          price: l.price,
+        }));
+        await fetch(`/api/webcart/draft?${q.toString()}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: token || state.session?.token || null,
+            phone: phoneVal,
+            items,
+          }),
+        });
+      } catch (_e) { /* non-fatal */ }
     }
     function loadCartLocal() {
       try {
@@ -1525,8 +1561,20 @@
 
     function currentDiscount(subtotal) {
       const code = ($('promo').value || '').trim().toUpperCase();
-      if (code === 'MUNAFE10') return { code, amount: Math.round(subtotal * 0.1) };
-      return { code: '', amount: 0 };
+      let amount = 0;
+      let label = '';
+      if (code === 'MUNAFE10') {
+        amount += Math.round(subtotal * 0.1);
+        label = code;
+      }
+      const loy = state.loyalty || {};
+      const redeemPts = Number(loy.redeem_points || 100);
+      const redeemInr = Number(loy.redeem_inr || 50);
+      if ($('loyaltyRedeem')?.checked && Number(loy.balance || 0) >= redeemPts) {
+        amount += redeemInr;
+        label = label ? `${label}+LOYALTY` : 'LOYALTY';
+      }
+      return { code: label, amount };
     }
 
 function cartTotals() {
@@ -1703,6 +1751,7 @@ function cartTotals() {
 
     function renderCart() {
       saveCartLocal(); // FIX (4): keep storage in sync on every cart render
+      scheduleDraftSave();
 
       const {
         lines,
@@ -3079,6 +3128,28 @@ $('subtotal').textContent = money(subtotal);
       syncUrlWithContext();
       state.menu = data.menu_items || [];
       state.pricingConfig = data.pricing_config || {};
+      state.loyalty = data.loyalty || { balance: 0, redeem_points: 100, redeem_inr: 50, points_per_100: 1 };
+      const loyWrap = $('loyaltyWrap');
+      const loyLabel = $('loyaltyLabel');
+      const loyCheck = $('loyaltyRedeem');
+      if (loyWrap && loyLabel) {
+        const bal = Number(state.loyalty.balance || 0);
+        const need = Number(state.loyalty.redeem_points || 100);
+        const inr = Number(state.loyalty.redeem_inr || 50);
+        if (bal > 0) {
+          loyWrap.style.display = '';
+          loyLabel.textContent = bal >= need
+            ? `You have ${bal} points — redeem ${need} for Rs ${inr} off`
+            : `You have ${bal} points (need ${need} to redeem Rs ${inr} off)`;
+          if (loyCheck) {
+            loyCheck.disabled = bal < need;
+            if (bal < need) loyCheck.checked = false;
+          }
+        } else {
+          loyWrap.style.display = 'none';
+          if (loyCheck) loyCheck.checked = false;
+        }
+      }
       state.affinity = data.affinity || { by_item: {}, pairs: [], customer_favourites: [] };
       state.todaysSpecial = data.todays_special || [];
       state.availableNow = data.available_now || [];
@@ -3296,6 +3367,7 @@ $('subtotal').textContent = money(subtotal);
         guest: useGuestCheckout ? '1' : undefined,
         items: [...state.cart.values()],
         promo_code: ($('promo').value || '').trim() || null,
+        redeem_loyalty: !!$('loyaltyRedeem')?.checked,
         special_request: ($('notes').value || '').trim() || null,
       };
       const giftOrder = isGiftOrder();
@@ -3408,6 +3480,7 @@ $('subtotal').textContent = money(subtotal);
       if (e.key === 'Escape') hideWhatsAppGuide();
     });
     $('promo').addEventListener('input', () => { renderCart(); if (requiresShipping()) scheduleDeliveryQuote(); });
+    if ($('loyaltyRedeem')) $('loyaltyRedeem').addEventListener('change', () => { renderCart(); if (requiresShipping()) scheduleDeliveryQuote(); });
     $('notes').addEventListener('input', renderCart);
     if ($('shipName')) $('shipName').addEventListener('input', () => { saveDeliveryLocal(); renderCart(); });
     // Keep focused delivery fields visible above the keyboard inside the sheet.

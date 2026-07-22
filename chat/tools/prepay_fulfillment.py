@@ -1799,9 +1799,222 @@ async def fulfill_from_webhook(booking_id: str) -> bool:
     )
     success = await fulfill_after_payment(payload)
     if success:
+        try:
+            await _award_loyalty_points(
+                restaurant_id=str(booking["restaurant_id"]),
+                customer_phone=str(booking["customer_phone"]),
+                booking_id=str(booking_id),
+                paid_total=float(
+                    payload.get("order_total")
+                    or (payload.get("totals") or {}).get("grand_total")
+                    or booking.get("total_amount")
+                    or 0
+                ),
+            )
+        except Exception as loy_err:
+            logger.warning(f"[prepay-fulfill] loyalty award failed for {booking_id}: {loy_err}")
+        try:
+            await _record_supply_consumption(
+                restaurant_id=str(booking["restaurant_id"]),
+                booking_id=str(booking_id),
+                cart_snapshot=payload.get("cart_snapshot"),
+            )
+        except Exception as cons_err:
+            logger.warning(
+                f"[prepay-fulfill] supply consumption failed for {booking_id}: {cons_err}"
+            )
         await clear_prepay_payload(
             booking["restaurant_id"],
             booking["customer_phone"],
             booking_id,
         )
     return success
+
+async def _award_loyalty_points(
+    *,
+    restaurant_id: str,
+    customer_phone: str,
+    booking_id: str,
+    paid_total: float,
+) -> None:
+    """Append loyalty earn row (idempotent on booking_id + reason)."""
+    from tools.db_tools import AsyncSessionLocal
+    from sqlalchemy import text
+
+    if AsyncSessionLocal is None or not restaurant_id or not customer_phone:
+        return
+    total = max(0.0, float(paid_total or 0))
+    if total < 100:
+        return
+    phone_digits = "".join(ch for ch in str(customer_phone) if ch.isdigit()) or str(customer_phone)
+
+    async with AsyncSessionLocal() as session:
+        cfg = await session.execute(
+            text("""
+                SELECT COALESCE(loyalty_points_per_100_inr, 1) AS pts
+                FROM tenants
+                WHERE id = CAST(:rid AS uuid)
+                LIMIT 1
+            """),
+            {"rid": restaurant_id},
+        )
+        row = cfg.mappings().first()
+        pts_per_100 = float((row or {}).get("pts") or 1)
+        points = int(total // 100) * int(pts_per_100)
+        if points <= 0:
+            return
+        await session.execute(
+            text("""
+                INSERT INTO loyalty_ledger
+                  (restaurant_id, customer_phone, delta, reason, booking_id)
+                VALUES
+                  (CAST(:rid AS uuid), :phone, :delta, 'order_paid', CAST(:bid AS uuid))
+                ON CONFLICT DO NOTHING
+            """),
+            {
+                "rid": restaurant_id,
+                "phone": phone_digits,
+                "delta": points,
+                "bid": booking_id,
+            },
+        )
+        await session.commit()
+        logger.info(
+            f"[loyalty] awarded {points} pts booking={booking_id} phone={phone_digits[-4:]}"
+        )
+
+
+async def _record_supply_consumption(
+    *,
+    restaurant_id: str,
+    booking_id: str,
+    cart_snapshot: Any,
+) -> None:
+    """Append-only consumption rows when opt-in menu_item_supply_sku maps exist."""
+    from tools.db_tools import AsyncSessionLocal
+    from sqlalchemy import text
+    import uuid as _uuid
+
+    if AsyncSessionLocal is None or not restaurant_id or not booking_id:
+        return
+
+    cart = _normalize_cart_snapshot(cart_snapshot or {})
+    if not cart:
+        return
+
+    keys = list(cart.keys())
+    uuid_keys = []
+    retailer_keys = []
+    for k in keys:
+        try:
+            _uuid.UUID(str(k))
+            uuid_keys.append(str(k))
+        except Exception:
+            retailer_keys.append(str(k))
+
+    async with AsyncSessionLocal() as session:
+        # Resolve cart keys → menu_items.id
+        id_by_key: dict[str, str] = {}
+        if uuid_keys:
+            rows = (
+                await session.execute(
+                    text("""
+                        SELECT id::text AS id, retailer_id
+                        FROM menu_items
+                        WHERE restaurant_id = CAST(:rid AS uuid)
+                          AND id = ANY(CAST(:ids AS uuid[]))
+                    """),
+                    {"rid": restaurant_id, "ids": uuid_keys},
+                )
+            ).mappings().all()
+            for row in rows:
+                id_by_key[str(row["id"])] = str(row["id"])
+                if row.get("retailer_id"):
+                    id_by_key[str(row["retailer_id"])] = str(row["id"])
+        if retailer_keys:
+            rows = (
+                await session.execute(
+                    text("""
+                        SELECT id::text AS id, retailer_id
+                        FROM menu_items
+                        WHERE restaurant_id = CAST(:rid AS uuid)
+                          AND retailer_id = ANY(CAST(:rids AS text[]))
+                    """),
+                    {"rid": restaurant_id, "rids": retailer_keys},
+                )
+            ).mappings().all()
+            for row in rows:
+                id_by_key[str(row["id"])] = str(row["id"])
+                if row.get("retailer_id"):
+                    id_by_key[str(row["retailer_id"])] = str(row["id"])
+
+        qty_by_menu: dict[str, float] = {}
+        for key, line in cart.items():
+            mid = id_by_key.get(str(key))
+            if not mid:
+                continue
+            qty_by_menu[mid] = qty_by_menu.get(mid, 0.0) + float(line.get("qty") or 0)
+
+        if not qty_by_menu:
+            return
+
+        menu_ids = list(qty_by_menu.keys())
+        try:
+            maps = (
+                await session.execute(
+                    text("""
+                        SELECT menu_item_id::text AS menu_item_id,
+                               supply_client_id::text AS supply_client_id,
+                               supply_sku_id::text AS supply_sku_id,
+                               COALESCE(consumption_ratio, 1) AS consumption_ratio
+                        FROM menu_item_supply_sku
+                        WHERE restaurant_id = CAST(:rid AS uuid)
+                          AND menu_item_id = ANY(CAST(:mids AS uuid[]))
+                    """),
+                    {"rid": restaurant_id, "mids": menu_ids},
+                )
+            ).mappings().all()
+        except Exception as map_err:
+            # Table not migrated yet — no-op.
+            logger.info(f"[supply-consumption] skip maps: {map_err}")
+            return
+
+        if not maps:
+            return
+
+        inserted = 0
+        for m in maps:
+            sold = float(qty_by_menu.get(m["menu_item_id"]) or 0)
+            ratio = float(m["consumption_ratio"] or 1)
+            qty = round(sold * ratio, 4)
+            if qty <= 0:
+                continue
+            try:
+                await session.execute(
+                    text("""
+                        INSERT INTO supply_consumption_ledger
+                          (restaurant_id, supply_client_id, supply_sku_id,
+                           menu_item_id, booking_id, qty_consumed)
+                        VALUES
+                          (CAST(:rid AS uuid), CAST(:cid AS uuid), CAST(:sku AS uuid),
+                           CAST(:mid AS uuid), CAST(:bid AS uuid), :qty)
+                        ON CONFLICT DO NOTHING
+                    """),
+                    {
+                        "rid": restaurant_id,
+                        "cid": m["supply_client_id"],
+                        "sku": m["supply_sku_id"],
+                        "mid": m["menu_item_id"],
+                        "bid": booking_id,
+                        "qty": qty,
+                    },
+                )
+                inserted += 1
+            except Exception as ins_err:
+                logger.warning(f"[supply-consumption] insert failed: {ins_err}")
+
+        await session.commit()
+        if inserted:
+            logger.info(
+                f"[supply-consumption] recorded {inserted} row(s) booking={booking_id}"
+            )

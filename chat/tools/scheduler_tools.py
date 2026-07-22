@@ -170,6 +170,13 @@ async def start_scheduler():
     )
 
     scheduler.add_job(
+        send_abandoned_webcart_reminders,
+        trigger=CronTrigger(minute="*/15"),
+        id="send_abandoned_webcart_reminders",
+        name="One-shot nudge for abandoned webcart drafts",
+    )
+
+    scheduler.add_job(
         abandon_stale_unpaid_prepay_bookings,
         trigger=CronTrigger(minute="*/15"),  # Every 15 minutes
         id="abandon_stale_unpaid_prepay_bookings",
@@ -338,23 +345,44 @@ async def send_prepay_payment_reminders():
 
             cta_sent = False
             if pay_link:
+                from locales.customer import reply as customer_reply
+                from tools.db_tools import get_session_state
+
+                pref_lang = "en"
+                try:
+                    sess = await get_session_state(restaurant_id, phone) or {}
+                    pref_lang = str(sess.get("preferred_language") or "en")
+                except Exception:
+                    pref_lang = "en"
+                service_label = service_type.replace("_", " ")
                 cta_sent = await send_whatsapp_cta_url(
                     phone,
                     restaurant_id,
-                    body_text=(
-                        f"Hi {name}! 👋\n\n"
-                        f"Your {service_type.replace('_', ' ')} order is still awaiting payment.\n\n"
-                        f"Tap Confirm & Pay to complete payment securely via {gateway_label}.\n\n"
-                        "This is our only payment reminder. If the link no longer works, "
-                        "reply *Home* (or *Hi*) to start a fresh order."
+                    body_text=customer_reply(
+                        pref_lang,
+                        "prepay_reminder_body",
+                        name=name,
+                        service_label=service_label,
+                        gateway_label=gateway_label,
                     ),
-                    button_text="Confirm & Pay",
+                    button_text=customer_reply(pref_lang, "prepay_reminder_button"),
                     url=pay_link,
-                    header_text="Payment Pending",
-                    footer_text=f"Secure payment powered by {gateway_label}",
+                    header_text=customer_reply(pref_lang, "prepay_reminder_header"),
+                    footer_text=customer_reply(
+                        pref_lang, "prepay_reminder_footer", gateway_label=gateway_label,
+                    ),
                 )
 
             if not cta_sent:
+                from locales.customer import reply as customer_reply
+                from tools.db_tools import get_session_state
+
+                pref_lang = "en"
+                try:
+                    sess = await get_session_state(restaurant_id, phone) or {}
+                    pref_lang = str(sess.get("preferred_language") or "en")
+                except Exception:
+                    pref_lang = "en"
                 pay_line = ""
                 if pay_link:
                     pay_line = "\n\n" + format_razorpay_payment_line(
@@ -362,11 +390,13 @@ async def send_prepay_payment_reminders():
                     )
                 await send_whatsapp_message(
                     phone,
-                    f"Hi {name}! 👋\n\n"
-                    f"Your {service_type.replace('_', ' ')} order is still awaiting payment."
-                    f"{pay_line}\n\n"
-                    "This is our only payment reminder. If the link no longer works, "
-                    "reply *Home* (or *Hi*) to start a fresh order.",
+                    customer_reply(
+                        pref_lang,
+                        "prepay_reminder_fallback",
+                        name=name,
+                        service_label=service_type.replace("_", " "),
+                        pay_line=pay_line,
+                    ),
                     restaurant_id,
                 )
             await increment_prepay_reminder_count(booking_id)
@@ -375,6 +405,80 @@ async def send_prepay_payment_reminders():
         logger.info(f"[prepay-reminder] Sent {sent} payment reminders")
     except Exception as e:
         logger.error(f"Error in send_prepay_payment_reminders: {e}")
+
+
+async def send_abandoned_webcart_reminders():
+    """One WhatsApp nudge for carts idle >30 minutes with no booking."""
+    from tools.db_tools import (
+        ABANDONED_CART_MINUTES,
+        get_abandoned_webcart_drafts,
+        get_session_state,
+        is_customer_mid_conversation,
+        mark_webcart_draft_reminded,
+    )
+    from tools.booking_mechanisms import _build_web_menu_url, _slugify_subdomain
+    from tools.whatsapp_tools import send_whatsapp_cta_url, send_whatsapp_message
+    from locales.customer import reply as customer_reply
+
+    logger.info("Running send_abandoned_webcart_reminders job")
+    try:
+        drafts = await get_abandoned_webcart_drafts(min_age_minutes=ABANDONED_CART_MINUTES)
+        sent = 0
+        for row in drafts:
+            draft_id = row["draft_id"]
+            restaurant_id = row["restaurant_id"]
+            phone = row.get("phone") or ""
+            store_name = row.get("store_name") or "our store"
+            if not phone:
+                continue
+            if await is_customer_mid_conversation(restaurant_id, phone):
+                continue
+
+            pref_lang = "en"
+            try:
+                sess = await get_session_state(restaurant_id, phone) or {}
+                pref_lang = str(sess.get("preferred_language") or "en")
+            except Exception:
+                pref_lang = "en"
+
+            name = "there"
+            slug = _slugify_subdomain(store_name)
+            token = str(row.get("session_token") or "").strip()
+            phone_digits = "".join(ch for ch in phone if ch.isdigit())
+            url = None
+            if slug and token and phone_digits:
+                url = _build_web_menu_url(slug, token, phone_digits[-10:] if len(phone_digits) > 10 else phone_digits)
+
+            body = customer_reply(
+                pref_lang,
+                "abandoned_cart_body",
+                name=name,
+                store_name=store_name,
+            )
+            cta_sent = False
+            if url:
+                cta_sent = await send_whatsapp_cta_url(
+                    phone,
+                    restaurant_id,
+                    body_text=body,
+                    button_text=customer_reply(pref_lang, "abandoned_cart_button"),
+                    url=url,
+                    header_text=customer_reply(pref_lang, "abandoned_cart_header"),
+                    footer_text=customer_reply(pref_lang, "abandoned_cart_footer"),
+                )
+            if not cta_sent:
+                await send_whatsapp_message(
+                    phone,
+                    body if not url else f"{body}\n\n{url}",
+                    restaurant_id,
+                )
+
+            if await mark_webcart_draft_reminded(draft_id):
+                sent += 1
+
+        logger.info(f"[webcart-abandon] Sent {sent}/{len(drafts)} abandoned-cart reminders")
+    except Exception as e:
+        logger.error(f"Error in send_abandoned_webcart_reminders: {e}")
 
 
 async def abandon_stale_unpaid_prepay_bookings():

@@ -19,8 +19,14 @@ from agents.customer.minimal_message_templates import (
     build_repeat_unavailable_message,
     build_short_redirect_message,
     build_welcome_message,
+    lang_from_session,
 )
 from agents.customer.booking_helpers import touch_session_activity
+from agents.customer.conversation_helpers import (
+    apply_language_to_session,
+    safe_classify_intent_full,
+)
+from locales.customer import reply, session_lang
 from tools.booking_mechanisms import (
     _build_web_menu_url,
     _normalize_phone_digits,
@@ -177,12 +183,13 @@ async def send_minimal_webcart_link(
     if not url:
         await send_whatsapp_message(
             customer_phone,
-            "Sorry, we couldn't open the menu right now. Please try again in a moment. 🙏",
+            reply(session_lang(session_state), "menu_link_failed"),
             restaurant_id,
         )
         return False
 
     timezone = (session_state.get("_restaurant_timezone") or "Asia/Kolkata")
+    lang = lang_from_session(session_state)
     body_text, header_text, button_text = build_welcome_message(
         lob_type=lob_type,
         store_name=store_name,
@@ -190,6 +197,7 @@ async def send_minimal_webcart_link(
         is_returning=is_returning,
         can_repeat=can_repeat,
         timezone=timezone,
+        lang=lang,
     )
 
     sent = await send_whatsapp_cta_url(
@@ -199,7 +207,7 @@ async def send_minimal_webcart_link(
         button_text=button_text,
         url=url,
         header_text=header_text,
-        footer_text="Secure checkout on our online menu",
+        footer_text=reply(lang, "webcart_footer"),
     )
     if not sent:
         fallback = f"{body_text}\n\n👉 {button_text}\n{url}"
@@ -248,11 +256,12 @@ async def _handle_repeat_order(
     store_name = (restaurant.get("name") or "our store").strip()
     customer_id = str(customer.get("id") or "")
     customer_name = str(customer.get("name") or "Guest").strip() or "Guest"
+    lang = lang_from_session(session_state)
 
     if not customer_id:
         await send_whatsapp_message(
             phone,
-            build_repeat_unavailable_message(store_name),
+            build_repeat_unavailable_message(store_name, lang=lang),
             restaurant_id,
         )
         return
@@ -261,7 +270,7 @@ async def _handle_repeat_order(
     if not last:
         await send_whatsapp_message(
             phone,
-            build_repeat_unavailable_message(store_name),
+            build_repeat_unavailable_message(store_name, lang=lang),
             restaurant_id,
         )
         return
@@ -271,7 +280,7 @@ async def _handle_repeat_order(
     if not items:
         await send_whatsapp_message(
             phone,
-            build_repeat_unavailable_message(store_name),
+            build_repeat_unavailable_message(store_name, lang=lang),
             restaurant_id,
         )
         return
@@ -365,6 +374,7 @@ async def _handle_repeat_order(
         total=total,
         preview_lines=preview_lines,
         gateway_label=gateway_label,
+        lang=lang,
     )
 
     sent = await send_whatsapp_cta_url(
@@ -420,6 +430,19 @@ async def handle_minimal_order_flow(
 
     touch_session_activity(session_state)
 
+    # Detect language without changing classifier; persist preferred_language on session.
+    try:
+        classified = await safe_classify_intent_full(
+            message_body or "hi",
+            "minimal_order",
+            {"lob_type": lob_type, "preferred_language": session_state.get("preferred_language")},
+        )
+        apply_language_to_session(session_state, classified.get("language"))
+    except Exception as lang_err:
+        logger.debug("[minimal-order] language detect skipped: %s", lang_err)
+
+    lang = lang_from_session(session_state)
+
     if is_repeat_keyword(message_body):
         await _handle_repeat_order(
             restaurant=restaurant,
@@ -446,6 +469,6 @@ async def handle_minimal_order_flow(
 
     await send_whatsapp_message(
         phone,
-        build_short_redirect_message(can_repeat),
+        build_short_redirect_message(can_repeat, lang=lang),
         restaurant_id,
     )

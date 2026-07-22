@@ -14,9 +14,27 @@ const { supabaseAdmin } = require('../../config/supabase');
 const { supplyAuthMiddleware: auth } = require('../../middleware/supplyAuth');
 const { notifyClient } = require('./notify');
 const { generateStatement } = require('./statements');
+const { isSubscriptionSoftLocked } = require('../../helpers/subscriptionAccess');
+const { createFormToken } = require('./supplyFormToken');
 
 const DEFAULT_FORM_BASE_URL = 'https://order.autom8.works';
 const SUPPLY_FORM_BASE_URL = process.env.SUPPLY_FORM_BASE_URL || DEFAULT_FORM_BASE_URL;
+
+function getTodayCutoffDate(supplier) {
+  const now = new Date();
+  const cutoffHour = Number(supplier?.order_cutoff_hour ?? 20);
+  const d = new Date(now);
+  d.setHours(cutoffHour, 0, 0, 0);
+  if (d <= now) d.setDate(d.getDate() + 1);
+  return d;
+}
+
+function median(nums) {
+  if (!nums.length) return null;
+  const sorted = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
 
 function getPreviousMonth() {
   const now = new Date();
@@ -174,6 +192,96 @@ async function runOverdueReminderJob(supplierId) {
   return { processedCount: processed.length, errors };
 }
 
+async function runReorderNudgeJob(supplierId) {
+  const { data: supplier } = await supabaseAdmin
+    .from('suppliers')
+    .select('id, subscription_status, subscription_current_period_end, order_cutoff_hour')
+    .eq('id', supplierId)
+    .maybeSingle();
+
+  if (!supplier || isSubscriptionSoftLocked(supplier)) {
+    return { processedCount: 0, errors: ['supplier soft-locked or missing'] };
+  }
+
+  const { data: clients, error: clientsErr } = await supabaseAdmin
+    .from('supply_clients')
+    .select('id, name, phone, is_active, last_reorder_nudge_at')
+    .eq('supplier_id', supplierId)
+    .eq('is_active', true);
+  if (clientsErr) throw new Error(`Failed to fetch clients: ${clientsErr.message}`);
+
+  const processed = [];
+  const errors = [];
+  const now = Date.now();
+  const DAY = 86400000;
+
+  for (const client of clients || []) {
+    try {
+      if (!client.phone) continue;
+
+      const { data: orders, error: ordErr } = await supabaseAdmin
+        .from('supply_orders')
+        .select('id, created_at, status')
+        .eq('supplier_id', supplierId)
+        .eq('client_id', client.id)
+        .in('status', ['confirmed', 'out_for_delivery', 'delivered', 'completed'])
+        .order('created_at', { ascending: false })
+        .limit(12);
+      if (ordErr) throw ordErr;
+
+      const dates = (orders || [])
+        .map((o) => new Date(o.created_at).getTime())
+        .filter((t) => Number.isFinite(t))
+        .sort((a, b) => b - a);
+      if (dates.length < 2) continue;
+
+      const gaps = [];
+      for (let i = 0; i < dates.length - 1; i += 1) {
+        gaps.push((dates[i] - dates[i + 1]) / DAY);
+      }
+      const med = median(gaps);
+      if (!med || med < 2) continue;
+
+      const daysSince = (now - dates[0]) / DAY;
+      // Grace: nudge when overdue by ~1 day past personal median.
+      if (daysSince < med + 0.5) continue;
+
+      if (client.last_reorder_nudge_at) {
+        const nudgedAt = new Date(client.last_reorder_nudge_at).getTime();
+        // Don't re-nudge until they've ordered again (last order after nudge) or 14d cooldown.
+        if (nudgedAt > dates[0] && (now - nudgedAt) < 14 * DAY) continue;
+      }
+
+      const validUntil = getTodayCutoffDate(supplier);
+      const token = createFormToken(supplierId, client.id, validUntil, false);
+      const orderFormUrl = `${SUPPLY_FORM_BASE_URL.replace(/\/$/, '')}/s/${token}`;
+      const notifyResult = await notifyClient(
+        supplierId,
+        client.phone,
+        'supply_order_link',
+        { client_name: client.name, order_form_url: orderFormUrl },
+        client.id,
+      );
+      if (!notifyResult.ok) {
+        errors.push(`client=${client.id} notify failed: ${notifyResult.error}`);
+        continue;
+      }
+
+      await supabaseAdmin
+        .from('supply_clients')
+        .update({ last_reorder_nudge_at: new Date().toISOString() })
+        .eq('id', client.id)
+        .eq('supplier_id', supplierId);
+
+      processed.push(client.id);
+    } catch (err) {
+      errors.push(`client=${client.id} error: ${err.message}`);
+    }
+  }
+
+  return { processedCount: processed.length, errors };
+}
+
 async function runSchedulerJob(jobName, supplierId, month) {
   switch (jobName) {
     case 'monthly_statement':
@@ -182,6 +290,9 @@ async function runSchedulerJob(jobName, supplierId, month) {
     case 'overdue_reminder':
     case 'overdue_reminders':
       return await runOverdueReminderJob(supplierId);
+    case 'reorder_nudge':
+    case 'reorder_nudges':
+      return await runReorderNudgeJob(supplierId);
     default:
       throw new Error(`Unsupported scheduler job: ${jobName}`);
   }
@@ -298,7 +409,7 @@ function startSupplySchedulerCron() {
     return;
   }
 
-  const lastRun = { overdue: '', monthly: '' };
+  const lastRun = { overdue: '', monthly: '', reorder: '' };
 
   const tick = async () => {
     try {
@@ -330,6 +441,13 @@ function startSupplySchedulerCron() {
         }
       }
 
+      if (hour === 11 && lastRun.reorder !== ymd) {
+        lastRun.reorder = ymd;
+        console.log('[supply-scheduler] cron reorder_nudges starting');
+        const results = await runCronJobsForAllSuppliers('reorder_nudges');
+        console.log('[supply-scheduler] cron reorder_nudges done', results.length);
+      }
+
       if (day === 1 && hour === 9 && lastRun.monthly !== ymd) {
         lastRun.monthly = ymd;
         console.log('[supply-scheduler] cron monthly_statements starting');
@@ -348,5 +466,5 @@ function startSupplySchedulerCron() {
   setInterval(tick, 15 * 60 * 1000);
   // First check shortly after boot
   setTimeout(tick, 30 * 1000);
-  console.log('[supply-scheduler] in-process IST cron started (overdue 10:00, monthly 1st 09:00)');
+  console.log('[supply-scheduler] in-process IST cron started (overdue 10:00, reorder 11:00, monthly 1st 09:00)');
 }

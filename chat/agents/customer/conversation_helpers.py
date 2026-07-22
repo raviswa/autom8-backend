@@ -24,15 +24,32 @@ logger = logging.getLogger(__name__)
 
 
 async def safe_classify_intent(message: str, flow: str, context: dict) -> str:
+    """Back-compat: returns intent string only."""
+    result = await safe_classify_intent_full(message, flow, context)
+    return result.get("intent", "unknown")
+
+
+async def safe_classify_intent_full(message: str, flow: str, context: dict) -> dict:
+    """Returns {intent, language} — language from conversation_intelligence."""
     try:
         result = await classify_intent(message, flow, context)
-        return result.get("intent", "unknown")
+        return {
+            "intent": result.get("intent", "unknown"),
+            "language": result.get("language") or "english",
+        }
     except ModuleNotFoundError as e:
         logger.debug(f"classify_intent skipped — missing module ({e}).")
-        return "unknown"
+        return {"intent": "unknown", "language": "english"}
     except Exception as e:
         logger.debug(f"classify_intent failed (non-fatal): {e}")
-        return "unknown"
+        return {"intent": "unknown", "language": "english"}
+
+
+def apply_language_to_session(session_state: dict, language: str | None) -> str:
+    """Persist preferred_language when Tamil is confidently detected."""
+    from locales.customer import apply_detected_language
+
+    return apply_detected_language(session_state, language)
 
 
 async def safe_load_context(restaurant_id: str, customer_id: str) -> dict:
@@ -101,7 +118,8 @@ async def background_analytics(
             return
 
         context = await safe_load_context(restaurant_id, customer_id)
-        intent  = await safe_classify_intent(message, "booking_flow", context)
+        classified = await safe_classify_intent_full(message, "booking_flow", context)
+        intent = classified.get("intent", "unknown")
         await safe_log_event(
             restaurant_id, customer_id,
             f"booking_{step}", "booking_message", intent, message,

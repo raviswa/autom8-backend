@@ -317,6 +317,7 @@ async def send_catalog_category_picker(
         ensure_restaurant_greeting_context,
         resolve_is_new_customer,
     )
+    from locales.customer import session_lang
     await ensure_restaurant_greeting_context(state, restaurant_id or "")
     is_new = await resolve_is_new_customer(state, restaurant_id or "", customer_phone)
     menu_body = build_menu_intro(
@@ -324,6 +325,7 @@ async def send_catalog_category_picker(
         restaurant_cuisine=state.get("_restaurant_cuisine", []),
         customer_name=state.get("_customer_db_name") or state.get("customer_name"),
         is_new=is_new,
+        lang=session_lang(state),
     )
     categories = _ordered_categories(available)
     rows: list[dict] = []

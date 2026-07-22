@@ -327,6 +327,278 @@ router.get('/insights', authenticateToken, getRestaurantId, requireOutlet, async
   }
 });
 
+function resolveDashboardRange(query) {
+  const range = String(query.range || '30d').toLowerCase();
+  const now = new Date();
+  let start;
+  let end = query.end ? new Date(query.end) : now;
+  if (query.start && query.end) {
+    start = new Date(query.start);
+    end = new Date(query.end);
+  } else if (range === '7d') {
+    start = new Date(now.getTime() - 7 * 86400000);
+  } else if (range === 'custom' && query.start) {
+    start = new Date(query.start);
+  } else {
+    start = new Date(now.getTime() - 30 * 86400000);
+  }
+  return { start: start.toISOString(), end: end.toISOString(), range };
+}
+
+// ── GET /api/dashboard/item-performance ──────────────────────────────────────
+router.get('/item-performance', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
+  try {
+    const { start, end, range } = resolveDashboardRange(req.query);
+    const sort = String(req.query.sort || 'revenue').toLowerCase();
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+
+    const { data: bookings, error: bookErr } = await supabaseAdmin
+      .from('bookings')
+      .select('id, status, payment_status, created_at, kds_sent_at, updated_at')
+      .eq('restaurant_id', req.restaurant_id)
+      .gte('created_at', start)
+      .lte('created_at', end);
+    if (bookErr) throw bookErr;
+
+    const bookingIds = (bookings || []).map((b) => b.id).filter(Boolean);
+    const bookingMeta = new Map((bookings || []).map((b) => [b.id, b]));
+
+    let items = [];
+    if (bookingIds.length) {
+      // Chunk to avoid URL length limits
+      const chunks = [];
+      for (let i = 0; i < bookingIds.length; i += 200) chunks.push(bookingIds.slice(i, i + 200));
+      for (const chunk of chunks) {
+        const { data, error } = await supabaseAdmin
+          .from('order_items')
+          .select('booking_id, menu_item_id, item_name, quantity, unit_price, total_price, name')
+          .in('booking_id', chunk);
+        if (error) {
+          // Fallback column set for older schemas
+          const fallback = await supabaseAdmin
+            .from('order_items')
+            .select('booking_id, menu_item_id, quantity, unit_price')
+            .in('booking_id', chunk);
+          if (fallback.error) throw error;
+          items = items.concat(fallback.data || []);
+        } else {
+          items = items.concat(data || []);
+        }
+      }
+    }
+
+    const byItem = new Map();
+    for (const row of items) {
+      const booking = bookingMeta.get(row.booking_id);
+      if (!booking) continue;
+      const key = String(row.menu_item_id || row.item_name || row.name || 'unknown');
+      const entry = byItem.get(key) || {
+        menu_item_id: row.menu_item_id || null,
+        name: row.item_name || row.name || 'Item',
+        order_count: 0,
+        unit_qty: 0,
+        revenue: 0,
+        cancelled_orders: 0,
+        ready_samples: 0,
+        ready_minutes_sum: 0,
+      };
+      const qty = Math.max(0, Number(row.quantity || 0));
+      const lineRev = Number(row.total_price != null
+        ? row.total_price
+        : (Number(row.unit_price || 0) * qty));
+      entry.order_count += 1;
+      entry.unit_qty += qty;
+      const cancelled = String(booking.status || '').toLowerCase() === 'cancelled';
+      if (cancelled) entry.cancelled_orders += 1;
+      else entry.revenue += lineRev;
+
+      if (booking.kds_sent_at && booking.updated_at && !cancelled) {
+        const mins = (new Date(booking.updated_at) - new Date(booking.kds_sent_at)) / 60000;
+        if (Number.isFinite(mins) && mins >= 0 && mins < 240) {
+          entry.ready_samples += 1;
+          entry.ready_minutes_sum += mins;
+        }
+      }
+      if (!entry.name || entry.name === 'Item') {
+        entry.name = row.item_name || row.name || entry.name;
+      }
+      byItem.set(key, entry);
+    }
+
+    let rows = [...byItem.values()].map((r) => ({
+      menu_item_id: r.menu_item_id,
+      name: r.name,
+      order_count: r.order_count,
+      unit_qty: r.unit_qty,
+      revenue: Math.round(r.revenue * 100) / 100,
+      cancellation_rate: r.order_count
+        ? Math.round((r.cancelled_orders / r.order_count) * 1000) / 10
+        : 0,
+      avg_ready_minutes: r.ready_samples
+        ? Math.round((r.ready_minutes_sum / r.ready_samples) * 10) / 10
+        : null,
+    }));
+
+    const sorters = {
+      revenue: (a, b) => b.revenue - a.revenue,
+      orders: (a, b) => b.order_count - a.order_count,
+      cancellation: (a, b) => b.cancellation_rate - a.cancellation_rate,
+      ready: (a, b) => (b.avg_ready_minutes || 0) - (a.avg_ready_minutes || 0),
+    };
+    rows.sort(sorters[sort] || sorters.revenue);
+    const total = rows.length;
+    rows = rows.slice(offset, offset + limit);
+
+    res.json({
+      success: true,
+      range,
+      start,
+      end,
+      sort,
+      total,
+      offset,
+      limit,
+      items: rows,
+    });
+  } catch (err) {
+    console.error('[dashboard/item-performance]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/dashboard/menu-supply-links ─────────────────────────────────────
+// Opt-in POS ↔ Supply SKU mappings for this restaurant.
+router.get('/menu-supply-links', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('menu_item_supply_sku')
+      .select('id, menu_item_id, supply_client_id, supply_sku_id, consumption_ratio, created_at')
+      .eq('restaurant_id', req.restaurant_id)
+      .order('created_at', { ascending: false });
+    if (error) {
+      if (/menu_item_supply_sku|42p01|pgrst205/i.test(error.message || '')) {
+        return res.json({ success: true, links: [] });
+      }
+      throw error;
+    }
+    res.json({ success: true, links: data || [] });
+  } catch (err) {
+    console.error('[dashboard/menu-supply-links GET]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/dashboard/menu-supply-links ────────────────────────────────────
+router.post('/menu-supply-links', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
+  try {
+    const {
+      menu_item_id,
+      supply_client_id,
+      supply_sku_id,
+      consumption_ratio = 1,
+    } = req.body || {};
+    if (!menu_item_id || !supply_client_id || !supply_sku_id) {
+      return res.status(400).json({
+        error: 'menu_item_id, supply_client_id, and supply_sku_id are required',
+      });
+    }
+    const ratio = Number(consumption_ratio);
+    if (!(ratio > 0)) {
+      return res.status(400).json({ error: 'consumption_ratio must be > 0' });
+    }
+
+    // Ensure client is linked to this restaurant (opt-in bridge).
+    const { data: client, error: clientErr } = await supabaseAdmin
+      .from('supply_clients')
+      .select('id, munafe_restaurant_id')
+      .eq('id', supply_client_id)
+      .maybeSingle();
+    if (clientErr) throw clientErr;
+    if (!client || String(client.munafe_restaurant_id) !== String(req.restaurant_id)) {
+      return res.status(400).json({
+        error: 'supply_client_id must belong to a client linked to this restaurant',
+      });
+    }
+
+    const { data: menuItem, error: menuErr } = await supabaseAdmin
+      .from('menu_items')
+      .select('id')
+      .eq('id', menu_item_id)
+      .eq('restaurant_id', req.restaurant_id)
+      .maybeSingle();
+    if (menuErr) throw menuErr;
+    if (!menuItem) return res.status(404).json({ error: 'Menu item not found' });
+
+    const { data: link, error } = await supabaseAdmin
+      .from('menu_item_supply_sku')
+      .upsert({
+        restaurant_id: req.restaurant_id,
+        menu_item_id,
+        supply_client_id,
+        supply_sku_id,
+        consumption_ratio: ratio,
+      }, { onConflict: 'restaurant_id,menu_item_id,supply_sku_id' })
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ success: true, link });
+  } catch (err) {
+    console.error('[dashboard/menu-supply-links POST]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── DELETE /api/dashboard/menu-supply-links/:id ──────────────────────────────
+router.delete('/menu-supply-links/:id', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
+  try {
+    const { error } = await supabaseAdmin
+      .from('menu_item_supply_sku')
+      .delete()
+      .eq('id', req.params.id)
+      .eq('restaurant_id', req.restaurant_id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[dashboard/menu-supply-links DELETE]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/dashboard/customer-cohorts ──────────────────────────────────────
+router.get('/customer-cohorts', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
+  try {
+    const { buildCustomerMap, filterSegment, SEGMENT_KEYS } = require('../helpers/marketingCampaign');
+    const map = await buildCustomerMap(req.restaurant_id);
+    const all = filterSegment(map, 'all');
+    const total = all.length || 0;
+    const segments = {};
+    for (const key of SEGMENT_KEYS) {
+      const list = filterSegment(map, key);
+      segments[key] = {
+        count: list.length,
+        percent: total ? Math.round((list.length / total) * 1000) / 10 : 0,
+      };
+    }
+
+    const returning = all.filter((c) => Number(c.visitCount || c.orderCount || 0) > 1).length;
+    const newCustomers = all.filter((c) => Number(c.visitCount || c.orderCount || 0) <= 1).length;
+    const repeatRate = total ? Math.round((returning / total) * 1000) / 10 : 0;
+
+    res.json({
+      success: true,
+      total_customers: total,
+      repeat_rate: repeatRate,
+      new_customers: newCustomers,
+      returning_customers: returning,
+      segments,
+    });
+  } catch (err) {
+    console.error('[dashboard/customer-cohorts]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── POST /api/dashboard/shipment/manual — merchant enters courier + AWB ───────
 router.post('/shipment/manual', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
   try {

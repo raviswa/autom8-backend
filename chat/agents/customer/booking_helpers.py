@@ -1505,6 +1505,7 @@ def build_smart_greeting(
     Kept for backwards compatibility in tests; does not use visit_count or raw_greeting bypass.
     """
     from agents.customer.message_templates import build_greeting
+    from locales.customer import session_lang
 
     is_new = bool(session_state.get("is_new_customer", True))
     if "is_new_customer" not in session_state:
@@ -1519,6 +1520,7 @@ def build_smart_greeting(
         restaurant_display_name=session_state.get("_restaurant_display_name", "our restaurant"),
         restaurant_cuisine=session_state.get("_restaurant_cuisine", []),
         timezone=session_state.get("_restaurant_timezone", "Asia/Kolkata"),
+        lang=session_lang(session_state),
     )
 
 
