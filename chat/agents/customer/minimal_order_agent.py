@@ -124,13 +124,15 @@ async def _mint_webcart_url(
             token_id_is_real = True
 
     if not token_id:
+        restaurant_lob = str((restaurant or {}).get("lob_type") or "").strip().lower()
+        shipped = restaurant_lob in ("food_products", "retail", "psl", "b2b")
         created_id = await create_walk_in_token_direct(
             restaurant_id=restaurant_id,
             name=session_state.get("customer_name") or "WhatsApp Guest",
             phone=customer_phone,
-            token_type="takeaway",
+            token_type="delivery" if shipped else "takeaway",
             pax=1,
-            meta={"source": "minimal_webcart_link"},
+            meta={"source": "minimal_webcart_link", "service_type": "delivery" if shipped else "takeaway"},
         )
         if created_id:
             token_id = created_id

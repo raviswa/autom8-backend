@@ -302,7 +302,8 @@
     .cart-overlay.open { display: block; }
     .cart-panel {
       position: fixed; left: 0; right: 0; bottom: 0;
-      max-height: 86vh;
+      height: min(92vh, 100dvh);
+      max-height: min(92vh, 100dvh);
       background: var(--panel);
       border-radius: 18px 18px 0 0;
       z-index: 50;
@@ -310,6 +311,7 @@
       transition: transform .25s ease;
       display: flex; flex-direction: column;
       box-shadow: 0 -8px 24px rgba(0,0,0,0.15);
+      overflow: hidden;
     }
     .cart-panel.open { transform: translateY(0); }
     .cart-head {
@@ -318,7 +320,24 @@
     }
     .cart-head strong { font-size: 16px; font-weight: 700; }
     .icon-btn { border: none; background: #f3f4f6; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; font-size: 16px; }
-    .cart-body { padding: 12px 16px; overflow-y: auto; display: grid; gap: 10px; -webkit-overflow-scrolling: touch; }
+    /* flex:1 + min-height:0 is required or overflow-y never engages on mobile sheets */
+    .cart-body {
+      padding: 12px 16px 20px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      overscroll-behavior: contain;
+      display: grid;
+      gap: 10px;
+      flex: 1 1 auto;
+      min-height: 0;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin;
+      scrollbar-color: #d1d5db transparent;
+    }
+    .cart-body::-webkit-scrollbar { width: 6px; }
+    .cart-body::-webkit-scrollbar-thumb {
+      background: #d1d5db; border-radius: 999px;
+    }
     .cart-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .cart-line .cl-name { font-size: 13.5px; font-weight: 600; }
     .cart-line .cl-price { color: var(--muted); font-size: 11.5px; }
@@ -408,7 +427,23 @@
       cursor: pointer;
       white-space: nowrap;
     }
-    .cart-foot { padding: 12px 16px 16px; border-top: 1px solid var(--line); flex-shrink: 0; }
+    .cart-foot {
+      padding: 10px 16px calc(12px + env(safe-area-inset-bottom));
+      border-top: 1px solid var(--line);
+      flex-shrink: 0;
+      background: var(--panel);
+    }
+    .cart-status {
+      display: none;
+      margin: 0 0 10px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 12.5px;
+      line-height: 1.4;
+      white-space: pre-line;
+    }
+    .cart-status.ok { display: block; background: #dcfce7; color: var(--ok); }
+    .cart-status.err { display: block; background: #fee2e2; color: var(--danger); }
     .btn-submit {
       width: 100%; border: none; background: var(--header); color: #fff;
       border-radius: 12px; padding: 13px; font-weight: 700; font-size: 14.5px; cursor: pointer;
@@ -590,6 +625,7 @@
         position: sticky !important;
         top: 86px;
         transform: none !important;
+        height: auto;
         max-height: calc(100vh - 110px);
         border-radius: var(--radius); border: 1px solid var(--line); box-shadow: none;
         z-index: 1;
@@ -773,6 +809,7 @@
         </div>
         </div>
         <div class="cart-foot">
+          <div id="cartStatus" class="cart-status" role="status" aria-live="polite"></div>
           <button id="submitBtn" class="btn-submit">Continue to WhatsApp</button>
           <div id="waFallback" class="wa-fallback"></div>
         </div>
@@ -1047,6 +1084,14 @@
     function showStatus(text, type) {
       statusBox.className = type || '';
       statusBox.textContent = text;
+      const cartStatus = $('cartStatus');
+      if (cartStatus) {
+        cartStatus.className = `cart-status${type ? ` ${type}` : ''}`;
+        cartStatus.textContent = text || '';
+        if (text && type === 'err' && cartPanel?.classList.contains('open')) {
+          try { cartStatus.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (_e) {}
+        }
+      }
     }
     function money(v) { return `Rs ${Math.max(0, Number(v || 0)).toFixed(0)}`; }
     function discountCopy(item) {
@@ -3264,6 +3309,12 @@ $('subtotal').textContent = money(subtotal);
         // inside WhatsApp's in-app browser (broken deep-links + nested checkout).
         showWhatsAppGuide({ awaitingApproval, paymentLink });
         startPaymentPolling();
+        // Outside WhatsApp: open the chat automatically so "Continue" feels responsive.
+        if (!isWhatsAppInAppBrowser()) {
+          setTimeout(() => {
+            try { openWhatsApp(); } catch (_e) { /* guide still available */ }
+          }, 250);
+        }
       } catch (_e) {
         showStatus('Order submission failed. Please try again.', 'err');
         state.submitting = false;
@@ -3302,6 +3353,18 @@ $('subtotal').textContent = money(subtotal);
     $('promo').addEventListener('input', () => { renderCart(); if (requiresShipping()) scheduleDeliveryQuote(); });
     $('notes').addEventListener('input', renderCart);
     if ($('shipName')) $('shipName').addEventListener('input', () => { saveDeliveryLocal(); renderCart(); });
+    // Keep focused delivery fields visible above the keyboard inside the sheet.
+    ['shipName', 'shipPhone', 'shipAddress', 'shipPincode', 'promo', 'notes',
+      'giftRecipientName', 'giftRecipientPhone', 'giftMessage',
+      'giftRecipientAddress', 'giftRecipientPincode'].forEach((id) => {
+      const el = $(id);
+      if (!el) return;
+      el.addEventListener('focus', () => {
+        setTimeout(() => {
+          try { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_e) {}
+        }, 350);
+      });
+    });
     if ($('shipAddress')) $('shipAddress').addEventListener('input', () => { saveDeliveryLocal(); renderCart(); });
     if ($('shipPincode')) {
       $('shipPincode').addEventListener('input', () => {

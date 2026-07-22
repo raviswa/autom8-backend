@@ -963,6 +963,14 @@ async def internal_webcart_confirm_pay(request: Request):
         or session_state.get("scheduled_at")
         or body.get("scheduled_at")
     )
+    # Immediate webcart checkout (name/address + no schedule) must not inherit a
+    # stale scheduled_* walk-in / session from a prior order on the same phone.
+    webcart_immediate = bool(body_delivery_address) and not body.get("scheduled_at") and body_order_mode != "scheduled"
+    if webcart_immediate and not scheduled_from_type:
+        is_scheduled = False
+        session_state.pop("order_mode", None)
+        session_state.pop("scheduled_at", None)
+
     if is_scheduled:
         session_state["order_mode"] = "scheduled"
         if body.get("scheduled_at") and not session_state.get("scheduled_at"):
@@ -977,12 +985,12 @@ async def internal_webcart_confirm_pay(request: Request):
         portal_token = await get_active_walk_in_token(restaurant_id, canonical_phone)
     portal_meta = parse_walk_in_meta((portal_token or {}).get("meta")) if portal_token else {}
     portal_type = str((portal_token or {}).get("type") or "").strip().lower()
-    if portal_type in ("scheduled_delivery", "scheduled_takeaway"):
+    if not webcart_immediate and portal_type in ("scheduled_delivery", "scheduled_takeaway"):
         is_scheduled = True
         session_state["order_mode"] = "scheduled"
         mapped, _ = _normalize_webcart_service_type(portal_type)
         service_type = mapped
-    if portal_meta.get("scheduled_at") and not session_state.get("scheduled_at"):
+    if not webcart_immediate and portal_meta.get("scheduled_at") and not session_state.get("scheduled_at"):
         session_state["scheduled_at"] = portal_meta.get("scheduled_at")
         is_scheduled = True
         session_state["order_mode"] = "scheduled"

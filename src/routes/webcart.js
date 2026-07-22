@@ -1369,18 +1369,25 @@ router.post('/api/webcart/submit', async (req, res) => {
       },
     };
 
-    if (session && !session._soft) {
+    if (session?.id) {
+      // Soft sessions still need cart meta persisted on the walk-in row so
+      // confirm-and-pay / dedupe can recover if chat retries. Clear completed_at
+      // so a reused packaged menu link stays orderable.
+      const walkPatch = {
+        meta: nextMeta,
+        completed_at: null,
+        ...(shippedOrder || catalogLob ? { type: 'delivery', status: 'delivery' } : {}),
+      };
       const { error } = await supabaseAdmin
         .from('walk_in_tokens')
-        .update({
-          meta: nextMeta,
-          ...(shippedOrder ? { type: 'delivery', status: 'delivery' } : {}),
-        })
+        .update(walkPatch)
         .eq('restaurant_id', restaurant.id)
-        .eq('id', session.id)
-        .eq('phone', session.phone);
+        .eq('id', session.id);
 
-      if (error) throw error;
+      if (error) {
+        console.warn('[webcart/submit] walk_in meta update:', error.message);
+        if (!session._soft) throw error;
+      }
     }
 
     const confirmResult = await triggerConfirmAndPay({
@@ -1409,7 +1416,7 @@ router.post('/api/webcart/submit', async (req, res) => {
       delivery_source: deliveryQuote?.source || undefined,
     });
 
-    if (session && !session._soft) {
+    if (session?.id) {
       const confirmedMeta = {
         ...(nextMeta || {}),
         web_cart_submission: {
@@ -1422,10 +1429,9 @@ router.post('/api/webcart/submit', async (req, res) => {
 
       await supabaseAdmin
         .from('walk_in_tokens')
-        .update({ meta: confirmedMeta })
+        .update({ meta: confirmedMeta, completed_at: null })
         .eq('restaurant_id', restaurant.id)
-        .eq('id', session.id)
-        .eq('phone', session.phone);
+        .eq('id', session.id);
     }
 
     let giftUrl = null;
@@ -1465,8 +1471,15 @@ router.post('/api/webcart/submit', async (req, res) => {
           : 'Confirm & Pay has been sent to your WhatsApp.',
     });
   } catch (err) {
-    console.error('[webcart/submit]', err.message);
-    return res.status(500).json({ ok: false, error: 'Failed to submit order.' });
+    console.error('[webcart/submit]', err.message, err.response || '');
+    const detail = err.response?.error || err.message || 'Failed to submit order.';
+    const status = /scheduled_at_missing|unavailable|FSSAI|required/i.test(String(detail)) ? 409 : 500;
+    return res.status(status).json({
+      ok: false,
+      error: detail === 'Failed to submit order.' || /Chat service error/i.test(String(detail))
+        ? 'Could not complete checkout. Please try again in a moment.'
+        : detail,
+    });
   }
 });
 
