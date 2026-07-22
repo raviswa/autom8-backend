@@ -1275,6 +1275,9 @@ async def handle_awaiting_prepay(
     else:
         pay_line = format_payment_link_failure_message()
 
+    from tools.customer_copy import prepay_pending_footer
+    pending_footer = prepay_pending_footer(session_state.get("lob_type"))
+
     await _send_interactive(customer_phone, {
         "interactive": {
             "type": "button",
@@ -1282,7 +1285,7 @@ async def handle_awaiting_prepay(
                 "text": (
                     f"⏳ *Awaiting payment*\n_{summary}_\n\n"
                     f"{pay_line}\n\n"
-                    "_Your order will be sent to the kitchen after payment._"
+                    f"{pending_footer}"
                 ),
             },
             "footer": {"text": "PAY resend · HOM new order"},

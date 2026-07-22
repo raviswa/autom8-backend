@@ -5,8 +5,11 @@ REPLIES = {
     "period_night": "இரவு",
 
     "greet_good_period": "இனிய {period} வணக்கம் 👋",
+    "greet_good_period_named": "இனிய {period} வணக்கம், {first} 👋",
     "welcome_new": "*{display}* க்கு வரவேற்கிறோம் 🍽️",
     "welcome_back": "*{display}* க்கு மீண்டும் வரவேற்கிறோம் 🍽️",
+    "welcome_new_named": "வரவேற்கிறோம், {first}! *{display}* 🍽️",
+    "welcome_back_named": "மீண்டும் வரவேற்கிறோம், {first}! *{display}* 🍽️",
     "cuisine_default": "நல்ல உணவு, உங்கள் விருப்பப்படி.",
     "cuisine_veg": "தினமும் புதிய, சுவையான சைவ உணவு!",
     "cuisine_non_veg": "தினமும் புதிய, சுவையான அசைவ விருப்பங்கள்!",

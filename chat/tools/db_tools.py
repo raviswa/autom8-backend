@@ -67,16 +67,16 @@ async def init_db():
                   AND conname = 'walk_in_tokens_type_check'
             """))
             defn = row.scalar() or ""
-            required = ("queue", "scheduled_delivery", "scheduled_takeaway")
+            required = ("queue", "delivery", "scheduled_delivery", "scheduled_takeaway")
             missing = [t for t in required if t not in defn]
             if not missing:
                 logger.info(
-                    "[boot] ✅ walk_in_tokens_type_check allows queue + scheduled types"
+                    "[boot] ✅ walk_in_tokens_type_check allows queue + delivery + scheduled types"
                 )
             else:
                 logger.error(
                     "[boot] ❌ walk_in_tokens_type_check missing %s — run "
-                    "migrations/20260722_walk_in_tokens_type_check_include_queue.sql. "
+                    "migrations/20260722_walk_in_tokens_type_check_include_delivery.sql. "
                     "defn=%s",
                     missing,
                     defn or "(missing)",
@@ -531,6 +531,7 @@ async def create_customer(
     """
     base = _a8_base()
     created_data: Dict[str, Any] | None = None
+    today = datetime.utcnow().strftime("%Y-%m-%d")
 
     # ── 1. autom8 Supabase (primary) ──────────────────────────────────────────
     if base:
@@ -544,6 +545,7 @@ async def create_customer(
                         "name":                  name,
                         "whatsapp_profile_name": profile_name,
                         "visit_count":           1,
+                        "last_visit_date":       today,
                         "opted_in_marketing":    True,
                     },
                     headers=_a8_headers(),
@@ -576,6 +578,7 @@ async def create_customer(
                     name=name,
                     whatsapp_profile_name=profile_name,
                     visit_count=1,
+                    last_visit_date=today,
                 )
                 # Inject the Supabase-assigned UUID when available
                 if supabase_uuid:
@@ -593,7 +596,7 @@ async def create_customer(
                         "name":                  customer.name,
                         "whatsapp_profile_name": customer.whatsapp_profile_name,
                         "visit_count":           customer.visit_count,
-                        "last_visit_date":       None,
+                        "last_visit_date":       customer.last_visit_date or today,
                         "opted_in_marketing":    True,
                         "created_at":            None,
                     }
@@ -2913,7 +2916,7 @@ async def create_walk_in_token_direct(
         return None
 
     if token_type not in (
-        "dinein", "takeaway", "queue", "large_party",
+        "dinein", "takeaway", "queue", "large_party", "delivery",
         "scheduled_delivery", "scheduled_takeaway",
     ):
         logger.error(f"[walk-in-token] Invalid type: {token_type}")
@@ -2922,10 +2925,11 @@ async def create_walk_in_token_direct(
     clean_phone = "".join(c for c in str(phone) if c.isdigit()) or None
     status = (
         "pending_approval" if token_type in ("large_party", "scheduled_delivery", "scheduled_takeaway")
+        else "delivery" if token_type == "delivery"
         else "takeaway" if token_type == "takeaway"
         else "waiting"
     )
-    actual_pax = 1 if token_type in ("takeaway", "scheduled_delivery", "scheduled_takeaway") else max(1, int(pax or 1))
+    actual_pax = 1 if token_type in ("takeaway", "delivery", "scheduled_delivery", "scheduled_takeaway") else max(1, int(pax or 1))
 
     existing = await get_active_walk_in_token(restaurant_id, phone)
     if existing and await _walk_in_token_is_paid_scheduled(existing):

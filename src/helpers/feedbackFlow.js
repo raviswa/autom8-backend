@@ -176,31 +176,47 @@ async function resolveVisitContext(record) {
   if (tokenId) {
     const { data: token } = await supabaseAdmin
       .from('walk_in_tokens')
-      .select('type, table_number')
+      .select('type, table_number, status, meta')
       .eq('id', tokenId)
       .maybeSingle();
     if (token) {
       visitType = token.type || visitType;
       if (token.table_number != null) tableNumber = String(token.table_number);
+      const meta = token.meta && typeof token.meta === 'object' ? token.meta : {};
+      if (
+        !visitType
+        || String(token.status || '').toLowerCase() === 'delivery'
+        || String(meta.service_type || '').toLowerCase() === 'delivery'
+      ) {
+        if (String(token.status || '').toLowerCase() === 'delivery'
+          || String(meta.service_type || '').toLowerCase() === 'delivery') {
+          visitType = 'delivery';
+        }
+      }
     }
   }
 
-  const isTakeaway = visitType === 'takeaway';
-  const isDineIn   = !isTakeaway && (visitType === 'dinein' || visitType === 'large_party' || !!tableNumber);
+  const type = String(visitType || '').toLowerCase();
+  const isDelivery = type === 'delivery' || type === 'scheduled_delivery';
+  const isTakeaway = type === 'takeaway' || type === 'scheduled_takeaway';
+  const isDineIn = !isTakeaway && !isDelivery
+    && (type === 'dinein' || type === 'large_party' || !!tableNumber);
 
   let contextLine = '';
   if (tokenId) contextLine = `Token *${tokenId}*`;
   if (isDineIn && tableNumber) {
     contextLine += contextLine ? ` · Table *${tableNumber}*` : `Table *${tableNumber}*`;
+  } else if (isDelivery) {
+    contextLine += contextLine ? ' · Delivery' : 'Delivery order';
   } else if (isTakeaway) {
     contextLine += contextLine ? ' · Takeaway' : 'Takeaway order';
   }
 
-  const thanksLine = isTakeaway
+  const thanksLine = (isTakeaway || isDelivery)
     ? 'Thank you for ordering with us today'
     : 'Thank you for visiting us today';
 
-  return { contextLine, thanksLine, visitType, tableNumber, tokenId, isTakeaway, isDineIn };
+  return { contextLine, thanksLine, visitType, tableNumber, tokenId, isTakeaway, isDineIn, isDelivery };
 }
 
 function extractMessageText(message) {

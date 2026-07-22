@@ -68,8 +68,8 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
     if (!name?.trim())    return res.status(400).json({ error: 'name is required' });
     if (!type)            return res.status(400).json({ error: 'type is required' });
     if (!restaurant_id)   return res.status(400).json({ error: 'restaurant_id is required' });
-    if (!['dinein', 'takeaway', 'queue', 'large_party', 'scheduled_delivery', 'scheduled_takeaway'].includes(type))
-      return res.status(400).json({ error: 'type must be dinein, takeaway, queue, large_party, scheduled_delivery, or scheduled_takeaway' });
+    if (!['dinein', 'takeaway', 'queue', 'large_party', 'delivery', 'scheduled_delivery', 'scheduled_takeaway'].includes(type))
+      return res.status(400).json({ error: 'type must be dinein, takeaway, queue, large_party, delivery, scheduled_delivery, or scheduled_takeaway' });
 
     if ((type === 'scheduled_delivery' || type === 'scheduled_takeaway') && meta?.scheduled_at) {
       const slotCheck = validateScheduledDeliverySlot(meta.scheduled_at);
@@ -79,7 +79,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
     }
 
     const cleanPhone = phone ? String(phone).replace(/\D/g, '') : null;
-    if (cleanPhone && ['dinein', 'queue', 'large_party', 'takeaway', 'scheduled_delivery', 'scheduled_takeaway'].includes(type)) {
+    if (cleanPhone && ['dinein', 'queue', 'large_party', 'takeaway', 'delivery', 'scheduled_delivery', 'scheduled_takeaway'].includes(type)) {
       const reuse = await findReusableTokenForPhone(restaurant_id, cleanPhone, type, meta || {});
       if (reuse) {
         return res.status(200).json({
@@ -90,7 +90,7 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
       }
     }
 
-    const partySize = (type === 'takeaway' || type === 'scheduled_delivery' || type === 'scheduled_takeaway')
+    const partySize = (type === 'takeaway' || type === 'delivery' || type === 'scheduled_delivery' || type === 'scheduled_takeaway')
       ? 1
       : (parseInt(pax, 10) || 1);
 
@@ -147,9 +147,9 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
       const detail = insertError.message || String(insertError);
       if (detail.includes('walk_in_tokens_type_check')) {
         throw new Error(
-          'Database migration required: run migrations/20260722_walk_in_tokens_type_check_include_queue.sql '
+          'Database migration required: run migrations/20260722_walk_in_tokens_type_check_include_delivery.sql '
           + 'in Supabase SQL editor (walk_in_tokens.type must allow dinein, takeaway, queue, '
-          + 'large_party, scheduled_delivery, scheduled_takeaway)'
+          + 'large_party, delivery, scheduled_delivery, scheduled_takeaway)'
         );
       }
       throw insertError;

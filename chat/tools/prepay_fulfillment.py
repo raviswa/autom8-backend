@@ -63,11 +63,16 @@ from tools.booking_mechanisms import (
     assign_and_notify_captain_takeaway,
 )
 
+from tools.customer_copy import (
+    order_confirmed_line,
+    prepay_pending_footer,
+    resolve_lob_from_payload,
+)
+
 logger = logging.getLogger(__name__)
 
-PREPAY_PENDING_FOOTER = (
-    "_Your order will be sent to the kitchen after payment is received._"
-)
+# Default restaurant footer — prefer prepay_pending_footer(lob) for LOB-aware copy.
+PREPAY_PENDING_FOOTER = prepay_pending_footer("restaurant")
 RESERVE_PREPAY_FOOTER = (
     "_Your table will be secured after payment is received._"
 )
@@ -96,6 +101,7 @@ _SESSION_HINT_KEYS = (
     "delivery_distance_method",
     "delivery_travel_minutes",
     "delivery_travel_traffic_aware",
+    "lob_type",
 )
 
 
@@ -735,6 +741,47 @@ async def _queue_feedback(
         logger.warning(f"[prepay-fulfill] feedback queue non-fatal: {exc}")
 
 
+async def _touch_customer_visit(payload: dict[str, Any]) -> None:
+    """Stamp last_visit_date + visit_count after a paid order."""
+    customer_id = str(payload.get("customer_id") or "").strip()
+    if not customer_id:
+        return
+    try:
+        from tools.db_tools import update_last_visit
+        await update_last_visit(customer_id)
+    except Exception as exc:
+        logger.warning(f"[prepay-fulfill] update_last_visit non-fatal: {exc}")
+
+
+async def _ensure_walk_in_type(
+    restaurant_id: str,
+    token: str,
+    token_type: str,
+) -> None:
+    """Keep walk_in_tokens.type aligned with the fulfilled service (feedback labels)."""
+    if not restaurant_id or not token or not token_type:
+        return
+    try:
+        from tools.db_tools import AsyncSessionLocal
+        from sqlalchemy import text
+        if AsyncSessionLocal is None:
+            return
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text("""
+                    UPDATE walk_in_tokens
+                    SET type = :ttype
+                    WHERE restaurant_id = CAST(:rid AS uuid)
+                      AND id = :tid
+                      AND type IS DISTINCT FROM :ttype
+                """),
+                {"ttype": token_type, "rid": restaurant_id, "tid": token},
+            )
+            await session.commit()
+    except Exception as exc:
+        logger.warning(f"[prepay-fulfill] walk_in type sync non-fatal: {exc}")
+
+
 async def _notify_manager_kds_dispatch_failed(
     *,
     restaurant_id: str,
@@ -1114,6 +1161,7 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
             parcel_charge=float(totals.get("parcel_charge") or 0),
             order_text=order_text_display,
         )
+        await _touch_customer_visit(payload)
         await update_booking_status(booking_id, "confirmed")
         logger.info(f"[prepay-fulfill] Scheduled takeaway {booking_id} confirmed — jobs queued")
         return True
@@ -1188,13 +1236,22 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
     )
 
     if defer:
-        kitchen_line = "Your takeaway order is confirmed."
+        kitchen_line = order_confirmed_line(
+            lob_type=resolve_lob_from_payload(payload),
+            service_type="takeaway",
+            deferred=True,
+        )
     elif dispatched_now:
-        kitchen_line = "Your takeaway order is confirmed and sent to the kitchen."
+        kitchen_line = order_confirmed_line(
+            lob_type=resolve_lob_from_payload(payload),
+            service_type="takeaway",
+            dispatched=True,
+        )
     else:
-        kitchen_line = (
-            "Your takeaway order is confirmed. "
-            "We're pushing it to the kitchen display — please alert staff if it doesn't appear shortly."
+        kitchen_line = order_confirmed_line(
+            lob_type=resolve_lob_from_payload(payload),
+            service_type="takeaway",
+            dispatched=False,
         )
 
     confirm_body = (
@@ -1250,6 +1307,8 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
         )
 
     if not defer:
+        await _ensure_walk_in_type(restaurant_id, str(display_token), "takeaway")
+        await _touch_customer_visit(payload)
         await _queue_feedback(restaurant_id, customer_phone, customer_name, display_token)
     await _send_receipt(
         restaurant_id=restaurant_id,
@@ -1352,6 +1411,8 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
             parcel_charge=float(totals.get("parcel_charge") or 0),
             order_text=order_text_display,
         )
+        await _ensure_walk_in_type(restaurant_id, str(token), "delivery")
+        await _touch_customer_visit(payload)
         await update_booking_status(booking_id, "confirmed")
         logger.info(f"[prepay-fulfill] Scheduled delivery {booking_id} confirmed — jobs queued")
         return True
@@ -1419,13 +1480,22 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
             dispatched_now = await retry_kds_for_confirmed_booking(booking_id, booking_row)
 
     if defer:
-        kitchen_line = "Your delivery order is confirmed."
+        kitchen_line = order_confirmed_line(
+            lob_type=resolve_lob_from_payload(payload),
+            service_type="delivery",
+            deferred=True,
+        )
     elif dispatched_now:
-        kitchen_line = "Your delivery order is confirmed and sent to the kitchen."
+        kitchen_line = order_confirmed_line(
+            lob_type=resolve_lob_from_payload(payload),
+            service_type="delivery",
+            dispatched=True,
+        )
     else:
-        kitchen_line = (
-            "Your delivery order is confirmed. "
-            "We're pushing it to the kitchen display — please alert staff if it doesn't appear shortly."
+        kitchen_line = order_confirmed_line(
+            lob_type=resolve_lob_from_payload(payload),
+            service_type="delivery",
+            dispatched=False,
         )
 
     confirm_body = (
@@ -1502,6 +1572,8 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
         )
 
     if not defer:
+        await _ensure_walk_in_type(restaurant_id, str(token), "delivery")
+        await _touch_customer_visit(payload)
         await _queue_feedback(restaurant_id, customer_phone, customer_name, token)
     await _send_receipt(
         restaurant_id=restaurant_id,
@@ -1576,15 +1648,22 @@ async def _fulfill_dine_in(payload: dict[str, Any]) -> bool:
         await send_whatsapp_message(
             customer_phone,
             "Payment received! ✅\n\n"
-            "Your order is confirmed and sent to the kitchen. Enjoy your meal! 🍽️",
+            + order_confirmed_line(
+                lob_type=resolve_lob_from_payload(payload),
+                service_type="dine_in",
+                dispatched=True,
+            ),
             restaurant_id,
         )
     else:
         await send_whatsapp_message(
             customer_phone,
             "Payment received! ✅\n\n"
-            "We're sending your order to the kitchen now — "
-            "please alert staff if it doesn't appear on the display within a minute."
+            + order_confirmed_line(
+                lob_type=resolve_lob_from_payload(payload),
+                service_type="dine_in",
+                dispatched=False,
+            )
             + _HOME_HINT,
             restaurant_id,
         )
@@ -1602,6 +1681,7 @@ async def _fulfill_dine_in(payload: dict[str, Any]) -> bool:
         )
 
     await save_session_state(restaurant_id, customer_phone, state)
+    await _touch_customer_visit(payload)
     await _queue_feedback(
         restaurant_id,
         customer_phone,

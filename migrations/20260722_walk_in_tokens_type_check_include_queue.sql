@@ -1,9 +1,9 @@
 -- Canonical walk_in_tokens.type check — must include ALL app-accepted types:
---   dinein, takeaway, queue, large_party, scheduled_delivery, scheduled_takeaway
+--   dinein, takeaway, queue, large_party, delivery, scheduled_delivery, scheduled_takeaway
 --
 -- WHY: Older fix_walk_in_tokens_scheduled_* migrations recreated the check
 -- WITHOUT 'queue', so Token/Queue inserts fail with walk_in_tokens_type_check
--- even though Node validates type=queue as valid.
+-- even though Node validates type=queue as valid. Door/courier orders also use type=delivery.
 --
 -- Run in Supabase SQL Editor. Safe to re-run.
 
@@ -39,11 +39,12 @@ ALTER TABLE public.walk_in_tokens
     'takeaway'::text,
     'queue'::text,
     'large_party'::text,
+    'delivery'::text,
     'scheduled_delivery'::text,
     'scheduled_takeaway'::text
   ]));
 
--- 4) Verify — expect exactly ONE row including queue + scheduled_*
+-- 4) Verify — expect exactly ONE row including queue + delivery + scheduled_*
 SELECT conname, pg_get_constraintdef(oid) AS definition
 FROM pg_constraint
 WHERE conrelid = 'public.walk_in_tokens'::regclass

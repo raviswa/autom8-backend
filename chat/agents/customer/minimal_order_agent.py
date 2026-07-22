@@ -217,7 +217,8 @@ async def send_minimal_webcart_link(
         session_state["minimal_step"] = "awaiting_webcart"
         session_state["booking_mechanism"] = "web_cart"
         session_state["booking_mechanism_order_source"] = "web_cart"
-        session_state["service_type"] = "takeaway"
+        shipped = lob_type in ("food_products", "retail", "psl", "b2b")
+        session_state["service_type"] = "delivery" if shipped else "takeaway"
         session_state["lob_type"] = lob_type
         logger.info("[minimal-order] webcart link sent to %s (%s)", customer_phone, lob_type)
     return sent

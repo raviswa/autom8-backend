@@ -34,6 +34,7 @@ ALTER TABLE public.walk_in_tokens
     'takeaway'::text,
     'queue'::text,
     'large_party'::text,
+    'delivery'::text,
     'scheduled_delivery'::text,
     'scheduled_takeaway'::text
   ]));

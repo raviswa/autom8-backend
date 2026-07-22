@@ -68,8 +68,23 @@ def build_greeting(
     warmth = reply(lang, warmth_key)
 
     period_display = period.capitalize() if (lang or "en") == "en" else period
-    greet = reply(lang, "greet_good_period", period=period_display)
-    welcome = reply(lang, "welcome_new" if is_new else "welcome_back", display=display)
+    first = ""
+    if customer_name:
+        first = customer_name.strip().split()[0]
+
+    if first:
+        greet = reply(
+            lang, "greet_good_period_named", period=period_display, first=first,
+        )
+        welcome = reply(
+            lang,
+            "welcome_new_named" if is_new else "welcome_back_named",
+            first=first,
+            display=display,
+        )
+    else:
+        greet = reply(lang, "greet_good_period", period=period_display)
+        welcome = reply(lang, "welcome_new" if is_new else "welcome_back", display=display)
 
     return f"{greet}\n{welcome}\n{warmth}"
 

@@ -25,6 +25,7 @@ BEGIN
       'takeaway',
       'queue',
       'large_party',
+      'delivery',
       'scheduled_delivery',
       'scheduled_takeaway'
     ));

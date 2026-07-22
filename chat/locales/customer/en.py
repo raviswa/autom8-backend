@@ -7,8 +7,11 @@ REPLIES = {
 
     # Restaurant greeting / menu
     "greet_good_period": "Good {period} 👋",
+    "greet_good_period_named": "Good {period}, {first} 👋",
     "welcome_new": "Welcome to *{display}* 🍽️",
     "welcome_back": "Welcome back to *{display}* 🍽️",
+    "welcome_new_named": "Welcome, {first}! *{display}* 🍽️",
+    "welcome_back_named": "Welcome back, {first}! *{display}* 🍽️",
     "cuisine_default": "Good food, your way.",
     "cuisine_veg": "Serving fresh, flavourful vegetarian food every day!",
     "cuisine_non_veg": "Serving fresh, flavourful non-vegetarian favourites every day!",

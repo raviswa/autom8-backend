@@ -131,7 +131,7 @@ router.get('/api/webcart/session', async (req, res) => {
         : null;
     }
 
-    const todaysSpecial = catalogLob ? [] : menuItems.filter(i => i.is_todays_special);
+    const todaysSpecial = menuItems.filter(i => i.is_todays_special);
 
     // Packaged storefronts can always check out with a phone — even when the
     // WhatsApp menu_tokens row has expired. Don't scare the shopper with a

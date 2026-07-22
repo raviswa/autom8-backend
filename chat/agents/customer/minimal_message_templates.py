@@ -81,11 +81,17 @@ def build_welcome_message(
     period, _ = get_time_period(timezone, lang)
     display = (store_name or "our store").strip()
     period_display = period.capitalize() if (lang or "en") == "en" else period
-    greet = reply(lang, "greet_good_period", period=period_display)
 
     first = ""
     if customer_name:
         first = customer_name.strip().split()[0]
+
+    if first:
+        greet = reply(
+            lang, "greet_good_period_named", period=period_display, first=first,
+        )
+    else:
+        greet = reply(lang, "greet_good_period", period=period_display)
 
     if is_returning and first:
         welcome_line = reply(
