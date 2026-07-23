@@ -18,6 +18,7 @@ const { sendOnboardingWelcomeEmail } = require('../helpers/onboardingEmail');
 const DEFAULT_FEATURES = DEFAULT_SERVICES;
 
 const { parseRegistrationLobType, REGISTER_LOB_TYPES } = require('../config/catalogSchemas');
+const { completeEmbeddedSignupForRestaurant } = require('../helpers/embeddedSignupComplete');
 
 function resolveRegistrationLobType(body) {
   const raw = body?.lob_type ?? body?.org_type ?? null;
@@ -30,9 +31,18 @@ function resolveRegistrationLobType(body) {
   return { lob_type: parsed.lob_type };
 }
 
-// ── POST /api/onboarding/register ─────────────────────────────────────────────
+// ── POST /api/onboarding/register (+ /register/upload for WP multipart) ───────
+// Also mounted at /api/v1/register for the WordPress registration form.
 
-router.post('/register', async (req, res) => {
+router.post(['/register', '/register/upload'], async (req, res) => {
+  // Multipart signup: JSON payload may be in req.body.data
+  if (req.body?.data && typeof req.body.data === 'string') {
+    try {
+      const parsed = JSON.parse(req.body.data);
+      Object.assign(req.body, parsed);
+    } catch (_) { /* ignore bad JSON */ }
+  }
+
   const {
     // Core restaurant fields
     name,
@@ -45,7 +55,13 @@ router.post('/register', async (req, res) => {
     whatsapp_number     = null,
     phone_number_id     = null,    // Meta phone_number_id for this outlet
     access_token        = null,    // WABA access token
+    meta_access_token   = null,    // WP register form alias
     waba_id             = null,
+
+    // Embedded Signup (from website Connect WhatsApp — no Meta Developer Console)
+    embedded_signup_code = null,
+    es_code              = null,
+    display_phone_number = null,
 
     // Optional settings
     timezone             = 'Asia/Kolkata',
@@ -78,6 +94,20 @@ router.post('/register', async (req, res) => {
   if (lobResolved.error) return res.status(400).json({ error: lobResolved.error });
   const lob_type = lobResolved.lob_type;
 
+  const resolvedAccessToken = access_token || meta_access_token || null;
+  const esCode = (embedded_signup_code || es_code || '').trim() || null;
+  const embeddedSignup = esCode ? {
+    code: esCode,
+    waba_id: waba_id || null,
+    phone_number_id: phone_number_id || null,
+    display_phone_number: display_phone_number || whatsapp_number || null,
+  } : null;
+
+  // When ES will finish Graph exchange, skip inserting a placeholder integration row
+  const deferIntegration = Boolean(
+    embeddedSignup?.code && embeddedSignup?.waba_id && embeddedSignup?.phone_number_id,
+  );
+
   const isChain = !!chain_name?.trim();
 
   // ── CHAIN MODE ────────────────────────────────────────────────────────────
@@ -86,22 +116,29 @@ router.post('/register', async (req, res) => {
       chain_name, email, phone, owner_name, owner_password,
       waba_id, meta_business_id,
       first_outlet: {
-        name, phone, whatsapp_number, phone_number_id, access_token,
+        name, phone, whatsapp_number,
+        phone_number_id: deferIntegration ? null : phone_number_id,
+        access_token:    deferIntegration ? null : resolvedAccessToken,
         timezone, dining_duration_minutes, payment_mode, manager_phone,
         table_count, outlet_code, lob_type,
       },
       outlet_owner_email:    outlet_owner_email    || null,
       outlet_owner_name:     outlet_owner_name     || null,
       outlet_owner_password: outlet_owner_password || null,
+      embeddedSignup,
     });
   }
 
   // ── STANDALONE MODE (existing behaviour, unchanged) ───────────────────────
   return registerStandalone(req, res, {
     name, email, phone, owner_name, owner_password,
-    whatsapp_number, phone_number_id, access_token, waba_id,
+    whatsapp_number,
+    phone_number_id: deferIntegration ? null : phone_number_id,
+    access_token:    deferIntegration ? null : resolvedAccessToken,
+    waba_id:         deferIntegration ? null : waba_id,
     timezone, dining_duration_minutes, payment_mode, manager_phone, table_count,
     meta_catalog_id, lob_type,
+    embeddedSignup,
   });
 });
 
@@ -116,6 +153,7 @@ async function registerStandalone(req, res, opts) {
     whatsapp_number, phone_number_id, access_token, waba_id,
     timezone, dining_duration_minutes, payment_mode, manager_phone, table_count,
     meta_catalog_id, lob_type,
+    embeddedSignup = null,
   } = opts;
 
   let restaurantId = null;
@@ -216,10 +254,29 @@ async function registerStandalone(req, res, opts) {
 
     console.log(`[onboarding] ✅ Standalone: ${name} (${restaurantId}) — ${email}`);
 
+    let whatsapp = null;
+    if (embeddedSignup?.code && embeddedSignup?.waba_id && embeddedSignup?.phone_number_id) {
+      try {
+        whatsapp = await completeEmbeddedSignupForRestaurant(restaurantId, {
+          code: embeddedSignup.code,
+          waba_id: embeddedSignup.waba_id,
+          phone_number_id: embeddedSignup.phone_number_id,
+          display_phone_number: embeddedSignup.display_phone_number || whatsapp_number,
+          actorId: authUserId,
+        });
+        console.log(`[onboarding] ✅ Embedded Signup linked for ${restaurantId}`);
+      } catch (esErr) {
+        console.error('[onboarding] Embedded Signup failed (account created; connect later in Settings):', esErr.message);
+        whatsapp = { success: false, error: esErr.message };
+      }
+    }
+
     // Welcome email — never fail registration if mail is down / missing address.
     sendOnboardingWelcomeEmail(restaurant).catch((e) =>
       console.error('[onboarding] welcome email failed (non-fatal):', e.message)
     );
+
+    const loginUrl = (process.env.FRONTEND_URL || 'https://app.autom8.works').replace(/\/$/, '') + '/login';
 
     res.status(201).json({
       success:       true,
@@ -227,6 +284,10 @@ async function registerStandalone(req, res, opts) {
       restaurant_id: restaurantId,
       user_id:       user.id,
       region:        req.region?.region || process.env.REGION || 'IN',
+      whatsapp,
+      login_url:     loginUrl,
+      // WP form historically expected checkout_url — send login until billing redirect exists
+      checkout_url:  loginUrl,
     });
 
   } catch (err) {
@@ -250,6 +311,7 @@ async function registerChain(req, res, opts) {
     waba_id, meta_business_id,
     first_outlet,
     outlet_owner_email, outlet_owner_name, outlet_owner_password,
+    embeddedSignup = null,
   } = opts;
 
   let brandId    = null;
@@ -394,6 +456,27 @@ async function registerChain(req, res, opts) {
 
     console.log(`[onboarding] ✅ Chain: ${chain_name} (${brandId}) — owner: ${email}${restaurantId ? ` — outlet: ${restaurantId}` : ''}`);
 
+    let whatsapp = null;
+    if (
+      restaurantId
+      && embeddedSignup?.code
+      && embeddedSignup?.waba_id
+      && embeddedSignup?.phone_number_id
+    ) {
+      try {
+        whatsapp = await completeEmbeddedSignupForRestaurant(restaurantId, {
+          code: embeddedSignup.code,
+          waba_id: embeddedSignup.waba_id,
+          phone_number_id: embeddedSignup.phone_number_id,
+          display_phone_number: embeddedSignup.display_phone_number || first_outlet?.whatsapp_number,
+          actorId: authUserId,
+        });
+      } catch (esErr) {
+        console.error('[onboarding/chain] Embedded Signup failed:', esErr.message);
+        whatsapp = { success: false, error: esErr.message };
+      }
+    }
+
     if (restaurantId) {
       const { data: outletRow } = await supabaseAdmin
         .from('tenants')
@@ -412,6 +495,8 @@ async function registerChain(req, res, opts) {
       }
     }
 
+    const loginUrl = (process.env.FRONTEND_URL || 'https://app.autom8.works').replace(/\/$/, '') + '/login';
+
     res.status(201).json({
       success:         true,
       mode:            'chain',
@@ -420,6 +505,9 @@ async function registerChain(req, res, opts) {
       restaurant_id:   restaurantId,
       outlet_owner_id: outletOwnerId,
       region:          req.region?.region || process.env.REGION || 'IN',
+      whatsapp,
+      login_url:       loginUrl,
+      checkout_url:    loginUrl,
     });
 
   } catch (err) {

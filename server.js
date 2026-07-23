@@ -41,6 +41,8 @@ const app = express();
 app.use(cors({
   origin: [
     'https://app.autom8.works',
+    'https://autom8.works',
+    'https://www.autom8.works',
     'http://127.0.0.1:5500',
     'http://localhost:5500',
     'http://localhost:5173',
@@ -93,6 +95,10 @@ app.use('/api/admin',       require('./src/routes/admin/referrals'));
 app.use('/api',             require('./src/routes/pos'));
 
 app.use('/api/onboarding',  require('./src/routes/onboarding'));
+// WP registration form posts to /api/v1/register — same handlers as onboarding
+app.use('/api/v1',          require('./src/routes/onboarding'));
+// Embedded Signup must mount before the generic /api/whatsapp webhook router
+app.use('/api/whatsapp/embedded-signup', require('./src/routes/embeddedSignup'));
 app.use('/api/whatsapp',    require('./src/routes/webhook'));
 app.use('/api/v1/takeaway', require('./src/routes/takeaway'));
 app.use('/api/staff',       require('./src/routes/staff'));

@@ -63,6 +63,23 @@ router.post('/webhook', async (req, res) => {
 
     for (const entry of body.entry ?? []) {
       for (const change of entry.changes ?? []) {
+        // Additive: log account_update (Embedded Signup / WABA health) — do not route as messages
+        if (change.field === 'account_update') {
+          const wabaId = entry.id;
+          const event  = change.value?.event;
+          const reason = change.value?.reason;
+          console.log(`[WA Webhook] account_update waba=${wabaId} event=${event || 'n/a'} reason=${reason || 'n/a'}`);
+          writeAuditLog({
+            restaurant_id: null,
+            actor_id:      null,
+            action:        'whatsapp.account_update',
+            entity_type:   'waba',
+            entity_id:     wabaId || null,
+            meta:          change.value || {},
+          }).catch(() => {});
+          continue;
+        }
+
         if (change.field !== 'messages') continue;
 
         const value    = change.value;
