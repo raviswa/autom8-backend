@@ -400,7 +400,7 @@ router.get('/draft/:email', async (req, res) => {
 
 async function registerStandalone(req, res, opts) {
   const {
-    name, email, phone, owner_name, owner_password, slug,
+    name, email, phone, owner_name, owner_password,
     whatsapp_number, phone_number_id, access_token, waba_id,
     timezone, dining_duration_minutes, payment_mode, manager_phone, table_count,
     meta_catalog_id, lob_type,
@@ -453,7 +453,7 @@ async function registerStandalone(req, res, opts) {
       timezone, dining_duration_minutes, payment_mode, manager_phone,
       meta_catalog_id, lob_type,
       display_name, city, country_code, currency_code, address_line1,
-      kitchen_workflow, cuisines, slug,
+      kitchen_workflow, cuisines, slug: candidateSlug || slug,
       body: req.body,
     });
 
@@ -461,8 +461,7 @@ async function registerStandalone(req, res, opts) {
     let restaurant;
     {
       let insertPayload = { ...tenantRow };
-      // Prefer explicit slug from wizard when present
-      if (slug) insertPayload.slug = String(slug).trim().toLowerCase();
+      if (candidateSlug) insertPayload.slug = candidateSlug;
 
       let { data, error: restError } = await supabaseAdmin
         .from('tenants')
@@ -485,7 +484,7 @@ async function registerStandalone(req, res, opts) {
       }
 
       if (restError && restError.code === '23505' && /slug/i.test(restError.message || '')) {
-        return res.status(409).json({ error: `The slug "${slug}" was just taken. Please choose another.` });
+        return res.status(409).json({ error: `The slug "${candidateSlug}" was just taken. Please choose another.` });
       }
       if (restError) throw restError;
       restaurant = data;
