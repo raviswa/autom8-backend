@@ -19,6 +19,88 @@ const DEFAULT_FEATURES = DEFAULT_SERVICES;
 
 const { parseRegistrationLobType, REGISTER_LOB_TYPES } = require('../config/catalogSchemas');
 const { completeEmbeddedSignupForRestaurant } = require('../helpers/embeddedSignupComplete');
+const { slugify, selectDroppingMissingColumns } = require('./webcart/shared');
+const { handleMenuUpload } = require('./catalog/menu-items');
+
+/**
+ * Registration's Step 4 catalog upload uses a simplified per-LOB column set
+ * (RegistrationForm.jsx's LOB_CONFIGS — item_name/category/price/sku/...), which
+ * is NOT the same as catalogSchemas.js's richer canonical bulk-upload template
+ * (id/title/description/price/category/custom_label_0/...) used by the
+ * authenticated Settings → Menu upload flow. Rather than a second, untested
+ * insert pipeline, this adapter maps the simplified registration row onto the
+ * same normalized shape handleMenuUpload() already expects, so first-catalog
+ * seeding at signup reuses that one tested path.
+ */
+function adaptRegistrationCatalogRow(row, lobType) {
+  const get = (key) => {
+    const alt = key.replace(/_/g, ' ');
+    return row[key] ?? row[key.toUpperCase()] ?? row[alt] ?? row[alt.replace(/\b\w/g, (c) => c.toUpperCase())] ?? '';
+  };
+  const str = (v) => String(v ?? '').trim();
+
+  const name  = str(get('item_name') || get('name'));
+  const sku   = str(get('sku'));
+  const price = parseFloat(str(get('price')).replace(/[^0-9.]/g, '')) || 0;
+
+  const item = {
+    id:           sku || (name ? `${slugify(name)}-${Math.random().toString(36).slice(2, 6)}` : null),
+    name,
+    description:  str(get('description')),
+    price,
+    category:     str(get('category')) || 'General',
+    is_available: true,
+  };
+
+  if (lobType === 'restaurant') {
+    const slot = str(get('slot')).toLowerCase();
+    if (slot) item.time_slot = slot;
+  } else if (lobType === 'food_products') {
+    const shelfLife = str(get('shelf_life_days'));
+    if (shelfLife) item.shelf_life_days = parseInt(shelfLife, 10) || null;
+  } else if (lobType === 'retail') {
+    // Also covers electronics/jewellery, aliased to 'retail' in catalogSchemas.js.
+    const warrantyMonths = str(get('warranty_months'));
+    if (warrantyMonths) item.warranty_days = (parseInt(warrantyMonths, 10) || 0) * 30;
+    const material = str(get('material'));
+    const stockQty = str(get('stock_qty'));
+    if (stockQty) item.current_stock = parseInt(stockQty, 10) || null;
+    if (material) item.description = [item.description, `Material: ${material}`].filter(Boolean).join(' — ');
+  } else if (lobType === 'b2b') {
+    // Aliased from 'supply' in catalogSchemas.js — no dedicated unit/MOQ columns,
+    // so fold them into the description rather than invent unsupported fields.
+    const unit = str(get('unit'));
+    const moq  = str(get('moq'));
+    const extra = [unit && `Unit: ${unit}`, moq && `MOQ: ${moq}`].filter(Boolean).join(' · ');
+    if (extra) item.description = [item.description, extra].filter(Boolean).join(' — ');
+  }
+
+  return item;
+}
+
+/**
+ * Runs the just-registered restaurant's Step 4 catalog upload through the same
+ * insert pipeline the authenticated Settings → Menu upload uses, in-process
+ * (no HTTP round-trip). Non-fatal: a bad catalog row should never fail
+ * registration itself — the owner can always upload/fix the catalog later.
+ */
+async function seedCatalogFromRegistration(restaurantId, rawRows, lobType) {
+  if (!Array.isArray(rawRows) || !rawRows.length) return null;
+
+  const items = rawRows
+    .map((row) => adaptRegistrationCatalogRow(row, lobType))
+    .filter((item) => item.name && item.price > 0);
+  if (!items.length) return { code: 400, payload: { error: 'No valid catalog rows found' } };
+
+  const fakeReq = { user_role: 'owner', restaurant_id: restaurantId, body: { items } };
+  let result = null;
+  const fakeRes = {
+    status(code) { this._code = code; return this; },
+    json(payload) { result = { code: this._code || 200, payload }; return this; },
+  };
+  await handleMenuUpload(fakeReq, fakeRes);
+  return result;
+}
 
 function resolveRegistrationLobType(body) {
   const raw = body?.lob_type ?? body?.org_type ?? null;
@@ -30,6 +112,37 @@ function resolveRegistrationLobType(body) {
   }
   return { lob_type: parsed.lob_type };
 }
+
+// ── GET /slug-check/:slug ──────────────────────────────────────────────────────
+// Also mounted at /api/v1/slug-check/:slug for the WordPress registration form
+// (matches the fetch already in RegistrationForm.jsx's Step 1).
+router.get('/slug-check/:slug', async (req, res) => {
+  const candidate = slugify(req.params.slug || '');
+  if (!candidate) {
+    return res.status(400).json({ available: false, error: 'slug is required' });
+  }
+
+  // Prefer the persisted `slug` column (migrations/add_tenant_slug.sql). If that
+  // migration hasn't run yet on this DB, selectDroppingMissingColumns retries
+  // without it and we fall back to the same derived-slug check webcart/shared.js
+  // uses at request time, so this endpoint works before and after the migration.
+  const { data, error } = await selectDroppingMissingColumns(
+    'slug-check',
+    'id, slug, name, display_name',
+    (select) => supabaseAdmin.from('tenants').select(select).eq('is_active', true).limit(2000),
+  );
+  if (error) {
+    console.error('[onboarding] slug-check failed:', error.message);
+    return res.status(500).json({ available: false, error: 'Could not check slug availability right now' });
+  }
+
+  const taken = (data || []).some((t) => {
+    if (t.slug) return t.slug === candidate;
+    return [slugify(t.display_name), slugify(t.name)].filter(Boolean).includes(candidate);
+  });
+
+  return res.json({ slug: candidate, available: !taken });
+});
 
 // ── POST /api/onboarding/register (+ /register/upload for WP multipart) ───────
 // Also mounted at /api/v1/register for the WordPress registration form.
@@ -50,6 +163,7 @@ router.post(['/register', '/register/upload'], async (req, res) => {
     phone               = null,
     owner_name,
     owner_password,
+    slug                = null,
 
     // WhatsApp
     whatsapp_number     = null,
@@ -131,7 +245,7 @@ router.post(['/register', '/register/upload'], async (req, res) => {
 
   // ── STANDALONE MODE (existing behaviour, unchanged) ───────────────────────
   return registerStandalone(req, res, {
-    name, email, phone, owner_name, owner_password,
+    name, email, phone, owner_name, owner_password, slug,
     whatsapp_number,
     phone_number_id: deferIntegration ? null : phone_number_id,
     access_token:    deferIntegration ? null : resolvedAccessToken,
@@ -149,7 +263,7 @@ router.post(['/register', '/register/upload'], async (req, res) => {
 
 async function registerStandalone(req, res, opts) {
   const {
-    name, email, phone, owner_name, owner_password,
+    name, email, phone, owner_name, owner_password, slug,
     whatsapp_number, phone_number_id, access_token, waba_id,
     timezone, dining_duration_minutes, payment_mode, manager_phone, table_count,
     meta_catalog_id, lob_type,
@@ -159,27 +273,67 @@ async function registerStandalone(req, res, opts) {
   let restaurantId = null;
   let authUserId   = null;
 
+  // Resolve the slug: prefer what the user picked in Step 1 (already checked via
+  // GET /slug-check/:slug), fall back to deriving one from name if they left it blank.
+  const candidateSlug = slugify(slug || name || '');
+  if (candidateSlug) {
+    const { data: slugRows, error: slugCheckError } = await selectDroppingMissingColumns(
+      'registerStandalone:slug-check',
+      'id, slug, name, display_name',
+      (select) => supabaseAdmin.from('tenants').select(select).eq('is_active', true).limit(2000),
+    );
+    if (slugCheckError) {
+      return res.status(500).json({ error: 'Could not verify slug availability. Please try again.' });
+    }
+    const slugTaken = (slugRows || []).some((t) => {
+      if (t.slug) return t.slug === candidateSlug;
+      return [slugify(t.display_name), slugify(t.name)].filter(Boolean).includes(candidateSlug);
+    });
+    if (slugTaken) {
+      return res.status(409).json({ error: `The slug "${candidateSlug}" is already in use. Please choose another.` });
+    }
+  }
+
   try {
     // 1. Create restaurant row
-    const { data: restaurant, error: restError } = await supabaseAdmin
+    let insertPayload = {
+      name,
+      email:                  email.trim().toLowerCase(),
+      phone:                  phone            || null,
+      whatsapp_number:        whatsapp_number  || null,
+      waba_id:                waba_id          || null,
+      timezone,
+      dining_duration_minutes,
+      payment_mode,
+      manager_phone:          manager_phone    || null,
+      meta_catalog_id:        meta_catalog_id  || null,
+      lob_type:               lob_type         || 'restaurant',
+      slug:                   candidateSlug    || null,
+      is_active:              true,
+      subscribed_features:    DEFAULT_FEATURES,
+    };
+
+    let { data: restaurant, error: restError } = await supabaseAdmin
       .from('tenants')
-      .insert({
-        name,
-        email:                  email.trim().toLowerCase(),
-        phone:                  phone            || null,
-        whatsapp_number:        whatsapp_number  || null,
-        waba_id:                waba_id          || null,
-        timezone,
-        dining_duration_minutes,
-        payment_mode,
-        manager_phone:          manager_phone    || null,
-        meta_catalog_id:        meta_catalog_id  || null,
-        lob_type:               lob_type         || 'restaurant',
-        is_active:              true,
-        subscribed_features:    DEFAULT_FEATURES,
-      })
+      .insert(insertPayload)
       .select()
       .single();
+
+    // If migrations/add_tenant_slug.sql hasn't been run on this DB yet, retry
+    // once without the slug column rather than failing the whole registration.
+    if (restError && /column .*slug.* does not exist/i.test(restError.message || '')) {
+      console.warn('[onboarding] tenants.slug column missing — run migrations/add_tenant_slug.sql. Retrying insert without slug.');
+      const { slug: _drop, ...withoutSlug } = insertPayload;
+      ({ data: restaurant, error: restError } = await supabaseAdmin
+        .from('tenants')
+        .insert(withoutSlug)
+        .select()
+        .single());
+    }
+
+    if (restError && restError.code === '23505' && /slug/i.test(restError.message || '')) {
+      return res.status(409).json({ error: `The slug "${candidateSlug}" was just taken. Please choose another.` });
+    }
     if (restError) throw restError;
     restaurantId = restaurant.id;
 
@@ -244,12 +398,25 @@ async function registerStandalone(req, res, opts) {
         .catch(e => console.warn('[onboarding] Table creation failed (non-fatal):', e.message));
     }
 
-    // 6. Audit
+    // 6. Seed initial catalog from Step 4's upload, if provided (non-fatal).
+    let catalogSeed = null;
+    try {
+      catalogSeed = await seedCatalogFromRegistration(restaurantId, req.body.menu_catalog, lob_type);
+      if (catalogSeed && catalogSeed.code >= 400) {
+        console.warn('[onboarding] Catalog seed had issues:', catalogSeed.payload);
+      } else if (catalogSeed) {
+        console.log(`[onboarding] ✅ Catalog seed: ${catalogSeed.payload?.upserted ?? 0} item(s) for ${restaurantId}`);
+      }
+    } catch (e) {
+      console.warn('[onboarding] Catalog seed failed (non-fatal):', e.message);
+    }
+
+    // 7. Audit
     await writeAuditLog({
       user_id:       authUserId,
       restaurant_id: restaurantId,
       action:        'Restaurant registered (standalone)',
-      details:       { name, email, whatsapp_number, lob_type, source: 'onboarding' },
+      details:       { name, email, whatsapp_number, lob_type, source: 'onboarding', catalog_seeded: catalogSeed?.payload?.upserted ?? 0 },
     });
 
     console.log(`[onboarding] ✅ Standalone: ${name} (${restaurantId}) — ${email}`);
@@ -285,6 +452,7 @@ async function registerStandalone(req, res, opts) {
       user_id:       user.id,
       region:        req.region?.region || process.env.REGION || 'IN',
       whatsapp,
+      catalog_seed:  catalogSeed?.payload || null,
       login_url:     loginUrl,
       // WP form historically expected checkout_url — send login until billing redirect exists
       checkout_url:  loginUrl,
