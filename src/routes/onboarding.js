@@ -21,6 +21,12 @@ const { parseRegistrationLobType, REGISTER_LOB_TYPES } = require('../config/cata
 const { completeEmbeddedSignupForRestaurant } = require('../helpers/embeddedSignupComplete');
 const { slugify, selectDroppingMissingColumns } = require('./webcart/shared');
 const { handleMenuUpload } = require('./catalog/menu-items');
+const { buildTenantInsertFields } = require('../helpers/registrationPayload');
+const {
+  assertWhatsAppAssetsAvailable,
+  recordRegistrationFailure,
+  rollbackRegistration,
+} = require('../helpers/registrationGuards');
 
 /**
  * Registration's Step 4 catalog upload uses a simplified per-LOB column set
@@ -101,13 +107,12 @@ async function seedCatalogFromRegistration(restaurantId, rawRows, lobType) {
   await handleMenuUpload(fakeReq, fakeRes);
   return result;
 }
-
 function resolveRegistrationLobType(body) {
-  const raw = body?.lob_type ?? body?.org_type ?? null;
+  const raw = body?.lob_type ?? body?.org_type ?? body?.business_type ?? null;
   const parsed = parseRegistrationLobType(raw);
   if (parsed.invalid) {
     return {
-      error: `Invalid lob_type "${parsed.attempted}". Allowed: ${REGISTER_LOB_TYPES.join(', ')}`,
+      error: `Invalid lob_type "${parsed.attempted}". Allowed: ${REGISTER_LOB_TYPES.join(', ')} (aliases: supply→b2b, electronics/jewellery→retail)`,
     };
   }
   return { lob_type: parsed.lob_type };
@@ -203,6 +208,40 @@ router.post(['/register', '/register/upload'], async (req, res) => {
   if (!email?.trim())         return res.status(400).json({ error: 'email is required' });
   if (!owner_name?.trim())    return res.status(400).json({ error: 'owner_name is required' });
   if (!owner_password)        return res.status(400).json({ error: 'owner_password is required' });
+  if (String(owner_password).length < 8) {
+    return res.status(400).json({ error: 'owner_password must be at least 8 characters' });
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email).trim())) {
+    return res.status(400).json({ error: 'email format is invalid' });
+  }
+
+  // FR-8: idempotency
+  const idempotencyKey = req.get('Idempotency-Key') || req.body.idempotency_key || null;
+  if (idempotencyKey) {
+    const { data: cached } = await supabaseAdmin
+      .from('registration_idempotency_keys')
+      .select('response, status_code')
+      .eq('idempotency_key', String(idempotencyKey).trim())
+      .maybeSingle();
+    if (cached?.response) {
+      return res.status(cached.status_code || 201).json(cached.response);
+    }
+  }
+
+  // Distinguish existing account vs new signup (FR-10 minimum)
+  const emailNorm = email.trim().toLowerCase();
+  const { data: existingEmp } = await supabaseAdmin
+    .from('employees')
+    .select('id, role')
+    .eq('email', emailNorm)
+    .maybeSingle();
+  if (existingEmp) {
+    return res.status(409).json({
+      error: 'You already have an Autom8 account — log in and add a new business from your dashboard',
+      code: 'existing_owner',
+      login_url: (process.env.FRONTEND_URL || 'https://app.autom8.works').replace(/\/$/, '') + '/login',
+    });
+  }
 
   const lobResolved = resolveRegistrationLobType(req.body);
   if (lobResolved.error) return res.status(400).json({ error: lobResolved.error });
@@ -253,7 +292,105 @@ router.post(['/register', '/register/upload'], async (req, res) => {
     timezone, dining_duration_minutes, payment_mode, manager_phone, table_count,
     meta_catalog_id, lob_type,
     embeddedSignup,
+    idempotencyKey,
+    display_name: req.body.display_name || null,
+    city: req.body.city || null,
+    country_code: req.body.country_code || null,
+    currency_code: req.body.currency_code || null,
+    address_line1: req.body.address_line1 || null,
+    kitchen_workflow: req.body.kitchen_workflow || null,
+    cuisines: req.body.cuisines || req.body.categories || null,
+    slug: req.body.slug || null,
   });
+});
+
+// ── GET availability checks (FR-8) ───────────────────────────────────────────
+router.get('/email-check/:email', async (req, res) => {
+  try {
+    const emailNorm = decodeURIComponent(req.params.email || '').trim().toLowerCase();
+    if (!emailNorm || !emailNorm.includes('@')) {
+      return res.status(400).json({ available: false, error: 'invalid email' });
+    }
+    const { data } = await supabaseAdmin
+      .from('employees')
+      .select('id')
+      .eq('email', emailNorm)
+      .maybeSingle();
+    res.json({
+      available: !data,
+      code: data ? 'existing_owner' : null,
+      message: data
+        ? 'You already have an Autom8 account — log in instead'
+        : null,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// FR-6: checkpoint WhatsApp linkage by email before final submit
+router.post('/draft', async (req, res) => {
+  try {
+    const email = String(req.body.email || '').trim().toLowerCase();
+    if (!email) return res.status(400).json({ error: 'email is required' });
+    const draft = { ...(req.body.draft || {}) };
+    delete draft.owner_password;
+    delete draft.password;
+    const row = {
+      email,
+      draft,
+      waba_id: req.body.waba_id || draft.waba_id || null,
+      phone_number_id: req.body.phone_number_id || draft.phone_number_id || null,
+      whatsapp_number: req.body.whatsapp_number || draft.whatsapp_number || null,
+      embedded_signup_code: req.body.embedded_signup_code || null,
+      updated_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 7 * 86400000).toISOString(),
+    };
+    const { data: existing } = await supabaseAdmin
+      .from('registration_drafts')
+      .select('id')
+      .eq('email', email)
+      .maybeSingle();
+    let saved;
+    if (existing) {
+      const { data, error } = await supabaseAdmin
+        .from('registration_drafts').update(row).eq('id', existing.id).select().single();
+      if (error) throw error;
+      saved = data;
+    } else {
+      const { data, error } = await supabaseAdmin
+        .from('registration_drafts').insert(row).select().single();
+      if (error) throw error;
+      saved = data;
+    }
+    res.json({ success: true, draft_id: saved.id });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.get('/draft/:email', async (req, res) => {
+  try {
+    const email = decodeURIComponent(req.params.email || '').trim().toLowerCase();
+    const { data } = await supabaseAdmin
+      .from('registration_drafts')
+      .select('id, draft, waba_id, phone_number_id, whatsapp_number, expires_at')
+      .eq('email', email)
+      .maybeSingle();
+    if (!data) return res.json({ draft: null });
+    if (data.expires_at && new Date(data.expires_at) < new Date()) {
+      return res.json({ draft: null, expired: true });
+    }
+    res.json({
+      draft_id: data.id,
+      draft: data.draft,
+      waba_id: data.waba_id,
+      phone_number_id: data.phone_number_id,
+      whatsapp_number: data.whatsapp_number,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 
@@ -268,6 +405,15 @@ async function registerStandalone(req, res, opts) {
     timezone, dining_duration_minutes, payment_mode, manager_phone, table_count,
     meta_catalog_id, lob_type,
     embeddedSignup = null,
+    idempotencyKey = null,
+    display_name = null,
+    city = null,
+    country_code = null,
+    currency_code = null,
+    address_line1 = null,
+    kitchen_workflow = null,
+    cuisines = null,
+    slug = null,
   } = opts;
 
   let restaurantId = null;
@@ -295,55 +441,63 @@ async function registerStandalone(req, res, opts) {
   }
 
   try {
-    // 1. Create restaurant row
-    let insertPayload = {
-      name,
-      email:                  email.trim().toLowerCase(),
-      phone:                  phone            || null,
-      whatsapp_number:        whatsapp_number  || null,
-      waba_id:                waba_id          || null,
-      timezone,
-      dining_duration_minutes,
-      payment_mode,
-      manager_phone:          manager_phone    || null,
-      meta_catalog_id:        meta_catalog_id  || null,
-      lob_type:               lob_type         || 'restaurant',
-      slug:                   candidateSlug    || null,
-      is_active:              true,
-      subscribed_features:    DEFAULT_FEATURES,
-    };
+    // Preflight WhatsApp uniqueness (FR-3)
+    await assertWhatsAppAssetsAvailable({
+      phone_number_id: embeddedSignup?.phone_number_id || phone_number_id,
+      waba_id: embeddedSignup?.waba_id || waba_id,
+      whatsapp_number: embeddedSignup?.display_phone_number || whatsapp_number,
+    });
 
-    let { data: restaurant, error: restError } = await supabaseAdmin
-      .from('tenants')
-      .insert(insertPayload)
-      .select()
-      .single();
+    const tenantRow = buildTenantInsertFields({
+      name, email, phone, whatsapp_number, waba_id,
+      timezone, dining_duration_minutes, payment_mode, manager_phone,
+      meta_catalog_id, lob_type,
+      display_name, city, country_code, currency_code, address_line1,
+      kitchen_workflow, cuisines, slug,
+      body: req.body,
+    });
 
-    // If migrations/add_tenant_slug.sql hasn't been run on this DB yet, retry
-    // once without the slug column rather than failing the whole registration.
-    if (restError && /column .*slug.* does not exist/i.test(restError.message || '')) {
-      console.warn('[onboarding] tenants.slug column missing — run migrations/add_tenant_slug.sql. Retrying insert without slug.');
-      const { slug: _drop, ...withoutSlug } = insertPayload;
-      ({ data: restaurant, error: restError } = await supabaseAdmin
+    // 1. Create restaurant row (full wizard fields + resilient optional columns)
+    let restaurant;
+    {
+      let insertPayload = { ...tenantRow };
+      // Prefer explicit slug from wizard when present
+      if (slug) insertPayload.slug = String(slug).trim().toLowerCase();
+
+      let { data, error: restError } = await supabaseAdmin
         .from('tenants')
-        .insert(withoutSlug)
+        .insert(insertPayload)
         .select()
-        .single());
-    }
+        .single();
 
-    if (restError && restError.code === '23505' && /slug/i.test(restError.message || '')) {
-      return res.status(409).json({ error: `The slug "${candidateSlug}" was just taken. Please choose another.` });
-    }
-    if (restError) throw restError;
-    restaurantId = restaurant.id;
+      if (restError && /column .*slug.* does not exist|short_code|kitchen_workflow|opening_hours|country|cuisine/i.test(restError.message || '')) {
+        console.warn('[onboarding] optional column missing — retrying stripped insert:', restError.message);
+        const fallback = { ...insertPayload };
+        delete fallback.slug;
+        delete fallback.short_code;
+        delete fallback.kitchen_workflow;
+        delete fallback.country;
+        ({ data, error: restError } = await supabaseAdmin
+          .from('tenants')
+          .insert(fallback)
+          .select()
+          .single());
+      }
+
+      if (restError && restError.code === '23505' && /slug/i.test(restError.message || '')) {
+        return res.status(409).json({ error: `The slug "${slug}" was just taken. Please choose another.` });
+      }
+      if (restError) throw restError;
+      restaurant = data;
+    }    restaurantId = restaurant.id;
 
     // Paid plan (billing) — optional at signup; defaults to full trial access
     await ensureRestaurantSubscription(supabaseAdmin, restaurantId, {
       paidFeatures:    req.body.paid_features,
-      enabledServices: req.body.enabled_services,
+      enabledServices: req.body.enabled_services || restaurant.subscribed_features,
     });
 
-    // 2. Create restaurant_integrations if phone_number_id provided
+    // 2. Create restaurant_integrations if phone_number_id provided (manual path)
     if (phone_number_id) {
       await supabaseAdmin.from('tenant_integrations').insert({
         restaurant_id:   restaurantId,
@@ -362,7 +516,9 @@ async function registerStandalone(req, res, opts) {
       email_confirm: true,
     });
     if (authError) {
-      await supabaseAdmin.from('tenants').delete().eq('id', restaurantId);
+      await rollbackRegistration({
+        restaurantId, email, slug, failedStep: 'auth_create', errorMessage: authError.message,
+      });
       throw authError;
     }
     authUserId = authData.user.id;
@@ -382,7 +538,12 @@ async function registerStandalone(req, res, opts) {
       })
       .select()
       .single();
-    if (userError) throw userError;
+    if (userError) {
+      await rollbackRegistration({
+        restaurantId, authUserId, email, slug, failedStep: 'employee_create', errorMessage: userError.message,
+      });
+      throw userError;
+    }
 
     // 5. Auto-create tables
     const count = parseInt(table_count) || 0;
@@ -398,7 +559,7 @@ async function registerStandalone(req, res, opts) {
         .catch(e => console.warn('[onboarding] Table creation failed (non-fatal):', e.message));
     }
 
-    // 6. Seed initial catalog from Step 4's upload, if provided (non-fatal).
+    // 5b. Seed initial catalog from Step 4's upload, if provided (non-fatal).
     let catalogSeed = null;
     try {
       catalogSeed = await seedCatalogFromRegistration(restaurantId, req.body.menu_catalog, lob_type);
@@ -411,15 +572,42 @@ async function registerStandalone(req, res, opts) {
       console.warn('[onboarding] Catalog seed failed (non-fatal):', e.message);
     }
 
-    // 7. Audit
-    await writeAuditLog({
+    // FR-9: B2B Supply → create suppliers row linked to same auth user
+    let supplier = null;
+    if (lob_type === 'b2b') {
+      try {
+        const { data: sup, error: supErr } = await supabaseAdmin.from('suppliers').insert({
+          auth_user_id:  authUserId,
+          name:          owner_name.trim(),
+          business_name: (display_name || name).trim(),
+          email:         email.trim().toLowerCase(),
+          phone:         (whatsapp_number || phone || manager_phone || '').toString().replace(/\D/g, '') || '0000000000',
+          city:          city || null,
+          address:       address_line1 || null,
+          lob_type:      'food_service',
+          waba_phone:    whatsapp_number || null,
+          waba_phone_number_id: embeddedSignup?.phone_number_id || phone_number_id || null,
+          is_active:     true,
+        }).select().single();
+        if (supErr) throw supErr;
+        supplier = sup;
+      } catch (supCreateErr) {
+        console.error('[onboarding] supplier create failed (non-fatal):', supCreateErr.message);
+        await recordRegistrationFailure({
+          email, slug, restaurant_id: restaurantId, auth_user_id: authUserId,
+          failed_step: 'supplier_create', error_message: supCreateErr.message,
+        });
+      }
+    }
+
+    // 6. Audit    await writeAuditLog({
       user_id:       authUserId,
       restaurant_id: restaurantId,
       action:        'Restaurant registered (standalone)',
       details:       { name, email, whatsapp_number, lob_type, source: 'onboarding', catalog_seeded: catalogSeed?.payload?.upserted ?? 0 },
     });
 
-    console.log(`[onboarding] ✅ Standalone: ${name} (${restaurantId}) — ${email}`);
+    console.log(`[onboarding] ✅ Standalone: ${name} (${restaurantId}) — ${email} lob=${lob_type}`);
 
     let whatsapp = null;
     if (embeddedSignup?.code && embeddedSignup?.waba_id && embeddedSignup?.phone_number_id) {
@@ -444,26 +632,59 @@ async function registerStandalone(req, res, opts) {
     );
 
     const loginUrl = (process.env.FRONTEND_URL || 'https://app.autom8.works').replace(/\/$/, '') + '/login';
-
-    res.status(201).json({
+    const waOk = !whatsapp || whatsapp.success !== false;
+    const payload = {
       success:       true,
+      status:        waOk ? 'ok' : 'needs_attention',
       mode:          'standalone',
       restaurant_id: restaurantId,
       user_id:       user.id,
+      lob_type,
+      supplier_id:   supplier?.id || null,
       region:        req.region?.region || process.env.REGION || 'IN',
       whatsapp,
       catalog_seed:  catalogSeed?.payload || null,
       login_url:     loginUrl,
-      // WP form historically expected checkout_url — send login until billing redirect exists
       checkout_url:  loginUrl,
-    });
+      message: waOk
+        ? null
+        : 'Your account is ready — WhatsApp could not be connected. Finish in Settings → WhatsApp.',
+    };
+
+    if (idempotencyKey) {
+      await supabaseAdmin.from('registration_idempotency_keys').upsert({
+        idempotency_key: String(idempotencyKey).trim(),
+        email: email.trim().toLowerCase(),
+        response: payload,
+        status_code: 201,
+      }).catch((e) => console.warn('[onboarding] idempotency store failed:', e.message));
+    }
+
+    // Clear draft after successful register
+    await supabaseAdmin.from('registration_drafts')
+      .delete()
+      .eq('email', email.trim().toLowerCase())
+      .catch(() => {});
+
+    res.status(201).json(payload);
 
   } catch (err) {
-    if (authUserId)    supabaseAdmin.auth.admin.deleteUser(authUserId).catch(() => {});
-    if (restaurantId)  supabaseAdmin.from('tenants').delete().eq('id', restaurantId).catch(() => {});
+    if (authUserId || restaurantId) {
+      await rollbackRegistration({
+        restaurantId, authUserId, email, slug,
+        failedStep: 'registerStandalone',
+        errorMessage: err.message,
+      });
+    }
     console.error('[onboarding/standalone]', err.message);
+    if (err.status === 409 || err.code === 'whatsapp_number_taken' || err.code === 'waba_taken') {
+      return res.status(409).json({ error: err.message, code: err.code });
+    }
     if (err.message?.includes('duplicate') || err.message?.includes('already exists'))
-      return res.status(409).json({ error: 'A restaurant or user with this email already exists.' });
+      return res.status(409).json({
+        error: 'A restaurant or user with this email already exists.',
+        code: 'duplicate',
+      });
     res.status(500).json({ error: err.message });
   }
 }

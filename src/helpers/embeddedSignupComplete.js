@@ -7,6 +7,7 @@
 const { supabaseAdmin } = require('../config/supabase');
 const { invalidateRestaurantConfigCache } = require('./restaurantConfig');
 const { writeAuditLog } = require('./auditLog');
+const { assertWhatsAppAssetsAvailable } = require('./registrationGuards');
 
 const GRAPH_VERSION = () => process.env.META_GRAPH_VERSION || 'v21.0';
 
@@ -125,6 +126,12 @@ async function completeEmbeddedSignupForRestaurant(restaurantId, opts) {
     err.status = 400;
     throw err;
   }
+
+  await assertWhatsAppAssetsAvailable({
+    phone_number_id,
+    waba_id,
+    excludeRestaurantId: restaurantId,
+  });
 
   const tokenPayload = await graphGet('/oauth/access_token', {
     client_id:     process.env.META_APP_ID,

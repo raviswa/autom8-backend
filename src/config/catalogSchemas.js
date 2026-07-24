@@ -462,26 +462,31 @@ const REGISTER_LOB_TYPES = Object.freeze(Object.keys(LOB_SCHEMAS));
 /**
  * Registration-time aliases: business types the registration form (or other
  * intake surfaces) may send that don't have a dedicated catalog schema yet.
- * They're mapped onto the closest existing LOB_SCHEMAS entry so signup
- * doesn't hard-fail while a bespoke schema is still pending. Extend
- * LOB_SCHEMAS with a real entry (and drop the alias here) once a LOB needs
- * its own catalog columns/validation instead of borrowing another's.
+ * Mapped onto the closest existing LOB_SCHEMAS entry.
  */
 const LOB_ALIASES = Object.freeze({
-  supply:      'b2b',     // matches register_fnb_supply_short_code.sql's lob_type='supply' intent
-  electronics: 'retail',  // retail schema already models condition/warranty/colour
-  jewellery:   'retail',  // closest existing fit (condition/colour); no material field yet
+  supply: 'b2b',
+  b2b_supply: 'b2b',
+  electronics: 'retail',
+  jewellery: 'retail',
+  jewelry: 'retail',
+  packaged_food: 'food_products',
+  home_baker: 'food_products',
+  pizza: 'psl',
+  ice_cream: 'psl',
 });
 
 function normalizeLobType(value, fallback = 'restaurant') {
   const raw = String(value ?? '').trim().toLowerCase();
+  if (!raw) return fallback;
   if (REGISTER_LOB_TYPES.includes(raw)) return raw;
-  if (LOB_ALIASES[raw]) return LOB_ALIASES[raw];
+  const aliased = LOB_ALIASES[raw];
+  if (aliased && REGISTER_LOB_TYPES.includes(aliased)) return aliased;
   return fallback;
 }
 
 /**
- * Parse lob_type / org_type from registration payload.
+ * Parse lob_type / org_type / business_type from registration payload.
  * Returns { lob_type, invalid, attempted? } — invalid=true when a non-empty unknown value was sent.
  * Accepts both canonical LOB_SCHEMAS keys and the registration-time aliases above.
  */
@@ -489,7 +494,10 @@ function parseRegistrationLobType(value) {
   const raw = String(value ?? '').trim().toLowerCase();
   if (!raw) return { lob_type: 'restaurant', invalid: false };
   if (REGISTER_LOB_TYPES.includes(raw)) return { lob_type: raw, invalid: false };
-  if (LOB_ALIASES[raw]) return { lob_type: LOB_ALIASES[raw], invalid: false };
+  const aliased = LOB_ALIASES[raw];
+  if (aliased && REGISTER_LOB_TYPES.includes(aliased)) {
+    return { lob_type: aliased, invalid: false };
+  }
   return { lob_type: null, invalid: true, attempted: raw };
 }
 
@@ -497,6 +505,7 @@ module.exports = {
   LOB_SCHEMAS,
   getSchemaForLob,
   REGISTER_LOB_TYPES,
+  LOB_ALIASES,
   normalizeLobType,
   parseRegistrationLobType,
 };

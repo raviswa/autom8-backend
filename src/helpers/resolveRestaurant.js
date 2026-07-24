@@ -40,14 +40,26 @@ async function resolveRestaurantByPhone(phoneNumberId) {
       .select('restaurant_id')
       .eq('phone_number_id', String(phoneNumberId).trim())
       .eq('is_active', true)
-      .maybeSingle();
+      .limit(2);
 
     if (error) {
       console.warn(`[resolveRestaurant] DB error for phone_number_id=${phoneNumberId}:`, error.message);
       return null;
     }
 
-    const restaurantId = data?.restaurant_id ?? null;
+    if (!data?.length) {
+      _cache.set(phoneNumberId, { restaurant_id: null, expires_at: Date.now() + CACHE_TTL_MS });
+      return null;
+    }
+
+    if (data.length > 1) {
+      console.error(
+        `[resolveRestaurant] AMBIGUOUS phone_number_id=${phoneNumberId} matches ${data.length} active tenants — using first`,
+        data.map((r) => r.restaurant_id),
+      );
+    }
+
+    const restaurantId = data[0]?.restaurant_id ?? null;
 
     // Cache the result (even null — avoids hammering DB for invalid IDs)
     _cache.set(phoneNumberId, {
