@@ -49,7 +49,7 @@ app.use(cors({
     process.env.FRONTEND_URL,
   ].filter(Boolean),
   methods:        ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-restaurant-id', 'x-internal-secret'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-restaurant-id', 'x-internal-secret', 'idempotency-key'],
   credentials:    true,
 }));
 app.options('*', cors());
