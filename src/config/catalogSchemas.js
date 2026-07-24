@@ -459,19 +459,37 @@ function getSchemaForLob(lobType) {
 /** LOB types valid at tenant registration and in Settings → Business type. */
 const REGISTER_LOB_TYPES = Object.freeze(Object.keys(LOB_SCHEMAS));
 
+/**
+ * Registration-time aliases: business types the registration form (or other
+ * intake surfaces) may send that don't have a dedicated catalog schema yet.
+ * They're mapped onto the closest existing LOB_SCHEMAS entry so signup
+ * doesn't hard-fail while a bespoke schema is still pending. Extend
+ * LOB_SCHEMAS with a real entry (and drop the alias here) once a LOB needs
+ * its own catalog columns/validation instead of borrowing another's.
+ */
+const LOB_ALIASES = Object.freeze({
+  supply:      'b2b',     // matches register_fnb_supply_short_code.sql's lob_type='supply' intent
+  electronics: 'retail',  // retail schema already models condition/warranty/colour
+  jewellery:   'retail',  // closest existing fit (condition/colour); no material field yet
+});
+
 function normalizeLobType(value, fallback = 'restaurant') {
   const raw = String(value ?? '').trim().toLowerCase();
-  return REGISTER_LOB_TYPES.includes(raw) ? raw : fallback;
+  if (REGISTER_LOB_TYPES.includes(raw)) return raw;
+  if (LOB_ALIASES[raw]) return LOB_ALIASES[raw];
+  return fallback;
 }
 
 /**
  * Parse lob_type / org_type from registration payload.
  * Returns { lob_type, invalid, attempted? } — invalid=true when a non-empty unknown value was sent.
+ * Accepts both canonical LOB_SCHEMAS keys and the registration-time aliases above.
  */
 function parseRegistrationLobType(value) {
   const raw = String(value ?? '').trim().toLowerCase();
   if (!raw) return { lob_type: 'restaurant', invalid: false };
   if (REGISTER_LOB_TYPES.includes(raw)) return { lob_type: raw, invalid: false };
+  if (LOB_ALIASES[raw]) return { lob_type: LOB_ALIASES[raw], invalid: false };
   return { lob_type: null, invalid: true, attempted: raw };
 }
 
