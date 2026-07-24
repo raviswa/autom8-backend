@@ -599,7 +599,8 @@ async function registerStandalone(req, res, opts) {
       }
     }
 
-    // 6. Audit    await writeAuditLog({
+    // 6. Audit
+    await writeAuditLog({
       user_id:       authUserId,
       restaurant_id: restaurantId,
       action:        'Restaurant registered (standalone)',
