@@ -111,6 +111,9 @@ def build_welcome_message(
         "",
         reply(lang, "welcome_browse_cta"),
     ]
+    if str(lob_type or "").strip().lower() in ("food_products", "retail", "psl", "b2b"):
+        lines.append("")
+        lines.append(reply(lang, "welcome_fulfillment_hint"))
     if can_repeat:
         lines.append("")
         lines.append(reply(lang, "welcome_repeat_hint"))

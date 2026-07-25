@@ -61,7 +61,10 @@ router.post('/notify', async (req, res) => {
     advance_credit = 0,
     booking_id,
     create_kot = false,
+    order_only = false,
   } = req.body;
+
+  const orderOnly = !!order_only;
 
   if (!restaurant_id) return res.status(400).json({ error: 'restaurant_id required' });
   if (!items.length)  return res.status(400).json({ error: 'items array must not be empty' });
@@ -188,7 +191,18 @@ router.post('/notify', async (req, res) => {
       const newItemsNeeded = items.filter((item) => !lineAlreadyOnOrder(item, existingOrderLines));
 
       // Repair: order + order_items exist but KDS lines were never created (failed prior notify).
+      // order_only = create POS order for Captain QR without pushing Live KDS yet.
       if (existingOrderLines.length > 0 && existingKdsCount === 0) {
+        if (orderOnly) {
+          return res.status(201).json({
+            success:           true,
+            order_id:          existingOrder.id,
+            order_number:      existingOrder.order_number,
+            kds_items_created: 0,
+            kds_items_added:   0,
+            order_only:        true,
+          });
+        }
         const oiIds = existingOrderLines.map((r) => r.id);
         const { data: oiDetail } = await supabaseAdmin
           .from('order_items')
@@ -459,6 +473,19 @@ router.post('/notify', async (req, res) => {
 
 
     // ── Step 4: Bulk-insert kds_items ─────────────────────────────────────────
+    // order_only: persist orders + order_items for Captain /verify/{order_id} QR,
+    // but do not push Live KDS yet (scheduled defer / early receipt).
+    if (orderOnly) {
+      return res.status(201).json({
+        success:           true,
+        order_id:          orderRow.id,
+        order_number:      orderRow.order_number,
+        kds_items_created: 0,
+        kds_items_added:   0,
+        order_only:        true,
+      });
+    }
+
     const packingForAlert = kdsInserts
       .filter((r) => r.queue === 'packing')
       .map((r) => ({ name: r.item_name, qty: r._qty }));

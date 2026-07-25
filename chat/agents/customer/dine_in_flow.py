@@ -64,6 +64,7 @@ from tools.booking_mechanisms import (
     fetch_restaurant_info,
     upload_and_send_receipt,
     receipt_qr_url,
+    receipt_verify_url,
     AUTOM8_KDS_URL,
 )
 from agents.customer.booking_helpers import (
@@ -502,7 +503,7 @@ async def _fire_kitchen_and_receipt(
             restaurant_gstin=r_info.get("gstin", ""),
             restaurant_wa_number=r_info.get("whatsapp_number", ""),
             restaurant_website=r_info.get("website", ""),
-            receipt_url=receipt_qr_url(token),
+            receipt_url=receipt_verify_url(order_id) if order_id else receipt_qr_url(token),
             token_number=token,
             table_number=table_label,
             service_type="dine_in",

@@ -177,9 +177,17 @@ def get_http() -> aiohttp.ClientSession:
 # ─────────────────────────────────────────────
 
 def receipt_qr_url(token_number: str) -> str:
-    """Build the stable redirect URL embedded in the receipt QR code."""
+    """Build the stable redirect URL embedded in the receipt QR code (token → PNG)."""
     clean = token_number.lstrip("#").replace(" ", "-").replace("/", "-")
     return f"{_RECEIPT_REDIRECT_BASE}/{clean}"
+
+
+def receipt_verify_url(order_id: str) -> str:
+    """Captain-scannable QR target — resolves directly to orders.id."""
+    oid = str(order_id or "").strip()
+    if not oid:
+        return ""
+    return f"{_AUTOM8_BACKEND_URL}/verify/{oid}"
 
 
 async def fetch_restaurant_info(restaurant_id: str) -> dict | None:
@@ -1293,8 +1301,14 @@ async def notify_kds(
     restaurant_id: str,
     special_notes: str | None = None,
     booking_id: str | None = None,
+    order_only: bool = False,
 ) -> str | None:
-    """POST order to Node KDS API. Returns order_id on success, else None."""
+    """POST order to Node KDS API. Returns order_id on success, else None.
+
+    order_only=True creates/returns the POS orders row (+ order_items with
+    booking_id) without pushing Live KDS — used so Captain receipt QR can
+    embed /verify/{order_id} before kitchen release.
+    """
     try:
         items = []
         for item_id, line in (cart or {}).items():
@@ -1335,6 +1349,8 @@ async def notify_kds(
         }
         if booking_id:
             payload["booking_id"] = booking_id
+        if order_only:
+            payload["order_only"] = True
         headers = _portal_auth_headers()
 
         for attempt in range(3):
@@ -1347,15 +1363,22 @@ async def notify_kds(
                 )
                 if resp.status in (200, 201):
                     data = await resp.json()
+                    order_id = data.get("order_id")
+                    if order_only and order_id:
+                        logger.info(
+                            f"[kds-notify] ✅ order_only OK for token {token_number} | "
+                            f"order {order_id} | restaurant {restaurant_id}"
+                        )
+                        return order_id
                     expected = len(items)
                     kds_added = int(data.get("kds_items_added", 0))
                     if data.get("deduplicated"):
-                        if kds_added > 0:
+                        if kds_added > 0 or order_id:
                             logger.info(
                                 f"[kds-notify] ♻️ idempotent retry OK ({kds_added} line(s)) "
-                                f"for token {token_number} | order {data.get('order_id')}"
+                                f"for token {token_number} | order {order_id}"
                             )
-                            return data.get("order_id")
+                            return order_id
                         logger.error(
                             f"[kds-notify] attempt {attempt + 1}/3 — dedup blocked new items "
                             f"for token {token_number} (expected {expected}) | {data}"
@@ -1375,10 +1398,10 @@ async def notify_kds(
                         continue
                     logger.info(
                         f"[kds-notify] ✅ {kds_added} item(s) created for token {token_number} | "
-                        f"table {table_number} | order {data.get('order_id', '?')} | "
+                        f"table {table_number} | order {order_id or '?'} | "
                         f"restaurant {restaurant_id}"
                     )
-                    return data.get("order_id")
+                    return order_id
                 body = await resp.text()
                 logger.error(
                     f"[kds-notify] attempt {attempt + 1}/3 failed {resp.status}: {body[:300]}"

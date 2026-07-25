@@ -6,6 +6,22 @@
 const { supabaseAdmin } = require('../config/supabase');
 const { writeAuditLog } = require('./auditLog');
 
+/** Comma-separated Meta phone_number_ids allowed to be shared across tenants (test only). */
+function phoneNumberIdUniquenessExempt() {
+  const fromEnv = String(process.env.WHATSAPP_PHONE_NUMBER_ID_UNIQUENESS_EXEMPT || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  // Known shared test MID (Autom8 multi-restaurant WhatsApp testing)
+  const defaults = ['1086618881209069'];
+  return new Set([...defaults, ...fromEnv]);
+}
+
+function isPhoneNumberIdExempt(phoneNumberId) {
+  if (!phoneNumberId) return false;
+  return phoneNumberIdUniquenessExempt().has(String(phoneNumberId).trim());
+}
+
 async function recordRegistrationFailure(entry) {
   const row = {
     email: entry.email || null,
@@ -45,20 +61,25 @@ async function assertWhatsAppAssetsAvailable({
   excludeRestaurantId = null,
 } = {}) {
   if (phone_number_id) {
-    let q = supabaseAdmin
-      .from('tenant_integrations')
-      .select('id, restaurant_id')
-      .eq('phone_number_id', String(phone_number_id).trim())
-      .eq('is_active', true)
-      .limit(2);
-    if (excludeRestaurantId) q = q.neq('restaurant_id', excludeRestaurantId);
-    const { data, error } = await q;
-    if (error) throw error;
-    if (data?.length) {
-      const err = new Error('This WhatsApp number is already connected to another Autom8 account');
-      err.status = 409;
-      err.code = 'whatsapp_number_taken';
-      throw err;
+    const pid = String(phone_number_id).trim();
+    if (isPhoneNumberIdExempt(pid)) {
+      console.warn('[registrationGuards] skipping uniqueness check for exempt phone_number_id', pid);
+    } else {
+      let q = supabaseAdmin
+        .from('tenant_integrations')
+        .select('id, restaurant_id')
+        .eq('phone_number_id', pid)
+        .eq('is_active', true)
+        .limit(2);
+      if (excludeRestaurantId) q = q.neq('restaurant_id', excludeRestaurantId);
+      const { data, error } = await q;
+      if (error) throw error;
+      if (data?.length) {
+        const err = new Error('This WhatsApp number is already connected to another Autom8 account');
+        err.status = 409;
+        err.code = 'whatsapp_number_taken';
+        throw err;
+      }
     }
   }
 

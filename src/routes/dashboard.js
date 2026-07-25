@@ -626,6 +626,7 @@ router.post('/shipment/manual', authenticateToken, getRestaurantId, requireOutle
       awb,
       shipment_status: 'manual',
       shipment_mode: 'manual',
+      shiprocket_last_error: null,
     };
     const { error: updateErr } = await supabaseAdmin
       .from('bookings')
@@ -658,6 +659,268 @@ router.post('/shipment/manual', authenticateToken, getRestaurantId, requireOutle
     res.json({ success: true, booking_id: booking.id });
   } catch (err) {
     console.error('[dashboard/shipment/manual]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET pending same-city Shiprocket requests (manager gate) ─────────────────
+router.get('/shipment/local-channel/pending', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
+  try {
+    const { isLocalShiprocketPending, pendingTimedOut } = require('../helpers/fulfillmentChannels');
+    const { data, error } = await supabaseAdmin
+      .from('bookings')
+      .select('id, token_number, order_ref, customer_name, customer_phone, delivery_address, meta, created_at, status')
+      .eq('restaurant_id', req.restaurant_id)
+      .order('created_at', { ascending: false })
+      .limit(80);
+    if (error) throw error;
+
+    const pending = [];
+    for (const row of data || []) {
+      const meta = row.meta || {};
+      if (!isLocalShiprocketPending(meta)) continue;
+      if (pendingTimedOut(meta)) {
+        // Auto-accept timed-out rows so packing can proceed.
+        const nextMeta = {
+          ...meta,
+          delivery_channel: 'shiprocket',
+          delivery_channel_status: 'auto_accepted',
+          local_shiprocket_pending_at: null,
+        };
+        await supabaseAdmin.from('bookings').update({ meta: nextMeta }).eq('id', row.id);
+        continue;
+      }
+      pending.push({
+        booking_id: row.id,
+        token_number: row.token_number,
+        order_ref: row.order_ref,
+        customer_name: row.customer_name || meta.customer_name || null,
+        customer_phone: row.customer_phone,
+        delivery_address: row.delivery_address || meta.delivery_address || null,
+        requested_at: meta.local_shiprocket_pending_at || row.created_at,
+        delivery_charge: meta.web_cart_submission?.delivery_charge
+          ?? meta.delivery_charge
+          ?? null,
+      });
+    }
+    res.json({ success: true, pending });
+  } catch (err) {
+    console.error('[dashboard/local-channel/pending]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST approve / reject same-city Shiprocket preference ────────────────────
+router.post('/shipment/local-channel/:bookingId', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
+  try {
+    const bookingId = String(req.params.bookingId || '').trim();
+    const action = String(req.body?.action || '').toLowerCase();
+    if (!['approve', 'reject'].includes(action)) {
+      return res.status(400).json({ error: 'action must be approve or reject' });
+    }
+
+    const { data: booking, error } = await supabaseAdmin
+      .from('bookings')
+      .select('id, restaurant_id, customer_phone, order_ref, meta, delivery_address')
+      .eq('restaurant_id', req.restaurant_id)
+      .eq('id', bookingId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+
+    const meta = booking.meta || {};
+    if (String(meta.delivery_channel_status || '') !== 'pending_manager') {
+      return res.status(400).json({
+        error: 'This order is not awaiting courier approval',
+        delivery_channel_status: meta.delivery_channel_status || null,
+      });
+    }
+
+    let patch;
+    let notifyText;
+    if (action === 'approve') {
+      patch = {
+        delivery_channel: 'shiprocket',
+        delivery_channel_status: 'confirmed',
+        local_shiprocket_pending_at: null,
+      };
+      notifyText =
+        `✅ *Courier confirmed*\n\n` +
+        `Order *${booking.order_ref || booking.id}* will ship via courier once packed.`;
+    } else {
+      // Re-quote own-team local charge for honest pricing
+      let ownCharge = Number(meta.intra_city_charge_snapshot);
+      if (!Number.isFinite(ownCharge)) {
+        const { data: tenant } = await supabaseAdmin
+          .from('tenants')
+          .select('intra_city_charge, delivery_charge_default, postal_code, shiprocket_api_key, shiprocket_email, shipping_provider, packaging_weight_grams, free_delivery_above, courier_rate_card, courier_name, outstation_charge, cod_enabled_city')
+          .eq('id', req.restaurant_id)
+          .maybeSingle();
+        const pin = String(meta.pincode || meta.delivery_pincode || '').replace(/\D/g, '').slice(0, 6);
+        const { calculateDelivery } = require('./webcart/shared');
+        // calculateDelivery is in webcart/shared — use flat fallback if import path awkward
+        ownCharge = Number(tenant?.intra_city_charge ?? tenant?.delivery_charge_default ?? 0) || 0;
+        try {
+          if (pin && tenant) {
+            const quote = await calculateDelivery(tenant, pin, Number(meta.web_cart_submission?.total || 0), {
+              delivery_channel: 'own_team',
+              items: meta.web_cart_submission?.items || [],
+            });
+            ownCharge = Number(quote.charge || ownCharge);
+          }
+        } catch (_) { /* keep flat */ }
+      }
+
+      const prevCharge = Number(meta.web_cart_submission?.delivery_charge ?? meta.delivery_charge ?? 0) || 0;
+      patch = {
+        delivery_channel: 'own_team',
+        delivery_channel_requested: meta.delivery_channel_requested || 'shiprocket',
+        delivery_channel_status: 'rejected_to_own_team',
+        delivery_source: 'intra_city_flat',
+        local_shiprocket_pending_at: null,
+        delivery_charge: ownCharge,
+        delivery_charge_adjusted_from: prevCharge,
+      };
+      if (meta.web_cart_submission) {
+        patch.web_cart_submission = {
+          ...meta.web_cart_submission,
+          delivery_charge: ownCharge,
+          delivery_channel: 'own_team',
+          delivery_channel_status: 'rejected_to_own_team',
+        };
+      }
+      const delta = Math.round((ownCharge - prevCharge) * 100) / 100;
+      const feeNote = delta === 0
+        ? `Delivery fee remains ₹${Math.round(ownCharge)}.`
+        : (delta < 0
+          ? `Delivery fee updated to ₹${Math.round(ownCharge)} (₹${Math.abs(delta)} less than courier quote).`
+          : `Delivery fee updated to ₹${Math.round(ownCharge)} (₹${delta} more than courier quote — settled with the store).`);
+      notifyText =
+        `🛵 *Store delivery team assigned*\n\n` +
+        `Order *${booking.order_ref || booking.id}* will be delivered by our team (same city).\n` +
+        feeNote;
+    }
+
+    const nextMeta = { ...meta, ...patch };
+    await supabaseAdmin.from('bookings').update({ meta: nextMeta }).eq('id', booking.id);
+
+    if (booking.customer_phone) {
+      try {
+        const { sendWhatsAppMessage } = require('../helpers/whatsapp');
+        await sendWhatsAppMessage(booking.customer_phone, notifyText, req.restaurant_id);
+      } catch (waErr) {
+        console.warn('[dashboard/local-channel] notify failed:', waErr.message);
+      }
+    }
+
+    res.json({
+      success: true,
+      booking_id: booking.id,
+      action,
+      delivery_channel: nextMeta.delivery_channel,
+      delivery_channel_status: nextMeta.delivery_channel_status,
+      delivery_charge: nextMeta.delivery_charge ?? null,
+    });
+  } catch (err) {
+    console.error('[dashboard/local-channel]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/dashboard/shipment/:bookingId — packing UI status ────────────────
+router.get('/shipment/:bookingId', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
+  try {
+    const bookingId = String(req.params.bookingId || '').trim();
+    const { data: booking, error } = await supabaseAdmin
+      .from('bookings')
+      .select('id, token_number, order_ref, meta, service_type')
+      .eq('restaurant_id', req.restaurant_id)
+      .eq('id', bookingId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+
+    const {
+      shipmentPayloadFromMeta,
+    } = require('../helpers/shiprocketShipment');
+    res.json({
+      success: true,
+      booking_id: booking.id,
+      token_number: booking.token_number,
+      order_ref: booking.order_ref,
+      service_type: booking.service_type,
+      shipment: shipmentPayloadFromMeta(booking.meta || {}),
+    });
+  } catch (err) {
+    console.error('[dashboard/shipment/:id]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/dashboard/shipment/lookup — resolve by token for packing board ───
+router.get('/shipment-lookup', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
+  try {
+    const token = String(req.query.token || '').trim();
+    const orderRef = String(req.query.order_ref || '').trim();
+    if (!token && !orderRef) {
+      return res.status(400).json({ error: 'token or order_ref is required' });
+    }
+
+    const {
+      resolveBookingForPackedOrder,
+      shipmentPayloadFromMeta,
+    } = require('../helpers/shiprocketShipment');
+
+    const booking = await resolveBookingForPackedOrder({
+      restaurantId: req.restaurant_id,
+      tokenNumber: token || null,
+      customerPhone: null,
+      orderNumber: orderRef || null,
+    });
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+
+    res.json({
+      success: true,
+      booking_id: booking.id,
+      token_number: booking.token_number,
+      order_ref: booking.order_ref,
+      service_type: booking.service_type,
+      fulfillment_type: booking.meta?.fulfillment_type || null,
+      delivery_channel: booking.meta?.delivery_channel || null,
+      delivery_channel_status: booking.meta?.delivery_channel_status || null,
+      shipment: shipmentPayloadFromMeta(booking.meta || {}),
+    });
+  } catch (err) {
+    console.error('[dashboard/shipment-lookup]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/dashboard/shipment/shiprocket/:bookingId — create / retry ───────
+router.post('/shipment/shiprocket/:bookingId', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
+  try {
+    const bookingId = String(req.params.bookingId || '').trim();
+    const force = req.body?.force !== false; // retry defaults to force
+    const { createOrRetryShiprocketShipment } = require('../helpers/shiprocketShipment');
+    const result = await createOrRetryShiprocketShipment({
+      restaurantId: req.restaurant_id,
+      bookingId,
+      force,
+    });
+    if (!result.ok && !result.skipped) {
+      return res.status(400).json({
+        success: false,
+        error: result.error || result.reason || 'Shiprocket create failed',
+        booking_id: result.booking_id || bookingId,
+        shipment: result.shipment,
+      });
+    }
+    res.json({
+      success: true,
+      ...result,
+    });
+  } catch (err) {
+    console.error('[dashboard/shipment/shiprocket]', err.message);
     res.status(500).json({ error: err.message });
   }
 });

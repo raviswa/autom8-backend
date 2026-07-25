@@ -132,13 +132,38 @@ async def _mint_webcart_url(
     if not token_id:
         restaurant_lob = str((restaurant or {}).get("lob_type") or "").strip().lower()
         shipped = restaurant_lob in ("food_products", "retail", "psl", "b2b")
+        # Packaged LOBs: do not force delivery — webcart lets shopper pick
+        # pickup vs delivery (and same-city channel). Prefer takeaway token
+        # when takeaway is enabled; else delivery.
+        features = list((restaurant or {}).get("subscribed_features") or [])
+        takeaway_on = (not features) or ("takeaway" in features)
+        delivery_on = (not features) or ("delivery" in features)
+        if shipped:
+            if takeaway_on and not delivery_on:
+                token_type = "takeaway"
+                service_type = "takeaway"
+            elif delivery_on and not takeaway_on:
+                token_type = "delivery"
+                service_type = "delivery"
+            else:
+                # Both (or unset): leave open for webcart fulfillment choice
+                token_type = "delivery"
+                service_type = None
+        else:
+            token_type = "takeaway"
+            service_type = "takeaway"
+        meta = {"source": "minimal_webcart_link"}
+        if service_type:
+            meta["service_type"] = service_type
+        else:
+            meta["fulfillment_choice_pending"] = True
         created_id = await create_walk_in_token_direct(
             restaurant_id=restaurant_id,
             name=session_state.get("customer_name") or "WhatsApp Guest",
             phone=customer_phone,
-            token_type="delivery" if shipped else "takeaway",
+            token_type=token_type,
             pax=1,
-            meta={"source": "minimal_webcart_link", "service_type": "delivery" if shipped else "takeaway"},
+            meta=meta,
         )
         if created_id:
             token_id = created_id
@@ -218,7 +243,12 @@ async def send_minimal_webcart_link(
         session_state["booking_mechanism"] = "web_cart"
         session_state["booking_mechanism_order_source"] = "web_cart"
         shipped = lob_type in ("food_products", "retail", "psl", "b2b")
-        session_state["service_type"] = "delivery" if shipped else "takeaway"
+        # Do not force delivery for packaged LOBs — shopper chooses on webcart.
+        if shipped:
+            session_state.pop("service_type", None)
+            session_state["fulfillment_choice_pending"] = True
+        else:
+            session_state["service_type"] = "takeaway"
         session_state["lob_type"] = lob_type
         logger.info("[minimal-order] webcart link sent to %s (%s)", customer_phone, lob_type)
     return sent

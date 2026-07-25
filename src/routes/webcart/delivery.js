@@ -119,7 +119,7 @@ router.get('/api/webcart/saved-addresses', async (req, res) => {
 
 router.post('/api/webcart/delivery-quote', async (req, res) => {
   try {
-    const { pincode, cart_total, items } = req.body || {};
+    const { pincode, cart_total, items, delivery_channel } = req.body || {};
     const customerPincode = normalizePincode(pincode);
     if (!customerPincode) {
       return res.status(400).json({ ok: false, error: 'A valid 6-digit pincode is required.' });
@@ -151,6 +151,7 @@ router.post('/api/webcart/delivery-quote', async (req, res) => {
 
     const quote = await calculateDelivery(restaurant, customerPincode, cart_total, {
       items: weighedItems,
+      delivery_channel,
     });
     return res.json({ ok: true, ...quote });
   } catch (err) {

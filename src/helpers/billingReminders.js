@@ -81,7 +81,7 @@ function paymentLinkFor(entityType, entity, sub) {
     return `${base}/supply/billing`;
   }
   const base = (process.env.FRONTEND_URL || 'https://app.autom8.works').replace(/\/$/, '');
-  return `${base}/settings/billing`;
+  return `${base}/billing`;
 }
 
 async function loadPendingPaymentLink(entityType, entityId) {

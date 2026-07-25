@@ -99,6 +99,7 @@ async function completeEmbeddedSignupForRestaurant(restaurantId, opts) {
     phone_number_id,
     display_phone_number = null,
     actorId = null,
+    existing_pin = null,
   } = opts || {};
 
   if (!isEmbeddedSignupConfigured()) {
@@ -147,14 +148,20 @@ async function completeEmbeddedSignupForRestaurant(restaurantId, opts) {
 
   await graphPost(`/${waba_id}/subscribed_apps`, businessToken, {});
 
-  const pin = (process.env.WHATSAPP_REGISTER_PIN || '').replace(/\D/g).slice(0, 6)
+  const pinFromUser = existing_pin != null
+    ? String(existing_pin).replace(/\D/g, '').slice(0, 6)
+    : '';
+  const pin = pinFromUser
+    || (process.env.WHATSAPP_REGISTER_PIN || '').replace(/\D/g).slice(0, 6)
     || randomSixDigitPin();
   if (pin.length !== 6) {
-    const err = new Error('WHATSAPP_REGISTER_PIN must be a 6-digit PIN');
-    err.status = 500;
+    const err = new Error('A 6-digit WhatsApp PIN is required to register this number');
+    err.status = 400;
+    err.code = 'needs_existing_pin';
     throw err;
   }
 
+  let needsExistingPin = false;
   try {
     await graphPost(`/${phone_number_id}/register`, businessToken, {
       messaging_product: 'whatsapp',
@@ -164,8 +171,17 @@ async function completeEmbeddedSignupForRestaurant(restaurantId, opts) {
     const msg = String(regErr.message || '');
     const already = /already registered|is registered/i.test(msg)
       || regErr.graph?.code === 133016;
-    if (!already) throw regErr;
-    console.warn(`[embedded-signup] phone ${phone_number_id} already registered — continuing`);
+    const pinIssue = /pin|two.?step|2fa|two-step/i.test(msg)
+      || [133005, 133006, 133008, 133009].includes(Number(regErr.graph?.code));
+    if (already) {
+      console.warn(`[embedded-signup] phone ${phone_number_id} already registered — continuing`);
+    } else if (pinIssue) {
+      // Persist credentials below so Screen A can collect the existing PIN and retry.
+      needsExistingPin = true;
+      console.warn(`[embedded-signup] phone ${phone_number_id} needs existing PIN — persisting and flagging`);
+    } else {
+      throw regErr;
+    }
   }
 
   let displayPhone = display_phone_number;
@@ -185,6 +201,7 @@ async function completeEmbeddedSignupForRestaurant(restaurantId, opts) {
 
   const tenantUpdates = {
     waba_id: String(waba_id),
+    whatsapp_needs_existing_pin: needsExistingPin,
     updated_at: new Date().toISOString(),
   };
   if (whatsappNumber) tenantUpdates.whatsapp_number = whatsappNumber;
@@ -266,11 +283,78 @@ async function completeEmbeddedSignupForRestaurant(restaurantId, opts) {
     whatsapp_number: whatsappNumber,
     integration_id: integration?.id || null,
     access_token: businessToken,
+    whatsapp_needs_existing_pin: needsExistingPin,
   };
+}
+
+/**
+ * Retry Graph /register with the number's existing 2FA PIN (migration case).
+ */
+async function registerPhoneWithExistingPin(restaurantId, existingPin, actorId = null) {
+  const pin = String(existingPin || '').replace(/\D/g, '').slice(0, 6);
+  if (pin.length !== 6) {
+    const err = new Error('Enter the 6-digit WhatsApp PIN for this number');
+    err.status = 400;
+    err.code = 'needs_existing_pin';
+    throw err;
+  }
+
+  const { data: integration } = await supabaseAdmin
+    .from('tenant_integrations')
+    .select('id, phone_number_id, access_token, config')
+    .eq('restaurant_id', restaurantId)
+    .eq('provider', 'meta')
+    .eq('channel', 'whatsapp')
+    .eq('is_active', true)
+    .maybeSingle();
+
+  if (!integration?.phone_number_id || !integration?.access_token) {
+    const err = new Error('WhatsApp is not linked yet — connect WhatsApp first');
+    err.status = 400;
+    throw err;
+  }
+
+  try {
+    await graphPost(`/${integration.phone_number_id}/register`, integration.access_token, {
+      messaging_product: 'whatsapp',
+      pin,
+    });
+  } catch (regErr) {
+    const msg = String(regErr.message || '');
+    const already = /already registered|is registered/i.test(msg)
+      || regErr.graph?.code === 133016;
+    if (!already) {
+      const err = new Error(msg || 'PIN was rejected by Meta — check and try again');
+      err.status = 400;
+      err.code = 'needs_existing_pin';
+      err.graph = regErr.graph;
+      throw err;
+    }
+  }
+
+  await supabaseAdmin
+    .from('tenants')
+    .update({
+      whatsapp_needs_existing_pin: false,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', restaurantId);
+
+  await writeAuditLog({
+    restaurant_id: restaurantId,
+    actor_id: actorId,
+    action: 'whatsapp.embedded_signup.register_pin',
+    entity_type: 'tenant_integrations',
+    entity_id: integration.id,
+    meta: { phone_number_id: integration.phone_number_id },
+  });
+
+  return { success: true, whatsapp_needs_existing_pin: false };
 }
 
 module.exports = {
   completeEmbeddedSignupForRestaurant,
+  registerPhoneWithExistingPin,
   getPublicEmbeddedSignupConfig,
   isEmbeddedSignupConfigured,
   normalizeWhatsAppNumber,

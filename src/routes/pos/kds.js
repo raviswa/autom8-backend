@@ -329,17 +329,34 @@ router.put('/kds/:id/status', authenticateToken, getRestaurantId, async (req, re
     if (status === 'ready') {
       try {
         const { data: kdsItem } = await supabaseAdmin.from('kds_items')
-          .select('order_item:order_item_id!left(order_id), token_number, customer_phone, service_type')
+          .select('queue, token_number, customer_phone, service_type, order_item:order_item_id!left(order_id, order:order_id!left(order_number))')
           .eq('id', req.params.id).single();
 
         const orderId = kdsItem?.order_item?.order_id;
         if (orderId) {
           const { data: allItems } = await supabaseAdmin.from('kds_items')
-            .select('status, order_item:order_item_id!left(order_id)')
+            .select('status, queue, order_item:order_item_id!left(order_id)')
             .eq('restaurant_id', req.restaurant_id);
           const orderItems = (allItems ?? []).filter(i => i.order_item?.order_id === orderId);
-          const allReady   = orderItems.length > 0 && orderItems.every(i => i.status === 'ready');
+          const allReady = orderItems.length > 0 && orderItems.every(i => i.status === 'ready');
           if (allReady) await notifyOrderReady({ orderId, restaurantId: req.restaurant_id, kdsItem });
+
+          // Packing queue: when every packing line for this order is ready, create Shiprocket.
+          const packingLines = orderItems.filter((i) => i.queue === 'packing');
+          const packingAllReady = packingLines.length > 0
+            && packingLines.every((i) => i.status === 'ready');
+          if (packingAllReady || (kdsItem?.queue === 'packing' && allReady)) {
+            const { maybeCreateShiprocketOnPackingComplete } = require('../../helpers/shiprocketShipment');
+            maybeCreateShiprocketOnPackingComplete({
+              restaurantId: req.restaurant_id,
+              tokenNumber: kdsItem?.token_number,
+              customerPhone: kdsItem?.customer_phone,
+              orderNumber: kdsItem?.order_item?.order?.order_number,
+              serviceType: kdsItem?.service_type,
+            }).catch((srErr) => {
+              console.error('[KDS] Shiprocket create failed (non-fatal):', srErr.message);
+            });
+          }
         }
       } catch (notifyErr) {
         console.error('[KDS ready notify] Failed:', notifyErr.message);

@@ -677,10 +677,126 @@ async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
   }
 }
 
+/**
+ * Platform-level WhatsApp (Munafe system WABA) — never tenant_integrations.
+ * Used for auth OTP templates against a dedicated number + approved Auth template.
+ *
+ * Env:
+ *   MUNAFE_SYSTEM_WABA_TOKEN
+ *   MUNAFE_SYSTEM_PHONE_NUMBER_ID
+ *   MUNAFE_SYSTEM_API_URL (optional; default Graph v21)
+ *   MUNAFE_SYSTEM_OTP_TEMPLATE (template name)
+ *   MUNAFE_SYSTEM_OTP_TEMPLATE_LANG (default en)
+ */
+function getPlatformWhatsAppCreds() {
+  const accessToken = process.env.MUNAFE_SYSTEM_WABA_TOKEN || '';
+  const phoneNumberId = process.env.MUNAFE_SYSTEM_PHONE_NUMBER_ID || '';
+  const apiUrl = (
+    process.env.MUNAFE_SYSTEM_API_URL
+    || process.env.WHATSAPP_API_URL
+    || 'https://graph.facebook.com/v21.0'
+  ).replace(/\/$/, '');
+  return { accessToken, phoneNumberId, apiUrl };
+}
+
+function isPlatformWhatsAppConfigured() {
+  const { accessToken, phoneNumberId } = getPlatformWhatsAppCreds();
+  return Boolean(accessToken && phoneNumberId);
+}
+
+/**
+ * Send an approved Authentication template from the platform WABA.
+ * @param {string} toNumber E.164 digits preferred (e.g. 9198…)
+ * @param {{ templateName?: string, languageCode?: string, bodyParams?: string[], buttonParams?: string[] }} opts
+ */
+async function sendPlatformWhatsAppTemplate(toNumber, opts = {}) {
+  try {
+    const { accessToken, phoneNumberId, apiUrl } = getPlatformWhatsAppCreds();
+    if (!accessToken || !phoneNumberId) {
+      console.warn('[WhatsApp:platform] Missing MUNAFE_SYSTEM_WABA_TOKEN / MUNAFE_SYSTEM_PHONE_NUMBER_ID');
+      return false;
+    }
+
+    const templateName = opts.templateName
+      || process.env.MUNAFE_SYSTEM_OTP_TEMPLATE
+      || 'munafe_verification_code';
+    const languageCode = opts.languageCode
+      || process.env.MUNAFE_SYSTEM_OTP_TEMPLATE_LANG
+      || 'en';
+
+    const components = [];
+    const bodyParams = opts.bodyParams || [];
+    if (bodyParams.length) {
+      components.push({
+        type: 'body',
+        parameters: bodyParams.map((text) => ({ type: 'text', text: String(text) })),
+      });
+    }
+    // Authentication templates usually bind the same OTP to the URL/copy-code button
+    const buttonParams = opts.buttonParams || bodyParams;
+    if (buttonParams.length) {
+      components.push({
+        type: 'button',
+        sub_type: 'url',
+        index: '0',
+        parameters: buttonParams.map((text) => ({ type: 'text', text: String(text) })),
+      });
+    }
+
+    const to = String(toNumber || '').replace(/\D/g, '');
+    if (!to) {
+      console.warn('[WhatsApp:platform] Empty destination phone');
+      return false;
+    }
+
+    const payload = {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: { code: languageCode },
+        ...(components.length ? { components } : {}),
+      },
+    };
+
+    const response = await fetch(`${apiUrl}/${phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      console.error('[WhatsApp:platform] API error:', JSON.stringify(err).slice(0, 400));
+      return false;
+    }
+    console.log(`[WhatsApp:platform] ✅ Template ${templateName} sent to ${to.slice(-4)}`);
+    return true;
+  } catch (err) {
+    console.error('[WhatsApp:platform] Failed:', err.message);
+    return false;
+  }
+}
+
+/** Convenience alias matching the Phase-2 plan name. */
+async function sendPlatformWhatsAppMessage(toNumber, templateName, params = []) {
+  return sendPlatformWhatsAppTemplate(toNumber, {
+    templateName,
+    bodyParams: params,
+    buttonParams: params,
+  });
+}
+
 // ── Exports ───────────────────────────────────────────────────────────────────
 
 module.exports = {
   isWhatsAppConfigured,
+  isPlatformWhatsAppConfigured,
   sendWhatsAppMessage,
   sendWhatsAppInteractive,
   sendWhatsAppCatalogMessage,
@@ -688,6 +804,8 @@ module.exports = {
   sendWhatsAppProductList,
   sendSpecialDishesNote,
   sendWhatsAppCatalogWithSpecials,
+  sendPlatformWhatsAppTemplate,
+  sendPlatformWhatsAppMessage,
   notifyOrderReady,
   CATALOG_PICKER_FULL_ID,
   slugifySubdomain,

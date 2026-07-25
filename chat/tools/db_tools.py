@@ -247,6 +247,7 @@ def _build_restaurant_dict(r) -> Dict[str, Any]:
         "lob_type":             getattr(r, "lob_type", None) or "restaurant",
         "is_default_for_number": getattr(r, "is_default_for_number", False),
         "sort_order":           getattr(r, "sort_order", 0),
+        "subscribed_features":  list(getattr(r, "subscribed_features", None) or []),
     }
 
 

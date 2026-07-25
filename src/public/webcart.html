@@ -396,6 +396,15 @@
       border-radius: 10px; padding: 8px 10px; margin-top: 6px;
     }
     .delivery-quote-hint.err { color: #991b1b; background: #fef2f2; border-color: #fecaca; }
+    .fulfill-choices { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+    .fulfill-choice {
+      display: flex; align-items: flex-start; gap: 8px;
+      border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+      background: #fff; cursor: pointer; font-size: 13px;
+    }
+    .fulfill-choice.active { border-color: var(--brand); background: #fff7ed; }
+    .fulfill-choice input { margin-top: 2px; }
+    .fulfill-choice .fc-meta { color: #6b7280; font-size: 12px; margin-top: 2px; }
     .cart-nudge {
       margin: 10px 0 4px;
       padding: 10px 12px;
@@ -818,6 +827,13 @@
             <div class="line" id="gstRow" style="display:none"><span id="gstLabel">GST (5%)</span><strong id="gstAmt">Rs 0</strong></div>
             <div class="line grand"><span>Total</span><strong id="grand">Rs 0</strong></div>
           </div>
+          <div id="fulfillmentWrap" style="display:none;margin-top:12px">
+            <div class="section-title">How do you want your order?</div>
+            <div id="fulfillmentChoices" class="fulfill-choices"></div>
+            <div id="pickupHint" style="display:none;font-size:12px;color:#6b7280;margin-top:6px">
+              Collect from the store. Show your order QR at handover.
+            </div>
+          </div>
           <div id="deliveryDetailsWrap" style="display:none">
             <div class="section-title" style="margin-top:12px">Delivery details</div>
             <div id="savedAddressesWrap" style="display:none;margin-bottom:8px">
@@ -828,6 +844,10 @@
             <input class="field" id="shipPhone" placeholder="WhatsApp number" inputmode="tel" autocomplete="tel" style="display:none" />
             <textarea id="shipAddress" rows="2" placeholder="Street, area, landmark" autocomplete="street-address"></textarea>
             <input class="field" id="shipPincode" placeholder="Pincode (6 digits)" inputmode="numeric" maxlength="6" autocomplete="postal-code" />
+            <div id="channelChoicesWrap" style="display:none;margin-top:8px">
+              <div style="font-size:12px;color:#6b7280;margin-bottom:6px">Same-city delivery option</div>
+              <div id="channelChoices" class="fulfill-choices"></div>
+            </div>
             <div id="deliveryQuoteHint" class="delivery-quote-hint" style="display:none"></div>
           </div>
         <input class="field" id="promo" placeholder="Promo code (optional)" />
@@ -1042,6 +1062,9 @@
       deliveryQuoteLoading: false,
       savedAddresses: [],
       deliveryQuoteTimer: null,
+      fulfillment: { takeaway: true, delivery: true, shiprocket_available: false },
+      fulfillmentType: 'delivery',
+      deliveryChannel: 'own_team',
       affinity: { by_item: {}, pairs: [], customer_favourites: [] },
       pricingConfig: {},
       loyalty: { balance: 0, redeem_points: 100, redeem_inr: 50, points_per_100: 1 },
@@ -1282,6 +1305,94 @@
       return state.catalogLob || ['food_products', 'retail', 'psl', 'b2b'].includes(state.lobType);
     }
 
+    function isPickupOrder() {
+      return requiresShipping() && state.fulfillmentType === 'pickup';
+    }
+
+    function needsAddressForOrder() {
+      return requiresShipping() && !isPickupOrder();
+    }
+
+    function renderFulfillmentChoices() {
+      const wrap = $('fulfillmentWrap');
+      const list = $('fulfillmentChoices');
+      const pickupHint = $('pickupHint');
+      if (!wrap || !list) return;
+      if (!requiresShipping()) {
+        wrap.style.display = 'none';
+        return;
+      }
+      const ff = state.fulfillment || {};
+      const options = [];
+      if (ff.takeaway !== false) {
+        options.push({ id: 'pickup', label: 'Store pickup', meta: 'Collect from the store' });
+      }
+      if (ff.delivery !== false) {
+        options.push({ id: 'delivery', label: 'Home delivery', meta: 'We ship or send our team' });
+      }
+      if (!options.length) {
+        wrap.style.display = 'none';
+        return;
+      }
+      if (!options.some((o) => o.id === state.fulfillmentType)) {
+        state.fulfillmentType = options[0].id;
+      }
+      wrap.style.display = '';
+      list.innerHTML = options.map((o) => `
+        <label class="fulfill-choice ${state.fulfillmentType === o.id ? 'active' : ''}">
+          <input type="radio" name="fulfillmentType" value="${o.id}" ${state.fulfillmentType === o.id ? 'checked' : ''} />
+          <span><strong>${o.label}</strong><div class="fc-meta">${o.meta}</div></span>
+        </label>`).join('');
+      list.querySelectorAll('input[name="fulfillmentType"]').forEach((input) => {
+        input.addEventListener('change', () => {
+          state.fulfillmentType = input.value;
+          if (state.fulfillmentType === 'pickup') state.deliveryQuote = null;
+          renderFulfillmentChoices();
+          renderChannelChoices();
+          renderCart();
+          if (needsAddressForOrder()) scheduleDeliveryQuote();
+        });
+      });
+      if (pickupHint) pickupHint.style.display = isPickupOrder() ? '' : 'none';
+    }
+
+    function renderChannelChoices() {
+      const wrap = $('channelChoicesWrap');
+      const list = $('channelChoices');
+      if (!wrap || !list) return;
+      const opts = Array.isArray(state.deliveryQuote?.channel_options)
+        ? state.deliveryQuote.channel_options
+        : [];
+      const show = needsAddressForOrder()
+        && state.deliveryQuote?.courier_zone === 'local'
+        && opts.length > 1;
+      if (!show) {
+        wrap.style.display = 'none';
+        list.innerHTML = '';
+        return;
+      }
+      if (!opts.some((o) => o.delivery_channel === state.deliveryChannel)) {
+        state.deliveryChannel = opts[0].delivery_channel;
+      }
+      wrap.style.display = '';
+      list.innerHTML = opts.map((o) => `
+        <label class="fulfill-choice ${state.deliveryChannel === o.delivery_channel ? 'active' : ''}">
+          <input type="radio" name="deliveryChannel" value="${o.delivery_channel}"
+            ${state.deliveryChannel === o.delivery_channel ? 'checked' : ''} />
+          <span>
+            <strong>${o.label || o.delivery_channel}</strong>
+            <div class="fc-meta">₹${Math.round(Number(o.charge || 0))}${o.requires_manager_approval ? ' · store confirms courier' : ''}</div>
+          </span>
+        </label>`).join('');
+      list.querySelectorAll('input[name="deliveryChannel"]').forEach((input) => {
+        input.addEventListener('change', () => {
+          state.deliveryChannel = input.value;
+          scheduleDeliveryQuote();
+          renderCart();
+        });
+      });
+    }
+
     function deliveryStorageKey() {
       return `munafe_delivery_${token || 'anon'}`;
     }
@@ -1320,6 +1431,9 @@
 
     function deliveryFieldsValid() {
       if (!requiresShipping()) return true;
+      if (isPickupOrder() && !isGiftOrder()) {
+        return !!(($('shipName')?.value || '').trim());
+      }
       if (isGiftOrder()) {
         const name = ($('giftRecipientName')?.value || '').trim();
         const address = ($('giftRecipientAddress')?.value || '').trim();
@@ -1397,13 +1511,13 @@
     }
 
     function scheduleDeliveryQuote() {
-      if (!requiresShipping()) return;
+      if (!needsAddressForOrder() && !isGiftOrder()) return;
       if (state.deliveryQuoteTimer) clearTimeout(state.deliveryQuoteTimer);
       state.deliveryQuoteTimer = setTimeout(fetchDeliveryQuote, 350);
     }
 
     async function fetchDeliveryQuote() {
-      if (!requiresShipping()) return;
+      if (!needsAddressForOrder() && !(isGiftOrder() && requiresShipping())) return;
       const giftOrder = isGiftOrder();
       const pincode = normalizePincode(
         (giftOrder ? $('giftRecipientPincode')?.value : $('shipPincode')?.value) || ''
@@ -1415,6 +1529,7 @@
           hint.style.display = 'none';
           hint.textContent = '';
         }
+        renderChannelChoices();
         renderCart();
         return;
       }
@@ -1438,7 +1553,12 @@
         const res = await fetch(`/api/webcart/delivery-quote?${q.toString()}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pincode, cart_total: afterDiscount, items: cartItems }),
+          body: JSON.stringify({
+            pincode,
+            cart_total: afterDiscount,
+            items: cartItems,
+            delivery_channel: state.deliveryChannel || undefined,
+          }),
         });
         const data = await res.json();
         if (!res.ok || !data.ok) {
@@ -1449,6 +1569,7 @@
           }
         } else {
           state.deliveryQuote = data;
+          if (data.delivery_channel) state.deliveryChannel = data.delivery_channel;
           if (hint) {
             hint.classList.remove('err');
             const zoneLabels = {
@@ -1462,13 +1583,8 @@
             const zoneLabel = data.courier_name
               ? `${data.courier_name} · ${zoneLabels[courierZone] || 'Shipping'}`
               : (data.zone === 'intra_city' ? 'Local delivery' : 'Courier shipping');
-            const chargeText = data.free_delivery_applied
-              ? 'Free delivery applied'
-              : `Shipping: ${money(data.charge || 0)}`;
-            const w = Number(data.weight_kg || 0);
-            const weightText = w > 0 ? ` · Parcel ${w} kg` : '';
-            const codText = data.cod_enabled ? ' · Cash on delivery available' : '';
-            hint.textContent = `${zoneLabel} · ${chargeText}${weightText}${codText}`;
+            const freeNote = data.free_delivery_applied ? ' · Free delivery applied' : '';
+            hint.textContent = `${zoneLabel}: ₹${Math.round(Number(data.charge || 0))}${freeNote}`;
           }
         }
       } catch (_e) {
@@ -1479,6 +1595,7 @@
         }
       } finally {
         state.deliveryQuoteLoading = false;
+        renderChannelChoices();
         renderCart();
       }
     }
@@ -1599,8 +1716,9 @@ function cartTotals() {
       // Pricing config from session (populated in loadSession)
       const cfg = state.pricingConfig || {};
       const shipped = requiresShipping();
+      const pickup = isPickupOrder();
       const serviceType = shipped
-        ? 'delivery'
+        ? (pickup ? 'takeaway' : 'delivery')
         : ((state.session && state.session.type) || 'takeaway');
       const parcelPerItem = parseFloat(cfg.parcel_charge_per_item || 0);
       const gstRate = parseFloat(cfg.gst_rate || 5);
@@ -1612,13 +1730,13 @@ function cartTotals() {
         parcelCharge = Math.round(lines.reduce((s, l) => s + l.qty * parcelPerItem, 0) * 100) / 100;
       }
 
-      // Delivery charge — live quote for shipped LOBs, flat default for restaurant delivery
+      // Delivery charge — live quote for delivery; 0 for pickup
       let deliveryCharge = 0;
-      if (shipped) {
+      if (shipped && !pickup) {
         if (state.deliveryQuote && normalizePincode($('shipPincode')?.value || '')) {
           deliveryCharge = Number(state.deliveryQuote.charge || 0);
         }
-      } else if (serviceType === 'delivery') {
+      } else if (!shipped && serviceType === 'delivery') {
         deliveryCharge = deliveryDefault;
       }
 
@@ -1627,7 +1745,7 @@ function cartTotals() {
       const total = Math.round((preGst + gstAmount) * 100) / 100;
 
       return { lines, subtotal, promo, afterDiscount, parcelCharge, deliveryCharge,
-               gstRate, gstAmount, total, count, shipped };
+               gstRate, gstAmount, total, count, shipped, pickup };
     }
 
     function baseItemName(name) {
@@ -1777,13 +1895,22 @@ function cartTotals() {
         total,
         count,
         shipped,
+        pickup,
       } = cartTotals();
+
+      renderFulfillmentChoices();
 
       const deliveryWrap = $('deliveryDetailsWrap');
       if (deliveryWrap) {
-        // A gift ships to the recipient's address (captured in the gift
-        // fields below), not the buyer's own "Delivery details".
-        deliveryWrap.style.display = (shipped && !isGiftOrder()) ? '' : 'none';
+        // Pickup still needs name; address only for delivery (gift uses gift fields).
+        const showDelivery = shipped && !isGiftOrder() && !pickup;
+        const showNameOnly = shipped && !isGiftOrder() && pickup;
+        deliveryWrap.style.display = (showDelivery || showNameOnly) ? '' : 'none';
+        const addr = $('shipAddress');
+        const pin = $('shipPincode');
+        if (addr) addr.style.display = showDelivery ? '' : 'none';
+        if (pin) pin.style.display = showDelivery ? '' : 'none';
+        if ($('savedAddressesWrap') && pickup) $('savedAddressesWrap').style.display = 'none';
       }
 
       cartLines.innerHTML = lines.length
@@ -1877,13 +2004,14 @@ $('subtotal').textContent = money(subtotal);
         now - Number(state.lastSubmittedAt || 0) < 20 * 60 * 1000;
       const needsDelivery = shipped && !deliveryFieldsValid();
       const needsQuote = shipped
+        && !pickup
         && !!normalizePincode($('shipPincode')?.value || '')
         && !state.deliveryQuote
         && !state.deliveryQuoteLoading;
       // Keep re-tappable after submit so customers can reopen the WhatsApp guide.
       submitBtn.disabled = count === 0 || state.submitting || needsDelivery || needsQuote;
       if (state.submitting) submitBtn.textContent = 'Submitting…';
-      else if (needsDelivery) submitBtn.textContent = 'Add delivery details to continue';
+      else if (needsDelivery) submitBtn.textContent = pickup ? 'Add your name to continue' : 'Add delivery details to continue';
       else if (needsQuote) submitBtn.textContent = 'Fix delivery charge to continue';
       else if (state.sessionExpired) submitBtn.textContent = 'Checkout Now';
       else if (sameAsLast) submitBtn.textContent = 'Open WhatsApp again';
@@ -3172,6 +3300,16 @@ $('subtotal').textContent = money(subtotal);
       state.activeTab = 'all';
       state.lobType = data.restaurant?.lob_type || data.lob_type || 'restaurant';
       state.catalogLob = !!data.catalog_lob || state.lobType !== 'restaurant';
+      state.fulfillment = data.fulfillment || {
+        takeaway: true,
+        delivery: true,
+        shiprocket_available: false,
+      };
+      if (state.fulfillment.delivery === false && state.fulfillment.takeaway !== false) {
+        state.fulfillmentType = 'pickup';
+      } else if (state.fulfillment.takeaway === false) {
+        state.fulfillmentType = 'delivery';
+      }
       state.guestStorefront = !!(data.guest_storefront || (data.session && data.session.guest));
       const shipPhoneEl = $('shipPhone');
       if (shipPhoneEl) {
@@ -3343,7 +3481,12 @@ $('subtotal').textContent = money(subtotal);
       renderCart();
 
       if (requiresShipping() && !deliveryFieldsValid()) {
-        showStatus('Please enter your name, delivery address, and a valid 6-digit pincode.', 'err');
+        showStatus(
+          isPickupOrder()
+            ? 'Please enter your name for store pickup.'
+            : 'Please enter your name, delivery address, and a valid 6-digit pincode.',
+          'err',
+        );
         state.submitting = false;
         renderCart();
         return;
@@ -3365,7 +3508,7 @@ $('subtotal').textContent = money(subtotal);
         return;
       }
 
-      if (requiresShipping() && normalizePincode($('shipPincode')?.value || '') && !state.deliveryQuote) {
+      if (needsAddressForOrder() && normalizePincode($('shipPincode')?.value || '') && !state.deliveryQuote) {
         showStatus('Delivery charge could not be calculated. Check the pincode and try again.', 'err');
         state.submitting = false;
         scheduleDeliveryQuote();
@@ -3390,15 +3533,20 @@ $('subtotal').textContent = money(subtotal);
         body.gift_message = ($('giftMessage')?.value || '').trim() || null;
       }
       if (requiresShipping()) {
+        body.fulfillment_type = isPickupOrder() && !giftOrder ? 'pickup' : 'delivery';
         if (giftOrder) {
           // Ship to the recipient, not the buyer — the buyer stays the payer/phone of record.
           body.customer_name = ($('giftRecipientName')?.value || '').trim();
           body.delivery_address = ($('giftRecipientAddress')?.value || '').trim();
           body.pincode = normalizePincode($('giftRecipientPincode')?.value || '');
+          body.delivery_channel = state.deliveryChannel || undefined;
+        } else if (isPickupOrder()) {
+          body.customer_name = ($('shipName').value || '').trim();
         } else {
           body.customer_name = ($('shipName').value || '').trim();
           body.delivery_address = ($('shipAddress').value || '').trim();
           body.pincode = normalizePincode($('shipPincode').value || '');
+          body.delivery_channel = state.deliveryChannel || undefined;
         }
       }
       if (!giftOrder) saveDeliveryLocal();

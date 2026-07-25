@@ -43,6 +43,9 @@ REPLIES = {
     "welcome_browse_cta": (
         "Tap below to browse, pick items, and pay securely — all on our online menu."
     ),
+    "welcome_fulfillment_hint": (
+        "On the cart you can choose *store pickup* or *home delivery*."
+    ),
     "welcome_repeat_hint": (
         "Ordered before? Reply *REPEAT* anytime to reorder your last purchase."
     ),

@@ -146,6 +146,8 @@ function buildSubmissionFingerprint({
   total,
   delivery_address,
   pincode,
+  fulfillment_type,
+  delivery_channel,
 }) {
   const stableLines = (Array.isArray(items) ? items : [])
     .map((line) => ({
@@ -162,6 +164,8 @@ function buildSubmissionFingerprint({
     special_request: String(special_request || '').trim(),
     delivery_address: String(delivery_address || '').trim(),
     pincode: normalizePincode(pincode),
+    fulfillment_type: String(fulfillment_type || '').trim(),
+    delivery_channel: String(delivery_channel || '').trim(),
     total: Number(total || 0),
   };
 
@@ -205,6 +209,7 @@ async function resolveRestaurantBySlug(req) {
       'packaging_weight_grams', 'cod_enabled_city', 'cod_enabled_outstation',
       'shipping_provider', 'courier_name', 'courier_rate_card',
       'gstin', 'fssai_license', 'sac_code', 'receipt_tagline',
+      'subscribed_features', 'enabled_services',
     ].join(', ');
 
     const { data, error } = await selectDroppingMissingColumns(
@@ -289,6 +294,7 @@ async function calculateDelivery(restaurant, customerPincode, cartTotal, options
   const intraCity = courierZone === 'local';
   // Keep legacy zone labels for webcart UI; expose courier_zone for rate cards.
   const zone = intraCity ? 'intra_city' : 'outstation';
+  const preferChannel = String(options.delivery_channel || options.deliveryChannel || '').toLowerCase();
   let weightKg = 0.5;
   try {
     weightKg = Math.max(
@@ -304,6 +310,7 @@ async function calculateDelivery(restaurant, customerPincode, cartTotal, options
     weightKg = 0.5;
   }
   const courierName = String(restaurant?.courier_name || '').trim() || null;
+  const shipCreds = !!(restaurant?.shiprocket_api_key || restaurant?.shiprocket_email);
 
   const finish = (payload) => ({
     ...payload,
@@ -321,6 +328,8 @@ async function calculateDelivery(restaurant, customerPincode, cartTotal, options
       cod_enabled: intraCity ? !!restaurant?.cod_enabled_city : !!restaurant?.cod_enabled_outstation,
       source: 'free_delivery_above',
       shipping_provider: provider,
+      delivery_channel: preferChannel || (intraCity ? 'own_team' : 'shiprocket'),
+      channel_options: [],
     });
   }
 
@@ -349,32 +358,21 @@ async function calculateDelivery(restaurant, customerPincode, cartTotal, options
       cod_enabled: intraCity ? !!restaurant?.cod_enabled_city : !!restaurant?.cod_enabled_outstation,
       source,
       shipping_provider: provider,
+      delivery_channel: 'own_team',
+      channel_options: [{
+        delivery_channel: 'own_team',
+        label: courierName || 'Store courier',
+        charge,
+        source,
+        requires_manager_approval: false,
+      }],
     });
   }
 
-  // Default: Shiprocket for outstation; flat intra-city
-  if (intraCity) {
-    const charge = Number(restaurant?.intra_city_charge ?? restaurant?.delivery_charge_default ?? 0) || 0;
-    return finish({
-      zone,
-      courier_zone: courierZone,
-      courier_name: null,
-      charge,
-      free_delivery_applied: false,
-      cod_enabled: !!restaurant?.cod_enabled_city,
-      source: 'intra_city_flat',
-      shipping_provider: provider,
-    });
-  }
-
-  let charge = Number(restaurant?.outstation_charge || 0) || 0;
-  let source = 'outstation_flat';
-  const useShiprocket = (restaurant?.shiprocket_api_key || restaurant?.shiprocket_email)
-    && tenantPincode
-    && customer;
-  if (useShiprocket) {
+  async function quoteShiprocket() {
+    if (!shipCreds || !tenantPincode || !customer) return null;
     try {
-      const shiprocketRate = await fetchShiprocketRate({
+      return await fetchShiprocketRate({
         apiKey: restaurant.shiprocket_api_key,
         email: restaurant.shiprocket_email,
         password: restaurant.shiprocket_api_key,
@@ -382,24 +380,83 @@ async function calculateDelivery(restaurant, customerPincode, cartTotal, options
         deliveryPincode: customer,
         weightKg,
       });
-      if (shiprocketRate != null) {
-        charge = shiprocketRate;
-        source = 'shiprocket';
-      }
     } catch (srErr) {
-      console.warn('[webcart/delivery] Shiprocket quote failed, using flat fallback:', srErr.message);
+      console.warn('[webcart/delivery] Shiprocket quote failed:', srErr.message);
+      return null;
     }
+  }
+
+  // Same-city: dual options — own team (flat) + Shiprocket (manager gate)
+  if (intraCity) {
+    const ownCharge = Number(restaurant?.intra_city_charge ?? restaurant?.delivery_charge_default ?? 0) || 0;
+    const channelOptions = [{
+      delivery_channel: 'own_team',
+      label: 'Store delivery team',
+      charge: ownCharge,
+      source: 'intra_city_flat',
+      requires_manager_approval: false,
+    }];
+
+    let shipCharge = null;
+    if (shipCreds) {
+      shipCharge = await quoteShiprocket();
+      if (shipCharge == null) {
+        shipCharge = Number(restaurant?.outstation_charge || ownCharge) || ownCharge;
+      }
+      channelOptions.push({
+        delivery_channel: 'shiprocket',
+        label: 'Courier (Shiprocket)',
+        charge: shipCharge,
+        source: 'shiprocket',
+        requires_manager_approval: true,
+        note: 'Store may confirm courier for same-city orders',
+      });
+    }
+
+    const chosen = preferChannel === 'shiprocket' && shipCreds
+      ? channelOptions.find((o) => o.delivery_channel === 'shiprocket')
+      : channelOptions.find((o) => o.delivery_channel === 'own_team');
+
+    return finish({
+      zone,
+      courier_zone: courierZone,
+      courier_name: chosen?.delivery_channel === 'shiprocket' ? 'Shiprocket' : null,
+      charge: chosen?.charge ?? ownCharge,
+      free_delivery_applied: false,
+      cod_enabled: !!restaurant?.cod_enabled_city,
+      source: chosen?.source || 'intra_city_flat',
+      shipping_provider: provider,
+      delivery_channel: chosen?.delivery_channel || 'own_team',
+      channel_options: channelOptions,
+    });
+  }
+
+  // Outstation: Shiprocket only
+  let charge = Number(restaurant?.outstation_charge || 0) || 0;
+  let source = 'outstation_flat';
+  const shiprocketRate = await quoteShiprocket();
+  if (shiprocketRate != null) {
+    charge = shiprocketRate;
+    source = 'shiprocket';
   }
 
   return finish({
     zone,
     courier_zone: courierZone,
-    courier_name: null,
+    courier_name: source === 'shiprocket' ? 'Shiprocket' : null,
     charge,
     free_delivery_applied: false,
     cod_enabled: !!restaurant?.cod_enabled_outstation,
     source,
     shipping_provider: provider,
+    delivery_channel: 'shiprocket',
+    channel_options: [{
+      delivery_channel: 'shiprocket',
+      label: 'Courier (Shiprocket)',
+      charge,
+      source,
+      requires_manager_approval: false,
+    }],
   });
 }
 

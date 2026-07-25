@@ -14,6 +14,10 @@ const { supabaseAdmin } = require('../config/supabase');
 const { ensureRestaurantSubscription, DEFAULT_SERVICES } = require('../helpers/subscriptionBilling');
 const { writeAuditLog } = require('../helpers/auditLog');
 const { sendOnboardingWelcomeEmail } = require('../helpers/onboardingEmail');
+const { authenticateToken, getRestaurantId } = require('../middleware/auth');
+const { enabledOrderServices, resolvePaidFeatures, resolveEnabledFeatures } = require('../helpers/subscriptionFeatures');
+const { MONTHLY_PRICE_INR } = require('../helpers/phonepeSubscription');
+const { isSubscriptionSoftLocked } = require('../helpers/subscriptionAccess');
 
 const DEFAULT_FEATURES = DEFAULT_SERVICES;
 
@@ -302,6 +306,86 @@ router.post(['/register', '/register/upload'], async (req, res) => {
     cuisines: req.body.cuisines || req.body.categories || null,
     slug: req.body.slug || null,
   });
+});
+
+// ── GET /status — post-login setup checklist (Screen A) ──────────────────────
+router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    if (!req.restaurant_id) {
+      return res.status(400).json({
+        error: 'No outlet selected',
+        hint: 'Brand accounts should pass x-restaurant-id for a specific outlet',
+      });
+    }
+
+    const restaurantId = req.restaurant_id;
+
+    const [
+      { data: tenant },
+      { data: integration },
+      { count: menuCount },
+      { data: sub },
+    ] = await Promise.all([
+      supabaseAdmin
+        .from('tenants')
+        .select('id, name, display_name, subscribed_features, whatsapp_needs_existing_pin, lob_type')
+        .eq('id', restaurantId)
+        .maybeSingle(),
+      supabaseAdmin
+        .from('tenant_integrations')
+        .select('id, phone_number_id, waba_id, is_active')
+        .eq('restaurant_id', restaurantId)
+        .eq('provider', 'meta')
+        .eq('channel', 'whatsapp')
+        .eq('is_active', true)
+        .maybeSingle(),
+      supabaseAdmin
+        .from('menu_items')
+        .select('id', { count: 'exact', head: true })
+        .eq('restaurant_id', restaurantId),
+      supabaseAdmin
+        .from('tenant_subscriptions')
+        .select('plan, status, trial_ends_at, renews_at, base_price, final_price, billing_cycle')
+        .eq('restaurant_id', restaurantId)
+        .maybeSingle(),
+    ]);
+
+    if (!tenant) return res.status(404).json({ error: 'Restaurant not found' });
+
+    const paidFeatures = resolvePaidFeatures(sub);
+    const enabledFeatures = resolveEnabledFeatures(tenant, paidFeatures);
+    const services = enabledOrderServices(enabledFeatures);
+    const fulfillmentConfigured = services.length > 0;
+    const whatsappConnected = Boolean(integration?.id);
+    const catalogUploaded = (menuCount || 0) > 0;
+    const needsPin = Boolean(tenant.whatsapp_needs_existing_pin);
+    const softLocked = isSubscriptionSoftLocked(sub);
+
+    const setupComplete = whatsappConnected && !needsPin && catalogUploaded && fulfillmentConfigured;
+
+    res.json({
+      success: true,
+      restaurant_id: restaurantId,
+      business_name: tenant.display_name || tenant.name,
+      lob_type: tenant.lob_type || 'restaurant',
+      whatsapp_connected: whatsappConnected,
+      whatsapp_needs_existing_pin: needsPin,
+      catalog_uploaded: catalogUploaded,
+      fulfillment_configured: fulfillmentConfigured,
+      setup_complete: setupComplete,
+      subscription: {
+        status: sub?.status || 'trial',
+        trial_ends_at: sub?.trial_ends_at || null,
+        renews_at: sub?.renews_at || null,
+        price: MONTHLY_PRICE_INR,
+        currency: 'INR',
+        soft_locked: softLocked,
+      },
+    });
+  } catch (err) {
+    console.error('[onboarding/status]', err.message);
+    res.status(500).json({ error: err.message || 'Failed to load onboarding status' });
+  }
 });
 
 // ── GET availability checks (FR-8) ───────────────────────────────────────────

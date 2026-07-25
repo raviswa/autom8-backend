@@ -130,8 +130,86 @@ function buildTokenVariants(token) {
   return [...variants].filter(Boolean);
 }
 
+function orderIdFromBookingMeta(booking) {
+  if (!booking) return null;
+  const meta = booking.meta && typeof booking.meta === 'object' ? booking.meta : {};
+  const sched = booking.schedule_meta && typeof booking.schedule_meta === 'object'
+    ? booking.schedule_meta
+    : {};
+  const candidates = [
+    meta.order_id,
+    meta.captain_order_id,
+    sched.order_id,
+    sched.captain_order_id,
+  ];
+  for (const c of candidates) {
+    const id = String(c || '').trim();
+    if (UUID_RE.test(id)) return id;
+  }
+  return null;
+}
+
+async function assertOrderForRestaurant(restaurantId, orderId) {
+  if (!orderId || !UUID_RE.test(orderId)) return null;
+  const { data } = await supabaseAdmin
+    .from('orders')
+    .select('id')
+    .eq('id', orderId)
+    .eq('restaurant_id', restaurantId)
+    .maybeSingle();
+  return data?.id || null;
+}
+
+/**
+ * Prefer stable links: booking.meta.order_id → order_items.booking_id → order_number pattern.
+ * Do not rely on phone-only matching when a booking exists.
+ */
+async function findOrderViaBooking(restaurantId, variants, suffixes) {
+  const { data: bookings } = await supabaseAdmin
+    .from('bookings')
+    .select('id, meta, schedule_meta')
+    .eq('restaurant_id', restaurantId)
+    .in('token_number', variants)
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  const booking = bookings?.[0];
+  if (!booking?.id) return null;
+
+  const fromMeta = orderIdFromBookingMeta(booking);
+  if (fromMeta) {
+    const verified = await assertOrderForRestaurant(restaurantId, fromMeta);
+    if (verified) return verified;
+  }
+
+  const { data: orderItems } = await supabaseAdmin
+    .from('order_items')
+    .select('order_id')
+    .eq('booking_id', booking.id)
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  if (orderItems?.[0]?.order_id) return orderItems[0].order_id;
+
+  const bidShort = String(booking.id).replace(/-/g, '').slice(0, 8);
+  for (const suffix of suffixes) {
+    const { data: rows } = await supabaseAdmin
+      .from('orders')
+      .select('id')
+      .eq('restaurant_id', restaurantId)
+      .like('order_number', `ORD-${suffix}-${bidShort}%`)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (rows?.[0]?.id) return rows[0].id;
+  }
+
+  return null;
+}
+
+/**
+ * Walk-in token → order via FK when present; phone match is last-resort only.
+ */
 async function findOrderViaWalkInToken(restaurantId, variants) {
-   // Step 1: Find walk_in_token — id IS the token (e.g. 'T-2606-132')
   const { data: witRows } = await supabaseAdmin
     .from('walk_in_tokens')
     .select('id, phone')
@@ -141,11 +219,25 @@ async function findOrderViaWalkInToken(restaurantId, variants) {
     .limit(1);
 
   const wit = witRows?.[0];
-  if (!wit?.id || !wit.phone) return null;
+  if (!wit?.id) return null;
 
-  // Step 2: Find most recent order by phone (within 6 hrs to avoid stale matches)
-  const since = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+  // Prefer direct FK if the column exists / is populated
+  try {
+    const { data: byFk, error } = await supabaseAdmin
+      .from('orders')
+      .select('id')
+      .eq('restaurant_id', restaurantId)
+      .eq('walk_in_token_id', wit.id)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (!error && byFk?.[0]?.id) return byFk[0].id;
+  } catch (_) {
+    // column may not exist on older schemas
+  }
 
+  // Last resort: recent order by same phone (narrow window to reduce stale matches)
+  if (!wit.phone) return null;
+  const since = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
   const { data: orders } = await supabaseAdmin
     .from('orders')
     .select('id')
@@ -156,17 +248,6 @@ async function findOrderViaWalkInToken(restaurantId, variants) {
     .limit(1);
 
   return orders?.[0]?.id || null;
-  
-   // Fallback: check orders table directly
-  const { data: directOrder } = await supabaseAdmin
-    .from('orders')
-    .select('id')
-    .eq('restaurant_id', restaurantId)
-    .eq('walk_in_token_id', wit.id)   // ← adjust FK name if different
-    .order('created_at', { ascending: false })
-    .limit(1);
-
-  return directOrder?.[0]?.id || null;
 }
 
 async function findOrderByNumberPatterns(restaurantId, suffixes) {
@@ -186,46 +267,6 @@ async function findOrderByNumberPatterns(restaurantId, suffixes) {
       .select('id')
       .eq('restaurant_id', restaurantId)
       .like('order_number', `ORD-${suffix}%`)
-      .order('created_at', { ascending: false })
-      .limit(1);
-    if (rows?.[0]?.id) return rows[0].id;
-  }
-
-  return null;
-}
-
-async function findOrderViaBooking(restaurantId, variants, suffixes) {
-  const { data: bookings } = await supabaseAdmin
-    .from('bookings')
-    .select('id')
-    .eq('restaurant_id', restaurantId)
-    .in('token_number', variants)
-    .order('created_at', { ascending: false })
-    .limit(1);
-
-    console.log('[findOrderViaBooking]', { restaurantId, variants, bookings }); // ← ADD THIS
-
-  const booking = bookings?.[0];
-  if (!booking?.id) return null;
-
-  const { data: orderItems } = await supabaseAdmin
-    .from('order_items')
-    .select('order_id')
-    .eq('booking_id', booking.id)
-    .order('created_at', { ascending: false })
-    .limit(1);
-
-    console.log('[findOrderViaBooking] orderItems for booking', booking.id, orderItems); // ← ADD THIS
-  
-  if (orderItems?.[0]?.order_id) return orderItems[0].order_id;
-
-  const bidShort = String(booking.id).replace(/-/g, '').slice(0, 8);
-  for (const suffix of suffixes) {
-    const { data: rows } = await supabaseAdmin
-      .from('orders')
-      .select('id')
-      .eq('restaurant_id', restaurantId)
-      .like('order_number', `ORD-${suffix}-${bidShort}%`)
       .order('created_at', { ascending: false })
       .limit(1);
     if (rows?.[0]?.id) return rows[0].id;
@@ -254,7 +295,6 @@ async function findOrderViaKdsToken(restaurantId, variants) {
  * @returns {{ order_id: string } | { error: string }}
  */
 async function resolveOrderIdForTakeawayScan(restaurantId, raw) {
-  
   const parsed = parseQrScanInput(raw);
   if (!parsed) return { error: 'Could not read QR code' };
 
@@ -262,13 +302,8 @@ async function resolveOrderIdForTakeawayScan(restaurantId, raw) {
     if (!UUID_RE.test(parsed.value)) {
       return { error: 'Invalid order id in QR code' };
     }
-    const { data } = await supabaseAdmin
-      .from('orders')
-      .select('id')
-      .eq('id', parsed.value)
-      .eq('restaurant_id', restaurantId)
-      .maybeSingle();
-    if (data?.id) return { order_id: data.id };
+    const verified = await assertOrderForRestaurant(restaurantId, parsed.value);
+    if (verified) return { order_id: verified };
     return { error: 'Order not found for this QR code' };
   }
 
@@ -276,38 +311,30 @@ async function resolveOrderIdForTakeawayScan(restaurantId, raw) {
   const suffixes = [...new Set(variants.map(tokenSuffix).filter(Boolean))];
   if (!suffixes.length) return { error: 'Could not read QR code' };
 
-  const byOrderNumber = await findOrderByNumberPatterns(restaurantId, suffixes);
-  if (byOrderNumber) return { order_id: byOrderNumber };
-
+  // Prefer booking-linked order (meta.order_id / order_items.booking_id) over heuristics
   const byBooking = await findOrderViaBooking(restaurantId, variants, suffixes);
   if (byBooking) return { order_id: byBooking };
 
-  const byWalkIn = await findOrderViaWalkInToken(restaurantId, variants);  // ← ADD
-  if (byWalkIn) return { order_id: byWalkIn };
+  const byOrderNumber = await findOrderByNumberPatterns(restaurantId, suffixes);
+  if (byOrderNumber) return { order_id: byOrderNumber };
 
   const byKds = await findOrderViaKdsToken(restaurantId, variants);
   if (byKds) return { order_id: byKds };
 
+  const byWalkIn = await findOrderViaWalkInToken(restaurantId, variants);
+  if (byWalkIn) return { order_id: byWalkIn };
+
   console.warn('[takeawayScanResolve] Unresolved QR scan', {
     restaurantId,
-    raw,
+    raw: String(raw || '').slice(0, 120),
     parsed,
-    variants,
+    variants: variants.slice(0, 8),
     suffixes,
   });
-
-  console.error('[takeawayScanResolve] Full debug', {
-  restaurantId,
-  raw,
-  parsed,
-  variants: variants.slice(0, 10), // first 10 for brevity
-  suffixes,
-});
 
   return {
     error: 'No order found for this QR. Ask the customer to show the receipt QR from WhatsApp.',
   };
-  
 }
 
 module.exports = {

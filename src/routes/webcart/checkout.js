@@ -172,6 +172,8 @@ router.post('/api/webcart/submit', async (req, res) => {
       delivery_address,
       pincode,
       redeem_loyalty,
+      fulfillment_type: bodyFulfillmentType,
+      delivery_channel: bodyDeliveryChannel,
     } = req.body || {};
     const safeToken = String(token || '').trim();
     const safePhone = String(phone || '').trim();
@@ -206,15 +208,42 @@ router.post('/api/webcart/submit', async (req, res) => {
       });
     }
 
-    const shippedOrder = requiresShipping(restaurant.lob_type);
+    const {
+      packagedServicesEnabled,
+      buildFulfillmentMeta,
+      chargeForChannel,
+      isShippedLob,
+    } = require('../../helpers/fulfillmentChannels');
+
+    const shippedLob = requiresShipping(restaurant.lob_type) || isShippedLob(restaurant.lob_type);
+    const svcFlags = shippedLob
+      ? packagedServicesEnabled(restaurant)
+      : { takeaway: true, delivery: true };
+
+    let fulfillmentType = String(bodyFulfillmentType || '').toLowerCase();
+    if (fulfillmentType !== 'pickup' && fulfillmentType !== 'delivery') {
+      fulfillmentType = shippedLob ? 'delivery' : 'delivery';
+    }
+    if (shippedLob) {
+      if (fulfillmentType === 'pickup' && !svcFlags.takeaway) fulfillmentType = 'delivery';
+      if (fulfillmentType === 'delivery' && !svcFlags.delivery) {
+        if (svcFlags.takeaway) fulfillmentType = 'pickup';
+        else {
+          return res.status(400).json({ ok: false, error: 'Ordering is not available right now.' });
+        }
+      }
+    }
+
+    const isPickup = shippedLob && fulfillmentType === 'pickup';
+    const isDeliveryShip = shippedLob && !isPickup;
     const safeName = String(customer_name || '').trim();
     const safeAddress = String(delivery_address || '').trim();
     const safePincode = normalizePincode(pincode);
 
-    if (shippedOrder) {
-      if (!safeName) {
-        return res.status(400).json({ ok: false, error: 'Customer name is required for delivery orders.' });
-      }
+    if (shippedLob && !safeName) {
+      return res.status(400).json({ ok: false, error: 'Customer name is required.' });
+    }
+    if (isDeliveryShip) {
       if (!safeAddress) {
         return res.status(400).json({ ok: false, error: 'Delivery address is required.' });
       }
@@ -229,7 +258,7 @@ router.post('/api/webcart/submit', async (req, res) => {
           token: safeToken,
           phone: safePhone,
           allowSoftMenuSession: catalogLob,
-          preferDelivery: catalogLob || shippedOrder,
+          preferDelivery: isDeliveryShip || catalogLob,
         })
       : null;
 
@@ -348,8 +377,15 @@ router.post('/api/webcart/submit', async (req, res) => {
       || ''
     ).toLowerCase();
     let serviceType = rawType;
-    if (shippedOrder) {
-      serviceType = 'delivery';
+    let fulfillmentMeta = {};
+    if (shippedLob) {
+      fulfillmentMeta = buildFulfillmentMeta({
+        fulfillmentType,
+        deliveryChannel: bodyDeliveryChannel,
+        quote: null,
+        restaurant,
+      });
+      serviceType = fulfillmentMeta.service_type || (isPickup ? 'takeaway' : 'delivery');
     } else if (rawType === 'scheduled_delivery') serviceType = 'delivery';
     else if (rawType === 'scheduled_takeaway' || rawType === 'scheduled_pickup') serviceType = 'takeaway';
     else if (rawType === 'dinein' || rawType === 'dine-in') serviceType = 'dine_in';
@@ -364,16 +400,43 @@ router.post('/api/webcart/submit', async (req, res) => {
       parcelCharge = Math.round(parcelCharge * 100) / 100;
     }
 
-// Delivery charge — shipped LOBs always re-quote server-side; restaurants use flat default
+// Delivery charge — packaged delivery re-quotes; pickup = 0; restaurants use flat default
     let deliveryCharge = 0;
     let deliveryQuote = null;
-    if (shippedOrder) {
+    if (isDeliveryShip) {
       deliveryQuote = await calculateDelivery(restaurant, safePincode, subtotal, {
         items: normalizedItems,
+        delivery_channel: bodyDeliveryChannel,
       });
-      deliveryCharge = Number(deliveryQuote.charge || 0);
-    } else if (serviceType === 'delivery') {
+      fulfillmentMeta = buildFulfillmentMeta({
+        fulfillmentType: 'delivery',
+        deliveryChannel: bodyDeliveryChannel || deliveryQuote.delivery_channel,
+        quote: deliveryQuote,
+        restaurant,
+      });
+      deliveryCharge = chargeForChannel(deliveryQuote, fulfillmentMeta.delivery_channel);
+      // Outstation without Shiprocket when provider expects it
+      if (
+        deliveryQuote.courier_zone !== 'local'
+        && fulfillmentMeta.delivery_channel === 'shiprocket'
+        && !deliveryQuote.channel_options?.length
+        && Number(deliveryQuote.charge) <= 0
+        && !restaurant.shiprocket_email
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error: 'Outstation delivery is not available right now. Please choose store pickup if offered.',
+        });
+      }
+    } else if (!shippedLob && serviceType === 'delivery') {
       deliveryCharge = parseFloat(restaurant.delivery_charge_default || 40);
+    } else if (isPickup) {
+      fulfillmentMeta = buildFulfillmentMeta({
+        fulfillmentType: 'pickup',
+        deliveryChannel: null,
+        quote: null,
+        restaurant,
+      });
     }
 
     const preGst = Math.round((subtotal + parcelCharge + deliveryCharge) * 100) / 100;
@@ -407,7 +470,7 @@ router.post('/api/webcart/submit', async (req, res) => {
     }
 
     const orderRef = `${(session?.id || safeToken)}-${Date.now().toString().slice(-6)}`;
-    const formattedAddress = shippedOrder
+    const formattedAddress = isDeliveryShip
       ? formatDeliveryAddress(safeAddress, safePincode)
       : '';
     const submissionFingerprint = buildSubmissionFingerprint({
@@ -416,7 +479,9 @@ router.post('/api/webcart/submit', async (req, res) => {
       special_request,
       total: totalAmount,
       delivery_address: formattedAddress,
-      pincode: safePincode,
+      pincode: isDeliveryShip ? safePincode : '',
+      fulfillment_type: fulfillmentMeta.fulfillment_type || fulfillmentType,
+      delivery_channel: fulfillmentMeta.delivery_channel || '',
     });
 
     const prevSubmission = session?.meta?.web_cart_submission || {};
@@ -441,20 +506,30 @@ router.post('/api/webcart/submit', async (req, res) => {
       service_type: serviceType,
       order_mode: orderMode || sessionMeta.order_mode || null,
       scheduled_at: sessionMeta.scheduled_at || null,
-      customer_name: shippedOrder ? safeName : (sessionMeta.customer_name || sessionMeta.name || null),
-      delivery_address: shippedOrder ? formattedAddress : (sessionMeta.delivery_address || null),
-      delivery_pincode: shippedOrder ? safePincode : (sessionMeta.delivery_pincode || null),
-      delivery_zone: deliveryQuote?.zone || sessionMeta.delivery_zone || null,
-      delivery_source: deliveryQuote?.source || sessionMeta.delivery_source || null,
+      customer_name: shippedLob ? safeName : (sessionMeta.customer_name || sessionMeta.name || null),
+      delivery_address: isDeliveryShip ? formattedAddress : null,
+      delivery_pincode: isDeliveryShip ? safePincode : null,
+      delivery_zone: fulfillmentMeta.delivery_zone || deliveryQuote?.zone || sessionMeta.delivery_zone || null,
+      delivery_source: fulfillmentMeta.delivery_source || deliveryQuote?.source || sessionMeta.delivery_source || null,
+      fulfillment_type: fulfillmentMeta.fulfillment_type || null,
+      delivery_channel: fulfillmentMeta.delivery_channel || null,
+      delivery_channel_requested: fulfillmentMeta.delivery_channel_requested || null,
+      delivery_channel_status: fulfillmentMeta.delivery_channel_status || null,
+      courier_zone: fulfillmentMeta.courier_zone || deliveryQuote?.courier_zone || null,
+      local_shiprocket_pending_at: fulfillmentMeta.local_shiprocket_pending_at || null,
       web_cart_submission: {
         submitted_at: new Date().toISOString(),
         promo_code: promo_code ? String(promo_code).trim().slice(0, 40) : null,
         special_request: special_request ? String(special_request).trim().slice(0, 500) : null,
-        customer_name: shippedOrder ? safeName : null,
-        delivery_address: shippedOrder ? formattedAddress : null,
-        delivery_pincode: shippedOrder ? safePincode : null,
-        delivery_zone: deliveryQuote?.zone || null,
-        delivery_source: deliveryQuote?.source || null,
+        customer_name: shippedLob ? safeName : null,
+        delivery_address: isDeliveryShip ? formattedAddress : null,
+        delivery_pincode: isDeliveryShip ? safePincode : null,
+        delivery_zone: fulfillmentMeta.delivery_zone || deliveryQuote?.zone || null,
+        delivery_source: fulfillmentMeta.delivery_source || deliveryQuote?.source || null,
+        fulfillment_type: fulfillmentMeta.fulfillment_type || null,
+        delivery_channel: fulfillmentMeta.delivery_channel || null,
+        delivery_channel_status: fulfillmentMeta.delivery_channel_status || null,
+        courier_zone: fulfillmentMeta.courier_zone || deliveryQuote?.courier_zone || null,
         free_delivery_applied: !!deliveryQuote?.free_delivery_applied,
         cod_enabled: deliveryQuote?.cod_enabled ?? null,
         item_count: normalizedItems.length,
@@ -477,10 +552,11 @@ router.post('/api/webcart/submit', async (req, res) => {
       // Soft sessions still need cart meta persisted on the walk-in row so
       // confirm-and-pay / dedupe can recover if chat retries. Clear completed_at
       // so a reused packaged menu link stays orderable.
+      const walkType = isPickup ? 'takeaway' : (isDeliveryShip || catalogLob ? 'delivery' : undefined);
       const walkPatch = {
         meta: nextMeta,
         completed_at: null,
-        ...(shippedOrder || catalogLob ? { type: 'delivery', status: 'delivery' } : {}),
+        ...(walkType ? { type: walkType, status: walkType } : {}),
       };
       const { error } = await supabaseAdmin
         .from('walk_in_tokens')
@@ -497,11 +573,11 @@ router.post('/api/webcart/submit', async (req, res) => {
     const confirmResult = await triggerConfirmAndPay({
       restaurant_id: restaurant.id,
       customer_phone: session?.phone || safePhone,
-      customer_name: shippedOrder
+      customer_name: shippedLob
         ? safeName
         : (String(sessionMeta?.customer_name || sessionMeta?.name || '').trim() || 'Guest'),
-      delivery_address: shippedOrder ? formattedAddress : undefined,
-      pincode: shippedOrder ? safePincode : undefined,
+      delivery_address: isDeliveryShip ? formattedAddress : undefined,
+      pincode: isDeliveryShip ? safePincode : undefined,
       token: String(session?.id || safeToken),
       order_ref: orderRef,
       // Send the walk-in type when scheduled so chat can gate approval;
@@ -516,9 +592,45 @@ router.post('/api/webcart/submit', async (req, res) => {
       promo_code: promo_code ? String(promo_code).trim().slice(0, 40) : null,
       special_request: special_request ? String(special_request).trim().slice(0, 500) : null,
       delivery_charge: deliveryCharge,
-      delivery_zone: deliveryQuote?.zone || undefined,
-      delivery_source: deliveryQuote?.source || undefined,
+      delivery_zone: fulfillmentMeta.delivery_zone || deliveryQuote?.zone || undefined,
+      delivery_source: fulfillmentMeta.delivery_source || deliveryQuote?.source || undefined,
+      fulfillment_type: fulfillmentMeta.fulfillment_type || undefined,
+      delivery_channel: fulfillmentMeta.delivery_channel || undefined,
+      delivery_channel_status: fulfillmentMeta.delivery_channel_status || undefined,
+      courier_zone: fulfillmentMeta.courier_zone || undefined,
     });
+
+    // Persist fulfillment meta on booking when chat returns an id
+    if (confirmResult?.booking_id) {
+      try {
+        const { data: bookingRow } = await supabaseAdmin
+          .from('bookings')
+          .select('id, meta')
+          .eq('id', confirmResult.booking_id)
+          .maybeSingle();
+        if (bookingRow) {
+          await supabaseAdmin.from('bookings').update({
+            meta: {
+              ...(bookingRow.meta || {}),
+              fulfillment_type: fulfillmentMeta.fulfillment_type,
+              delivery_channel: fulfillmentMeta.delivery_channel,
+              delivery_channel_requested: fulfillmentMeta.delivery_channel_requested,
+              delivery_channel_status: fulfillmentMeta.delivery_channel_status,
+              courier_zone: fulfillmentMeta.courier_zone,
+              delivery_zone: fulfillmentMeta.delivery_zone,
+              delivery_source: fulfillmentMeta.delivery_source,
+              local_shiprocket_pending_at: fulfillmentMeta.local_shiprocket_pending_at,
+              delivery_address: isDeliveryShip ? formattedAddress : (bookingRow.meta?.delivery_address || null),
+              pincode: isDeliveryShip ? safePincode : null,
+              web_cart_submission: nextMeta.web_cart_submission,
+            },
+            ...(isDeliveryShip ? { delivery_address: formattedAddress } : {}),
+          }).eq('id', bookingRow.id);
+        }
+      } catch (metaErr) {
+        console.warn('[webcart/submit] booking fulfillment meta:', metaErr.message);
+      }
+    }
 
     if (session?.id) {
       const confirmedMeta = {
@@ -552,8 +664,8 @@ router.post('/api/webcart/submit', async (req, res) => {
           // The order actually ships to whatever address/pincode was submitted
           // for delivery — recorded here so gift orders stay traceable even
           // though the gifter (not the recipient) is the paying customer.
-          recipientAddress: shippedOrder ? formattedAddress : null,
-          recipientPincode: shippedOrder ? safePincode : null,
+          recipientAddress: isDeliveryShip ? formattedAddress : null,
+          recipientPincode: isDeliveryShip ? safePincode : null,
         });
         giftUrl = `${req.protocol}://${req.get('host')}/gift/${gift.token}`;
       } catch (giftErr) {

@@ -67,6 +67,7 @@ from tools.booking_mechanisms import (
     fetch_restaurant_info,
     upload_and_send_receipt,
     receipt_qr_url,
+    receipt_verify_url,
     _restaurant_receipt_fields,
     notify_manager_order_alert,
     assign_and_notify_captain_takeaway,
@@ -939,11 +940,27 @@ async def handle_takeaway_flow(
 
             if RECEIPT_AVAILABLE:
                 try:
+                    from tools.prepay_fulfillment import _ensure_order_for_captain_qr
+
+                    captain_order_id = await _ensure_order_for_captain_qr(
+                        restaurant_id=restaurant_id,
+                        customer_name=customer_name,
+                        customer_phone=customer_phone,
+                        token=str(display_token),
+                        service_type="takeaway",
+                        cart_snapshot=cart_snapshot,
+                        order_text=order_text_display,
+                        booking_id=booking_id,
+                    )
                     r_info = await fetch_restaurant_info(restaurant_id)
                     token_clean = str(display_token).lstrip("#").replace("T-", "")
                     receipt_data = _ReceiptData(
                         **(_restaurant_receipt_fields(r_info) if _restaurant_receipt_fields else {}),
-                        receipt_url=receipt_qr_url(display_token),
+                        receipt_url=(
+                            receipt_verify_url(captain_order_id)
+                            if captain_order_id
+                            else receipt_qr_url(display_token)
+                        ),
                         token_number=display_token,
                         bill_number=token_clean[-6:] if token_clean else "",
                         service_type="takeaway",

@@ -12,6 +12,7 @@ const express  = require('express');
 const router   = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const { requestPasswordReset } = require('../helpers/passwordReset');
+const { requestLoginOtp, verifyLoginOtp } = require('../helpers/loginOtp');
 
 const BRAND_ROLES = ['brand_owner', 'brand_manager'];
 
@@ -194,6 +195,48 @@ router.post('/forgot-password', async (req, res) => {
   } catch (err) {
     console.error('[auth/forgot-password]', err.message);
     res.status(500).json({ error: 'Could not send reset email. Please try again later.' });
+  }
+});
+
+// ── POST /api/auth/otp/request ───────────────────────────────────────────────
+// WhatsApp OTP via platform WABA (not tenant integrations). Generic response.
+router.post('/otp/request', async (req, res) => {
+  try {
+    const { email, purpose } = req.body || {};
+    const result = await requestLoginOtp({
+      email,
+      purpose: purpose || 'password_reset',
+    });
+    res.json(result);
+  } catch (err) {
+    const status = err.status || 500;
+    console.error('[auth/otp/request]', err.message);
+    res.status(status).json({
+      error: err.message || 'Could not send verification code. Please try again later.',
+    });
+  }
+});
+
+// ── POST /api/auth/otp/verify ────────────────────────────────────────────────
+// On password_reset success: returns token_hash for ResetPasswordPage.
+router.post('/otp/verify', async (req, res) => {
+  try {
+    const { email, code, purpose, redirectTo } = req.body || {};
+    const resetRedirect = redirectTo
+      || (req.headers.origin ? `${req.headers.origin}/reset-password` : null);
+    const result = await verifyLoginOtp({
+      email,
+      code,
+      purpose: purpose || 'password_reset',
+      redirectTo: resetRedirect,
+    });
+    res.json(result);
+  } catch (err) {
+    const status = err.status || 500;
+    console.error('[auth/otp/verify]', err.message);
+    res.status(status).json({
+      error: err.message || 'Could not verify code. Please try again.',
+    });
   }
 });
 

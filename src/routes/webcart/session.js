@@ -253,6 +253,20 @@ router.get('/api/webcart/session', async (req, res) => {
       preferred_category: preferredCategory,
       category_slots: categorySlotMap,
       promotions: [],
+      fulfillment: (() => {
+        const { packagedServicesEnabled, hasShiprocketCreds, isShippedLob } = require('../../helpers/fulfillmentChannels');
+        if (!isShippedLob(lobType) && !catalogLob) {
+          return { takeaway: true, delivery: true, shiprocket_available: false };
+        }
+        const svc = packagedServicesEnabled(restaurant);
+        return {
+          takeaway: svc.takeaway,
+          delivery: svc.delivery,
+          shiprocket_available: hasShiprocketCreds(restaurant)
+            && String(restaurant.shipping_provider || 'shiprocket').toLowerCase() !== 'custom',
+          shipping_provider: restaurant.shipping_provider || 'shiprocket',
+        };
+      })(),
       session_message: isGuest
         ? (expiredLinkGuest
           ? null

@@ -7,6 +7,8 @@ const PRODUCTION_APP_ORIGIN = 'https://app.autom8.works';
 const ALLOWED_RESET_ORIGINS = new Set([
   PRODUCTION_APP_ORIGIN,
   'https://autom8.works',
+  'https://www.autom8.works',
+  'https://owner.autom8.works',
   'http://localhost:3000',
   'http://localhost:5173',
   'http://127.0.0.1:3000',

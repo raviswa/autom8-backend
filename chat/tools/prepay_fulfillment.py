@@ -58,6 +58,7 @@ from tools.booking_mechanisms import (
     fetch_restaurant_info,
     upload_and_send_receipt,
     receipt_qr_url,
+    receipt_verify_url,
     _restaurant_receipt_fields,
     notify_manager_order_alert,
     assign_and_notify_captain_takeaway,
@@ -848,6 +849,99 @@ async def _notify_manager_kds_dispatch_failed(
         )
 
 
+async def _persist_booking_order_id(booking_id: str | None, order_id: str | None) -> None:
+    """Store orders.id on booking.meta so Captain can resolve token → order."""
+    if not booking_id or not order_id:
+        return
+    try:
+        import os
+        base = (os.getenv("AUTOM8_SUPABASE_URL") or "").rstrip("/")
+        key = os.getenv("AUTOM8_SUPABASE_SERVICE_KEY") or ""
+        if not (base and key):
+            return
+        # Fetch existing meta, merge, patch
+        get_resp = await get_http().get(
+            f"{base}/rest/v1/bookings",
+            params={"select": "meta,schedule_meta", "id": f"eq.{booking_id}", "limit": "1"},
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            timeout=aiohttp.ClientTimeout(total=4),
+        )
+        rows = await get_resp.json() if get_resp.status == 200 else []
+        row = rows[0] if rows else {}
+        meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+        sched = row.get("schedule_meta") if isinstance(row.get("schedule_meta"), dict) else {}
+        meta = {**(meta or {}), "order_id": order_id, "captain_order_id": order_id}
+        sched = {**(sched or {}), "order_id": order_id}
+        patch_resp = await get_http().patch(
+            f"{base}/rest/v1/bookings",
+            params={"id": f"eq.{booking_id}"},
+            json={"meta": meta, "schedule_meta": sched},
+            headers={
+                "apikey": key,
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            timeout=aiohttp.ClientTimeout(total=4),
+        )
+        if patch_resp.status not in (200, 204):
+            # meta column may be missing — try schedule_meta only
+            await get_http().patch(
+                f"{base}/rest/v1/bookings",
+                params={"id": f"eq.{booking_id}"},
+                json={"schedule_meta": sched},
+                headers={
+                    "apikey": key,
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+                timeout=aiohttp.ClientTimeout(total=4),
+            )
+    except Exception as exc:
+        logger.warning(f"[prepay-fulfill] persist order_id on booking failed: {exc}")
+
+
+async def _ensure_order_for_captain_qr(
+    *,
+    restaurant_id: str,
+    customer_name: str,
+    customer_phone: str,
+    token: str,
+    service_type: str,
+    cart_snapshot: dict,
+    order_text: str,
+    booking_id: str | None,
+) -> str | None:
+    """Create POS orders (+ order_items.booking_id) without Live KDS for Captain QR."""
+    try:
+        cart_copy = _normalize_cart_snapshot(cart_snapshot or {})
+        if cart_copy:
+            from tools.cart_tools import enrich_cart_titles
+            await enrich_cart_titles(cart_copy, restaurant_id)
+        order_id = await notify_kds(
+            customer_name=customer_name or "Guest",
+            customer_phone=customer_phone,
+            order_text=order_text or "",
+            cart=cart_copy,
+            table_number=None,
+            token_number=str(token or "—"),
+            service_type=service_type or "takeaway",
+            restaurant_id=restaurant_id,
+            booking_id=booking_id,
+            order_only=True,
+        )
+        if order_id:
+            await _persist_booking_order_id(booking_id, order_id)
+            logger.info(
+                f"[prepay-fulfill] Captain order ready booking={booking_id} order_id={order_id}"
+            )
+        return order_id
+    except Exception as exc:
+        logger.warning(f"[prepay-fulfill] ensure captain order failed (non-fatal): {exc}")
+        return None
+
+
 async def _send_receipt(
     *,
     restaurant_id: str,
@@ -865,11 +959,32 @@ async def _send_receipt(
     footer_message: str = "",
     gst_rate: float = 5.0,
     order_text: str = "",
+    booking_id: str | None = None,
+    order_id: str | None = None,
 ) -> None:
     if not RECEIPT_AVAILABLE:
         logger.warning("[prepay-fulfill] receipt skipped — generate_receipt unavailable")
         return
     try:
+        # Ensure a stable orders.id exists so Captain can scan /verify/{order_id}.
+        # Critical for takeaway / store pickup (restaurant + packaged LOBs).
+        resolved_order_id = order_id
+        svc = str(service_type or "").lower()
+        needs_captain_qr = svc in ("takeaway", "pickup") or (
+            svc == "delivery" and not str(delivery_address or "").strip()
+        )
+        if not resolved_order_id and needs_captain_qr:
+            resolved_order_id = await _ensure_order_for_captain_qr(
+                restaurant_id=restaurant_id,
+                customer_name=customer_name,
+                customer_phone=customer_phone,
+                token=token,
+                service_type="takeaway" if svc in ("takeaway", "pickup") else svc,
+                cart_snapshot=cart_snapshot,
+                order_text=order_text,
+                booking_id=booking_id,
+            )
+
         r_info = await fetch_restaurant_info(restaurant_id)
         r_info = r_info or {}
         token_str = str(token or "—")
@@ -877,9 +992,10 @@ async def _send_receipt(
         items = _LineItem.from_cart(cart_snapshot) if cart_snapshot else []
         if not items and order_text:
             items = _LineItem.from_order_text(order_text)
+        qr_url = receipt_verify_url(resolved_order_id) if resolved_order_id else receipt_qr_url(token_str)
         receipt_data = _ReceiptData(
             **(_restaurant_receipt_fields(r_info) if _restaurant_receipt_fields else {}),
-            receipt_url=receipt_qr_url(token_str),
+            receipt_url=qr_url,
             token_number=token_str,
             bill_number=token_clean[-6:] if token_clean else "",
             table_number=table_number,
@@ -897,7 +1013,10 @@ async def _send_receipt(
             round_to_integer=True,
         )
         receipt_path = _generate_receipt(receipt_data)
-        logger.info(f"[prepay-fulfill] Receipt saved: {receipt_path}")
+        logger.info(
+            f"[prepay-fulfill] Receipt saved: {receipt_path} "
+            f"qr={'verify/' + str(resolved_order_id) if resolved_order_id else 'token/' + token_str}"
+        )
         # Await so payment webhooks cannot finish before WhatsApp send starts.
         await upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, token_str)
     except Exception as exc:
@@ -1160,6 +1279,7 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
             totals=totals,
             parcel_charge=float(totals.get("parcel_charge") or 0),
             order_text=order_text_display,
+            booking_id=booking_id,
         )
         await _touch_customer_visit(payload)
         await update_booking_status(booking_id, "confirmed")
@@ -1196,6 +1316,7 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
                 totals=totals,
                 parcel_charge=float(totals.get("parcel_charge") or 0),
                 order_text=order_text_display,
+                booking_id=booking_id,
             )
             await update_booking_status(booking_id, "confirmed")
             logger.info(
@@ -1320,6 +1441,7 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
         totals=totals,
         parcel_charge=float(totals.get("parcel_charge") or 0),
         order_text=order_text_display,
+        booking_id=booking_id,
     )
     await update_booking_status(booking_id, "confirmed")
     logger.info(f"[prepay-fulfill] Takeaway booking {booking_id} confirmed after payment")
@@ -1410,6 +1532,7 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
             delivery_charge=float(totals.get("delivery_charge") or payload.get("delivery_fee") or 0),
             parcel_charge=float(totals.get("parcel_charge") or 0),
             order_text=order_text_display,
+            booking_id=booking_id,
         )
         await _ensure_walk_in_type(restaurant_id, str(token), "delivery")
         await _touch_customer_visit(payload)
@@ -1448,6 +1571,7 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
                 delivery_charge=float(totals.get("delivery_charge") or payload.get("delivery_fee") or 0),
                 parcel_charge=float(totals.get("parcel_charge") or 0),
                 order_text=order_text_display,
+                booking_id=booking_id,
             )
             await update_booking_status(booking_id, "confirmed")
             logger.info(
@@ -1587,6 +1711,7 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
         delivery_charge=float(totals.get("delivery_charge") or payload.get("delivery_fee") or 0),
         parcel_charge=float(totals.get("parcel_charge") or 0),
         order_text=order_text_display,
+        booking_id=booking_id,
     )
     await update_booking_status(booking_id, "confirmed")
     logger.info(f"[prepay-fulfill] Delivery booking {booking_id} confirmed after payment")
@@ -1702,13 +1827,15 @@ async def _fulfill_dine_in(payload: dict[str, Any]) -> bool:
             totals=totals,
             table_number=str(table_number or ""),
             order_text=order_text_display,
+            booking_id=booking_id,
         )
         state["_receipt_sent"] = True
         await save_session_state(restaurant_id, customer_phone, state)
     await update_booking_status(booking_id, "confirmed")
     logger.info(
         f"[prepay-fulfill] Dine-in booking {booking_id} payment received "
-        f"(kds={'sent' if dispatched else 'pending'})"
+        f"(kds={'sent' if dispatched else 'pending'})",
+        booking_id=booking_id,
     )
     return True
 
@@ -1751,6 +1878,7 @@ async def _fulfill_reserve_table(payload: dict[str, Any]) -> bool:
         totals={},
         gst_rate=0.0,
         footer_message=f"Reservation for {display_dt} — {party_size} guests 😊",
+        booking_id=booking_id,
     )
     await update_booking_status(booking_id, "confirmed")
     logger.info(f"[prepay-fulfill] Reservation booking {booking_id} confirmed after payment")

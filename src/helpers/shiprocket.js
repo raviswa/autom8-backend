@@ -130,8 +130,135 @@ async function fetchShiprocketCheapestRate(opts) {
   return result.cheapest;
 }
 
+/**
+ * Create a Shiprocket custom (adhoc) order.
+ * @returns {{ ok, orderId, shipmentId, status, raw, error }}
+ */
+async function createShiprocketOrder({ email, password, apiKey, payload }) {
+  const auth = await resolveShiprocketToken({ email, password, apiKey });
+  if (!auth.token) {
+    return { ok: false, orderId: null, shipmentId: null, status: null, raw: null, error: auth.error };
+  }
+
+  try {
+    const res = await fetch('https://apiv2.shiprocket.in/v1/external/orders/create/adhoc', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${auth.token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (res.status === 401 && email) {
+        tokenCache.delete(String(email).trim().toLowerCase());
+      }
+      const msg = data?.message
+        || (Array.isArray(data?.errors) ? data.errors.join('; ') : null)
+        || (typeof data?.errors === 'object' ? JSON.stringify(data.errors) : null)
+        || `Shiprocket create order failed (${res.status})`;
+      return { ok: false, orderId: null, shipmentId: null, status: null, raw: data, error: msg };
+    }
+
+    return {
+      ok: true,
+      orderId: data.order_id || data.order_id_shiprocket || null,
+      shipmentId: data.shipment_id || null,
+      status: data.status || data.status_code || null,
+      raw: data,
+      error: null,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      orderId: null,
+      shipmentId: null,
+      status: null,
+      raw: null,
+      error: err.message || 'Shiprocket create order request failed.',
+    };
+  }
+}
+
+/**
+ * Assign AWB / courier to an existing Shiprocket shipment.
+ * @returns {{ ok, awb, courierName, courierId, raw, error }}
+ */
+async function assignShiprocketAwb({ email, password, apiKey, shipmentId, courierId = null }) {
+  const auth = await resolveShiprocketToken({ email, password, apiKey });
+  if (!auth.token) {
+    return { ok: false, awb: null, courierName: null, courierId: null, raw: null, error: auth.error };
+  }
+  if (!shipmentId) {
+    return { ok: false, awb: null, courierName: null, courierId: null, raw: null, error: 'Missing shipment_id for AWB assign.' };
+  }
+
+  try {
+    const body = { shipment_id: shipmentId };
+    if (courierId != null && courierId !== '') body.courier_id = courierId;
+
+    const res = await fetch('https://apiv2.shiprocket.in/v1/external/courier/assign/awb', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${auth.token}`,
+      },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (res.status === 401 && email) {
+        tokenCache.delete(String(email).trim().toLowerCase());
+      }
+      const msg = data?.message
+        || data?.response?.data?.awb_assign_error
+        || `Shiprocket AWB assign failed (${res.status})`;
+      return { ok: false, awb: null, courierName: null, courierId: null, raw: data, error: msg };
+    }
+
+    const inner = data?.response?.data || data?.data || data || {};
+    const awb = String(inner.awb_code || inner.awb || data.awb_code || '').trim() || null;
+    const courierName = String(
+      inner.courier_name || inner.courier_company || data.courier_name || '',
+    ).trim() || null;
+    const assignedCourierId = inner.courier_company_id || inner.courier_id || courierId || null;
+
+    if (!awb && data?.awb_assign_status === 0) {
+      return {
+        ok: false,
+        awb: null,
+        courierName,
+        courierId: assignedCourierId,
+        raw: data,
+        error: data?.response?.data?.awb_assign_error || 'AWB assignment rejected by Shiprocket.',
+      };
+    }
+
+    return {
+      ok: true,
+      awb,
+      courierName,
+      courierId: assignedCourierId,
+      raw: data,
+      error: null,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      awb: null,
+      courierName: null,
+      courierId: null,
+      raw: null,
+      error: err.message || 'Shiprocket AWB assign request failed.',
+    };
+  }
+}
+
 module.exports = {
   resolveShiprocketToken,
   fetchShiprocketCourierOptions,
   fetchShiprocketCheapestRate,
+  createShiprocketOrder,
+  assignShiprocketAwb,
 };
