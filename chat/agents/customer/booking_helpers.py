@@ -209,6 +209,7 @@ def expire_session_if_stale(
     _prev_visits = session_state.get("visit_count", 0)
     _prev_last = session_state.get("last_order_summary", "")
     _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
+    _prev_lang = session_state.get("preferred_language")
     _pending_pay = session_state.get("pending_prepay_fulfillment")
     _booking_id = session_state.get("booking_id")
     _payment_link = session_state.get("payment_link")
@@ -230,6 +231,8 @@ def expire_session_if_stale(
         session_state["last_order_summary"] = strip_order_quantity(_prev_last)
     if _prev_svc:
         session_state["last_service_type"] = _prev_svc
+    if _prev_lang:
+        session_state["preferred_language"] = _prev_lang
     if _pending_pay:
         session_state["pending_prepay_fulfillment"] = _pending_pay
     if _booking_id:
@@ -668,6 +671,7 @@ async def start_fresh_visit(
     _prev_visits = session_state.get("visit_count", 0)
     _prev_last = session_state.get("last_order_summary", "")
     _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
+    _prev_lang = session_state.get("preferred_language")
     _pending_pay = session_state.get("pending_prepay_fulfillment")
     _abandoned = session_state.pop("_last_visit_abandoned", False)
     session_state.clear()
@@ -683,6 +687,8 @@ async def start_fresh_visit(
         session_state["last_order_summary"] = strip_order_quantity(_prev_last)
     if _prev_svc:
         session_state["last_service_type"] = _prev_svc
+    if _prev_lang:
+        session_state["preferred_language"] = _prev_lang
     if _pending_pay:
         session_state["pending_prepay_fulfillment"] = _pending_pay
     if _abandoned:
@@ -751,6 +757,7 @@ async def do_reset(
         _prev_visits = session_state.get("visit_count", 0)
         _prev_last   = session_state.get("last_order_summary", "")
         _prev_svc    = session_state.get("service_type") or session_state.get("last_service_type")
+        _prev_lang   = session_state.get("preferred_language")
         session_state.clear()
         session_state["next_state"]    = "identity"
         session_state["identity_step"] = "initial"
@@ -765,6 +772,8 @@ async def do_reset(
             session_state["last_order_summary"] = strip_order_quantity(_prev_last)
         if _prev_svc:
             session_state["last_service_type"] = _prev_svc
+        if _prev_lang:
+            session_state["preferred_language"] = _prev_lang
         return
 
     _cid     = session_state.get("customer_id")
@@ -775,6 +784,7 @@ async def do_reset(
     _is_new  = session_state.get("is_new_customer")
     _visits  = session_state.get("visit_count", 0)
     _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
+    _prev_lang = session_state.get("preferred_language")
     session_state.clear()
     if _cid:    session_state["customer_id"]           = _cid
     if _cname:  session_state["customer_name"]         = _cname
@@ -788,6 +798,7 @@ async def do_reset(
         session_state["is_returning_customer"] = True
     if _visits: session_state["visit_count"]           = _visits
     if _prev_svc: session_state["last_service_type"]   = _prev_svc
+    if _prev_lang: session_state["preferred_language"] = _prev_lang
     session_state["booking_step"]          = "awaiting_service_selection"
 
     from agents.customer.message_templates import build_conversation_greeting
