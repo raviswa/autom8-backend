@@ -1038,20 +1038,91 @@ async def send_service_menu(
 
     footer = _reply(_lang, "service_menu_footer")
     button_label = _reply(_lang, "service_menu_button")[:20]
+    select_cta = _reply(_lang, "service_card_select")[:20]
 
-    ok = await _send_interactive(customer_phone, {
-        "interactive": {
-            "type": "list",
-            "header": {"type": "text", "text": header[:60]},
-            "body":   {"text": body_text[:1024]},
-            "footer": {"text": footer[:60]},
-            "action": {
-                "button": button_label,
-                "sections": sections,
-            },
-        }
-    }, restaurant_id)
-    t = _lat("wa_interactive", t)
+    # Prefer interactive media carousel (2–10 cards). Fall back to list, then text.
+    from tools.feature_gate import (
+        service_card_body_text,
+        service_card_image_url,
+    )
+
+    carousel_rows = [r for r in rows if r.get("id") and r["id"] != "nothing"]
+    # Preserve menu order: instant first, then planned.
+    _order = (
+        "token_queue", "dine_in_now", "door_delivery_now", "takeaway_now",
+        "table_reservation", "scheduled_delivery", "scheduled_pickup",
+    )
+    by_id_all = {r["id"]: r for r in carousel_rows}
+    ordered_carousel = [by_id_all[i] for i in _order if i in by_id_all]
+    for rid, row in by_id_all.items():
+        if rid not in _order:
+            ordered_carousel.append(row)
+
+    cards = []
+    if 2 <= len(ordered_carousel) <= 10:
+        for idx, row in enumerate(ordered_carousel):
+            image_url = service_card_image_url(row["id"])
+            if not image_url:
+                cards = []
+                break
+            cards.append({
+                "card_index": idx,
+                "type": "cta_url",
+                "header": {
+                    "type": "image",
+                    "image": {"link": image_url},
+                },
+                "body": {
+                    "text": service_card_body_text(
+                        row["id"],
+                        title=row.get("title"),
+                        description=row.get("description"),
+                    ),
+                },
+                "action": {
+                    "buttons": [
+                        {
+                            "type": "quick_reply",
+                            "quick_reply": {
+                                "id": str(row["id"])[:256],
+                                "title": select_cta,
+                            },
+                        }
+                    ],
+                },
+            })
+
+    outcome = "list"
+    ok = False
+    if cards:
+        ok = await _send_interactive(customer_phone, {
+            "interactive": {
+                "type": "carousel",
+                "body": {"text": body_text[:1024]},
+                "action": {"cards": cards},
+            }
+        }, restaurant_id)
+        t = _lat("wa_carousel", t)
+        if ok:
+            outcome = "carousel"
+
+    if not ok:
+        ok = await _send_interactive(customer_phone, {
+            "interactive": {
+                "type": "list",
+                "header": {"type": "text", "text": header[:60]},
+                "body":   {"text": body_text[:1024]},
+                "footer": {"text": footer[:60]},
+                "action": {
+                    "button": button_label,
+                    "sections": sections,
+                },
+            }
+        }, restaurant_id)
+        t = _lat("wa_interactive", t)
+        if ok:
+            outcome = "list"
+
     if not ok:
         lines = "\n".join(f"{i + 1}. {r['title']}" for i, r in enumerate(rows))
         await send_whatsapp_message(
@@ -1060,9 +1131,10 @@ async def send_service_menu(
             restaurant_id,
         )
         _lat("wa_fallback_text", t)
+        outcome = "text"
     logger.info(
         f"[LATENCY] stage=service_menu.total dur_ms={int((_time.monotonic() - _t0) * 1000)} "
-        f"restaurant_id={restaurant_id} outcome=list rows={len(rows)}"
+        f"restaurant_id={restaurant_id} outcome={outcome} rows={len(rows)} cards={len(cards)}"
     )
 
 

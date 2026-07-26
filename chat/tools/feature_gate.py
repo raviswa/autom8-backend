@@ -189,6 +189,31 @@ SERVICE_ROW_CONFIG: dict[str, dict[str, str]] = {
     },
 }
 
+# Public HTTPS base for WhatsApp carousel card headers (served by Express
+# from /service-cards). Override via SERVICE_CARD_IMAGE_BASE_URL in env.
+_DEFAULT_SERVICE_CARD_IMAGE_BASE = "https://api.autom8.works/service-cards"
+
+
+def service_card_image_base() -> str:
+    import os
+    return (os.environ.get("SERVICE_CARD_IMAGE_BASE_URL") or _DEFAULT_SERVICE_CARD_IMAGE_BASE).rstrip("/")
+
+
+def service_card_image_url(row_id: str) -> str | None:
+    """Public image URL for a service-menu row, or None if no asset exists."""
+    if not row_id or row_id not in SERVICE_ROW_CONFIG:
+        return None
+    return f"{service_card_image_base()}/{row_id}.jpg"
+
+
+def service_card_body_text(row_id: str, title: str | None = None, description: str | None = None) -> str:
+    """WhatsApp carousel card body (max 160 chars)."""
+    cfg = SERVICE_ROW_CONFIG.get(row_id) or {}
+    t = (title or cfg.get("title") or row_id).strip()
+    d = (description or cfg.get("description") or "").strip()
+    body = f"*{t}*\n\n{d}" if d else f"*{t}*"
+    return body[:160]
+
 
 def _cache_get(restaurant_id: str) -> list[str] | None:
     entry = _CACHE.get(restaurant_id)

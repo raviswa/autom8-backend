@@ -15,6 +15,7 @@
 'use strict';
 
 const http    = require('http');
+const path    = require('path');
 const express = require('express');
 const cors    = require('cors');
 
@@ -56,6 +57,15 @@ app.use(cors({
   credentials:    true,
 }));
 app.options('*', cors());
+
+// ── Public static assets (WhatsApp service-menu carousel images) ─────────────
+app.use(
+  '/service-cards',
+  express.static(path.join(__dirname, 'public', 'service-cards'), {
+    maxAge: '7d',
+    fallthrough: true,
+  }),
+);
 
 // ── Body parser ───────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '10mb' }));

@@ -166,5 +166,6 @@ REPLIES = {
     "service_menu_footer": 'ઓર્ડર શરૂ કરવા નીચે ટૅપ કરો',
     "service_menu_button": 'સેવા પસંદ કરો',
     "service_menu_ready_takeaway": 'તમારો ટેકઅવે ઓર્ડર *{token}* તૈયાર છે — કાઉન્ટર પરથી લઈ લો.',
+    "service_card_select": 'પસંદ કરો',
     "service_choice_unclear": 'માફ કરજો, સમજાયું નહીં. કૃપા કરીને ઉપરના વિકલ્પોમાંથી એક ટૅપ કરો.',
 }

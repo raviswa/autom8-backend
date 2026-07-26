@@ -166,5 +166,6 @@ REPLIES = {
     "service_menu_footer": 'অর্ডার শুরু করতে নিচে ট্যাপ করুন',
     "service_menu_button": 'সেবা বেছে নিন',
     "service_menu_ready_takeaway": 'আপনার টেকঅ্যাওয়ে অর্ডার *{token}* প্রস্তুত — কাউন্টার থেকে নিন।',
+    "service_card_select": 'বেছে নিন',
     "service_choice_unclear": 'দুঃখিত, বুঝতে পারিনি। অনুগ্রহ করে উপরের অপশনগুলোর একটি ট্যাপ করুন।',
 }

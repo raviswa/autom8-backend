@@ -169,5 +169,6 @@ REPLIES = {
     "service_menu_footer": 'ஆர்டர் செய்ய கீழே தட்டவும்',
     "service_menu_button": 'சேவை தேர்வு',
     "service_menu_ready_takeaway": 'உங்கள் டேக்அவே ஆர்டர் *{token}* தயார் — கவுண்டரில் எடுத்துக்கொள்ளுங்கள்.',
+    "service_card_select": 'தேர்வு',
     "service_choice_unclear": 'மன்னிக்கவும், புரியவில்லை. மேலே உள்ள விருப்பங்களில் ஒன்றைத் தட்டவும்.',
 }
