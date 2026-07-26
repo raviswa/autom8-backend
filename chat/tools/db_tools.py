@@ -3668,15 +3668,40 @@ _PIN_TTL_HOURS = 24   # stale pin → keyword routing re-evaluated on next messa
 _KEYWORD_GREETING_WORDS: set[str] = {
     "hi", "hey", "hello", "hlo", "hii", "hai", "hola",
     "namaste", "namaskar", "vanakkam",
-    # Common Indic-script greetings (romanization + native forms after strip)
-    "வணக்கம்", "வணககம", "ஹாய்", "ஹய", "नमस्ते", "नमसत",
+    # Common Indic-script greetings (full forms + pulli-stripped forms)
+    "வணக்கம்", "வணககம", "ஹாய்", "ஹய", "ஹி", "ஹ", "नमस्ते", "नमसत",
     "నమస్కారం", "ನಮಸ್ಕಾರ", "നമസ്കാരം", "নমস্কার", "નમસ્તે",
     "good", "morning", "evening", "afternoon", "night", "noon",
     "dear", "sir", "madam", "team",
 }
 
-# Outlet short_codes are always ASCII (munafe, psl, fnb, …).
+# Outlet short_codes are stored ASCII in DB (munafe, amma, psl, fnb, …).
+# Indic spellings of the same outlet keyword must map here after greeting strip.
+_SHORT_CODE_ALIASES: dict[str, str] = {
+    "amma": "amma",
+    "அம்மா": "amma",
+    "அமம": "amma",  # pulli-stripped fallback
+}
+
 _ASCII_SHORT_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,19}$")
+
+
+def _normalize_routing_text(message: str) -> str:
+    """Lowercase and drop punctuation, but KEEP Indic vowel/pulli marks.
+
+    Python's \\w does not include Mn/Mc marks, so a naive [^\\w\\s] strip
+    turns 'ஹி'→'ஹ' and 'அம்மா'→'அமம', breaking greeting + outlet parsing.
+    """
+    import unicodedata
+
+    out: list[str] = []
+    for ch in (message or "").lower():
+        if ch.isalnum() or ch.isspace():
+            out.append(ch)
+            continue
+        if unicodedata.category(ch) in ("Mn", "Mc", "Lm"):
+            out.append(ch)
+    return "".join(out).strip()
 
 
 def extract_short_code(message: str) -> str | None:
@@ -3684,24 +3709,80 @@ def extract_short_code(message: str) -> str | None:
     Extract a restaurant short_code from an opening greeting.
 
     "Hi Munafe"          → "munafe"
+    "Hi Amma" / "வணக்கம் அம்மா" / "ஹி அம்மா" → "amma"
     "Hi psl"             → "psl"
-    "Hi fnb"             → "fnb"   (Munafe Supply B2B on shared WABA)
-    "Good morning PSL"   → "psl"
-    "Hi"                 → None   (plain greeting — use default tenant)
-    "வணக்கம்"            → None   (Indic greeting — use default tenant + language latch)
+    "Hi" / "வணக்கம்"     → None   (plain greeting — use default tenant)
     "Hi, I want biryani" → None   (2+ tokens — treat as normal message, not a keyword)
     """
-    cleaned = re.sub(r"[^\w\s]", "", (message or "").lower()).strip()
+    raw = (message or "").strip()
+    cleaned = _normalize_routing_text(raw)
     tokens  = [t for t in cleaned.split() if t and t not in _KEYWORD_GREETING_WORDS]
     if len(tokens) != 1:
+        # #region agent log
+        try:
+            import json as _json, time as _time
+            logger.info(
+                "[DBG-c76584] "
+                + _json.dumps({
+                    "sessionId": "c76584",
+                    "hypothesisId": "A",
+                    "location": "db_tools.extract_short_code",
+                    "message": "no single keyword token",
+                    "data": {
+                        "raw_len": len(raw),
+                        "cleaned": cleaned[:80],
+                        "tokens": tokens[:5],
+                        "has_tamil": bool(re.search(r"[\u0B80-\u0BFF]", raw)),
+                    },
+                    "timestamp": int(_time.time() * 1000),
+                }, ensure_ascii=False)
+            )
+        except Exception:
+            pass
+        # #endregion
         return None
     candidate = tokens[0]
-    # Never treat Tamil/Hindi/etc. script as an outlet keyword — those are
-    # greetings for language detection, not shared-WABA routing codes.
+    aliased = _SHORT_CODE_ALIASES.get(candidate) or _SHORT_CODE_ALIASES.get(candidate.lower())
+    if aliased:
+        # #region agent log
+        try:
+            import json as _json, time as _time
+            logger.info(
+                "[DBG-c76584] "
+                + _json.dumps({
+                    "sessionId": "c76584",
+                    "hypothesisId": "A",
+                    "location": "db_tools.extract_short_code",
+                    "message": "alias mapped",
+                    "data": {"candidate": candidate, "aliased": aliased},
+                    "timestamp": int(_time.time() * 1000),
+                }, ensure_ascii=False)
+            )
+        except Exception:
+            pass
+        # #endregion
+        return aliased
+    # Plain ASCII outlet codes only — bare Indic greetings are not keywords.
     if not _ASCII_SHORT_CODE_RE.match(candidate):
+        # #region agent log
+        try:
+            import json as _json, time as _time
+            logger.info(
+                "[DBG-c76584] "
+                + _json.dumps({
+                    "sessionId": "c76584",
+                    "hypothesisId": "A",
+                    "location": "db_tools.extract_short_code",
+                    "message": "non-ascii candidate rejected",
+                    "data": {"candidate": candidate},
+                    "timestamp": int(_time.time() * 1000),
+                }, ensure_ascii=False)
+            )
+        except Exception:
+            pass
+        # #endregion
         return None
     return candidate
-
 
 async def get_restaurant_by_short_code(
     whatsapp_number: str,

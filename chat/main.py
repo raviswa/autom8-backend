@@ -474,6 +474,28 @@ async def _process_meta_payload(payload: dict):
         restaurant      = None
         keyword         = extract_short_code(message_body or "")
 
+        # #region agent log
+        try:
+            import json as _json
+            logger.info(
+                "[DBG-c76584] "
+                + _json.dumps({
+                    "sessionId": "c76584",
+                    "hypothesisId": "A,B",
+                    "location": "main.resolve_start",
+                    "message": "routing inputs",
+                    "data": {
+                        "body": (message_body or "")[:60],
+                        "keyword": keyword,
+                        "waba_tail": str(restaurant_whatsapp or "")[-6:],
+                    },
+                    "timestamp": int(time.time() * 1000),
+                }, ensure_ascii=False)
+            )
+        except Exception:
+            pass
+        # #endregion
+
         # 3a. Explicit keyword — only acts when it resolves to a real, active tenant
         if keyword:
             candidate = await get_restaurant_by_short_code(restaurant_whatsapp, keyword)
@@ -482,12 +504,14 @@ async def _process_meta_payload(payload: dict):
                 logger.info(f"[routing] keyword '{keyword}' → {restaurant['name']}")
 
         # 3b. Pin table — mid-conversation continuation
+        pin_used = False
         if not restaurant:
             pinned_id = await get_active_restaurant_for_phone(restaurant_whatsapp, phone)
             if pinned_id:
                 restaurant = await get_restaurant_by_id(pinned_id)
                 if restaurant:
-                    logger.debug(f"[routing] pin hit: {phone} → {restaurant['name']}")
+                    pin_used = True
+                    logger.info(f"[routing] pin hit: {phone[-4:]} → {restaurant['name']}")
 
         # 3c. Unrecognized keyword AND no pin — genuinely fresh, unknown-outlet contact
         if not restaurant and keyword:
@@ -516,6 +540,31 @@ async def _process_meta_payload(payload: dict):
         # 3e. Default fallback — plain "Hi" routes to is_default_for_number=True tenant
         if not restaurant:
             restaurant = await get_restaurant_by_whatsapp_number(restaurant_whatsapp)
+
+        # #region agent log
+        try:
+            import json as _json
+            logger.info(
+                "[DBG-c76584] "
+                + _json.dumps({
+                    "sessionId": "c76584",
+                    "hypothesisId": "A,B,C",
+                    "location": "main.resolve_done",
+                    "message": "tenant resolved",
+                    "data": {
+                        "keyword": keyword,
+                        "pin_used": pin_used,
+                        "name": (restaurant or {}).get("name"),
+                        "lob": (restaurant or {}).get("lob_type"),
+                        "short_code": (restaurant or {}).get("short_code"),
+                        "is_default": (restaurant or {}).get("is_default_for_number"),
+                    },
+                    "timestamp": int(time.time() * 1000),
+                }, ensure_ascii=False)
+            )
+        except Exception:
+            pass
+        # #endregion
 
         if not restaurant:
             lat.mark("resolve_restaurant")
