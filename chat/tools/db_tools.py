@@ -3668,9 +3668,15 @@ _PIN_TTL_HOURS = 24   # stale pin → keyword routing re-evaluated on next messa
 _KEYWORD_GREETING_WORDS: set[str] = {
     "hi", "hey", "hello", "hlo", "hii", "hai", "hola",
     "namaste", "namaskar", "vanakkam",
+    # Common Indic-script greetings (romanization + native forms after strip)
+    "வணக்கம்", "வணககம", "ஹாய்", "ஹய", "नमस्ते", "नमसत",
+    "నమస్కారం", "ನಮಸ್ಕಾರ", "നമസ്കാരം", "নমস্কার", "નમસ્તે",
     "good", "morning", "evening", "afternoon", "night", "noon",
     "dear", "sir", "madam", "team",
 }
+
+# Outlet short_codes are always ASCII (munafe, psl, fnb, …).
+_ASCII_SHORT_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,19}$")
 
 
 def extract_short_code(message: str) -> str | None:
@@ -3682,11 +3688,19 @@ def extract_short_code(message: str) -> str | None:
     "Hi fnb"             → "fnb"   (Munafe Supply B2B on shared WABA)
     "Good morning PSL"   → "psl"
     "Hi"                 → None   (plain greeting — use default tenant)
+    "வணக்கம்"            → None   (Indic greeting — use default tenant + language latch)
     "Hi, I want biryani" → None   (2+ tokens — treat as normal message, not a keyword)
     """
     cleaned = re.sub(r"[^\w\s]", "", (message or "").lower()).strip()
     tokens  = [t for t in cleaned.split() if t and t not in _KEYWORD_GREETING_WORDS]
-    return tokens[0] if len(tokens) == 1 else None
+    if len(tokens) != 1:
+        return None
+    candidate = tokens[0]
+    # Never treat Tamil/Hindi/etc. script as an outlet keyword — those are
+    # greetings for language detection, not shared-WABA routing codes.
+    if not _ASCII_SHORT_CODE_RE.match(candidate):
+        return None
+    return candidate
 
 
 async def get_restaurant_by_short_code(

@@ -94,6 +94,10 @@ class Restaurant(Base):
     # Hotel Munafe = True; all other tenants on same number = False.
     is_default_for_number = Column(Boolean, nullable=False, default=False)
 
+    # sort_order: tie-break when multiple tenants share a WABA and none is
+    # flagged is_default_for_number (lower = preferred). Exists in DB / index.
+    sort_order = Column(Integer, nullable=True, default=0)
+
     # lob_type: which agent handles this tenant's conversations.
     #   "restaurant" → booking_agent (default for all existing rows)
     #   "supply"     → supply_agent
