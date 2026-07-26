@@ -397,6 +397,7 @@ async def upload_and_send_receipt(
     customer_phone: str,
     restaurant_id: str,
     token_number: str,
+    lang: str | None = None,
 ) -> None:
     """Upload receipt PNG to Supabase Storage and send a 48-h signed URL to the customer."""
     try:
@@ -452,11 +453,10 @@ async def upload_and_send_receipt(
             # Step 3: send stable redirect URL (never the signed Supabase URL)
             redirect_url = receipt_qr_url(token_number)
             logger.info(f"[receipt-upload] Sending WhatsApp receipt link {redirect_url}")
+            from locales.customer import reply
             await send_whatsapp_message(
                 customer_phone,
-                f"🧾 *Your Receipt — Token {token_number}*\n\n"
-                f"{redirect_url}\n\n"
-                f"⏰ _This link expires in 48 hours. Please save a copy if needed._",
+                reply(lang, "receipt_message", token=token_number, url=redirect_url),
                 restaurant_id,
             )
     except Exception as e:

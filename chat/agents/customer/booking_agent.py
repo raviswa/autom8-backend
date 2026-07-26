@@ -125,9 +125,9 @@ async def handle_booking_flow(
         ))
 
     session_state["restaurant_id"] = restaurant_id
-    # Latch Tamil script before outbound greetings use session_lang().
-    from locales.customer import latch_tamil_from_text
-    latch_tamil_from_text(session_state, message)
+    # Latch preferred language from inbound script before outbound greetings.
+    from locales.customer import latch_indic_from_text
+    latch_indic_from_text(session_state, message)
 
     # ── Idle session expiry (30 min) — drop stale mid-flow steps ───────────────
     if expire_session_if_stale(

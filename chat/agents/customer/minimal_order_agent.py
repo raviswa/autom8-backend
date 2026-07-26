@@ -433,13 +433,19 @@ async def _handle_repeat_order(
         phone,
         restaurant_id,
         body_text=body_text,
-        button_text="Confirm & Pay",
+        button_text=reply(lang, "webcart_confirm_button"),
         url=str(payment_link),
-        header_text="Repeat Your Order",
-        footer_text=f"Secure payment powered by {gateway_label}",
+        header_text=reply(lang, "webcart_confirm_header"),
+        footer_text=reply(lang, "webcart_confirm_footer", gateway_label=gateway_label),
     )
     if not sent:
-        fallback = f"{body_text}\n\nConfirm & Pay:\n{payment_link}"
+        fallback = reply(
+            lang,
+            "webcart_confirm_fallback",
+            order_ref=booking_id[-8:],
+            total=total,
+            payment_link=payment_link,
+        )
         await send_whatsapp_message(phone, fallback, restaurant_id)
 
     logger.info("[minimal-order] REPEAT payment link sent to %s booking=%s", phone, booking_id)

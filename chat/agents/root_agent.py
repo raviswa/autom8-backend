@@ -197,6 +197,14 @@ async def route_message(
         raw_message_obj = message if isinstance(message, dict) else None
     message = _extract_interactive_reply_id(message)
 
+    # Latch preferred_language from the customer's typed greeting/script before
+    # identity or booking replies (QR check-in leaves the chat blank on purpose).
+    try:
+        from locales.customer import latch_indic_from_text
+        latch_indic_from_text(session_state, str(message or ""))
+    except Exception:
+        pass
+
     # ── 1. MANAGER ROUTE ─────────────────────────────────────────────────────
     if sender_phone == restaurant_manager_phone:
         logger.info(f"Manager command from {sender_phone}: {message[:50]}")

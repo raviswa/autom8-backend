@@ -302,8 +302,23 @@ def build_prepay_payload(
     totals: dict | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
+    """Build the persisted prepay fulfillment payload.
+
+    STORAGE RULE: order_text_display, cart line titles/names, and service_type
+    stay English/system (catalog source). preferred_language is stored only as a
+    preference code for later customer WhatsApp copy — never to translate lines.
+    """
+    from locales.customer import normalize_lang, system_service_label
+
+    svc = str(service_type or "takeaway").strip().lower() or "takeaway"
+    pref = normalize_lang(
+        session_state.get("preferred_language") if isinstance(session_state, dict) else "en"
+    )
     payload: dict[str, Any] = {
-        "service_type": service_type,
+        "service_type": svc,
+        "service_label_en": system_service_label(svc),
+        "preferred_language": pref,
+        "storage_language": "en",
         "restaurant_id": restaurant_id,
         "customer_id": customer_id,
         "customer_name": customer_name,
@@ -319,6 +334,34 @@ def build_prepay_payload(
     }
     payload.update(extra)
     return payload
+
+
+def _payload_lang(payload: dict[str, Any] | None) -> str:
+    """Customer language for WhatsApp copy (payload preference, defaults en)."""
+    from locales.customer import normalize_lang
+
+    return normalize_lang((payload or {}).get("preferred_language"))
+
+
+def _confirm_header(lang: str, token: Any) -> str:
+    """Localized 'Payment received' + token header for confirmation messages."""
+    from locales.customer import reply
+
+    return (
+        f"{reply(lang, 'payment_received')}\n────────────────────\n"
+        f"{reply(lang, 'token_line', token=token)}\n"
+    )
+
+
+def _scheduled_confirm_body(lang: str, token: Any, service: str, slot: Any) -> str:
+    from locales.customer import reply
+
+    key = (
+        "confirmed_scheduled_delivery"
+        if service == "delivery"
+        else "confirmed_scheduled_takeaway"
+    )
+    return _confirm_header(lang, token) + reply(lang, key, slot=slot)
 
 
 async def _should_defer_kds_for_scheduled(
@@ -809,11 +852,9 @@ async def _notify_manager_kds_dispatch_failed(
         )
         return
 
-    service_label = {
-        "takeaway": "Takeaway",
-        "delivery": "Delivery",
-        "dine_in": "Dine-in",
-    }.get((service_type or "").lower(), service_type or "Order")
+    from locales.customer import system_service_label
+
+    service_label = system_service_label(service_type)
 
     total_line = ""
     if total is not None:
@@ -961,6 +1002,7 @@ async def _send_receipt(
     order_text: str = "",
     booking_id: str | None = None,
     order_id: str | None = None,
+    lang: str | None = None,
 ) -> None:
     if not RECEIPT_AVAILABLE:
         logger.warning("[prepay-fulfill] receipt skipped — generate_receipt unavailable")
@@ -1018,7 +1060,7 @@ async def _send_receipt(
             f"qr={'verify/' + str(resolved_order_id) if resolved_order_id else 'token/' + token_str}"
         )
         # Await so payment webhooks cannot finish before WhatsApp send starts.
-        await upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, token_str)
+        await upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, token_str, lang=lang)
     except Exception as exc:
         logger.warning(f"[prepay-fulfill] receipt failed (non-fatal): {exc}")
 
@@ -1243,12 +1285,9 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
                 )
 
     if scheduled_flow and (jobs_enqueued or defer):
+        lang = _payload_lang(payload)
         sched_label = hints.get("scheduled_at_label") or hints.get("scheduled_at") or "your slot"
-        confirm_body = (
-            f"Payment received! ✅\n────────────────────\n"
-            f"Token: {display_token}\n"
-            f"Your scheduled take-away is confirmed for *{sched_label}*."
-        )
+        confirm_body = _scheduled_confirm_body(lang, display_token, "takeaway", sched_label)
         if defer_note:
             confirm_body += f"\n\n{defer_note}"
         await send_whatsapp_message(customer_phone, confirm_body, restaurant_id)
@@ -1280,6 +1319,7 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
             parcel_charge=float(totals.get("parcel_charge") or 0),
             order_text=order_text_display,
             booking_id=booking_id,
+            lang=lang,
         )
         await _touch_customer_visit(payload)
         await update_booking_status(booking_id, "confirmed")
@@ -1297,13 +1337,12 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
             service_type="takeaway",
         )
         if refused:
+            lang = _payload_lang(payload)
             sched_label = hints.get("scheduled_at_label") or hints.get("scheduled_at") or "your slot"
             await send_whatsapp_message(
                 customer_phone,
-                f"Payment received! ✅\n────────────────────\n"
-                f"Token: {display_token}\n"
-                f"Your scheduled take-away is confirmed for *{sched_label}*.\n\n"
-                f"👨‍🍳 Kitchen prep is scheduled for closer to your pickup time.",
+                _scheduled_confirm_body(lang, display_token, "takeaway", sched_label)
+                + "\n\n👨‍🍳 Kitchen prep is scheduled for closer to your pickup time.",
                 restaurant_id,
             )
             await _send_receipt(
@@ -1317,6 +1356,7 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
                 parcel_charge=float(totals.get("parcel_charge") or 0),
                 order_text=order_text_display,
                 booking_id=booking_id,
+                lang=lang,
             )
             await update_booking_status(booking_id, "confirmed")
             logger.info(
@@ -1356,29 +1396,32 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
         total=total,
     )
 
+    lang = _payload_lang(payload)
     if defer:
         kitchen_line = order_confirmed_line(
             lob_type=resolve_lob_from_payload(payload),
             service_type="takeaway",
             deferred=True,
+            lang=lang,
         )
     elif dispatched_now:
         kitchen_line = order_confirmed_line(
             lob_type=resolve_lob_from_payload(payload),
             service_type="takeaway",
             dispatched=True,
+            lang=lang,
         )
     else:
         kitchen_line = order_confirmed_line(
             lob_type=resolve_lob_from_payload(payload),
             service_type="takeaway",
             dispatched=False,
+            lang=lang,
         )
 
     confirm_body = (
-        f"Payment received! ✅\n────────────────────\n"
-        f"Token: {display_token}\n"
-        f"{kitchen_line}{captain_line}"
+        _confirm_header(lang, display_token)
+        + f"{kitchen_line}{captain_line}"
     )
     if defer and defer_note:
         confirm_body += f"\n\n{defer_note}"
@@ -1442,6 +1485,7 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
         parcel_charge=float(totals.get("parcel_charge") or 0),
         order_text=order_text_display,
         booking_id=booking_id,
+        lang=lang,
     )
     await update_booking_status(booking_id, "confirmed")
     logger.info(f"[prepay-fulfill] Takeaway booking {booking_id} confirmed after payment")
@@ -1499,12 +1543,9 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
                 )
 
     if scheduled_flow and (jobs_enqueued or defer):
+        lang = _payload_lang(payload)
         sched_label = hints.get("scheduled_at_label") or hints.get("scheduled_at") or "your slot"
-        confirm_body = (
-            f"Payment received! ✅\n────────────────────\n"
-            f"Token: {token}\n"
-            f"Your scheduled delivery is confirmed for *{sched_label}*."
-        )
+        confirm_body = _scheduled_confirm_body(lang, token, "delivery", sched_label)
         if defer_note:
             confirm_body += f"\n\n{defer_note}"
         await send_whatsapp_message(customer_phone, confirm_body, restaurant_id)
@@ -1533,6 +1574,7 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
             parcel_charge=float(totals.get("parcel_charge") or 0),
             order_text=order_text_display,
             booking_id=booking_id,
+            lang=lang,
         )
         await _ensure_walk_in_type(restaurant_id, str(token), "delivery")
         await _touch_customer_visit(payload)
@@ -1550,13 +1592,12 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
             service_type="delivery",
         )
         if refused:
+            lang = _payload_lang(payload)
             sched_label = hints.get("scheduled_at_label") or hints.get("scheduled_at") or "your slot"
             await send_whatsapp_message(
                 customer_phone,
-                f"Payment received! ✅\n────────────────────\n"
-                f"Token: {token}\n"
-                f"Your scheduled delivery is confirmed for *{sched_label}*.\n\n"
-                f"👨‍🍳 Kitchen prep is scheduled for closer to your delivery slot.",
+                _scheduled_confirm_body(lang, token, "delivery", sched_label)
+                + "\n\n👨‍🍳 Kitchen prep is scheduled for closer to your delivery slot.",
                 restaurant_id,
             )
             await _send_receipt(
@@ -1572,6 +1613,7 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
                 parcel_charge=float(totals.get("parcel_charge") or 0),
                 order_text=order_text_display,
                 booking_id=booking_id,
+                lang=lang,
             )
             await update_booking_status(booking_id, "confirmed")
             logger.info(
@@ -1603,31 +1645,34 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
         if booking_row:
             dispatched_now = await retry_kds_for_confirmed_booking(booking_id, booking_row)
 
+    lang = _payload_lang(payload)
     if defer:
         kitchen_line = order_confirmed_line(
             lob_type=resolve_lob_from_payload(payload),
             service_type="delivery",
             deferred=True,
+            lang=lang,
         )
     elif dispatched_now:
         kitchen_line = order_confirmed_line(
             lob_type=resolve_lob_from_payload(payload),
             service_type="delivery",
             dispatched=True,
+            lang=lang,
         )
     else:
         kitchen_line = order_confirmed_line(
             lob_type=resolve_lob_from_payload(payload),
             service_type="delivery",
             dispatched=False,
+            lang=lang,
         )
 
     confirm_body = (
-        f"Payment received! ✅\n────────────────────\n"
-        f"Token: {token}\n"
-        f"{kitchen_line}\n"
+        _confirm_header(lang, token)
+        + f"{kitchen_line}\n"
         f"────────────────────\n"
-        f"{format_order_total_lines(totals)}"
+        f"{format_order_total_lines(totals, lang=lang)}"
     )
     if defer and defer_note:
         confirm_body += f"\n\n{defer_note}"
@@ -1712,6 +1757,7 @@ async def _fulfill_delivery(payload: dict[str, Any]) -> bool:
         parcel_charge=float(totals.get("parcel_charge") or 0),
         order_text=order_text_display,
         booking_id=booking_id,
+        lang=lang,
     )
     await update_booking_status(booking_id, "confirmed")
     logger.info(f"[prepay-fulfill] Delivery booking {booking_id} confirmed after payment")
@@ -1769,25 +1815,29 @@ async def _fulfill_dine_in(payload: dict[str, Any]) -> bool:
         if booking_row:
             dispatched = await retry_kds_for_confirmed_booking(booking_id, booking_row)
 
+    lang = _payload_lang(payload)
+    from locales.customer import reply as _reply
     if dispatched:
         await send_whatsapp_message(
             customer_phone,
-            "Payment received! ✅\n\n"
+            _reply(lang, "payment_received") + "\n\n"
             + order_confirmed_line(
                 lob_type=resolve_lob_from_payload(payload),
                 service_type="dine_in",
                 dispatched=True,
+                lang=lang,
             ),
             restaurant_id,
         )
     else:
         await send_whatsapp_message(
             customer_phone,
-            "Payment received! ✅\n\n"
+            _reply(lang, "payment_received") + "\n\n"
             + order_confirmed_line(
                 lob_type=resolve_lob_from_payload(payload),
                 service_type="dine_in",
                 dispatched=False,
+                lang=lang,
             )
             + _HOME_HINT,
             restaurant_id,
@@ -1828,6 +1878,7 @@ async def _fulfill_dine_in(payload: dict[str, Any]) -> bool:
             table_number=str(table_number or ""),
             order_text=order_text_display,
             booking_id=booking_id,
+            lang=lang,
         )
         state["_receipt_sent"] = True
         await save_session_state(restaurant_id, customer_phone, state)
@@ -1860,9 +1911,8 @@ async def _fulfill_reserve_table(payload: dict[str, Any]) -> bool:
 
     await send_whatsapp_message(
         customer_phone,
-        f"Payment received! ✅\n────────────────────\n"
-        f"Token: {token}\n"
-        f"Your table reservation is confirmed for *{display_dt}* "
+        _confirm_header(_payload_lang(payload), token)
+        + f"Your table reservation is confirmed for *{display_dt}* "
         f"({party_size} guests).\n\n"
         f"Tell our staff your token *{token}* when you arrive!",
         restaurant_id,
@@ -1879,6 +1929,7 @@ async def _fulfill_reserve_table(payload: dict[str, Any]) -> bool:
         gst_rate=0.0,
         footer_message=f"Reservation for {display_dt} — {party_size} guests 😊",
         booking_id=booking_id,
+        lang=_payload_lang(payload),
     )
     await update_booking_status(booking_id, "confirmed")
     logger.info(f"[prepay-fulfill] Reservation booking {booking_id} confirmed after payment")

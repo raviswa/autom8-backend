@@ -277,25 +277,42 @@ def format_order_total_lines(
     *,
     compact: bool = False,
     session_state: dict[str, Any] | None = None,
+    lang: str | None = None,
 ) -> str:
-    """Human-readable price breakdown for WhatsApp messages."""
-    from tools.delivery_distance import format_delivery_line
+    """Human-readable price breakdown for WhatsApp messages (localized labels)."""
+    from locales.customer import normalize_lang, reply
 
-    lines = [f"Items: ₹{totals['items_subtotal']:.0f}"]
+    code = normalize_lang(lang)
+    lines = [reply(code, "totals_items", amount=f"{totals['items_subtotal']:.0f}")]
     if totals.get("parcel_charge", 0) > 0:
-        lines.append(f"Parcel/packaging: ₹{totals['parcel_charge']:.0f}")
-    deli_line = format_delivery_line(totals, session_state)
+        lines.append(reply(code, "totals_packaging", amount=f"{totals['parcel_charge']:.0f}"))
+    # Distance-annotated delivery line is English-only; use the plain localized
+    # label for non-English sessions.
+    deli_line = None
+    if code == "en":
+        from tools.delivery_distance import format_delivery_line
+        deli_line = format_delivery_line(totals, session_state)
     if deli_line:
         lines.append(deli_line)
     elif totals.get("delivery_charge", 0) > 0:
-        lines.append(f"Delivery: ₹{totals['delivery_charge']:.0f}")
+        lines.append(reply(code, "totals_delivery", amount=f"{totals['delivery_charge']:.0f}"))
     if not compact:
-        lines.append(f"GST ({totals.get('gst_rate', DEFAULT_GST_RATE):.0f}%): ₹{totals['gst_amount']:.0f}")
+        lines.append(reply(
+            code, "totals_gst",
+            rate=f"{totals.get('gst_rate', DEFAULT_GST_RATE):.0f}",
+            amount=f"{totals['gst_amount']:.0f}",
+        ))
     incl_parts = []
     if totals.get("parcel_charge", 0) > 0:
-        incl_parts.append(f"₹{totals['parcel_charge']:.0f} packaging")
+        incl_parts.append(reply(code, "totals_part_packaging", amount=f"{totals['parcel_charge']:.0f}"))
     if totals.get("delivery_charge", 0) > 0:
-        incl_parts.append(f"₹{totals['delivery_charge']:.0f} delivery")
-    suffix = f" (incl. {' + '.join(incl_parts)})" if incl_parts else ""
-    lines.append(f"*Total: ₹{totals['grand_total']:.0f}*{suffix}")
+        incl_parts.append(reply(code, "totals_part_delivery", amount=f"{totals['delivery_charge']:.0f}"))
+    if incl_parts:
+        lines.append(reply(
+            code, "totals_total_incl",
+            amount=f"{totals['grand_total']:.0f}",
+            parts=" + ".join(incl_parts),
+        ))
+    else:
+        lines.append(reply(code, "totals_total_plain", amount=f"{totals['grand_total']:.0f}"))
     return "\n".join(lines)

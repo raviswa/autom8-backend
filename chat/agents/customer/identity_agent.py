@@ -216,7 +216,9 @@ async def handle_new_customer(
     message_obj: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Logic for first-time visitors."""
+    from locales.customer import reply, session_lang
 
+    lang = session_lang(session_state)
     current_step = session_state.get("identity_step", "initial")
 
     # ── STEP 1: Send greeting + confirmation buttons (or plain prompt) ──────
@@ -226,10 +228,10 @@ async def handle_new_customer(
             # Button titles must be ≤ 20 chars (WhatsApp limit).
             await send_whatsapp_buttons(
                 to=customer_phone,
-                body=f"Welcome to Munafe! Are you *{whatsapp_profile_name}*?",
+                body=reply(lang, "identity_welcome_confirm", name=whatsapp_profile_name),
                 buttons=[
-                    {"id": BTN_NEW_YES,  "title": "✅ Yes, that's me"},
-                    {"id": BTN_NEW_EDIT, "title": "✏️ Enter my name"},
+                    {"id": BTN_NEW_YES,  "title": reply(lang, "identity_btn_yes")[:20]},
+                    {"id": BTN_NEW_EDIT, "title": reply(lang, "identity_btn_edit")[:20]},
                 ],
                 restaurant_id=restaurant_id,
             )
@@ -244,7 +246,7 @@ async def handle_new_customer(
             # No profile name — plain text prompt, no buttons needed.
             await send_whatsapp_message(
                 customer_phone,
-                "Welcome to Munafe! What is your name please?",
+                reply(lang, "identity_ask_name"),
                 restaurant_id,
             )
             return {
@@ -269,7 +271,7 @@ async def handle_new_customer(
         if wants_edit:
             await send_whatsapp_message(
                 customer_phone,
-                "No problem! Please type your name:",
+                reply(lang, "identity_type_name"),
                 restaurant_id,
             )
             return {
@@ -346,7 +348,9 @@ async def handle_returning_customer(
     message_obj: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Logic for repeat visitors, including name confirmation for long absences."""
+    from locales.customer import reply, session_lang
 
+    lang = session_lang(session_state)
     current_step = session_state.get("identity_step", "initial")
     days_since_visit = 0
 
@@ -366,12 +370,10 @@ async def handle_returning_customer(
         if days_since_visit > 90:
             await send_whatsapp_buttons(
                 to=customer_phone,
-                body=(
-                    f"We missed you! 😊 Is your name still *{customer_name}*?"
-                ),
+                body=reply(lang, "identity_missed_confirm", name=customer_name),
                 buttons=[
-                    {"id": BTN_RET_YES,  "title": "✅ Yes, that's me"},
-                    {"id": BTN_RET_EDIT, "title": "✏️ Different name"},
+                    {"id": BTN_RET_YES,  "title": reply(lang, "identity_btn_yes")[:20]},
+                    {"id": BTN_RET_EDIT, "title": reply(lang, "identity_btn_diff")[:20]},
                 ],
                 restaurant_id=restaurant_id,
             )
@@ -415,7 +417,7 @@ async def handle_returning_customer(
         if wants_edit:
             await send_whatsapp_message(
                 customer_phone,
-                "Of course! Please type your correct name:",
+                reply(lang, "identity_type_correct_name"),
                 restaurant_id,
             )
             return {

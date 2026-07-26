@@ -1242,6 +1242,9 @@ async def internal_webcart_confirm_pay(request: Request):
     session_state["booking_step"] = "awaiting_prepay"
     await save_session_state(restaurant_id, canonical_phone, session_state)
 
+    from locales.customer import reply, session_lang
+
+    lang = session_lang(session_state)
     preview_lines = []
     for row in items[:6]:
         try:
@@ -1253,35 +1256,41 @@ async def internal_webcart_confirm_pay(request: Request):
             preview_lines.append(f"- {qty}x {name}")
     order_preview = "\n".join(preview_lines)
     if len(items) > 6:
-        order_preview += f"\n- +{len(items) - 6} more item(s)"
+        order_preview += "\n" + reply(
+            lang, "webcart_confirm_more_items", count=len(items) - 6,
+        )
 
     gateway_label = "Razorpay" if settings.payment_gateway == "razorpay" else "PhonePe"
-    body_text = (
-        "Your order is almost confirmed.\n\n"
-        f"Order ref: {order_ref or booking_id[-8:]}\n"
-        f"Token: {token_label or token_number}\n"
-        f"Total: INR {float(totals.get('grand_total') or total):.0f}\n\n"
-        f"{order_preview}\n\n"
-        f"Tap Confirm & Pay to complete payment securely via {gateway_label}."
+    order_ref_display = order_ref or booking_id[-8:]
+    token_display = token_label or token_number
+    total_display = float(totals.get("grand_total") or total)
+    body_text = reply(
+        lang,
+        "webcart_confirm_body",
+        order_ref=order_ref_display,
+        token_label=token_display,
+        total=total_display,
+        order_preview=order_preview,
+        gateway_label=gateway_label,
     ).strip()
 
     sent = await send_whatsapp_cta_url(
         canonical_phone,
         restaurant_id,
         body_text=body_text,
-        button_text="Confirm & Pay",
+        button_text=reply(lang, "webcart_confirm_button"),
         url=str(payment_link),
-        header_text="Confirm Your Order",
-        footer_text=f"Secure payment powered by {gateway_label}",
+        header_text=reply(lang, "webcart_confirm_header"),
+        footer_text=reply(lang, "webcart_confirm_footer", gateway_label=gateway_label),
     )
 
     if not sent:
-        fallback_text = (
-            "Your order is almost confirmed.\n"
-            f"Order ref: {order_ref or booking_id[-8:]}\n"
-            f"Total: INR {float(totals.get('grand_total') or total):.0f}\n\n"
-            "Confirm & Pay:\n"
-            f"{payment_link}"
+        fallback_text = reply(
+            lang,
+            "webcart_confirm_fallback",
+            order_ref=order_ref_display,
+            total=total_display,
+            payment_link=payment_link,
         )
         sent = await send_whatsapp_message(canonical_phone, fallback_text, restaurant_id)
 

@@ -46,7 +46,7 @@ async def safe_classify_intent_full(message: str, flow: str, context: dict) -> d
 
 
 def apply_language_to_session(session_state: dict, language: str | None) -> str:
-    """Persist preferred_language when Tamil is confidently detected."""
+    """Persist preferred_language when a supported local language is detected."""
     from locales.customer import apply_detected_language
 
     return apply_detected_language(session_state, language)

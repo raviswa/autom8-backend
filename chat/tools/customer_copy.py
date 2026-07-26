@@ -37,8 +37,14 @@ def order_confirmed_line(
     service_type: str,
     dispatched: bool = True,
     deferred: bool = False,
+    lang: str | None = None,
 ) -> str:
-    """Customer-facing paid-order confirmation line (no staff/KDS jargon for shipped LOBs)."""
+    """Customer-facing paid-order confirmation line (no staff/KDS jargon for shipped LOBs).
+
+    Localized via chat locales; rare not-dispatched warning variants stay English.
+    """
+    from locales.customer import reply
+
     service = str(service_type or "order").strip().lower()
     shipped = is_shipped_lob(lob_type)
 
@@ -52,19 +58,19 @@ def order_confirmed_line(
         label = "order"
 
     if deferred:
-        if label == "delivery":
-            return "Your delivery order is confirmed."
-        if label == "takeaway":
-            return "Your takeaway order is confirmed."
-        return "Your order is confirmed."
+        key = {
+            "delivery": "confirmed_delivery_deferred",
+            "takeaway": "confirmed_takeaway_deferred",
+        }.get(label, "confirmed_generic_deferred")
+        return reply(lang, key)
 
     if shipped:
         if dispatched:
-            if label == "delivery":
-                return "Your delivery order is confirmed and we're preparing it for dispatch."
-            if label == "takeaway":
-                return "Your order is confirmed and we're preparing it for pickup."
-            return "Your order is confirmed and we're preparing it now."
+            key = {
+                "delivery": "confirmed_delivery_dispatch",
+                "takeaway": "confirmed_takeaway_pickup_prep",
+            }.get(label, "confirmed_generic_prep")
+            return reply(lang, key)
         if label == "delivery":
             return (
                 "Your delivery order is confirmed. "
@@ -76,27 +82,26 @@ def order_confirmed_line(
         )
 
     # Restaurant LOB — keep kitchen wording
+    if dispatched:
+        key = {
+            "delivery": "confirmed_kitchen_delivery",
+            "takeaway": "confirmed_kitchen_takeaway",
+            "dine_in": "confirmed_kitchen_dinein",
+        }.get(label, "confirmed_kitchen_generic")
+        return reply(lang, key)
     if label == "delivery":
-        if dispatched:
-            return "Your delivery order is confirmed and sent to the kitchen."
         return (
             "Your delivery order is confirmed. "
             "We're pushing it to the kitchen display — please alert staff if it doesn't appear shortly."
         )
     if label == "takeaway":
-        if dispatched:
-            return "Your takeaway order is confirmed and sent to the kitchen."
         return (
             "Your takeaway order is confirmed. "
             "We're pushing it to the kitchen display — please alert staff if it doesn't appear shortly."
         )
     if label == "dine_in":
-        if dispatched:
-            return "Your order is confirmed and sent to the kitchen. Enjoy your meal! 🍽️"
         return (
             "We're sending your order to the kitchen now — "
             "please alert staff if it doesn't appear on the display within a minute."
         )
-    if dispatched:
-        return "Your order is confirmed and sent to the kitchen."
-    return "Your order is confirmed."
+    return reply(lang, "confirmed_generic_deferred")

@@ -354,7 +354,10 @@ async def send_prepay_payment_reminders():
                     pref_lang = str(sess.get("preferred_language") or "en")
                 except Exception:
                     pref_lang = "en"
-                service_label = service_type.replace("_", " ")
+                from locales.customer import customer_service_label
+
+                # Display label localized for the customer; DB keeps English codes.
+                service_label = customer_service_label(pref_lang, service_type)
                 cta_sent = await send_whatsapp_cta_url(
                     phone,
                     restaurant_id,
@@ -375,6 +378,7 @@ async def send_prepay_payment_reminders():
 
             if not cta_sent:
                 from locales.customer import reply as customer_reply
+                from locales.customer import customer_service_label
                 from tools.db_tools import get_session_state
 
                 pref_lang = "en"
@@ -394,7 +398,7 @@ async def send_prepay_payment_reminders():
                         pref_lang,
                         "prepay_reminder_fallback",
                         name=name,
-                        service_label=service_type.replace("_", " "),
+                        service_label=customer_service_label(pref_lang, service_type),
                         pay_line=pay_line,
                     ),
                     restaurant_id,

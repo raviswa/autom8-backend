@@ -975,7 +975,11 @@ async def handle_takeaway_flow(
                     )
                     receipt_path = _generate_receipt(receipt_data)
                     logger.info(f"[receipt] Takeaway receipt saved: {receipt_path}")
-                    await upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, display_token)
+                    from locales.customer import session_lang as _session_lang
+                    await upload_and_send_receipt(
+                        receipt_path, customer_phone, restaurant_id, display_token,
+                        lang=_session_lang(session_state),
+                    )
                     await update_booking_status(booking_id, "confirmed")
                     logger.info(f"[receipt] Booking {booking_id} marked confirmed")
                 except Exception as _re:
