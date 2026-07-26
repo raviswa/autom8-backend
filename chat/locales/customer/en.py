@@ -126,6 +126,14 @@ REPLIES = {
     "abandoned_cart_button": "Continue order",
     "abandoned_cart_footer": "One gentle reminder — we will not message again.",
 
+    # Service picker chrome (list message body/footer/button)
+    "service_menu_help": "How can we help you today?",
+    "service_menu_footer": "Tap below to start ordering",
+    "service_menu_button": "Select Service",
+    "service_menu_ready_takeaway": (
+        "Your takeaway order *{token}* is ready — pick up at the counter."
+    ),
+
     # Customer-facing service labels (display only — DB keeps English codes)
     "svc_takeaway": "Takeaway",
     "svc_delivery": "Delivery",

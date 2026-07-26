@@ -976,6 +976,32 @@ async def send_service_menu(
     normalize_last_order_summary(state)
     header = (state.get("_restaurant_display_name") or "Service Menu").strip()
 
+    from locales.customer import reply as _reply, session_lang as _session_lang
+    _lang = _session_lang(state)
+
+    # #region agent log
+    try:
+        import json as _json, time as _time
+        logger.info(
+            "[DBG-c76584] "
+            + _json.dumps({
+                "sessionId": "c76584",
+                "hypothesisId": "E,F",
+                "location": "booking_helpers.send_service_menu",
+                "message": "service menu lang",
+                "data": {
+                    "lang": _lang,
+                    "pref": state.get("preferred_language"),
+                    "greeting_prefix": (greeting or "")[:60],
+                    "header": header[:40],
+                },
+                "timestamp": int(_time.time() * 1000),
+            }, ensure_ascii=False)
+        )
+    except Exception:
+        pass
+    # #endregion
+
     body_lines = []
     if greeting and greeting.strip():
         greeting_text = greeting.strip()
@@ -987,15 +1013,16 @@ async def send_service_menu(
     if ready_takeaway:
         token = ready_takeaway.get("display_token") or ready_takeaway.get("order_number", "")
         body_lines.append(
-            f"Your takeaway order *{token}* is ready — pick up at the counter."
+            _reply(_lang, "service_menu_ready_takeaway", token=token)
         )
     t = _lat("ready_takeaway", t)
 
     state.pop("_last_visit_abandoned", None)
-    body_lines.append("How can we help you today?")
+    body_lines.append(_reply(_lang, "service_menu_help"))
     body_text = "\n\n".join(body_lines)
 
-    footer = "Tap below to start ordering"
+    footer = _reply(_lang, "service_menu_footer")
+    button_label = _reply(_lang, "service_menu_button")[:20]
 
     ok = await _send_interactive(customer_phone, {
         "interactive": {
@@ -1004,7 +1031,7 @@ async def send_service_menu(
             "body":   {"text": body_text[:1024]},
             "footer": {"text": footer[:60]},
             "action": {
-                "button": "👉 Select Service",
+                "button": button_label,
                 "sections": sections,
             },
         }

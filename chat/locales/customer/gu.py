@@ -160,4 +160,10 @@ REPLIES = {
     "svc_scheduled_delivery": 'શેડ્યૂલ્ડ ડિલિવરી',
     "svc_scheduled_pickup": 'શેડ્યૂલ્ડ પિકઅપ',
     "svc_order": 'ઓર્ડર',
+
+    # Service picker chrome
+    "service_menu_help": 'આજે અમે કેવી રીતે મદદ કરીએ?',
+    "service_menu_footer": 'ઓર્ડર શરૂ કરવા નીચે ટૅપ કરો',
+    "service_menu_button": 'સેવા પસંદ કરો',
+    "service_menu_ready_takeaway": 'તમારો ટેકઅવે ઓર્ડર *{token}* તૈયાર છે — કાઉન્ટર પરથી લઈ લો.',
 }

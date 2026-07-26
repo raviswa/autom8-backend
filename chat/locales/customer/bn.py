@@ -160,4 +160,10 @@ REPLIES = {
     "svc_scheduled_delivery": 'শিডিউল্ড ডেলিভারি',
     "svc_scheduled_pickup": 'শিডিউল্ড পিকআপ',
     "svc_order": 'অর্ডার',
+
+    # Service picker chrome
+    "service_menu_help": 'আজ আমরা কীভাবে সাহায্য করতে পারি?',
+    "service_menu_footer": 'অর্ডার শুরু করতে নিচে ট্যাপ করুন',
+    "service_menu_button": 'সেবা বেছে নিন',
+    "service_menu_ready_takeaway": 'আপনার টেকঅ্যাওয়ে অর্ডার *{token}* প্রস্তুত — কাউন্টার থেকে নিন।',
 }

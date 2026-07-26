@@ -160,4 +160,10 @@ REPLIES = {
     "svc_scheduled_delivery": 'शेड्युल्ड डिलिव्हरी',
     "svc_scheduled_pickup": 'शेड्युल्ड पिकअप',
     "svc_order": 'ऑर्डर',
+
+    # Service picker chrome
+    "service_menu_help": 'आज आम्ही कशी मदत करू?',
+    "service_menu_footer": 'ऑर्डर सुरू करण्यासाठी खाली टॅप करा',
+    "service_menu_button": 'सेवा निवडा',
+    "service_menu_ready_takeaway": 'तुमचा टेकअवे ऑर्डर *{token}* तयार आहे — काउंटरवरून घ्या.',
 }

@@ -160,4 +160,10 @@ REPLIES = {
     "svc_scheduled_delivery": 'ഷെഡ്യൂൾഡ് ഡെലിവറി',
     "svc_scheduled_pickup": 'ഷെഡ്യൂൾഡ് പിക്കപ്പ്',
     "svc_order": 'ഓർഡർ',
+
+    # Service picker chrome
+    "service_menu_help": 'ഇന്ന് ഞങ്ങൾ എങ്ങനെ സഹായിക്കാം?',
+    "service_menu_footer": 'ഓർഡർ ആരംഭിക്കാൻ താഴെ ടാപ്പ് ചെയ്യൂ',
+    "service_menu_button": 'സേവനം തിരഞ്ഞെടുക്കൂ',
+    "service_menu_ready_takeaway": 'നിങ്ങളുടെ ടേക്ക്എവേ ഓർഡർ *{token}* തയ്യാർ — കൗണ്ടറിൽ നിന്ന് എടുക്കൂ.',
 }

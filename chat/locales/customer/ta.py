@@ -163,4 +163,10 @@ REPLIES = {
     "svc_scheduled_delivery": 'திட்டமிட்ட டெலிவரி',
     "svc_scheduled_pickup": 'திட்டமிட்ட பிக்அப்',
     "svc_order": 'ஆர்டர்',
+
+    # Service picker chrome
+    "service_menu_help": 'இன்று எப்படி உதவலாம்?',
+    "service_menu_footer": 'ஆர்டர் செய்ய கீழே தட்டவும்',
+    "service_menu_button": 'சேவை தேர்வு',
+    "service_menu_ready_takeaway": 'உங்கள் டேக்அவே ஆர்டர் *{token}* தயார் — கவுண்டரில் எடுத்துக்கொள்ளுங்கள்.',
 }
