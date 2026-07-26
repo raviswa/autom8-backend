@@ -306,13 +306,6 @@ async def route_message(
         return result
 
     if _is_greeting_like(user_text) and session_state.get("booking_step") in (None, "awaiting_service_selection", "ask_service"):
-        # #region agent log
-        logger.info(
-            "[DBG-c76584] root greeting-like reopen "
-            f"text={user_text!r} step={session_state.get('booking_step')!r} "
-            f"hypothesisId=H2"
-        )
-        # #endregion
         session_state["current_state"] = "booking"
         session_state["booking_step"] = "ask_service"
 

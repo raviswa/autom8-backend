@@ -1017,29 +1017,6 @@ async def send_service_menu(
     from locales.customer import reply as _reply, session_lang as _session_lang
     _lang = _session_lang(state)
 
-    # #region agent log
-    try:
-        import json as _json, time as _time
-        logger.info(
-            "[DBG-c76584] "
-            + _json.dumps({
-                "sessionId": "c76584",
-                "hypothesisId": "E,F",
-                "location": "booking_helpers.send_service_menu",
-                "message": "service menu lang",
-                "data": {
-                    "lang": _lang,
-                    "pref": state.get("preferred_language"),
-                    "greeting_prefix": (greeting or "")[:60],
-                    "header": header[:40],
-                },
-                "timestamp": int(_time.time() * 1000),
-            }, ensure_ascii=False)
-        )
-    except Exception:
-        pass
-    # #endregion
-
     body_lines = []
     if greeting and greeting.strip():
         greeting_text = greeting.strip()

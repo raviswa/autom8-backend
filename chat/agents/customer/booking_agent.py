@@ -136,13 +136,6 @@ async def handle_booking_flow(
         current_step = session_state.get("booking_step") or "ask_service"
         # clear() can wipe preferred_language; re-latch from this message.
         latch_indic_from_text(session_state, message)
-        # #region agent log
-        logger.info(
-            "[DBG-c76584] after stale expire "
-            f"lang={session_state.get('preferred_language')!r} step={current_step!r} "
-            f"hypothesisId=H4"
-        )
-        # #endregion
 
     msg_lower = message.strip().lower()
 
@@ -280,13 +273,6 @@ async def handle_booking_flow(
         if _pending_pay: session_state["pending_prepay_fulfillment"] = _pending_pay
         # Re-latch in case clear raced before the inbound greeting was stored.
         latch_indic_from_text(session_state, message)
-        # #region agent log
-        logger.info(
-            "[DBG-c76584] after visit_complete clear "
-            f"lang={session_state.get('preferred_language')!r} msg={message[:40]!r} "
-            f"hypothesisId=H4"
-        )
-        # #endregion
         session_state["booking_step"] = "ask_service"
         current_step = "ask_service"
 
@@ -531,13 +517,6 @@ async def handle_booking_flow(
                     if fb.get("completed"):
                         mark_session_visit_complete(session_state)
                     return {"status": session_state.get("booking_step", "awaiting_service_selection")}
-            # #region agent log
-            logger.info(
-                "[DBG-c76584] awaiting_service ValueError branch "
-                f"choice={_raw_choice!r} is_greeting={is_greeting(_raw_choice)} "
-                f"soft_reopen={_is_soft_reopen(_raw_choice)} hypothesisId=H1"
-            )
-            # #endregion
             if _is_soft_reopen(_raw_choice):
                 return await _resend_service_menu_for_greeting()
             from locales.customer import reply as _creply, session_lang as _slang
@@ -551,14 +530,6 @@ async def handle_booking_flow(
         # resolve_service_selection returns (None, None) for unknown text — it does
         # NOT raise. Greetings must be handled here or they hit the English sorry.
         if service_type is None:
-            # #region agent log
-            logger.info(
-                "[DBG-c76584] awaiting_service None path "
-                f"choice={_raw_choice!r} is_greeting={is_greeting(_raw_choice)} "
-                f"soft_reopen={_is_soft_reopen(_raw_choice)} lang={session_state.get('preferred_language')!r} "
-                f"hypothesisId=H1"
-            )
-            # #endregion
             if _is_soft_reopen(_raw_choice):
                 return await _resend_service_menu_for_greeting()
             from locales.customer import reply as _creply, session_lang as _slang

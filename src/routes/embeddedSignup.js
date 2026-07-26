@@ -39,14 +39,6 @@ router.get('/config', (_req, res) => {
 router.get('/status', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
   try {
     const status = await getWhatsAppAccountStatus(req.restaurant_id);
-    // #region agent log
-    try {
-      const fs = require('fs');
-      const path = require('path');
-      const logPath = path.join(__dirname, '..', '..', '..', 'debug-c76584.log');
-      fs.appendFileSync(logPath, JSON.stringify({sessionId:'c76584',runId:'pre-deploy',hypothesisId:'D',location:'embeddedSignup.js:/status',message:'status endpoint hit',data:{connected:Boolean(status?.connected),hasWaba:Boolean(status?.waba_id),restaurantId:req.restaurant_id},timestamp:Date.now()}) + '\n');
-    } catch (_) {}
-    // #endregion
     res.json({ success: true, ...status });
   } catch (err) {
     console.error('[embedded-signup] status failed:', err.message);

@@ -3730,69 +3730,13 @@ def extract_short_code(message: str) -> str | None:
     cleaned = _normalize_routing_text(raw)
     tokens  = [t for t in cleaned.split() if t and t not in _KEYWORD_GREETING_WORDS]
     if len(tokens) != 1:
-        # #region agent log
-        try:
-            import json as _json, time as _time
-            logger.info(
-                "[DBG-c76584] "
-                + _json.dumps({
-                    "sessionId": "c76584",
-                    "hypothesisId": "A",
-                    "location": "db_tools.extract_short_code",
-                    "message": "no single keyword token",
-                    "data": {
-                        "raw_len": len(raw),
-                        "cleaned": cleaned[:80],
-                        "tokens": tokens[:5],
-                        "has_tamil": bool(re.search(r"[\u0B80-\u0BFF]", raw)),
-                    },
-                    "timestamp": int(_time.time() * 1000),
-                }, ensure_ascii=False)
-            )
-        except Exception:
-            pass
-        # #endregion
         return None
     candidate = tokens[0]
     aliased = _SHORT_CODE_ALIASES.get(candidate) or _SHORT_CODE_ALIASES.get(candidate.lower())
     if aliased:
-        # #region agent log
-        try:
-            import json as _json, time as _time
-            logger.info(
-                "[DBG-c76584] "
-                + _json.dumps({
-                    "sessionId": "c76584",
-                    "hypothesisId": "A",
-                    "location": "db_tools.extract_short_code",
-                    "message": "alias mapped",
-                    "data": {"candidate": candidate, "aliased": aliased},
-                    "timestamp": int(_time.time() * 1000),
-                }, ensure_ascii=False)
-            )
-        except Exception:
-            pass
-        # #endregion
         return aliased
     # Plain ASCII outlet codes only — bare Indic greetings are not keywords.
     if not _ASCII_SHORT_CODE_RE.match(candidate):
-        # #region agent log
-        try:
-            import json as _json, time as _time
-            logger.info(
-                "[DBG-c76584] "
-                + _json.dumps({
-                    "sessionId": "c76584",
-                    "hypothesisId": "A",
-                    "location": "db_tools.extract_short_code",
-                    "message": "non-ascii candidate rejected",
-                    "data": {"candidate": candidate},
-                    "timestamp": int(_time.time() * 1000),
-                }, ensure_ascii=False)
-            )
-        except Exception:
-            pass
-        # #endregion
         return None
     return candidate
 
