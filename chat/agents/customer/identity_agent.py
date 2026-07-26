@@ -382,8 +382,10 @@ async def handle_returning_customer(
                 "pending_button_step": "awaiting_name_confirm",
             }
 
-        # Standard returning customer — service menu greeting is sent by booking_agent
-        await update_last_visit(customer["id"])
+        # Standard returning customer — service menu greeting is sent by booking_agent.
+        # Visit update is bookkeeping — never block the first WhatsApp reply on it.
+        import asyncio
+        asyncio.create_task(update_last_visit(customer["id"]))
 
         return {
             "status": "identified",

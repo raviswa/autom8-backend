@@ -74,7 +74,6 @@ function baseFields(row) {
 
 function baseValidate(item, rowNum) {
   const errors = [];
-  if (!item.id) errors.push(`Row ${rowNum}: missing id/SKU`);
   if (!item.name) errors.push(`Row ${rowNum}: missing title/name`);
   if (item.price <= 0) errors.push(`Row ${rowNum} (${item.name || item.id}): price must be > 0`);
   if (item.image_url && !/^https?:\/\//i.test(item.image_url)) {
@@ -188,6 +187,7 @@ const LOB_SCHEMAS = {
     columnHelp: [
       ['Column guide - Packaged Food / Home Baker'],
       [''],
+      ['id - optional. Leave blank to auto-generate a stable SKU from title + pack_size_label'],
       ['item_type - PRODUCT (default) or BUNDLE (hamper / sampler)'],
       ['variant_group_id - same ID across pack rows for one product (e.g. MANGO-PICKLE)'],
       ['pack_size_label - 250g, 500g, 1kg (pack pills when variant_group_id is set)'],
@@ -464,6 +464,8 @@ const REGISTER_LOB_TYPES = Object.freeze(Object.keys(LOB_SCHEMAS));
  * intake surfaces) may send that don't have a dedicated catalog schema yet.
  * Mapped onto the closest existing LOB_SCHEMAS entry.
  */
+const { VERTICAL_LOB_ALIASES } = require('./lobTaxonomy');
+
 const LOB_ALIASES = Object.freeze({
   supply: 'b2b',
   b2b_supply: 'b2b',
@@ -474,6 +476,8 @@ const LOB_ALIASES = Object.freeze({
   home_baker: 'food_products',
   pizza: 'psl',
   ice_cream: 'psl',
+  // Brochure vertical ids → catalog schema
+  ...VERTICAL_LOB_ALIASES,
 });
 
 function normalizeLobType(value, fallback = 'restaurant') {

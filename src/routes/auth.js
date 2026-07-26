@@ -171,7 +171,7 @@ router.post('/forgot-password', async (req, res) => {
 
     const { data: emp } = await supabaseAdmin
       .from('employees')
-      .select('id, is_active, full_name, restaurant_id')
+      .select('id, is_active, full_name, restaurant_id, role')
       .eq('email', normalized)
       .maybeSingle();
 
@@ -183,6 +183,7 @@ router.post('/forgot-password', async (req, res) => {
         email:          normalized,
         employeeName:   emp.full_name,
         restaurantId:   emp.restaurant_id,
+        role:           emp.role,
         triggeredBy:    'self',
         redirectTo:     resetRedirect,
       });
@@ -190,7 +191,7 @@ router.post('/forgot-password', async (req, res) => {
 
     res.json({
       success: true,
-      message: 'If an account exists for that email, a password reset has been initiated. Check your inbox (and spam). If you do not receive it, contact your restaurant manager.',
+      message: 'If an account exists for that email, a password reset link has been sent. Check your inbox and spam folder. If nothing arrives, try WhatsApp OTP on this page.',
     });
   } catch (err) {
     console.error('[auth/forgot-password]', err.message);

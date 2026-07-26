@@ -22,6 +22,11 @@ const { isSubscriptionSoftLocked } = require('../helpers/subscriptionAccess');
 const DEFAULT_FEATURES = DEFAULT_SERVICES;
 
 const { parseRegistrationLobType, REGISTER_LOB_TYPES } = require('../config/catalogSchemas');
+const {
+  resolveBusinessTaxonomy,
+  formatBusinessLabel,
+  getVertical,
+} = require('../config/lobTaxonomy');
 const { completeEmbeddedSignupForRestaurant } = require('../helpers/embeddedSignupComplete');
 const { slugify, selectDroppingMissingColumns } = require('./webcart/shared');
 const { handleMenuUpload } = require('./catalog/menu-items');
@@ -112,14 +117,50 @@ async function seedCatalogFromRegistration(restaurantId, rawRows, lobType) {
   return result;
 }
 function resolveRegistrationLobType(body) {
-  const raw = body?.lob_type ?? body?.org_type ?? body?.business_type ?? null;
+  const otherLabel = String(body?.business_vertical_other || '').trim();
+  const taxonomy = resolveBusinessTaxonomy({
+    business_family: body?.business_family,
+    business_vertical: body?.business_vertical,
+    business_vertical_other: otherLabel,
+    lob_type: body?.lob_type ?? body?.org_type ?? body?.business_type ?? null,
+  });
+
+  // Prefer explicit vertical when provided
+  if (body?.business_vertical) {
+    const vertical = getVertical(body.business_vertical);
+    if (!vertical) {
+      return { error: `Invalid business_vertical "${body.business_vertical}"` };
+    }
+    if (vertical.custom && !otherLabel) {
+      return { error: 'Tell us what your business does — business_vertical_other is required when you pick Others.' };
+    }
+    return {
+      lob_type: vertical.lob_type,
+      business_family: vertical.family,
+      business_vertical: vertical.id,
+      business_vertical_other: vertical.custom ? otherLabel.slice(0, 160) : null,
+    };
+  }
+
+  const raw = taxonomy.lob_type
+    || body?.lob_type
+    || body?.org_type
+    || body?.business_type
+    || null;
   const parsed = parseRegistrationLobType(raw);
   if (parsed.invalid) {
     return {
-      error: `Invalid lob_type "${parsed.attempted}". Allowed: ${REGISTER_LOB_TYPES.join(', ')} (aliases: supply→b2b, electronics/jewellery→retail)`,
+      error: `Invalid lob_type "${parsed.attempted}". Allowed: ${REGISTER_LOB_TYPES.join(', ')} (aliases: supply→b2b, electronics/jewellery→retail, brochure vertical ids)`,
     };
   }
-  return { lob_type: parsed.lob_type };
+  return {
+    lob_type: parsed.lob_type,
+    business_family: taxonomy.business_family || body?.business_family || null,
+    business_vertical: taxonomy.business_vertical || null,
+    business_vertical_other: taxonomy.business_vertical_other
+      ? taxonomy.business_vertical_other.slice(0, 160)
+      : null,
+  };
 }
 
 // ── GET /slug-check/:slug ──────────────────────────────────────────────────────
@@ -170,6 +211,8 @@ router.post(['/register', '/register/upload'], async (req, res) => {
     name,
     email,
     phone               = null,
+    owner_whatsapp      = null,    // owner's personal WA for OTP — not the WABA number
+    contact_phone       = null,    // business contact phone on tenants
     owner_name,
     owner_password,
     slug                = null,
@@ -250,6 +293,13 @@ router.post(['/register', '/register/upload'], async (req, res) => {
   const lobResolved = resolveRegistrationLobType(req.body);
   if (lobResolved.error) return res.status(400).json({ error: lobResolved.error });
   const lob_type = lobResolved.lob_type;
+  const business_family = lobResolved.business_family || null;
+  const business_vertical = lobResolved.business_vertical || null;
+  const business_vertical_other = lobResolved.business_vertical_other || null;
+
+  // Owner personal WhatsApp (OTP recovery) vs business contact vs WABA number
+  const ownerPhone = (owner_whatsapp || phone || '').toString().replace(/\D/g, '') || null;
+  const businessPhone = (contact_phone || phone || '').toString().replace(/\D/g, '') || null;
 
   const resolvedAccessToken = access_token || meta_access_token || null;
   const esCode = (embedded_signup_code || es_code || '').trim() || null;
@@ -270,14 +320,15 @@ router.post(['/register', '/register/upload'], async (req, res) => {
   // ── CHAIN MODE ────────────────────────────────────────────────────────────
   if (isChain) {
     return registerChain(req, res, {
-      chain_name, email, phone, owner_name, owner_password,
+      chain_name, email, phone: ownerPhone, owner_name, owner_password,
       waba_id, meta_business_id,
       first_outlet: {
-        name, phone, whatsapp_number,
+        name, phone: businessPhone, whatsapp_number,
         phone_number_id: deferIntegration ? null : phone_number_id,
         access_token:    deferIntegration ? null : resolvedAccessToken,
         timezone, dining_duration_minutes, payment_mode, manager_phone,
         table_count, outlet_code, lob_type,
+        business_family, business_vertical, business_vertical_other,
       },
       outlet_owner_email:    outlet_owner_email    || null,
       outlet_owner_name:     outlet_owner_name     || null,
@@ -288,13 +339,15 @@ router.post(['/register', '/register/upload'], async (req, res) => {
 
   // ── STANDALONE MODE (existing behaviour, unchanged) ───────────────────────
   return registerStandalone(req, res, {
-    name, email, phone, owner_name, owner_password, slug,
+    name, email, phone: ownerPhone, owner_name, owner_password, slug,
+    contact_phone: businessPhone,
     whatsapp_number,
     phone_number_id: deferIntegration ? null : phone_number_id,
     access_token:    deferIntegration ? null : resolvedAccessToken,
     waba_id:         deferIntegration ? null : waba_id,
     timezone, dining_duration_minutes, payment_mode, manager_phone, table_count,
     meta_catalog_id, lob_type,
+    business_family, business_vertical, business_vertical_other,
     embeddedSignup,
     idempotencyKey,
     display_name: req.body.display_name || null,
@@ -350,7 +403,14 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
         .maybeSingle(),
     ]);
 
-    if (!tenant) return res.status(404).json({ error: 'Restaurant not found' });
+    if (!tenant) {
+      return res.status(404).json({
+        error: 'Restaurant not found — registration may be incomplete. Contact Autom8 support.',
+        code: 'tenant_missing',
+        restaurant_id: restaurantId,
+        setup_complete: false,
+      });
+    }
 
     const paidFeatures = resolvePaidFeatures(sub);
     const enabledFeatures = resolveEnabledFeatures(tenant, paidFeatures);
@@ -360,6 +420,21 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
     const catalogUploaded = (menuCount || 0) > 0;
     const needsPin = Boolean(tenant.whatsapp_needs_existing_pin);
     const softLocked = isSubscriptionSoftLocked(sub);
+    const lobType = tenant.lob_type || 'restaurant';
+    const isPackaged = ['food_products', 'retail', 'psl', 'b2b', 'jewellery'].includes(lobType);
+
+    // Brochure taxonomy is a later migration — never fail /status when it is absent.
+    const { data: taxonomyRow } = await supabaseAdmin
+      .from('tenants')
+      .select('business_family, business_vertical, business_vertical_other')
+      .eq('id', restaurantId)
+      .maybeSingle();
+    const taxonomy = resolveBusinessTaxonomy({
+      business_family: taxonomyRow?.business_family,
+      business_vertical: taxonomyRow?.business_vertical,
+      business_vertical_other: taxonomyRow?.business_vertical_other,
+      lob_type: lobType,
+    });
 
     const setupComplete = whatsappConnected && !needsPin && catalogUploaded && fulfillmentConfigured;
 
@@ -367,12 +442,24 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
       success: true,
       restaurant_id: restaurantId,
       business_name: tenant.display_name || tenant.name,
-      lob_type: tenant.lob_type || 'restaurant',
+      lob_type: lobType,
+      business_family: taxonomy.business_family,
+      business_vertical: taxonomy.business_vertical,
+      business_vertical_other: taxonomy.business_vertical_other,
+      business_label: formatBusinessLabel({
+        business_family: taxonomy.business_family,
+        business_vertical: taxonomy.business_vertical,
+        business_vertical_other: taxonomy.business_vertical_other,
+        lob_type: lobType,
+      }),
       whatsapp_connected: whatsappConnected,
       whatsapp_needs_existing_pin: needsPin,
       catalog_uploaded: catalogUploaded,
       fulfillment_configured: fulfillmentConfigured,
       setup_complete: setupComplete,
+      fulfillment_hint: isPackaged
+        ? 'Enable pickup or delivery in Settings'
+        : 'Enable dine-in, takeaway, or delivery in Settings',
       subscription: {
         status: sub?.status || 'trial',
         trial_ends_at: sub?.trial_ends_at || null,
@@ -485,9 +572,13 @@ router.get('/draft/:email', async (req, res) => {
 async function registerStandalone(req, res, opts) {
   const {
     name, email, phone, owner_name, owner_password,
+    contact_phone = null,
     whatsapp_number, phone_number_id, access_token, waba_id,
     timezone, dining_duration_minutes, payment_mode, manager_phone, table_count,
     meta_catalog_id, lob_type,
+    business_family = null,
+    business_vertical = null,
+    business_vertical_other = null,
     embeddedSignup = null,
     idempotencyKey = null,
     display_name = null,
@@ -533,9 +624,13 @@ async function registerStandalone(req, res, opts) {
     });
 
     const tenantRow = buildTenantInsertFields({
-      name, email, phone, whatsapp_number, waba_id,
+      name, email,
+      phone: contact_phone || phone,
+      contact_phone: contact_phone || phone,
+      whatsapp_number, waba_id,
       timezone, dining_duration_minutes, payment_mode, manager_phone,
       meta_catalog_id, lob_type,
+      business_family, business_vertical, business_vertical_other,
       display_name, city, country_code, currency_code, address_line1,
       kitchen_workflow, cuisines, slug: candidateSlug || slug,
       body: req.body,
@@ -553,13 +648,16 @@ async function registerStandalone(req, res, opts) {
         .select()
         .single();
 
-      if (restError && /column .*slug.* does not exist|short_code|kitchen_workflow|opening_hours|country|cuisine/i.test(restError.message || '')) {
+      if (restError && /column .*slug.* does not exist|short_code|kitchen_workflow|opening_hours|country|cuisine|business_family|business_vertical/i.test(restError.message || '')) {
         console.warn('[onboarding] optional column missing — retrying stripped insert:', restError.message);
         const fallback = { ...insertPayload };
         delete fallback.slug;
         delete fallback.short_code;
         delete fallback.kitchen_workflow;
         delete fallback.country;
+        delete fallback.business_family;
+        delete fallback.business_vertical;
+        delete fallback.business_vertical_other;
         ({ data, error: restError } = await supabaseAdmin
           .from('tenants')
           .insert(fallback)
@@ -839,28 +937,47 @@ async function registerChain(req, res, opts) {
     let outletOwnerId = null;
 
     if (first_outlet?.name) {
-      const { data: restaurant, error: restErr } = await supabaseAdmin
+      const outletRow = {
+        brand_id:               brandId,
+        name:                   first_outlet.name.trim(),
+        email:                  outlet_owner_email?.trim().toLowerCase()
+                                  || `outlet-1@brand-${brandId}.internal`,
+        phone:                  first_outlet.phone        || null,
+        whatsapp_number:        first_outlet.whatsapp_number || null,
+        waba_id:                waba_id                   || null,
+        timezone:               first_outlet.timezone     || 'Asia/Kolkata',
+        dining_duration_minutes: first_outlet.dining_duration_minutes || 90,
+        payment_mode:           first_outlet.payment_mode || 'prepay',
+        manager_phone:          first_outlet.manager_phone || null,
+        outlet_code:            first_outlet.outlet_code   || null,
+        lob_type:               first_outlet.lob_type      || 'restaurant',
+        business_family:        first_outlet.business_family   || null,
+        business_vertical:      first_outlet.business_vertical || null,
+        business_vertical_other: first_outlet.business_vertical_other || null,
+        sort_order:             0,
+        is_active:              true,
+        subscribed_features:    DEFAULT_FEATURES,
+      };
+
+      let { data: restaurant, error: restErr } = await supabaseAdmin
         .from('tenants')
-        .insert({
-          brand_id:               brandId,
-          name:                   first_outlet.name.trim(),
-          email:                  outlet_owner_email?.trim().toLowerCase()
-                                    || `outlet-1@brand-${brandId}.internal`,
-          phone:                  first_outlet.phone        || null,
-          whatsapp_number:        first_outlet.whatsapp_number || null,
-          waba_id:                waba_id                   || null,
-          timezone:               first_outlet.timezone     || 'Asia/Kolkata',
-          dining_duration_minutes: first_outlet.dining_duration_minutes || 90,
-          payment_mode:           first_outlet.payment_mode || 'prepay',
-          manager_phone:          first_outlet.manager_phone || null,
-          outlet_code:            first_outlet.outlet_code   || null,
-          lob_type:               first_outlet.lob_type      || 'restaurant',
-          sort_order:             0,
-          is_active:              true,
-          subscribed_features:    DEFAULT_FEATURES,
-        })
+        .insert(outletRow)
         .select()
         .single();
+
+      if (restErr && /business_family|business_vertical/i.test(restErr.message || '')) {
+        console.warn('[onboarding] taxonomy columns missing — retrying outlet insert:', restErr.message);
+        const fallback = { ...outletRow };
+        delete fallback.business_family;
+        delete fallback.business_vertical;
+        delete fallback.business_vertical_other;
+        ({ data: restaurant, error: restErr } = await supabaseAdmin
+          .from('tenants')
+          .insert(fallback)
+          .select()
+          .single());
+      }
+
       if (restErr) throw restErr;
       restaurantId = restaurant.id;
 

@@ -21,12 +21,12 @@ from agents.customer.minimal_message_templates import (
     build_welcome_message,
     lang_from_session,
 )
-from agents.customer.booking_helpers import touch_session_activity
+from agents.customer.booking_helpers import touch_session_activity, is_greeting
 from agents.customer.conversation_helpers import (
     apply_language_to_session,
     safe_classify_intent_full,
 )
-from locales.customer import reply, session_lang
+from locales.customer import reply, session_lang, latch_tamil_from_text
 from tools.booking_mechanisms import (
     _build_web_menu_url,
     _normalize_phone_digits,
@@ -50,8 +50,9 @@ from tools.whatsapp_tools import send_whatsapp_cta_url, send_whatsapp_message
 logger = logging.getLogger(__name__)
 
 _REPEAT_RE = re.compile(r"\b(REPEAT|REORDER|SAME\s*ORDER|LAST\s*ORDER)\b", re.IGNORECASE)
-_GREETING_RE = re.compile(
-    r"^(hi|hello|hey|hola|namaste|start|order|menu|shop|browse)\b",
+# Packaged-LOB reopeners beyond is_greeting (order/menu/shop/browse).
+_LOB_REOPEN_RE = re.compile(
+    r"^(?:order|menu|shop|browse)(?=\s|$)",
     re.IGNORECASE,
 )
 
@@ -67,7 +68,7 @@ def _is_fresh_contact(message: str, session_state: dict[str, Any]) -> bool:
         return True
     if is_repeat_keyword(body):
         return False
-    if _GREETING_RE.match(body):
+    if is_greeting(body) or _LOB_REOPEN_RE.match(body):
         return True
     step = str(session_state.get("minimal_step") or "")
     if step in ("", "welcome"):
@@ -80,13 +81,27 @@ async def _ensure_customer(
     phone: str,
     profile_name: str,
 ) -> tuple[dict[str, Any], bool]:
-    """Return (customer, is_new_customer)."""
+    """Return (customer, is_new_customer). Prefer canonical phone first (one HTTP)."""
     phone_candidates = _phone_variants(phone)
+    # Canonical 91XXXXXXXXXX first — avoids 2–3 sequential misses on first Hi.
+    ordered: list[str] = []
     for ph in phone_candidates:
+        digits = "".join(ch for ch in str(ph) if ch.isdigit())
+        if len(digits) == 10:
+            ordered.append(f"91{digits}")
+        ordered.append(ph)
+    seen: set[str] = set()
+    for ph in ordered:
+        if not ph or ph in seen:
+            continue
+        seen.add(ph)
         customer = await get_customer(restaurant_id, ph)
         if customer:
             return customer, False
     canonical = phone_candidates[0] if phone_candidates else phone
+    digits = "".join(ch for ch in str(canonical) if ch.isdigit())
+    if len(digits) == 10:
+        canonical = f"91{digits}"
     name = (profile_name or "").strip() or "Guest"
     created = await create_customer(
         restaurant_id,
@@ -111,9 +126,12 @@ async def _mint_webcart_url(
     customer_phone: str,
     restaurant_id: str,
     session_state: dict[str, Any],
+    restaurant: dict[str, Any] | None = None,
 ) -> str | None:
     """Reuse restaurant web-menu token pattern — opaque session_token + menu_tokens row."""
-    restaurant = await get_restaurant_by_id(restaurant_id)
+    restaurant = restaurant or session_state.pop("_minimal_restaurant", None)
+    if not restaurant or not restaurant.get("name"):
+        restaurant = await get_restaurant_by_id(restaurant_id)
     slug = _slugify_subdomain((restaurant or {}).get("name") or "")
     phone_digits = _normalize_phone_digits(customer_phone)
 
@@ -203,8 +221,11 @@ async def send_minimal_webcart_link(
     customer_name: str,
     is_returning: bool,
     can_repeat: bool,
+    restaurant: dict[str, Any] | None = None,
 ) -> bool:
-    url = await _mint_webcart_url(customer_phone, restaurant_id, session_state)
+    url = await _mint_webcart_url(
+        customer_phone, restaurant_id, session_state, restaurant=restaurant,
+    )
     if not url:
         await send_whatsapp_message(
             customer_phone,
@@ -436,9 +457,11 @@ async def handle_minimal_order_flow(
     Single-message webcart entry for psl / food_products / retail tenants.
     Called under customer_lock from main.py.
     """
+    import asyncio
+
     restaurant_id = str(restaurant["id"])
     lob_type = str(restaurant.get("lob_type") or "retail").strip().lower()
-    if lob_type not in ("psl", "food_products", "retail"):
+    if lob_type not in ("psl", "food_products", "retail", "b2b"):
         lob_type = "retail"
 
     session_state["lob_type"] = lob_type
@@ -451,17 +474,62 @@ async def handle_minimal_order_flow(
     session_state["is_new_customer"] = is_new
     session_state["is_returning_customer"] = is_returning
 
-    can_repeat = False
-    if session_state.get("customer_id"):
+    touch_session_activity(session_state)
+    # Latch Tamil before welcome so ta.py copy is used on this turn.
+    latch_tamil_from_text(session_state, message_body)
+    fresh = _is_fresh_contact(message_body, session_state)
+
+    # Greeting / first contact: send CTA immediately. Gemini language detect and
+    # last-order lookup are not needed before the first WhatsApp reply — they
+    # were the main TTFR tax on packaged LOBs.
+    if fresh and not is_repeat_keyword(message_body):
+        store_name = (restaurant.get("name") or "our store").strip()
+        can_repeat = False
+        last_task = None
+        if session_state.get("customer_id"):
+            last_task = asyncio.create_task(
+                get_last_paid_booking_for_customer(
+                    restaurant_id,
+                    str(session_state["customer_id"]),
+                )
+            )
+
+        sent = await send_minimal_webcart_link(
+            lob_type=lob_type,
+            customer_phone=phone,
+            restaurant_id=restaurant_id,
+            session_state=session_state,
+            store_name=store_name,
+            customer_name=session_state["customer_name"],
+            is_returning=is_returning,
+            can_repeat=False,
+            restaurant=restaurant,
+        )
+
+        if last_task is not None:
+            try:
+                last = await last_task
+                can_repeat = bool(last and _cart_lines_from_payload(last.get("payload") or {}))
+                session_state["_can_repeat"] = can_repeat
+            except Exception as last_err:
+                logger.debug("[minimal-order] last-order lookup skipped: %s", last_err)
+
+        # Language detect after first reply — never block greeting TTFR.
+        asyncio.create_task(
+            _detect_language_background(message_body, session_state, restaurant_id, phone)
+        )
+        if sent:
+            return
+
+    can_repeat = bool(session_state.get("_can_repeat"))
+    if session_state.get("customer_id") and not fresh:
         last = await get_last_paid_booking_for_customer(
             restaurant_id,
             str(session_state["customer_id"]),
         )
         can_repeat = bool(last and _cart_lines_from_payload(last.get("payload") or {}))
+        session_state["_can_repeat"] = can_repeat
 
-    touch_session_activity(session_state)
-
-    # Detect language without changing classifier; persist preferred_language on session.
     try:
         classified = await safe_classify_intent_full(
             message_body or "hi",
@@ -485,7 +553,7 @@ async def handle_minimal_order_flow(
 
     store_name = (restaurant.get("name") or "our store").strip()
 
-    if _is_fresh_contact(message_body, session_state):
+    if fresh:
         await send_minimal_webcart_link(
             lob_type=lob_type,
             customer_phone=phone,
@@ -495,6 +563,7 @@ async def handle_minimal_order_flow(
             customer_name=session_state["customer_name"],
             is_returning=is_returning,
             can_repeat=can_repeat,
+            restaurant=restaurant,
         )
         return
 
@@ -503,3 +572,32 @@ async def handle_minimal_order_flow(
         build_short_redirect_message(can_repeat, lang=lang),
         restaurant_id,
     )
+
+
+async def _detect_language_background(
+    message_body: str,
+    session_state: dict[str, Any],
+    restaurant_id: str,
+    phone: str,
+) -> None:
+    """Best-effort language detect after greeting CTA was already sent."""
+    try:
+        classified = await safe_classify_intent_full(
+            message_body or "hi",
+            "minimal_order",
+            {
+                "lob_type": session_state.get("lob_type"),
+                "preferred_language": session_state.get("preferred_language"),
+            },
+        )
+        # Mutating the caller's session_state after save is racy; only persist
+        # preferred_language via a tiny session patch if detection succeeds.
+        lang = classified.get("language")
+        if not lang:
+            return
+        from tools.db_tools import get_session_state, save_session_state
+        latest = await get_session_state(restaurant_id, phone) or {}
+        apply_language_to_session(latest, lang)
+        await save_session_state(restaurant_id, phone, latest)
+    except Exception as err:
+        logger.debug("[minimal-order] background language detect failed: %s", err)

@@ -194,36 +194,74 @@ async function calculateWaitEstimate(
   };
 }
 
-function buildDineInCustomerMessage(partySize, tokenId, estimate) {
+function formatOutletLabel(displayName, city) {
+  const name = String(displayName || '').trim() || 'us';
+  const loc = String(city || '').trim();
+  return loc ? `${name}, ${loc}` : name;
+}
+
+/**
+ * Warm dine-in check-in WhatsApp copy (wording only).
+ * @param {number|string} partySize
+ * @param {string} tokenId
+ * @param {{ estimate_minutes: number, display?: string }} estimate
+ * @param {{ displayName?: string, city?: string }} [outlet]
+ */
+function buildDineInCustomerMessage(partySize, tokenId, estimate, outlet = {}) {
   const pax = Math.max(1, parseInt(partySize, 10) || 1);
   const people = `${pax} ${pax === 1 ? 'person' : 'people'}`;
+  const outletLabel = formatOutletLabel(outlet.displayName, outlet.city);
 
   if (estimate.estimate_minutes === 0) {
     return (
-      `Your token is *${tokenId}* 🎟\n`
-      + `Party of ${people}\n`
-      + `*Your table is ready — please approach the host.*`
+      `Hey there, welcome to *${outletLabel}* 🙏\n\n`
+      + `Thanks for checking in! Token: *${tokenId}*\n`
+      + `Party of ${people}\n\n`
+      + `*Your table is ready* — please make your way to the host stand.\n`
+      + `Thank you for your patience 🤗`
     );
   }
 
   if (estimate.estimate_minutes < 0) {
     return (
-      `Party of *${pax}* — we've noted your visit! 🍽️\n\n`
-      + `*Token: ${tokenId}*\n\n`
-      + `Our team will assist you shortly — please speak with the host. 🙏`
+      `Hey there, welcome to *${outletLabel}* 🙏\n\n`
+      + `Thanks for checking in! Token: *${tokenId}*\n`
+      + `Party of ${people}\n\n`
+      + `We've received your request — our team will assist you shortly.\n`
+      + `Please speak with the host. Thank you for your patience 🤗`
     );
   }
 
   return (
-    `Your token is *${tokenId}* 🎟\n`
-    + `Party of ${people} · *${estimate.display}*\n`
-    + `We'll notify you when your table is ready.`
+    `Hey there, welcome to *${outletLabel}* 🙏\n\n`
+    + `Thanks for checking in! Token: *${tokenId}*\n`
+    + `Party of ${people} · *${estimate.display}*\n\n`
+    + `We've received your request and are preparing a table for you.\n`
+    + `We'll notify you as soon as it's ready.\n`
+    + `Thank you for your patience 🤗`
+  );
+}
+
+/**
+ * Warm table-ready WhatsApp copy after manager assigns a table.
+ */
+function buildTableReadyMessage({ displayName, city, tokenId, tableNumber } = {}) {
+  const outletLabel = formatOutletLabel(displayName, city);
+  const table = tableNumber != null ? String(tableNumber) : '';
+  return (
+    `Great news! 🎉\n\n`
+    + `Your table is now ready. Please make your way to the host stand`
+    + (table ? ` — our team will help you to *Table ${table}*.` : '.')
+    + `\n\nToken: *${tokenId}*\n`
+    + `We look forward to serving you at *${outletLabel}*!`
   );
 }
 
 module.exports = {
   calculateWaitEstimate,
   formatWaitDisplay,
+  formatOutletLabel,
   buildDineInCustomerMessage,
+  buildTableReadyMessage,
   DEFAULT_DINING_MINUTES,
 };

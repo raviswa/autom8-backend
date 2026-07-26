@@ -36,16 +36,24 @@ async function ensureRestaurantSubscription(supabaseAdmin, restaurantId, options
     const trialEnds = new Date();
     trialEnds.setDate(trialEnds.getDate() + 30);
 
-    const { error: subErr } = await supabaseAdmin.from('tenant_subscriptions').insert({
+    const baseRow = {
       restaurant_id: restaurantId,
-      features:      paidPlan,
       status:        'trial',
       billing_cycle: 'monthly',
       base_price:    0,
       discount_pct:  0,
       final_price:   0,
       trial_ends_at: trialEnds.toISOString(),
+    };
+
+    let { error: subErr } = await supabaseAdmin.from('tenant_subscriptions').insert({
+      ...baseRow,
+      features: paidPlan,
     });
+    // Older DBs may not have a features column — retry without it.
+    if (subErr && /features/i.test(subErr.message || '')) {
+      ({ error: subErr } = await supabaseAdmin.from('tenant_subscriptions').insert(baseRow));
+    }
     if (subErr) {
       console.warn('[subscriptionBilling] insert failed (non-fatal):', subErr.message);
     }

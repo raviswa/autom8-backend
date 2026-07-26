@@ -38,7 +38,10 @@ const RESTAURANT_SELECT_FULL = [
   'delivery_charge_default', 'delivery_charge_tiers',
   'min_delivery_order_amount', 'min_takeaway_order_amount',
   'scheduled_delivery_enabled', 'scheduled_takeaway_enabled', 'scheduled_kds_lead_minutes', 'max_delivery_radius_km',
-  'lob_type',   // ← add this
+  'lob_type',
+  'business_family', 'business_vertical', 'business_vertical_other',
+  'subscribed_features',
+  'whatsapp_needs_existing_pin',
   'allow_manager_menu_upload',    //expose allow_manager_menu_upload to the frontend
   'shiprocket_connected', 'shiprocket_email', 'shiprocket_api_key', 'intra_city_charge', 'outstation_charge', 'free_delivery_above',
   'cod_enabled_city', 'cod_enabled_outstation',
@@ -52,7 +55,9 @@ const RESTAURANT_SELECT_BASE = [
   'id', 'name', 'waba_id', 'whatsapp_number', 'display_name', 'manager_phone', 'sweets_counter_phone', 'meta_catalog_id',
   'timezone', 'dining_duration_minutes', 'payment_mode',
   'takeaway_fulfillment_mode', 'fulfillment_sections', 'opening_hours',
-  'lob_type',   // ← add this
+  'lob_type',
+  'subscribed_features',
+  'whatsapp_needs_existing_pin',
   'allow_manager_menu_upload',  //expose allow_manager_menu_upload to the frontend
 ].join(', ');
 
@@ -67,7 +72,7 @@ async function fetchRestaurantRow(restaurantId) {
     return { data: sanitizeRestaurantForClient(data), error: null };
   }
 
-  if (/kitchen_workflow|kot_printer|meta_catalog_id|parcel_charge_per_item|takeaway_ready_range|delivery_ready_range|kitchen_busy|restaurant_type|delivery_charge|scheduled_delivery|scheduled_takeaway|max_delivery_radius|shipping_provider|courier_rate_card|courier_name|fssai_license|sac_code|receipt_tagline|gstin|shiprocket_api_key/i.test(error.message)) {
+  if (/kitchen_workflow|kot_printer|meta_catalog_id|parcel_charge_per_item|takeaway_ready_range|delivery_ready_range|kitchen_busy|restaurant_type|delivery_charge|scheduled_delivery|scheduled_takeaway|max_delivery_radius|shipping_provider|courier_rate_card|courier_name|fssai_license|sac_code|receipt_tagline|gstin|shiprocket_api_key|business_family|business_vertical/i.test(error.message)) {
     const fallback = await supabaseAdmin
       .from('tenants')
       .select(RESTAURANT_SELECT_BASE)
@@ -89,6 +94,9 @@ async function fetchRestaurantRow(restaurantId) {
       fallback.data.min_delivery_order_amount = 0;
       fallback.data.min_takeaway_order_amount = 0;
       fallback.data.lob_type = fallback.data.lob_type || 'restaurant';
+      fallback.data.business_family = null;
+      fallback.data.business_vertical = null;
+      fallback.data.business_vertical_other = null;
       fallback.data.allow_manager_menu_upload = fallback.data.allow_manager_menu_upload ?? false;
 
     }

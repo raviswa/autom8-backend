@@ -8,6 +8,7 @@ const { authenticateToken, getRestaurantId } = require('../../middleware/auth');
 const { writeAuditLog } = require('../../helpers/auditLog');
 const { mapTimeSlot, getCurrentSlotIST, applySlotAvailability } = require('./shared/slots');
 const { triggerMetaFeedRefetch, pushSingleItemToMetaCatalog } = require('./shared/meta');
+const { deriveRetailerId, productMatchKey } = require('../../helpers/retailerId');
 const {
   exportCategoryLabel,
   exportTimeSlotLabel,
@@ -16,7 +17,6 @@ const {
 } = require('./shared/uploadParse');
 // ── POST /api/menu/upload (and /api/catalog/menu-upload) — Bulk menu upload ──
 
-// AFTER
 async function handleMenuUpload(req, res) {
   try {
     const OWNER_ROLES = ['owner', 'brand_owner'];
@@ -46,7 +46,14 @@ async function handleMenuUpload(req, res) {
       return res.status(400).json({ error: 'items array required' });
 
     const restaurantId = req.restaurant_id;
-    let upserted = 0, skipped = 0, purged = 0;
+    const mode = req.body.mode === 'replace' ? 'replace' : 'merge';
+    const missingPolicy = ['keep', 'sold_out', 'archive'].includes(req.body.missing_policy)
+      ? req.body.missing_policy
+      : (mode === 'replace' ? 'archive' : 'keep');
+    const stockPolicy = ['leave', 'add', 'replace'].includes(req.body.stock_policy)
+      ? req.body.stock_policy
+      : 'leave';
+    let created = 0, updated = 0, skipped = 0, archived = 0, markedSoldOut = 0;
     const errors = [];
 
     let packagedLob = false;
@@ -66,35 +73,59 @@ async function handleMenuUpload(req, res) {
         && !String(tenantRow?.fssai_license || '').trim();
     } catch (_) { /* non-fatal */ }
 
-    // Phase 0: remove duplicate retailer_id rows (keep newest)
-    try {
-      const { data: allRows } = await supabaseAdmin.from('menu_items')
-        .select('id, retailer_id, updated_at').eq('restaurant_id', restaurantId)
-        .not('retailer_id', 'is', null).order('updated_at', { ascending: false })
-        .is('archived_at', null)
-        .order('updated_at', { ascending: false });
-      const seen = new Map(), dupIds = [];
-      for (const row of allRows ?? []) {
-        if (seen.has(row.retailer_id)) dupIds.push(row.id);
-        else seen.set(row.retailer_id, row.id);
-      }
-      if (dupIds.length > 0) {
-        await supabaseAdmin.from('menu_items').delete().in('id', dupIds);
-        console.log(`[menu/upload] 🧹 Removed ${dupIds.length} duplicate rows`);
-      }
-    } catch (dedupErr) {
-      console.warn('[menu/upload] Dedup failed (non-fatal):', dedupErr.message);
+    const { data: existingRows, error: existingErr } = await supabaseAdmin
+      .from('menu_items')
+      .select('id, retailer_id, name, pack_size_label, size_label, current_stock, is_stocked, is_available, archived_at')
+      .eq('restaurant_id', restaurantId)
+      .order('updated_at', { ascending: false });
+    if (existingErr) throw existingErr;
+
+    const existingByRetailerId = new Map();
+    const existingByProductKey = new Map();
+    for (const row of existingRows || []) {
+      const retailerKey = String(row.retailer_id || '').trim().toUpperCase();
+      if (retailerKey && !existingByRetailerId.has(retailerKey)) existingByRetailerId.set(retailerKey, row);
+      const productKey = productMatchKey(row.name, row.pack_size_label || row.size_label);
+      if (!existingByProductKey.has(productKey)) existingByProductKey.set(productKey, row);
     }
 
-    // Phase 1: parse + validate
-    const validRows = [], payloadIds = [];
-    for (const item of items) {
+    const reservedIds = new Set(existingByRetailerId.keys());
+    const payloadIds = new Set();
+    const validRows = [];
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index];
       const itemName   = item.name || item.title;
-      const retailerId = item.retailer_id || item.id;
-      if (!retailerId || !itemName) { errors.push({ row_id: retailerId, error: 'Missing retailer_id or name' }); skipped++; continue; }
+      if (!itemName) {
+        errors.push({ row: index + 1, row_id: item.retailer_id || item.id || null, error: 'Missing name' });
+        skipped++;
+        continue;
+      }
 
       const price = parseFloat(item.price) || 0;
-      if (price <= 0) { errors.push({ row_id: retailerId, error: `Invalid price: ${item.price}` }); skipped++; continue; }
+      if (price <= 0) {
+        errors.push({ row: index + 1, row_id: item.retailer_id || item.id || null, error: `Invalid price: ${item.price}` });
+        skipped++;
+        continue;
+      }
+
+      const packSizeLabel = item.pack_size_label || item.size_label || null;
+      const matchedByProduct = existingByProductKey.get(productMatchKey(itemName, packSizeLabel));
+      let retailerId = String(item.retailer_id || item.id || matchedByProduct?.retailer_id || '').trim();
+      if (!retailerId) {
+        retailerId = deriveRetailerId({
+          name: itemName,
+          packSizeLabel,
+          existingIds: Array.from(reservedIds),
+        });
+      }
+      const retailerKey = retailerId.toUpperCase();
+      if (payloadIds.has(retailerKey)) {
+        errors.push({ row: index + 1, row_id: retailerId, error: 'Duplicate item ID in this file' });
+        skipped++;
+        continue;
+      }
+      payloadIds.add(retailerKey);
+      reservedIds.add(retailerKey);
 
       let isStocked = true;
       if (item.is_available !== undefined && item.is_available !== null && item.is_available !== '') {
@@ -107,12 +138,11 @@ async function handleMenuUpload(req, res) {
       if (stockQty === 0) isStocked = false;
       if (blockNoFssai) isStocked = false;
 
-      payloadIds.push(String(retailerId).trim());
       const now = new Date().toISOString();
       const timeSlotRaw = item.time_slot ?? item.custom_label_0 ?? item['custom_label_0'] ?? '';
       validRows.push({
         restaurant_id:       restaurantId,
-        retailer_id:         String(retailerId).trim(),
+        retailer_id:         retailerId,
         name:                String(itemName).trim(),
         description:         String(item.description || '').trim(),
         price,
@@ -182,7 +212,7 @@ async function handleMenuUpload(req, res) {
         updated_at:          now,
       });
 
-      // Optional Excel discount_percent + discount_days → ends_at from upload time
+      // Optional Excel discount_percent + discount_days → ends_at from upload time.
       if (item.discount_percent && item.discount_days) {
         try {
           const { buildDiscountPatch } = require('../../helpers/menuDiscount');
@@ -202,35 +232,56 @@ async function handleMenuUpload(req, res) {
 
     if (!validRows.length) return res.status(400).json({ error: 'No valid rows found', skipped, errors });
 
-    // Phase 2: full catalog replace — remove every existing item for this outlet
-// Phase 2: soft-replace — archive everything currently active for this outlet.
-// (A hard DELETE here fails atomically if any row is referenced by order_items,
-//  which silently aborts the whole upload — this is what was letting stale
-//  items and stale categories survive re-uploads.)
-try {
-  const nowIso = new Date().toISOString();
-  const { data: archived, error: archiveErr } = await supabaseAdmin.from('menu_items')
-    .update({ is_stocked: false, is_available: false, archived_at: nowIso, updated_at: nowIso })
-    .eq('restaurant_id', restaurantId)
-    .is('archived_at', null)
-    .select('id');
-  if (archiveErr) throw archiveErr;
-  purged = archived?.length ?? 0;
-  console.log(`[menu/upload] 🗄️ Archived ${purged} previous items (soft-replace)`);
-} catch (archiveErr) {
-  console.error('[menu/upload] Archive step failed:', archiveErr.message);
-  return res.status(500).json({ error: `Could not archive existing catalog: ${archiveErr.message}` });
-}
+    async function writeRow(kind, targetId, row) {
+      let query = kind === 'update'
+        ? supabaseAdmin.from('menu_items').update(row).eq('id', targetId).eq('restaurant_id', restaurantId)
+        : supabaseAdmin.from('menu_items').insert(row);
+      let { error } = await query;
+      if (error && /menu_items\.meta|['"]meta['"] column|column ['"]?meta/i.test(error.message || '')) {
+        const withoutMeta = { ...row };
+        delete withoutMeta.meta;
+        query = kind === 'update'
+          ? supabaseAdmin.from('menu_items').update(withoutMeta).eq('id', targetId).eq('restaurant_id', restaurantId)
+          : supabaseAdmin.from('menu_items').insert(withoutMeta);
+        ({ error } = await query);
+      }
+      return error;
+    }
 
-    // Phase 3: insert fresh rows
     for (const row of validRows) {
       try {
-        const { error: dbErr } = await supabaseAdmin.from('menu_items').insert(row);
+        const existing = existingByRetailerId.get(String(row.retailer_id).toUpperCase())
+          || existingByProductKey.get(productMatchKey(row.name, row.pack_size_label || row.size_label));
+        let dbErr;
+        if (existing) {
+          const patch = { ...row, archived_at: null };
+          delete patch.restaurant_id;
+          delete patch.created_at;
+          if (stockPolicy === 'leave') {
+            delete patch.current_stock;
+            delete patch.is_stocked;
+            delete patch.is_available;
+            delete patch.availability_status;
+            delete patch.made_on_date;
+          } else {
+            const uploaded = row.current_stock == null ? 0 : Number(row.current_stock);
+            const nextStock = stockPolicy === 'add'
+              ? Math.max(0, Number(existing.current_stock || 0) + uploaded)
+              : Math.max(0, uploaded);
+            patch.current_stock = nextStock;
+            patch.is_stocked = !blockNoFssai && nextStock > 0;
+            patch.is_available = patch.is_stocked;
+            patch.availability_status = nextStock > 0 ? 'in_stock' : 'sold_out';
+          }
+          dbErr = await writeRow('update', existing.id, patch);
+          if (!dbErr) updated++;
+        } else {
+          dbErr = await writeRow('insert', null, row);
+          if (!dbErr) created++;
+        }
         if (dbErr) {
           errors.push({ row_id: row.retailer_id, error: dbErr.message });
           skipped++;
-        } else {
-          upserted++;
         }
       } catch (itemErr) {
         errors.push({ row_id: row.retailer_id, error: itemErr.message });
@@ -238,16 +289,54 @@ try {
       }
     }
 
-    // Phase 4: audit
+    const upserted = created + updated;
+    if (upserted === 0) {
+      return res.status(500).json({
+        error: 'No catalog items were saved. Your existing catalog was left unchanged.',
+        created, updated, skipped, total: items.length, errors,
+      });
+    }
+
+    const liveMissing = (existingRows || []).filter((row) =>
+      !row.archived_at && row.retailer_id && !payloadIds.has(String(row.retailer_id).trim().toUpperCase()));
+    if (missingPolicy !== 'keep' && liveMissing.length) {
+      const ids = liveMissing.map((row) => row.id);
+      const now = new Date().toISOString();
+      const patch = missingPolicy === 'archive'
+        ? { is_stocked: false, is_available: false, archived_at: now, updated_at: now }
+        : { is_stocked: false, is_available: false, availability_status: 'sold_out', updated_at: now };
+      const { data: changed, error: missingErr } = await supabaseAdmin
+        .from('menu_items')
+        .update(patch)
+        .eq('restaurant_id', restaurantId)
+        .in('id', ids)
+        .select('id');
+      if (missingErr) errors.push({ error: `Could not apply missing-item policy: ${missingErr.message}` });
+      else if (missingPolicy === 'archive') archived = changed?.length || 0;
+      else markedSoldOut = changed?.length || 0;
+    }
+
     await writeAuditLog({
       user_id: req.user.sub, restaurant_id: restaurantId,
-      action: 'Menu items uploaded via Excel', details: { upserted, skipped, purged },
+      action: 'Menu items uploaded via Excel',
+      details: { mode, missing_policy: missingPolicy, stock_policy: stockPolicy, created, updated, skipped, archived, marked_sold_out: markedSoldOut },
     });
 
-    // Phase 5: trigger Meta feed refetch
     triggerMetaFeedRefetch().catch(e => console.warn('[menu/upload] Meta trigger failed:', e.message));
 
-    const response = { success: true, upserted, skipped, purged, total: items.length };
+    const response = {
+      success: true,
+      mode,
+      created,
+      updated,
+      upserted,
+      skipped,
+      archived,
+      marked_sold_out: markedSoldOut,
+      not_in_file: liveMissing.length,
+      total: items.length,
+      item_ids: validRows.map((row) => row.retailer_id),
+    };
     if (errors.length) response.errors = errors;
     if (blockNoFssai) {
       response.warnings = [
@@ -425,7 +514,126 @@ async function handleMenuItemRestock(req, res) {
   }
 }
 
-router.post('/menu-items/:id/restock', authenticateToken, getRestaurantId, handleMenuItemRestock);
+const menuItemRestockMiddleware = [authenticateToken, getRestaurantId, handleMenuItemRestock];
+router.post('/menu-items/:id/restock', ...menuItemRestockMiddleware);
+
+// ── POST /api/menu-items/bulk-restock — Record one production batch ─────────
+
+async function handleBulkMenuItemRestock(req, res) {
+  try {
+    if (!['owner', 'manager', 'brand_owner'].includes(req.user_role)) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    const lines = Array.isArray(req.body.lines) ? req.body.lines : [];
+    if (!lines.length) return res.status(400).json({ error: 'At least one batch line is required' });
+    if (lines.length > 250) return res.status(400).json({ error: 'A batch can contain at most 250 items' });
+
+    const defaultMadeOnDate = String(req.body.made_on_date || '').trim().slice(0, 10) || null;
+    const { restockItem, notifyStockWaitlist } = require('../../helpers/inventory');
+    const results = [];
+    const errors = [];
+
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index] || {};
+      const itemId = String(line.item_id || '').trim();
+      const receivedQty = Math.floor(Number(line.received_qty ?? line.add_qty));
+      const madeOnDate = String(line.made_on_date || defaultMadeOnDate || '').trim().slice(0, 10) || null;
+      if (!itemId || !Number.isFinite(receivedQty) || receivedQty <= 0) {
+        errors.push({ row: index + 1, item_id: itemId || null, error: 'item_id and a positive received_qty are required' });
+        continue;
+      }
+
+      try {
+        const result = await restockItem(supabaseAdmin, {
+          restaurantId: req.restaurant_id,
+          itemId,
+          addQty: receivedQty,
+        });
+
+        if (madeOnDate) {
+          const { error: dateErr } = await supabaseAdmin
+            .from('menu_items')
+            .update({ made_on_date: madeOnDate, updated_at: new Date().toISOString() })
+            .eq('id', itemId)
+            .eq('restaurant_id', req.restaurant_id);
+          if (dateErr) throw dateErr;
+        }
+
+        let waitlistNotified = 0;
+        if (result.was_out && result.now_in_stock) {
+          const notification = await notifyStockWaitlist(supabaseAdmin, {
+            restaurantId: req.restaurant_id,
+            menuItemId: result.id,
+            retailerId: result.retailer_id,
+            itemName: result.name,
+          });
+          waitlistNotified = notification.notified || 0;
+        }
+
+        const { error: batchLogErr } = await supabaseAdmin.from('stock_batches').insert({
+          restaurant_id: req.restaurant_id,
+          menu_item_id: result.id,
+          qty_added: receivedQty,
+          made_on_date: madeOnDate,
+          created_by: req.user.sub,
+        });
+        if (batchLogErr && !/stock_batches|pgrst205|42p01/i.test(batchLogErr.message || '')) {
+          console.warn('[bulk-restock] batch history insert failed:', batchLogErr.message);
+        }
+
+        if (result.retailer_id) {
+          pushSingleItemToMetaCatalog({
+            retailerId: result.retailer_id,
+            isAvailable: result.now_in_stock,
+            restaurantId: req.restaurant_id,
+          }).catch((error) => console.error('[bulk-restock-meta]', error.message));
+        }
+
+        results.push({
+          ...result,
+          received_qty: receivedQty,
+          made_on_date: madeOnDate,
+          waitlist_notified: waitlistNotified,
+        });
+      } catch (lineErr) {
+        errors.push({ row: index + 1, item_id: itemId, error: lineErr.message });
+      }
+    }
+
+    if (!results.length) {
+      return res.status(400).json({ error: 'No stock was added', results, errors });
+    }
+
+    await writeAuditLog({
+      user_id: req.user.sub,
+      restaurant_id: req.restaurant_id,
+      action: 'Recorded new stock batch',
+      details: {
+        items_updated: results.length,
+        units_added: results.reduce((sum, row) => sum + row.received_qty, 0),
+        made_on_date: defaultMadeOnDate,
+        failed: errors.length,
+      },
+    });
+
+    res.json({
+      success: errors.length === 0,
+      partial: errors.length > 0,
+      items_updated: results.length,
+      units_added: results.reduce((sum, row) => sum + row.received_qty, 0),
+      waitlist_notified: results.reduce((sum, row) => sum + row.waitlist_notified, 0),
+      results,
+      errors,
+    });
+  } catch (err) {
+    console.error('[bulk-menu-item-restock]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+const menuItemBulkRestockMiddleware = [authenticateToken, getRestaurantId, handleBulkMenuItemRestock];
+router.post('/menu-items/bulk-restock', ...menuItemBulkRestockMiddleware);
 
 // ── POST /api/menu-items/:id/launch — Flip coming-soon/preorder item live now ─
 
@@ -496,7 +704,8 @@ async function handleMenuItemLaunch(req, res) {
   }
 }
 
-router.post('/menu-items/:id/launch', authenticateToken, getRestaurantId, handleMenuItemLaunch);
+const menuItemLaunchMiddleware = [authenticateToken, getRestaurantId, handleMenuItemLaunch];
+router.post('/menu-items/:id/launch', ...menuItemLaunchMiddleware);
 
 // ── PUT /api/menu-items/:id/special-today — Mark special dish (no Meta push) ─
 
@@ -673,6 +882,9 @@ module.exports = router;
 module.exports.handleMenuUpload = handleMenuUpload;
 module.exports.menuUploadMiddleware = menuUploadMiddleware;
 module.exports.menuItemAvailabilityMiddleware = menuItemAvailabilityMiddleware;
+module.exports.menuItemRestockMiddleware = menuItemRestockMiddleware;
+module.exports.menuItemBulkRestockMiddleware = menuItemBulkRestockMiddleware;
+module.exports.menuItemLaunchMiddleware = menuItemLaunchMiddleware;
 module.exports.menuItemSpecialTodayMiddleware = menuItemSpecialTodayMiddleware;
 module.exports.menuItemDiscountMiddleware = menuItemDiscountMiddleware;
 module.exports.resetDailySpecialDishes = resetDailySpecialDishes;

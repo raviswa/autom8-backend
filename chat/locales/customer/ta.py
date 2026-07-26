@@ -6,10 +6,10 @@ REPLIES = {
 
     "greet_good_period": "இனிய {period} வணக்கம் 👋",
     "greet_good_period_named": "இனிய {period} வணக்கம், {first} 👋",
-    "welcome_new": "*{display}* க்கு வரவேற்கிறோம் 🍽️",
-    "welcome_back": "*{display}* க்கு மீண்டும் வரவேற்கிறோம் 🍽️",
-    "welcome_new_named": "வரவேற்கிறோம், {first}! *{display}* 🍽️",
-    "welcome_back_named": "மீண்டும் வரவேற்கிறோம், {first}! *{display}* 🍽️",
+    "welcome_new": "வணக்கம், *{display}* க்கு வரவேற்கிறோம் 🙏",
+    "welcome_back": "வணக்கம், *{display}* க்கு மீண்டும் வரவேற்கிறோம் 🙏",
+    "welcome_new_named": "வணக்கம் {first}, *{display}* க்கு வரவேற்கிறோம் 🙏",
+    "welcome_back_named": "வணக்கம் {first}, *{display}* க்கு மீண்டும் வரவேற்கிறோம் 🙏",
     "cuisine_default": "நல்ல உணவு, உங்கள் விருப்பப்படி.",
     "cuisine_veg": "தினமும் புதிய, சுவையான சைவ உணவு!",
     "cuisine_non_veg": "தினமும் புதிய, சுவையான அசைவ விருப்பங்கள்!",
@@ -26,17 +26,17 @@ REPLIES = {
     "menu_intro_named": "இன்று உள்ளவை இதோ, {first}:\n",
     "menu_intro_cta": "கீழே உள்ள மெனுவைப் பார்த்து உருப்படிகளைத் தேர்ந்தெடுக்கவும் — மீதியை நாங்கள் பார்த்துக்கொள்கிறோம்.",
 
-    "lob_psl_hook": "பிட்சா, ஐஸ்கிரீம் மற்றும் மேலும் — ஆன்லைனில் பார்த்து ஆர்டர் செய்யுங்கள்.",
-    "lob_food_products_hook": "புதிய பேக்ஸ் மற்றும் சுவைகள் — ஆன்லைனில் பார்த்து ஆர்டர் செய்யுங்கள்.",
-    "lob_retail_hook": "எங்கள் கேட்டலாகைப் பார்த்து ஆர்டர் செய்யுங்கள்.",
+    "lob_psl_hook": "பிட்சா, ஐஸ்கிரீம் மற்றும் மேலும் — அனைவருக்கும் ஏதோ ஒன்று.",
+    "lob_food_products_hook": "புதிய பேக்ஸ் மற்றும் சுவைகள், கவனத்துடன் தயாரிப்பு — பாருங்கள்!",
+    "lob_retail_hook": "எங்கள் கேட்டலாகைப் பாருங்கள் — இன்று உங்களுக்கு வேண்டியதைக் கண்டுபிடிக்கவும்.",
     "lob_cta_header_order": "ஆர்டர் தொடங்குங்கள்",
     "lob_cta_header_shop": "ஷாப்பிங் தொடங்குங்கள்",
     "lob_cta_button_order": "பார்த்து ஆர்டர்",
     "lob_cta_button_shop": "கேட்டலாக் பார்க்க",
 
-    "welcome_returning_named": "மீண்டும் வரவேற்கிறோம், {first}! *{display}* {icon}",
-    "welcome_named": "வரவேற்கிறோம், {first}! *{display}* {icon}",
-    "welcome_anon": "*{display}* க்கு வரவேற்கிறோம் {icon}",
+    "welcome_returning_named": "வணக்கம் {first}, *{display}* க்கு மீண்டும் வரவேற்கிறோம் {icon}",
+    "welcome_named": "வணக்கம் {first}, *{display}* க்கு வரவேற்கிறோம் {icon}",
+    "welcome_anon": "வணக்கம், *{display}* க்கு வரவேற்கிறோம் {icon}",
     "welcome_browse_cta": (
         "கீழே தட்டி உருப்படிகளைத் தேர்ந்தெடுத்து பாதுகாப்பாக பணம் செலுத்துங்கள் — எங்கள் ஆன்லைன் மெனுவில்."
     ),

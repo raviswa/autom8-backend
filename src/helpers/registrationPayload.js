@@ -9,6 +9,7 @@ const {
   mergeEnabledFeatures,
   ALL_FEATURES,
 } = require('./subscriptionFeatures');
+const { resolveBusinessTaxonomy } = require('../config/lobTaxonomy');
 
 function truthy(v) {
   return v === true || v === 'true' || v === 1 || v === '1';
@@ -18,8 +19,13 @@ function truthy(v) {
 function featuresFromFulfillment(body = {}) {
   const selected = ['token_management'];
   if (truthy(body.dine_in)) selected.push('dine_in');
-  if (truthy(body.takeaway)) selected.push('takeaway');
-  if (truthy(body.door_delivery) || truthy(body.delivery)) selected.push('delivery');
+  // Packaged LOBs use store_pickup / wholesale in the registration UI
+  if (truthy(body.takeaway) || truthy(body.store_pickup)) selected.push('takeaway');
+  if (
+    truthy(body.door_delivery)
+    || truthy(body.delivery)
+    || truthy(body.wholesale)
+  ) selected.push('delivery');
   if (truthy(body.table_reservation) || truthy(body.reserve_table)) selected.push('reserve_table');
 
   // If merchant picked nothing, keep platform defaults
@@ -63,6 +69,7 @@ function buildTenantInsertFields(opts) {
     name,
     email,
     phone = null,
+    contact_phone = null,
     whatsapp_number = null,
     waba_id = null,
     timezone = 'Asia/Kolkata',
@@ -71,6 +78,9 @@ function buildTenantInsertFields(opts) {
     manager_phone = null,
     meta_catalog_id = null,
     lob_type = 'restaurant',
+    business_family = null,
+    business_vertical = null,
+    business_vertical_other = null,
     display_name = null,
     city = null,
     country_code = null,
@@ -100,7 +110,8 @@ function buildTenantInsertFields(opts) {
   const row = {
     name: name.trim(),
     email: email.trim().toLowerCase(),
-    phone: phone || null,
+    phone: phone || contact_phone || null,
+    contact_phone: contact_phone || phone || null,
     whatsapp_number: whatsapp_number || null,
     waba_id: waba_id || null,
     timezone: timezone || 'Asia/Kolkata',
@@ -121,6 +132,19 @@ function buildTenantInsertFields(opts) {
 
   if (lob_type === 'restaurant' && kitchen_workflow) {
     row.kitchen_workflow = kitchen_workflow;
+  }
+
+  // Brochure taxonomy — labels only; engine behaviour still keys off lob_type.
+  const taxonomy = resolveBusinessTaxonomy({
+    business_family,
+    business_vertical,
+    business_vertical_other,
+    lob_type,
+  });
+  if (taxonomy.business_family) row.business_family = taxonomy.business_family;
+  if (taxonomy.business_vertical) row.business_vertical = taxonomy.business_vertical;
+  if (taxonomy.business_vertical_other) {
+    row.business_vertical_other = taxonomy.business_vertical_other.slice(0, 160);
   }
 
   // Prefer tenants.slug (add_tenant_slug migration); short_code as legacy fallback

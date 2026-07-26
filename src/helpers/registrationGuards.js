@@ -123,6 +123,33 @@ async function assertWhatsAppAssetsAvailable({
   }
 }
 
+async function verifiedDeleteTenantEmployees(restaurantId) {
+  if (!restaurantId) return { ok: true, employeeIds: [] };
+
+  const { data: emps, error: listErr } = await supabaseAdmin
+    .from('employees')
+    .select('id, email')
+    .eq('restaurant_id', restaurantId);
+  if (listErr) {
+    console.error('[onboarding] failed listing employees for rollback:', listErr.message);
+    return { ok: false, error: listErr.message, employeeIds: [] };
+  }
+
+  const employeeIds = (emps || []).map((e) => e.id).filter(Boolean);
+  if (!employeeIds.length) return { ok: true, employeeIds: [] };
+
+  const { error: delErr } = await supabaseAdmin
+    .from('employees')
+    .delete()
+    .eq('restaurant_id', restaurantId);
+  if (delErr) {
+    console.error('[onboarding] failed deleting employees on rollback:', delErr.message);
+    return { ok: false, error: delErr.message, employeeIds };
+  }
+
+  return { ok: true, employeeIds };
+}
+
 async function verifiedDeleteTenant(restaurantId) {
   if (!restaurantId) return { ok: true };
   // Remove child integrations first so tenant delete is not blocked by FK
@@ -145,12 +172,18 @@ async function verifiedDeleteAuthUser(authUserId) {
   if (!authUserId) return { ok: true };
   const { error } = await supabaseAdmin.auth.admin.deleteUser(authUserId);
   if (error) {
+    // Already deleted is fine during rollback
+    if (/not found|user not found/i.test(error.message || '')) return { ok: true };
     console.error('[onboarding] failed deleting auth user:', error.message);
     return { ok: false, error: error.message };
   }
   return { ok: true };
 }
 
+/**
+ * Tear down a partial registration without leaving orphan employees
+ * pointing at a deleted tenant (which defaults the portal to restaurant LOB).
+ */
 async function rollbackRegistration({
   restaurantId = null,
   authUserId = null,
@@ -159,26 +192,40 @@ async function rollbackRegistration({
   failedStep = null,
   errorMessage = null,
 } = {}) {
+  const empResult = await verifiedDeleteTenantEmployees(restaurantId);
   const tenantResult = await verifiedDeleteTenant(restaurantId);
-  const authResult = await verifiedDeleteAuthUser(authUserId);
-  if (!tenantResult.ok || !authResult.ok) {
-    await recordRegistrationFailure({
-      email,
-      slug,
-      restaurant_id: restaurantId,
-      auth_user_id: authUserId,
-      failed_step: failedStep || 'rollback',
-      error_message: errorMessage,
-      meta: { tenantResult, authResult },
-    });
+
+  const authIds = new Set(empResult.employeeIds || []);
+  if (authUserId) authIds.add(authUserId);
+
+  const authResults = [];
+  for (const id of authIds) {
+    authResults.push({ id, ...(await verifiedDeleteAuthUser(id)) });
   }
-  return { tenantResult, authResult };
+  const authOk = authResults.every((r) => r.ok !== false);
+
+  await recordRegistrationFailure({
+    email,
+    slug,
+    restaurant_id: restaurantId,
+    auth_user_id: authUserId,
+    failed_step: failedStep || 'rollback',
+    error_message: errorMessage,
+    meta: { empResult, tenantResult, authResults },
+  });
+
+  return {
+    empResult,
+    tenantResult,
+    authResult: { ok: authOk, results: authResults },
+  };
 }
 
 module.exports = {
   assertWhatsAppAssetsAvailable,
   recordRegistrationFailure,
   verifiedDeleteTenant,
+  verifiedDeleteTenantEmployees,
   verifiedDeleteAuthUser,
   rollbackRegistration,
 };

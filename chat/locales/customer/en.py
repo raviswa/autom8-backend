@@ -8,10 +8,10 @@ REPLIES = {
     # Restaurant greeting / menu
     "greet_good_period": "Good {period} 👋",
     "greet_good_period_named": "Good {period}, {first} 👋",
-    "welcome_new": "Welcome to *{display}* 🍽️",
-    "welcome_back": "Welcome back to *{display}* 🍽️",
-    "welcome_new_named": "Welcome, {first}! *{display}* 🍽️",
-    "welcome_back_named": "Welcome back, {first}! *{display}* 🍽️",
+    "welcome_new": "Hey there, welcome to *{display}* 🙏",
+    "welcome_back": "Hey there, welcome back to *{display}* 🙏",
+    "welcome_new_named": "Hey {first}, welcome to *{display}* 🙏",
+    "welcome_back_named": "Hey {first}, welcome back to *{display}* 🙏",
     "cuisine_default": "Good food, your way.",
     "cuisine_veg": "Serving fresh, flavourful vegetarian food every day!",
     "cuisine_non_veg": "Serving fresh, flavourful non-vegetarian favourites every day!",
@@ -29,17 +29,17 @@ REPLIES = {
     "menu_intro_cta": "Browse the menu below, pick your items, and we'll take care of the rest.",
 
     # Minimal LOB hooks
-    "lob_psl_hook": "Pizza, ice cream & more — browse and order online.",
-    "lob_food_products_hook": "Fresh bakes & treats — browse and order online.",
-    "lob_retail_hook": "Shop our catalog — browse and order online.",
+    "lob_psl_hook": "Pizza, ice cream & more — we've got something for everyone.",
+    "lob_food_products_hook": "Fresh bakes & treats, made with care — take a look!",
+    "lob_retail_hook": "Browse our catalog — find what you need today.",
     "lob_cta_header_order": "Start Your Order",
     "lob_cta_header_shop": "Start Shopping",
     "lob_cta_button_order": "Browse & Order",
     "lob_cta_button_shop": "Browse Catalog",
 
-    "welcome_returning_named": "Welcome back, {first}! *{display}* {icon}",
-    "welcome_named": "Welcome, {first}! *{display}* {icon}",
-    "welcome_anon": "Welcome to *{display}* {icon}",
+    "welcome_returning_named": "Hey {first}, welcome back to *{display}* {icon}",
+    "welcome_named": "Hey {first}, welcome to *{display}* {icon}",
+    "welcome_anon": "Hey there, welcome to *{display}* {icon}",
     "welcome_browse_cta": (
         "Tap below to browse, pick items, and pay securely — all on our online menu."
     ),

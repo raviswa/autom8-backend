@@ -79,7 +79,7 @@ async function resolveTenantForEmployee(emp) {
 
   const { data: tenant } = await supabaseAdmin
     .from('tenants')
-    .select('id, contact_phone, name')
+    .select('id, contact_phone, phone, name')
     .eq('id', tenantId)
     .maybeSingle();
 
@@ -132,7 +132,7 @@ async function requestLoginOtp({ email, purpose = 'password_reset' }) {
 
   const { data: emp } = await supabaseAdmin
     .from('employees')
-    .select('id, is_active, full_name, restaurant_id, brand_id, role, email')
+    .select('id, is_active, full_name, restaurant_id, brand_id, role, email, phone')
     .eq('email', normalized)
     .maybeSingle();
 
@@ -141,9 +141,16 @@ async function requestLoginOtp({ email, purpose = 'password_reset' }) {
   }
 
   const tenant = await resolveTenantForEmployee(emp);
-  const contactPhone = String(tenant?.contact_phone || '').trim();
-  if (!tenant?.id || !contactPhone) {
-    console.warn(`[login-otp] No contact_phone for tenant of ${normalized}`);
+  // Prefer the owner's personal WhatsApp (employees.phone) — never the WABA
+  // business number (tenants.whatsapp_number), which is reserved for Meta.
+  const destPhone = String(
+    emp.phone
+    || tenant?.contact_phone
+    || tenant?.phone
+    || '',
+  ).trim();
+  if (!tenant?.id || !destPhone) {
+    console.warn(`[login-otp] No owner/contact phone for ${normalized}`);
     return generic;
   }
 
@@ -157,11 +164,11 @@ async function requestLoginOtp({ email, purpose = 'password_reset' }) {
   const code = generateOtpCode();
   const codeHash = hashOtpCode(code);
   const expiresAt = new Date(Date.now() + OTP_TTL_MS).toISOString();
-  const e164 = toE164India(contactPhone);
+  const e164 = toE164India(destPhone);
 
   const { error: insertErr } = await supabaseAdmin.from('login_otp_codes').insert({
     tenant_id: tenant.id,
-    phone: contactPhone,
+    phone: destPhone,
     code_hash: codeHash,
     purpose: purposeNorm,
     expires_at: expiresAt,
@@ -173,17 +180,16 @@ async function requestLoginOtp({ email, purpose = 'password_reset' }) {
     throw err;
   }
 
-  const sent = await sendPlatformWhatsAppTemplate(e164 || contactPhone, {
+  const sent = await sendPlatformWhatsAppTemplate(e164 || destPhone, {
     bodyParams: [code],
     buttonParams: [code],
   });
 
   if (!sent) {
     console.warn(`[login-otp] Platform WhatsApp send failed for tenant ${tenant.id}`);
-    // Still return generic — do not leak send failures as enumeration
   }
 
-  const digits = normalizePhoneDigits(contactPhone);
+  const digits = normalizePhoneDigits(destPhone);
   const masked = digits.length >= 4
     ? `******${digits.slice(-4)}`
     : null;

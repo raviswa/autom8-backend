@@ -11,6 +11,7 @@ const {
   sendWhatsAppInteractive,
   isWhatsAppConfigured,
   getOperationalAlertPhones,
+  getRestaurantConfig,
   sendOperationalAlerts,
   validateScheduledDeliverySlot,
   assignAndNotifyCaptainTakeaway,
@@ -20,6 +21,7 @@ const {
   cancelScheduledJobsForBooking,
   calculateWaitEstimate,
   buildDineInCustomerMessage,
+  buildTableReadyMessage,
   releaseTablesForToken,
   writeAuditLog,
   authenticateToken,
@@ -187,9 +189,19 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
           && req.body.customer_notify !== false
           && await isWhatsAppConfigured(restaurant_id)
         ) {
+          let outlet = {};
+          try {
+            const cfg = await getRestaurantConfig(restaurant_id);
+            if (cfg) {
+              outlet = {
+                displayName: cfg.display_name || cfg.name,
+                city: cfg.city,
+              };
+            }
+          } catch (_e) { /* non-fatal */ }
           await sendWhatsAppMessage(
             cleanPhone,
-            buildDineInCustomerMessage(partySize, finalToken.id, estimate),
+            buildDineInCustomerMessage(partySize, finalToken.id, estimate, outlet),
             restaurant_id,
           );
         }

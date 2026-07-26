@@ -135,7 +135,6 @@ async function markSubscriptionPaid({ restaurantId, paymentRowId, amountInr, mer
       discount_pct: 0,
       final_price: amountInr,
       renews_at: renews.toISOString(),
-      features: ALL_FEATURES,
     });
   }
 }
@@ -178,11 +177,25 @@ router.get('/', authenticateToken, getRestaurantId, async (req, res) => {
       .eq('id', req.restaurant_id)
       .single();
 
-    const { data: sub } = await supabaseAdmin
-      .from('tenant_subscriptions')
-      .select('plan, status, trial_ends_at, renews_at, base_price, final_price, billing_cycle, features, applied_offer_code')
-      .eq('restaurant_id', req.restaurant_id)
-      .maybeSingle();
+    let sub = null;
+    {
+      const full = await supabaseAdmin
+        .from('tenant_subscriptions')
+        .select('plan, status, trial_ends_at, renews_at, base_price, final_price, billing_cycle, features, applied_offer_code')
+        .eq('restaurant_id', req.restaurant_id)
+        .maybeSingle();
+      if (full.error && /features/i.test(full.error.message || '')) {
+        const fallback = await supabaseAdmin
+          .from('tenant_subscriptions')
+          .select('plan, status, trial_ends_at, renews_at, base_price, final_price, billing_cycle, applied_offer_code')
+          .eq('restaurant_id', req.restaurant_id)
+          .maybeSingle();
+        sub = fallback.data;
+      } else {
+        if (full.error) console.warn('[subscription] sub select:', full.error.message);
+        sub = full.data;
+      }
+    }
 
     const paidFeatures    = resolvePaidFeatures(sub);
     const enabledFeatures = resolveEnabledFeatures(restaurant, paidFeatures);

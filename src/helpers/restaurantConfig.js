@@ -10,6 +10,7 @@ const OPERATIONAL_MANAGER_ROLES = ['manager', 'owner'];
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const _cache = new Map(); // restaurantId -> { data, expires_at }
+const _waCache = new Map(); // restaurantId -> { data, expires_at }
 
 async function _loadRow(restaurantId) {
   if (!restaurantId) return null;
@@ -19,11 +20,33 @@ async function _loadRow(restaurantId) {
 
   const { data, error } = await supabaseAdmin
     .from('tenants')
-    .select('id, name, manager_phone, whatsapp_number, waba_id, meta_catalog_id')
+    .select(
+      'id, name, display_name, city, manager_phone, whatsapp_number, waba_id, meta_catalog_id, '
+      + 'lob_type, timezone, payment_mode, subscribed_features, '
+      + 'pickup_latitude, pickup_longitude, max_delivery_radius_km, '
+      + 'delivery_charge_default, delivery_charge_tiers',
+    )
     .eq('id', restaurantId)
     .maybeSingle();
 
   if (error) {
+    // Older schemas may lack city — retry without it so config still loads.
+    if (String(error.message || '').toLowerCase().includes('city')) {
+      const retry = await supabaseAdmin
+        .from('tenants')
+        .select(
+          'id, name, display_name, manager_phone, whatsapp_number, waba_id, meta_catalog_id, '
+          + 'lob_type, timezone, payment_mode, subscribed_features, '
+          + 'pickup_latitude, pickup_longitude, max_delivery_radius_km, '
+          + 'delivery_charge_default, delivery_charge_tiers',
+        )
+        .eq('id', restaurantId)
+        .maybeSingle();
+      if (!retry.error && retry.data) {
+        _cache.set(restaurantId, { data: retry.data, expires_at: Date.now() + CACHE_TTL_MS });
+        return retry.data;
+      }
+    }
     console.warn(`[restaurantConfig] load failed for ${restaurantId}:`, error.message);
     return null;
   }
@@ -33,8 +56,18 @@ async function _loadRow(restaurantId) {
 }
 
 function invalidateRestaurantConfigCache(restaurantId) {
-  if (restaurantId) _cache.delete(restaurantId);
-  else _cache.clear();
+  if (restaurantId) {
+    _cache.delete(restaurantId);
+    _waCache.delete(restaurantId);
+  } else {
+    _cache.clear();
+    _waCache.clear();
+  }
+}
+
+/** Full cached tenant row — prefer this over re-querying lob_type/timezone/etc. */
+async function getRestaurantConfig(restaurantId) {
+  return _loadRow(restaurantId);
 }
 
 /** Manager alert number — restaurants.manager_phone is canonical (primary on-call). */
@@ -111,6 +144,9 @@ async function getMetaCatalogId(restaurantId) {
 async function getWhatsAppIntegration(restaurantId) {
   if (!restaurantId) return null;
 
+  const cached = _waCache.get(restaurantId);
+  if (cached && Date.now() < cached.expires_at) return cached.data;
+
   const { data, error } = await supabaseAdmin
     .from('tenant_integrations')
     .select('access_token, phone_number_id, api_endpoint, provider')
@@ -120,48 +156,53 @@ async function getWhatsAppIntegration(restaurantId) {
     .eq('provider', 'meta')
     .maybeSingle();
 
+  let result = null;
+
   if (!error && data?.access_token && data?.phone_number_id) {
-    return {
+    result = {
       accessToken:   data.access_token,
       phoneNumberId: data.phone_number_id,
       apiUrl:        (data.api_endpoint || process.env.WHATSAPP_API_URL || 'https://graph.facebook.com/v20.0').replace(/\/$/, ''),
       provider:      data.provider,
     };
+  } else {
+    const { data: botbiz } = await supabaseAdmin
+      .from('tenant_integrations')
+      .select('access_token, phone_number_id, api_endpoint, provider')
+      .eq('restaurant_id', restaurantId)
+      .eq('channel', 'whatsapp')
+      .eq('is_active', true)
+      .eq('provider', 'botbiz')
+      .maybeSingle();
+
+    if (botbiz?.access_token && botbiz?.phone_number_id) {
+      result = {
+        accessToken:   botbiz.access_token,
+        phoneNumberId: botbiz.phone_number_id,
+        apiUrl:        (botbiz.api_endpoint || process.env.WHATSAPP_API_URL || 'https://graph.facebook.com/v20.0').replace(/\/$/, ''),
+        provider:      botbiz.provider,
+      };
+    }
   }
 
-  const { data: botbiz } = await supabaseAdmin
-    .from('tenant_integrations')
-    .select('access_token, phone_number_id, api_endpoint, provider')
-    .eq('restaurant_id', restaurantId)
-    .eq('channel', 'whatsapp')
-    .eq('is_active', true)
-    .eq('provider', 'botbiz')
-    .maybeSingle();
+  if (!result) {
+    if (error) {
+      console.warn(`[restaurantConfig] integration load failed for ${restaurantId}:`, error.message);
+    }
 
-  if (botbiz?.access_token && botbiz?.phone_number_id) {
-    return {
-      accessToken:   botbiz.access_token,
-      phoneNumberId: botbiz.phone_number_id,
-      apiUrl:        (botbiz.api_endpoint || process.env.WHATSAPP_API_URL || 'https://graph.facebook.com/v20.0').replace(/\/$/, ''),
-      provider:      botbiz.provider,
-    };
+    if (process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID) {
+      console.warn(`[restaurantConfig] no integration row for ${restaurantId} — using global WHATSAPP_* env`);
+      result = {
+        accessToken:   process.env.WHATSAPP_ACCESS_TOKEN,
+        phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID,
+        apiUrl:        (process.env.WHATSAPP_API_URL || 'https://graph.facebook.com/v20.0').replace(/\/$/, ''),
+        provider:      'env',
+      };
+    }
   }
 
-  if (error) {
-    console.warn(`[restaurantConfig] integration load failed for ${restaurantId}:`, error.message);
-  }
-
-  if (process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID) {
-    console.warn(`[restaurantConfig] no integration row for ${restaurantId} — using global WHATSAPP_* env`);
-    return {
-      accessToken:   process.env.WHATSAPP_ACCESS_TOKEN,
-      phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID,
-      apiUrl:        (process.env.WHATSAPP_API_URL || 'https://graph.facebook.com/v20.0').replace(/\/$/, ''),
-      provider:      'env',
-    };
-  }
-
-  return null;
+  _waCache.set(restaurantId, { data: result, expires_at: Date.now() + CACHE_TTL_MS });
+  return result;
 }
 
 module.exports = {
@@ -169,5 +210,6 @@ module.exports = {
   getOperationalAlertPhones,
   getMetaCatalogId,
   getWhatsAppIntegration,
+  getRestaurantConfig,
   invalidateRestaurantConfigCache,
 };

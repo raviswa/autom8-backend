@@ -352,10 +352,106 @@ async function registerPhoneWithExistingPin(restaurantId, existingPin, actorId =
   return { success: true, whatsapp_needs_existing_pin: false };
 }
 
+/**
+ * Account status panel data for Settings / Screen A.
+ */
+async function getWhatsAppAccountStatus(restaurantId) {
+  const [{ data: tenant }, { data: integration }] = await Promise.all([
+    supabaseAdmin
+      .from('tenants')
+      .select('id, name, display_name, waba_id, whatsapp_number, whatsapp_needs_existing_pin, lob_type, updated_at')
+      .eq('id', restaurantId)
+      .maybeSingle(),
+    supabaseAdmin
+      .from('tenant_integrations')
+      .select('id, phone_number_id, waba_id, is_active, updated_at, config')
+      .eq('restaurant_id', restaurantId)
+      .eq('provider', 'meta')
+      .eq('channel', 'whatsapp')
+      .eq('is_active', true)
+      .maybeSingle(),
+  ]);
+
+  if (!tenant) {
+    const err = new Error('Restaurant not found');
+    err.status = 404;
+    err.code = 'tenant_missing';
+    throw err;
+  }
+
+  const connected = Boolean(integration?.id && integration?.phone_number_id);
+  return {
+    connected,
+    business_name: tenant.display_name || tenant.name,
+    lob_type: tenant.lob_type || 'restaurant',
+    whatsapp_number: tenant.whatsapp_number || null,
+    waba_id: tenant.waba_id || integration?.waba_id || null,
+    phone_number_id: integration?.phone_number_id || null,
+    whatsapp_needs_existing_pin: Boolean(tenant.whatsapp_needs_existing_pin),
+    integration_id: integration?.id || null,
+    last_updated_at: integration?.updated_at || tenant.updated_at || null,
+    billing_path: '/billing',
+  };
+}
+
+/**
+ * Read-only Meta message_templates for the connected WABA.
+ */
+async function listMessageTemplatesForRestaurant(restaurantId) {
+  const { data: integration } = await supabaseAdmin
+    .from('tenant_integrations')
+    .select('id, waba_id, access_token, phone_number_id, is_active')
+    .eq('restaurant_id', restaurantId)
+    .eq('provider', 'meta')
+    .eq('channel', 'whatsapp')
+    .eq('is_active', true)
+    .maybeSingle();
+
+  const { data: tenant } = await supabaseAdmin
+    .from('tenants')
+    .select('waba_id')
+    .eq('id', restaurantId)
+    .maybeSingle();
+
+  const wabaId = integration?.waba_id || tenant?.waba_id;
+  const token = integration?.access_token;
+
+  if (!wabaId || !token) {
+    const err = new Error('Connect WhatsApp before viewing message templates');
+    err.status = 400;
+    err.code = 'whatsapp_not_connected';
+    throw err;
+  }
+
+  const data = await graphGet(`/${wabaId}/message_templates`, {
+    access_token: token,
+    fields: 'name,status,category,language,id',
+    limit: 100,
+  });
+
+  const templates = (data?.data || []).map((t) => ({
+    id: t.id,
+    name: t.name,
+    status: t.status,
+    category: t.category,
+    language: t.language,
+  }));
+
+  return {
+    waba_id: wabaId,
+    templates,
+    count: templates.length,
+  };
+}
+
 module.exports = {
   completeEmbeddedSignupForRestaurant,
   registerPhoneWithExistingPin,
   getPublicEmbeddedSignupConfig,
   isEmbeddedSignupConfigured,
+  getWhatsAppAccountStatus,
+  listMessageTemplatesForRestaurant,
+  graphGet,
+  graphPost,
   normalizeWhatsAppNumber,
 };

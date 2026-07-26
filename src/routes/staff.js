@@ -201,6 +201,7 @@ router.post('/', authenticateToken, getRestaurantId, async (req, res) => {
       email:        email.trim().toLowerCase(),
       employeeName: full_name,
       restaurantId: req.restaurant_id,
+      role,
       triggeredBy:  'onboarding',
     }).catch(e => console.warn('[staff/create] password reset failed (non-fatal):', e.message));
 
@@ -361,6 +362,7 @@ router.post('/:id/send-password-reset', authenticateToken, getRestaurantId, asyn
       email:        target.email,
       employeeName: target.full_name,
       restaurantId: target.restaurant_id || req.restaurant_id,
+      role:         target.role,
       triggeredBy:  'manager',
     });
 

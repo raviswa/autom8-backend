@@ -15,6 +15,34 @@ from agents.customer.booking_helpers import (
 logger = logging.getLogger(__name__)
 
 
+def _outlet_label(restaurant: Dict[str, Any] | None) -> str:
+    if not restaurant:
+        return "us"
+    name = str(restaurant.get("display_name") or restaurant.get("name") or "").strip()
+    city = str(restaurant.get("city") or "").strip()
+    if name and city:
+        return f"{name}, {city}"
+    return name or "us"
+
+
+def _queue_welcome_message(*, outlet: str, token: str) -> str:
+    return (
+        f"Hey there, welcome to *{outlet}* 🙏\n\n"
+        f"Thanks for checking in! Token: *{token}*\n\n"
+        f"We've received your request — our team will assist you shortly.\n"
+        f"Thank you for your patience 🤗"
+    )
+
+
+def _queue_fallback_message(*, outlet: str) -> str:
+    return (
+        f"Hey there, welcome to *{outlet}* 🙏\n\n"
+        f"Thanks for checking in! We've noted your visit — "
+        f"our team will assist you shortly.\n"
+        f"Thank you for your patience 🤗"
+    )
+
+
 async def handle_token_queue_flow(
     restaurant_id: str,
     customer_id: str,
@@ -64,6 +92,14 @@ async def handle_token_queue_flow(
         restaurant_id=restaurant_id,
     )
 
+    outlet = "us"
+    try:
+        from tools.db_tools import get_restaurant_by_id
+        restaurant = await get_restaurant_by_id(restaurant_id)
+        outlet = _outlet_label(restaurant)
+    except Exception as err:
+        logger.warning("[token-queue] restaurant lookup failed: %s", err)
+
     if not portal_token_id:
         logger.error(
             "[token-queue] Portal token sync failed for %s (restaurant=%s)",
@@ -72,7 +108,7 @@ async def handle_token_queue_flow(
         )
         await send_whatsapp_message(
             customer_phone,
-            "Thanks — we've noted your visit. Our team will assist you shortly. 🙏",
+            _queue_fallback_message(outlet=outlet),
             restaurant_id,
         )
         if manager_phone:
@@ -101,8 +137,7 @@ async def handle_token_queue_flow(
 
     await send_whatsapp_message(
         customer_phone,
-        f"🎫 You're in! Token: *{display_token}*\n\n"
-        f"Our team will take it from here — thank you! 🙏",
+        _queue_welcome_message(outlet=outlet, token=display_token),
         restaurant_id,
     )
 

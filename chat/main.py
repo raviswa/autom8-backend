@@ -542,7 +542,7 @@ async def _process_meta_payload(payload: dict):
         # tenants fell straight through to the "Unknown lob_type" drop below
         # (food_products/psl) or a permanent "coming soon" placeholder
         # (retail) — no functioning agent was ever reached.
-        MINIMAL_MESSAGE_LOBS = ("food_products", "psl", "retail")
+        MINIMAL_MESSAGE_LOBS = ("food_products", "psl", "retail", "b2b")
         if lob_type in MINIMAL_MESSAGE_LOBS:
             logger.info(
                 f"[routing] lob='{lob_type}' for {restaurant['name']} — minimal-message agent"
@@ -591,6 +591,20 @@ async def _process_meta_payload(payload: dict):
             if session_state is None:
                 session_state = {}
             lat.mark("session_get")
+
+            # Seed greeting chrome from the already-resolved tenant — avoids a
+            # tenants re-fetch on the first Hi before the service menu is sent.
+            display = (restaurant.get("display_name") or restaurant.get("name") or "").strip()
+            if display and not session_state.get("_greeting_ctx_loaded"):
+                session_state["_restaurant_display_name"] = display
+                session_state["_restaurant_timezone"] = (
+                    restaurant.get("timezone") or "Asia/Kolkata"
+                )
+                session_state["_greeting_ctx_loaded"] = True
+            session_state.setdefault(
+                "_restaurant_timezone",
+                restaurant.get("timezone") or "Asia/Kolkata",
+            )
 
             from agents.customer.dine_in_flow import _on_special_notes_timeout
             from agents.customer.booking_helpers import ensure_special_notes_kitchen_delivery
@@ -652,15 +666,22 @@ async def _process_meta_payload(payload: dict):
                     return
 
             # 5b. Feedback reply — delegate to Node before booking routing.
-            # Skip the Node hop for greetings / Home / Menu — those are never
-            # feedback replies and the bridge timeout can add seconds to Hi.
+            # Skip when Node webhook already handled feedback for this message
+            # (avoids a duplicate sync HTTP hop of up to 12s).
+            # Also skip for greetings / Home / Menu — never feedback replies.
+            feedback_already_checked = bool(payload.get("_autom8_feedback_checked"))
             if msg_type in ("text", "button", "interactive") and is_reset_keyword(message_body):
                 await try_dismiss_feedback_via_api(phone, restaurant_id)
                 lat.mark("feedback_dismiss")
             elif msg_type in ("text", "button", "interactive") and should_skip_feedback_bridge(message_body):
                 lat.mark("feedback_skipped")
             elif msg_type in ("text", "button", "interactive"):
-                fb_result = await try_handle_feedback_via_api(phone, message_obj, restaurant_id)
+                fb_result = await try_handle_feedback_via_api(
+                    phone,
+                    message_obj,
+                    restaurant_id,
+                    already_checked=feedback_already_checked,
+                )
                 lat.mark("feedback_handle")
                 if fb_result.get("consumed"):
                     if fb_result.get("completed"):

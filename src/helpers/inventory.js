@@ -12,6 +12,7 @@ async function setItemStocked(supabaseAdmin, {
   itemId,
   isStocked,
   currentStock = undefined,
+  availabilityStatus = undefined,
 }) {
   const patch = {
     is_stocked: !!isStocked,
@@ -20,6 +21,9 @@ async function setItemStocked(supabaseAdmin, {
   };
   if (currentStock !== undefined) {
     patch.current_stock = currentStock;
+  }
+  if (availabilityStatus !== undefined) {
+    patch.availability_status = availabilityStatus;
   }
   const { error } = await supabaseAdmin
     .from('menu_items')
@@ -86,6 +90,7 @@ async function deductStockForLines(supabaseAdmin, restaurantId, lines) {
       itemId: u.id,
       isStocked: u.next > 0,
       currentStock: u.next,
+      availabilityStatus: u.next > 0 ? 'in_stock' : 'sold_out',
     });
   }
 
@@ -100,7 +105,7 @@ async function restockItem(supabaseAdmin, {
 }) {
   const { data: row, error } = await supabaseAdmin
     .from('menu_items')
-    .select('id, name, retailer_id, current_stock, is_stocked')
+    .select('id, name, retailer_id, current_stock, is_stocked, availability_status')
     .eq('id', itemId)
     .eq('restaurant_id', restaurantId)
     .maybeSingle();
@@ -117,20 +122,27 @@ async function restockItem(supabaseAdmin, {
   }
 
   const wasOut = !row.is_stocked || (row.current_stock != null && Number(row.current_stock) <= 0);
+  const isPrelaunch = ['coming_soon', 'preorder'].includes(String(row.availability_status || '').toLowerCase());
+  const nowInStock = next > 0 && !isPrelaunch;
   await setItemStocked(supabaseAdmin, {
     restaurantId,
     itemId: row.id,
-    isStocked: next > 0,
+    isStocked: nowInStock,
     currentStock: next,
+    availabilityStatus: isPrelaunch
+      ? row.availability_status
+      : (next > 0 ? 'in_stock' : 'sold_out'),
   });
 
   return {
     id: row.id,
     name: row.name,
     retailer_id: row.retailer_id,
+    previous_stock: row.current_stock == null ? null : Math.max(0, parseInt(row.current_stock, 10) || 0),
     current_stock: next,
+    availability_status: isPrelaunch ? row.availability_status : (next > 0 ? 'in_stock' : 'sold_out'),
     was_out: wasOut,
-    now_in_stock: next > 0,
+    now_in_stock: nowInStock,
   };
 }
 

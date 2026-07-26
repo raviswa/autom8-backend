@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import re
+
 from . import en, ta
 
 _CATALOGS: dict[str, dict[str, str]] = {
@@ -51,6 +53,27 @@ def session_lang(session_state: dict | None) -> str:
     if not isinstance(session_state, dict):
         return "en"
     return normalize_lang(session_state.get("preferred_language"))
+
+
+_TAMIL_SCRIPT_RE = re.compile(r"[\u0B80-\u0BFF]")
+
+
+def contains_tamil_script(text: str | None) -> bool:
+    """True when the message includes any Tamil Unicode letter/mark."""
+    return bool(_TAMIL_SCRIPT_RE.search(text or ""))
+
+
+def latch_tamil_from_text(session_state: dict, text: str | None) -> str:
+    """If inbound text has Tamil script, latch preferred_language to ta immediately.
+
+    Cheap, sync, and runs before the first outbound reply so welcome copy can
+    use ta.py without waiting on Gemini classify.
+    """
+    if not isinstance(session_state, dict):
+        return "en"
+    if contains_tamil_script(text):
+        return apply_detected_language(session_state, "tamil")
+    return session_lang(session_state)
 
 
 def apply_detected_language(session_state: dict, language: str | None) -> str:

@@ -26,16 +26,18 @@ function canonicalPhone(phone) {
 }
 
 async function findConversationRow(restaurantId, phone) {
-  for (const variant of phoneVariants(phone)) {
-    const { data } = await supabaseAdmin
-      .from('conversation_states')
-      .select('id, context, customer_phone')
-      .eq('restaurant_id', restaurantId)
-      .eq('customer_phone', variant)
-      .maybeSingle();
-    if (data) return data;
-  }
-  return null;
+  const variants = phoneVariants(phone);
+  if (!variants.length) return null;
+
+  const { data } = await supabaseAdmin
+    .from('conversation_states')
+    .select('id, context, customer_phone')
+    .eq('restaurant_id', restaurantId)
+    .in('customer_phone', variants)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return data || null;
 }
 
 /**

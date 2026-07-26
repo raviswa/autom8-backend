@@ -39,6 +39,22 @@ const CHAT_SERVICE_URL  = process.env.CHAT_SERVICE_URL || 'http://localhost:8001
 const OUR_WHATSAPP_PHONE = process.env.WHATSAPP_PHONE_NUMBER || '';
 const REFERRAL_CODE_REGEX = /^\s*([A-Z0-9]{6})\s*$/i;
 
+const GREETING_OR_RESET = new Set([
+  'hi', 'hello', 'hey', 'hii', 'hiii', 'hai', 'namaste', 'vanakkam',
+  'home', 'menu', 'main menu', 'mainmenu', 'restart', 'start over', 'startover',
+  'reboot', 'new', 'begin',
+]);
+
+function isLikelyNonFeedbackText(text) {
+  const normalized = String(text || '').trim().toLowerCase();
+  if (!normalized) return false;
+  if (GREETING_OR_RESET.has(normalized)) return true;
+  // "hi munafe" / "hi psl" — still a greeting, never a star rating
+  const parts = normalized.split(/\s+/);
+  if (parts.length <= 2 && GREETING_OR_RESET.has(parts[0])) return true;
+  return false;
+}
+
 // ── GET /api/whatsapp/webhook — Meta verification ────────────────────────────
 router.get('/webhook', (req, res) => {
   const mode      = req.query['hub.mode'];
@@ -167,12 +183,16 @@ router.post('/webhook', async (req, res) => {
             }
 
             // ── Priority 1: Feedback reply ─────────────────────────────────
-            const wasFeedback = restaurantId
+            // Skip DB look-up for greetings / Home — never feedback replies.
+            const skipFeedback = isLikelyNonFeedbackText(messageText);
+            let feedbackChecked = false;
+            const wasFeedback = (!skipFeedback && restaurantId)
               ? await handleFeedbackReply(message.from, message, restaurantId).catch(err => {
                   console.error('[WA Webhook] handleFeedbackReply failed:', err.message);
                   return { consumed: false, completed: false };
                 })
               : { consumed: false, completed: false };
+            feedbackChecked = !skipFeedback && Boolean(restaurantId);
 
             if (wasFeedback.consumed) continue;
 
@@ -189,12 +209,16 @@ router.post('/webhook', async (req, res) => {
             }
 
             // ── Priority 3: Forward to Python chat service ─────────────────
-            await forwardToChatService(message, metadata, value).catch(err =>
+            // Fire-and-forget: Meta already got 200. Awaiting Python (up to 10s)
+            // only blocks later messages in the same webhook batch.
+            void forwardToChatService(message, metadata, value, {
+              feedbackChecked,
+            }).catch(err =>
               console.error('[WA Webhook] forwardToChatService failed:', err.message)
             );
 
           } else {
-            await forwardToChatService(message, metadata, value).catch(err =>
+            void forwardToChatService(message, metadata, value).catch(err =>
               console.error('[WA Webhook] forwardToChatService failed:', err.message)
             );
           }
@@ -219,13 +243,16 @@ router.post('/webhook', async (req, res) => {
 });
 
 // ── Forward to Python chat service ───────────────────────────────────────────
-async function forwardToChatService(message, metadata, value) {
+async function forwardToChatService(message, metadata, value, opts = {}) {
   try {
     const response = await fetch(`${CHAT_SERVICE_URL}/webhook/botbiz`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         object: 'whatsapp_business_account',
+        // Node already ran handleFeedbackReply for this message — Python must
+        // not pay the sync feedback-bridge HTTP hop again.
+        _autom8_feedback_checked: Boolean(opts.feedbackChecked),
         entry: [{
           changes: [{
             field: 'messages',

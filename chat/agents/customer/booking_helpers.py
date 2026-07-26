@@ -455,6 +455,9 @@ _GREETING_WORDS: set[str] = {
     "hi","hello","holla","hola","hey","howdy","sup","yo","ok","okay","k",
     "yes","no","yep","nope","thanks","thank you","thankyou","bye","goodbye",
     "help","start","back","reset","restart","cancel",
+    # Tamil script + common transliterations
+    "வணக்கம்", "ஹி", "ஹலோ", "ஹாய்",
+    "vanakkam", "vanakam", "vankkam",
 }
 _RESET_KEYWORDS: set[str] = _DIRECT_RESET_KEYWORDS | _FULL_RESET_KEYWORDS | {"begin"}
 
@@ -511,7 +514,16 @@ def is_feedback_aspect_reply(text: str) -> bool:
     return False
 
 
-_GREETING_PREFIX_RE = re.compile(r"^(hi|hello|hey|hii|helo|hola|namaste)\b", re.IGNORECASE)
+# Latin greetings keep \b; Tamil must use (?=\s|$) — Tamil ends in Mn/Mc so \b never fires.
+_GREETING_PREFIX_RE = re.compile(
+    r"^(?:"
+    r"hi|hello|hey|hii|helo|hola|namaste|vanakkam|vanakam|vankkam"
+    r")\b"
+    r"|^(?:"
+    r"ஹி|வணக்கம்|ஹலோ|ஹாய்"
+    r")(?=\s|$)",
+    re.IGNORECASE,
+)
 
 
 def is_greeting(text: str) -> bool:
@@ -525,7 +537,7 @@ def is_greeting(text: str) -> bool:
     if not match:
         return False
     remainder = normalized[match.end():].strip()
-    # "hi" / "hi munafe" — not "hi I'd like a table for 4"
+    # "hi" / "hi munafe" / "ஹி அம்மா" — not "hi I'd like a table for 4"
     return len(remainder.split()) <= 1
 
 
@@ -810,10 +822,24 @@ async def send_service_menu(
         )
         return
 
-    rows = await build_service_menu_rows(restaurant_id, state)
+    # Parallelize independent greeting work: feature rows + ready-order + display name.
+    import asyncio
+    from tools.db_tools import get_ready_takeaway_order
+    from agents.customer.message_templates import ensure_restaurant_greeting_context
+
+    async def _ready():
+        if state.get("_last_visit_abandoned"):
+            return None
+        return await get_ready_takeaway_order(restaurant_id, customer_phone)
+
+    rows, ready_takeaway, _ = await asyncio.gather(
+        build_service_menu_rows(restaurant_id, state),
+        _ready(),
+        ensure_restaurant_greeting_context(state, restaurant_id),
+    )
     rows = sanitize_list_rows(rows)
     state["_service_menu_rows"] = rows
-    t = _lat("build_rows", t)
+    t = _lat("build_rows_ready_greeting", t)
 
     # RULE 2: Minimum viable menu guard
     if len(rows) == 0:
@@ -948,11 +974,6 @@ async def send_service_menu(
         })
 
     normalize_last_order_summary(state)
-    from agents.customer.message_templates import (
-        ensure_restaurant_greeting_context,
-    )
-    await ensure_restaurant_greeting_context(state, restaurant_id)
-    t = _lat("greeting_ctx", t)
     header = (state.get("_restaurant_display_name") or "Service Menu").strip()
 
     body_lines = []
@@ -963,17 +984,12 @@ async def send_service_menu(
             greeting_text = rest.strip()
         body_lines.append(greeting_text)
 
-    if not state.get("_last_visit_abandoned"):
-        from tools.db_tools import get_ready_takeaway_order
-        ready_takeaway = await get_ready_takeaway_order(restaurant_id, customer_phone)
-        t = _lat("ready_takeaway", t)
-        if ready_takeaway:
-            token = ready_takeaway.get("display_token") or ready_takeaway.get("order_number", "")
-            body_lines.append(
-                f"Your takeaway order *{token}* is ready — pick up at the counter."
-            )
-    else:
-        t = _lat("ready_takeaway_skipped", t)
+    if ready_takeaway:
+        token = ready_takeaway.get("display_token") or ready_takeaway.get("order_number", "")
+        body_lines.append(
+            f"Your takeaway order *{token}* is ready — pick up at the counter."
+        )
+    t = _lat("ready_takeaway", t)
 
     state.pop("_last_visit_abandoned", None)
     body_lines.append("How can we help you today?")

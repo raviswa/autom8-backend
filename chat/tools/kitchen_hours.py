@@ -101,11 +101,27 @@ def invalidate_kitchen_override_cache(restaurant_id: str | None = None) -> None:
 async def refresh_kitchen_acceptance(
     session_state: dict[str, Any] | None,
     restaurant_id: str | None,
+    *,
+    force: bool = False,
 ) -> bool:
     """
     Cache whether WhatsApp ordering is allowed (slot open OR manager override).
     Sets session_state keys when session_state is provided.
+
+    Within a single greeting turn this is often called 2–3 times — reuse a
+    30s session stamp unless force=True.
     """
+    import time as _time
+
+    if (
+        not force
+        and session_state is not None
+        and "kitchen_accepting_orders" in session_state
+    ):
+        ts = session_state.get("_kitchen_acceptance_ts")
+        if isinstance(ts, (int, float)) and (_time.time() - ts) < 30:
+            return bool(session_state["kitchen_accepting_orders"])
+
     slot_open = is_kitchen_open()
     override = False
     if not slot_open and restaurant_id:
@@ -116,6 +132,7 @@ async def refresh_kitchen_acceptance(
         session_state["kitchen_slot_open"] = slot_open
         session_state["kitchen_manual_override"] = override
         session_state["kitchen_accepting_orders"] = accepting
+        session_state["_kitchen_acceptance_ts"] = _time.time()
     return accepting
 
 

@@ -14,6 +14,8 @@ const {
   completeEmbeddedSignupForRestaurant,
   registerPhoneWithExistingPin,
   getPublicEmbeddedSignupConfig,
+  listMessageTemplatesForRestaurant,
+  getWhatsAppAccountStatus,
 } = require('../helpers/embeddedSignupComplete');
 const {
   authenticateToken,
@@ -31,6 +33,41 @@ function requireSettingsAccess(req, res, next) {
 
 router.get('/config', (_req, res) => {
   res.json(getPublicEmbeddedSignupConfig());
+});
+
+/** WhatsApp Account Status — credentials + connection health summary */
+router.get('/status', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
+  try {
+    const status = await getWhatsAppAccountStatus(req.restaurant_id);
+    // #region agent log
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const logPath = path.join(__dirname, '..', '..', '..', 'debug-c76584.log');
+      fs.appendFileSync(logPath, JSON.stringify({sessionId:'c76584',runId:'pre-deploy',hypothesisId:'D',location:'embeddedSignup.js:/status',message:'status endpoint hit',data:{connected:Boolean(status?.connected),hasWaba:Boolean(status?.waba_id),restaurantId:req.restaurant_id},timestamp:Date.now()}) + '\n');
+    } catch (_) {}
+    // #endregion
+    res.json({ success: true, ...status });
+  } catch (err) {
+    console.error('[embedded-signup] status failed:', err.message);
+    const statusCode = err.status && err.status >= 400 && err.status < 600 ? err.status : 500;
+    res.status(statusCode).json({ error: err.message || 'Could not load WhatsApp status' });
+  }
+});
+
+/** Read-only Meta message template library for the connected WABA */
+router.get('/templates', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
+  try {
+    const result = await listMessageTemplatesForRestaurant(req.restaurant_id);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[embedded-signup] templates failed:', err.message, err.graph || '');
+    const statusCode = err.status && err.status >= 400 && err.status < 600 ? err.status : 500;
+    res.status(statusCode).json({
+      error: err.message || 'Could not load message templates',
+      code: err.code || undefined,
+    });
+  }
 });
 
 router.post('/complete', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {

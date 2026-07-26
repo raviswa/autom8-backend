@@ -41,6 +41,7 @@ const {
   requireSettingsAccess,
   enrichScheduledOrdersFromPortal,
 } = require('./shared');
+const { resolveBusinessTaxonomy } = require('../../config/lobTaxonomy');
 
 router.post('/restaurants/resolve-pickup', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
   try {
@@ -226,13 +227,18 @@ router.put(
   'packaging_weight_grams',
   'daily_settlement_enabled','weekly_promo_drafts_enabled','instagram_handle','instagram_user_id',
   'subscribed_features', 'enabled_services',
+  'lob_type', 'allow_manager_menu_upload',
+  'business_family', 'business_vertical', 'business_vertical_other',
     ];
 
     // These two fields are owner-governed only — a manager may have general
 // settings access (whitelisted above), but must not be able to change the
 // business type or grant themselves menu-upload rights via direct API call,
 // even though the UI already hides these controls from managers.
-const OWNER_ONLY_FIELDS = ['lob_type', 'allow_manager_menu_upload', 'shiprocket_api_key', 'shiprocket_email'];
+const OWNER_ONLY_FIELDS = [
+  'lob_type', 'allow_manager_menu_upload', 'shiprocket_api_key', 'shiprocket_email',
+  'business_family', 'business_vertical', 'business_vertical_other',
+];
 const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
     
     const updates = Object.fromEntries(
@@ -363,6 +369,31 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
       );
     }
 
+    // Business family / vertical are labels; lob_type stays the schema driver.
+    if (
+      updates.business_family !== undefined
+      || updates.business_vertical !== undefined
+      || updates.business_vertical_other !== undefined
+    ) {
+      const taxonomy = resolveBusinessTaxonomy({
+        business_family: updates.business_family,
+        business_vertical: updates.business_vertical,
+        business_vertical_other: updates.business_vertical_other,
+        lob_type: updates.lob_type,
+      });
+      if (taxonomy.vertical?.custom && !taxonomy.business_vertical_other) {
+        return res.status(400).json({
+          error: 'Tell us what your business does before saving an "Others" business type.',
+        });
+      }
+      updates.business_family = taxonomy.business_family;
+      updates.business_vertical = taxonomy.business_vertical;
+      updates.business_vertical_other = taxonomy.business_vertical_other
+        ? taxonomy.business_vertical_other.slice(0, 160)
+        : null;
+      if (taxonomy.business_vertical) updates.lob_type = taxonomy.lob_type;
+    }
+
     if (updates.courier_name !== undefined) {
       updates.courier_name = String(updates.courier_name || '').trim() || null;
     }
@@ -383,6 +414,19 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
       .update(updates)
       .eq('id', req.restaurant_id)
       .select().single();
+
+    // Brochure taxonomy columns arrive in a later migration — keep saves working without them.
+    if (error && /business_family|business_vertical/i.test(error.message)) {
+      const stripped = { ...updates };
+      delete stripped.business_family;
+      delete stripped.business_vertical;
+      delete stripped.business_vertical_other;
+      ({ data, error } = await supabaseAdmin
+        .from('tenants')
+        .update(stripped)
+        .eq('id', req.restaurant_id)
+        .select().single());
+    }
 
     if (error && /kitchen_workflow|kot_printer/i.test(error.message)) {
       const kitchenKeys = ['kitchen_workflow', 'kot_printer_ip', 'kot_printer_port', 'kot_printer_enabled'];

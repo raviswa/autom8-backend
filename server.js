@@ -24,6 +24,9 @@ const {
   handleInternalMenuItems,
   menuUploadMiddleware,
   menuItemAvailabilityMiddleware,
+  menuItemRestockMiddleware,
+  menuItemBulkRestockMiddleware,
+  menuItemLaunchMiddleware,
   menuItemSpecialTodayMiddleware,
   menuItemDiscountMiddleware,
 } = require('./src/routes/catalog');
@@ -77,6 +80,9 @@ app.use('/api/instagram',   require('./src/routes/instagram'));
 app.use('/api/loyalty',     require('./src/routes/loyalty').router);
 app.post('/api/menu/upload', ...menuUploadMiddleware);
 app.put('/api/menu-items/:id/availability', ...menuItemAvailabilityMiddleware);
+app.post('/api/menu-items/bulk-restock', ...menuItemBulkRestockMiddleware);
+app.post('/api/menu-items/:id/restock', ...menuItemRestockMiddleware);
+app.post('/api/menu-items/:id/launch', ...menuItemLaunchMiddleware);
 app.put('/api/menu-items/:id/special-today', ...menuItemSpecialTodayMiddleware);
 app.put('/api/menu-items/:id/discount', ...menuItemDiscountMiddleware);
 app.get('/api/internal/menu-items', handleInternalMenuItems);

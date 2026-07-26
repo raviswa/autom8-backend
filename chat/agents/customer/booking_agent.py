@@ -125,6 +125,9 @@ async def handle_booking_flow(
         ))
 
     session_state["restaurant_id"] = restaurant_id
+    # Latch Tamil script before outbound greetings use session_lang().
+    from locales.customer import latch_tamil_from_text
+    latch_tamil_from_text(session_state, message)
 
     # ── Idle session expiry (30 min) — drop stale mid-flow steps ───────────────
     if expire_session_if_stale(
@@ -370,26 +373,30 @@ async def handle_booking_flow(
         return {"status": "kitchen_closed"}
 
     # ── Closed kitchen: repeat greeting while stuck in ordering ───────────────
+    # Skip the early refresh on ask_service / service-picker — send_service_menu
+    # refreshes once. This cut ~1 kitchen override DB hit on every Hi.
     from tools.kitchen_hours import (
         kitchen_accepting_orders,
         ordering_blocked_for_service,
         refresh_kitchen_acceptance,
     )
-    await refresh_kitchen_acceptance(session_state, restaurant_id)
-    svc = session_state.get("service_type")
-    if (
-        not kitchen_accepting_orders(session_state)
-        and ordering_blocked_for_service(svc, session_state)
-        and current_step in ("awaiting_order", "awaiting_address", "awaiting_address_choice")
-        and (is_greeting(message) or len(message.strip()) < 4)
+    if current_step in (
+        "awaiting_order", "awaiting_address", "awaiting_address_choice", "kitchen_closed",
     ):
-        from tools.kitchen_hours import build_blanket_closed_message
-        await send_whatsapp_message(
-            customer_phone, build_blanket_closed_message(), restaurant_id,
-        )
-        session_state["booking_step"] = "kitchen_closed"
-        clear_cart(session_state)
-        return {"status": "kitchen_closed"}
+        await refresh_kitchen_acceptance(session_state, restaurant_id)
+        svc = session_state.get("service_type")
+        if (
+            not kitchen_accepting_orders(session_state)
+            and ordering_blocked_for_service(svc, session_state)
+            and (is_greeting(message) or len(message.strip()) < 4)
+        ):
+            from tools.kitchen_hours import build_blanket_closed_message
+            await send_whatsapp_message(
+                customer_phone, build_blanket_closed_message(), restaurant_id,
+            )
+            session_state["booking_step"] = "kitchen_closed"
+            clear_cart(session_state)
+            return {"status": "kitchen_closed"}
 
     # ── Greeting guard ────────────────────────────────────────────────────────
     if (current_step not in _STEPS_ALLOWING_SHORT_REPLY and is_greeting(message)):

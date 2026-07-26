@@ -3788,6 +3788,11 @@ async def get_active_restaurant_for_phone(
         return None
 
 
+# Soft-skip pin upserts when we recently wrote the same mapping (cuts write amp).
+_PIN_CACHE: dict[str, tuple[str, float]] = {}
+_PIN_CACHE_TTL = 300.0  # 5 minutes
+
+
 async def pin_active_restaurant_for_phone(
     whatsapp_number: str,
     customer_phone: str,
@@ -3795,11 +3800,18 @@ async def pin_active_restaurant_for_phone(
 ) -> None:
     """
     Upsert the active restaurant pin for this phone + WABA.
-    Called on every inbound message after restaurant is resolved so subsequent
-    turns skip keyword parsing entirely.
+    Called after restaurant resolve so subsequent turns skip keyword parsing.
+    Skips the DB write when the same pin was saved recently.
     """
     if AsyncSessionLocal is None or not all([whatsapp_number, customer_phone, restaurant_id]):
         return
+
+    cache_key = f"{whatsapp_number}:{customer_phone}"
+    now = time.monotonic()
+    cached_rid, cached_ts = _PIN_CACHE.get(cache_key, (None, 0.0))
+    if cached_rid == restaurant_id and (now - cached_ts) < _PIN_CACHE_TTL:
+        return
+
     try:
         async with AsyncSessionLocal() as session:
             await session.execute(
@@ -3819,6 +3831,7 @@ async def pin_active_restaurant_for_phone(
                 )
             )
             await session.commit()
+        _PIN_CACHE[cache_key] = (restaurant_id, now)
     except Exception as e:
         logger.error(f"[pin] save failed for {whatsapp_number}/{customer_phone}: {e}")
 
@@ -3835,6 +3848,8 @@ async def clear_active_restaurant_pin(
     """
     if AsyncSessionLocal is None:
         return
+    cache_key = f"{whatsapp_number}:{customer_phone}"
+    _PIN_CACHE.pop(cache_key, None)
     try:
         async with AsyncSessionLocal() as session:
             await session.execute(

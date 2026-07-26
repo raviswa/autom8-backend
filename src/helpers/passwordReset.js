@@ -115,7 +115,43 @@ async function createRecoveryCredentials(email, redirectTo) {
   };
 }
 
-async function sendPasswordResetEmail(email, redirectTo) {
+function buildResetEmailContent(resetLink, { isOwner = false } = {}) {
+  const accountLabel = isOwner ? 'Autom8 owner account' : 'Autom8 account';
+  const subject = 'Reset your Autom8 password';
+  const text = (
+    `Hi,\n\n` +
+    `Use this link to set a new password for your ${accountLabel}:\n\n` +
+    `${resetLink}\n\n` +
+    `This link expires in about an hour. If you did not request this, you can ignore this email.\n\n` +
+    `— Autom8 / Munafe`
+  );
+  const html = (
+    `<p>Hi,</p>` +
+    `<p>Use this link to set a new password for your ${accountLabel}:</p>` +
+    `<p><a href="${resetLink}">Reset password</a></p>` +
+    `<p style="color:#666;font-size:13px">This link expires in about an hour. ` +
+    `If you did not request this, you can ignore this email.</p>`
+  );
+  return { subject, text, html };
+}
+
+async function deliverResetLinkEmail(email, resetLink, { isOwner = false } = {}) {
+  const { subject, text, html } = buildResetEmailContent(resetLink, { isOwner });
+
+  if (process.env.RESEND_API_KEY) {
+    await sendTransactionalEmail({ to: email, subject, text, html });
+    return true;
+  }
+
+  console.warn('[password-reset] RESEND_API_KEY unset — falling back to Supabase auth email (check Site URL in dashboard)');
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: resolvePasswordResetRedirectUrl(null),
+  });
+  if (error) throw error;
+  return true;
+}
+
+async function sendPasswordResetEmail(email, redirectTo, { isOwner = false } = {}) {
   const normalized = String(email || '').trim().toLowerCase();
   if (!normalized) throw new Error('Email is required');
 
@@ -123,27 +159,11 @@ async function sendPasswordResetEmail(email, redirectTo) {
   const resetLink = creds.directLink || creds.fallbackLink;
   if (!resetLink) throw new Error('Could not generate reset link');
 
-  console.log(`[password-reset] redirectTo=${creds.resetRedirect} direct=${Boolean(creds.directLink)}`);
-
-  const subject = 'Reset your Autom8 password';
-  const text = (
-    `Hi,\n\n` +
-    `Use this link to set a new password for your Autom8 staff account:\n\n` +
-    `${resetLink}\n\n` +
-    `This link expires in about an hour. If you did not request this, you can ignore this email.\n\n` +
-    `— Autom8 / Munafe`
-  );
-  const html = (
-    `<p>Hi,</p>` +
-    `<p>Use this link to set a new password for your Autom8 staff account:</p>` +
-    `<p><a href="${resetLink}">Reset password</a></p>` +
-    `<p style="color:#666;font-size:13px">This link expires in about an hour. ` +
-    `If you did not request this, you can ignore this email.</p>`
-  );
+  console.log(`[password-reset] redirectTo=${creds.resetRedirect} direct=${Boolean(creds.directLink)} owner=${isOwner}`);
 
   if (process.env.RESEND_API_KEY) {
-    await sendTransactionalEmail({ to: normalized, subject, text, html });
-    return true;
+    await deliverResetLinkEmail(normalized, resetLink, { isOwner });
+    return { sent: true, resetLink };
   }
 
   console.warn('[password-reset] RESEND_API_KEY unset — falling back to Supabase auth email (check Site URL in dashboard)');
@@ -151,7 +171,7 @@ async function sendPasswordResetEmail(email, redirectTo) {
     redirectTo: creds.resetRedirect,
   });
   if (error) throw error;
-  return true;
+  return { sent: true, resetLink };
 }
 
 async function generateRecoveryLink(email, redirectTo) {
@@ -159,7 +179,7 @@ async function generateRecoveryLink(email, redirectTo) {
   return creds.directLink || creds.fallbackLink;
 }
 
-async function getManagerOwnerEmails(restaurantId) {
+async function getManagerOwnerEmails(restaurantId, { excludeEmail = null } = {}) {
   if (!restaurantId) return { emails: [], restaurantName: 'Restaurant' };
 
   const [{ data: emps }, { data: rest }] = await Promise.all([
@@ -176,17 +196,22 @@ async function getManagerOwnerEmails(restaurantId) {
       .maybeSingle(),
   ]);
 
+  const skip = excludeEmail ? String(excludeEmail).trim().toLowerCase() : null;
   const emails = new Set();
   for (const row of emps ?? []) {
-    if (row.email) emails.add(row.email.trim().toLowerCase());
+    if (!row.email) continue;
+    const e = row.email.trim().toLowerCase();
+    if (skip && e === skip) continue;
+    emails.add(e);
   }
   if (rest?.contact_email) {
-    emails.add(String(rest.contact_email).trim().toLowerCase());
+    const e = String(rest.contact_email).trim().toLowerCase();
+    if (!(skip && e === skip)) emails.add(e);
   }
 
   return {
-    emails:          [...emails],
-    restaurantName:  rest?.name || 'Restaurant',
+    emails:         [...emails],
+    restaurantName: rest?.name || 'Restaurant',
   };
 }
 
@@ -198,9 +223,12 @@ async function notifyManagersPasswordReset({
   resetLink = null,
   triggeredBy = 'self',
 }) {
-  const { emails, restaurantName } = await getManagerOwnerEmails(restaurantId);
+  // Never email the requester the manager FYI — they need the real reset path.
+  const { emails, restaurantName } = await getManagerOwnerEmails(restaurantId, {
+    excludeEmail: employeeEmail,
+  });
   if (!emails.length) {
-    console.warn(`[password-reset] No manager/owner email for restaurant ${restaurantId}`);
+    console.warn(`[password-reset] No other manager/owner email for restaurant ${restaurantId}`);
     return { sent: false, reason: 'no_manager_emails' };
   }
 
@@ -224,6 +252,7 @@ async function notifyManagersPasswordReset({
       `The link expires after a short period. They can also use Settings → Staff → Reset password in the manager portal.\n\n`
     );
   } else {
+    // FYI-only (success path for staff). Do not claim a link was sent if we have none.
     body += (
       `A reset email has been sent to ${employeeEmail}.\n` +
       `If they do not receive it, use Settings → Staff → Reset password in the manager portal.\n\n`
@@ -244,33 +273,73 @@ async function notifyManagersPasswordReset({
 }
 
 /**
- * Send Supabase reset to employee; on failure, email manager/owner with recovery link.
+ * Send reset link to the account holder.
+ * Owners: always get the real link email; never the manager FYI.
+ * Staff: on delivery failure, managers get the one-time link (not an empty FYI).
  */
 async function requestPasswordReset({
   email,
   employeeName = null,
   restaurantId = null,
+  role = null,
   triggeredBy = 'self',
   redirectTo = null,
 }) {
   const normalized = String(email || '').trim().toLowerCase();
+  const isOwner = String(role || '').toLowerCase() === 'owner';
   let employeeNotified = false;
   let resetLink = null;
 
   try {
-    await sendPasswordResetEmail(normalized, redirectTo);
+    const result = await sendPasswordResetEmail(normalized, redirectTo, { isOwner });
     employeeNotified = true;
+    resetLink = result?.resetLink || null;
   } catch (err) {
-    console.warn(`[password-reset] Supabase email failed for ${normalized}:`, err.message);
+    console.warn(`[password-reset] Reset email failed for ${normalized}:`, err.message);
   }
 
+  // Owner self-service: never send manager FYI. Retry delivering the link if first send failed.
+  if (isOwner) {
+    if (employeeNotified) {
+      return { employeeNotified: true, managersNotified: { sent: false, skipped: 'owner' }, resetLink };
+    }
+
+    try {
+      resetLink = resetLink || await generateRecoveryLink(normalized, redirectTo);
+    } catch (err) {
+      console.warn(`[password-reset] generateLink failed for owner ${normalized}:`, err.message);
+    }
+
+    if (resetLink) {
+      try {
+        await deliverResetLinkEmail(normalized, resetLink, { isOwner: true });
+        return {
+          employeeNotified: true,
+          managersNotified: { sent: false, skipped: 'owner' },
+          resetLink,
+        };
+      } catch (err) {
+        console.warn(`[password-reset] Owner link re-send failed for ${normalized}:`, err.message);
+      }
+    }
+
+    throw new Error(
+      'Could not send reset email. Try WhatsApp OTP on the forgot-password page, or contact Autom8 support.',
+    );
+  }
+
+  // Staff: on failure, managers must receive the one-time link — never “a reset was sent” without one.
   let managersNotified = { sent: false };
 
   if (!employeeNotified) {
     try {
-      resetLink = await generateRecoveryLink(normalized, redirectTo);
+      resetLink = resetLink || await generateRecoveryLink(normalized, redirectTo);
     } catch (err) {
       console.warn(`[password-reset] generateLink failed for ${normalized}:`, err.message);
+    }
+
+    if (!resetLink) {
+      throw new Error('Could not send reset email. Please contact your manager.');
     }
 
     try {
@@ -278,7 +347,7 @@ async function requestPasswordReset({
         employeeEmail:    normalized,
         employeeName,
         restaurantId,
-        includeResetLink: Boolean(resetLink),
+        includeResetLink: true,
         resetLink,
         triggeredBy,
       });
@@ -286,10 +355,17 @@ async function requestPasswordReset({
       console.warn('[password-reset] Manager email failed:', err.message);
       managersNotified = { sent: false, reason: err.message };
     }
-  }
 
-  if (!employeeNotified && !managersNotified.sent) {
-    throw new Error('Could not send reset email. Please contact your manager.');
+    if (!managersNotified.sent) {
+      // Last resort: deliver the link to the staff member again via Resend if managers unreachable
+      try {
+        await deliverResetLinkEmail(normalized, resetLink, { isOwner: false });
+        return { employeeNotified: true, managersNotified, resetLink };
+      } catch (err) {
+        console.warn(`[password-reset] Staff fallback email failed for ${normalized}:`, err.message);
+      }
+      throw new Error('Could not send reset email. Please contact your manager.');
+    }
   }
 
   return { employeeNotified, managersNotified, resetLink: resetLink || null };

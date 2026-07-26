@@ -43,20 +43,20 @@ async function dismissActiveFeedback(restaurantId, phone) {
 }
 
 async function findOpenFeedbackRecord(restaurantId, phone) {
-  for (const variant of phoneVariants(phone)) {
-    const { data } = await supabaseAdmin
-      .from('feedback_pending')
-      .select('*')
-      .eq('customer_phone', variant)
-      .eq('restaurant_id', restaurantId)
-      .eq('feedback_sent', true)
-      .eq('manager_notified', false)
-      .order('freed_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (data) return data;
-  }
-  return null;
+  const variants = phoneVariants(phone);
+  if (!variants.length) return null;
+
+  const { data } = await supabaseAdmin
+    .from('feedback_pending')
+    .select('*')
+    .eq('restaurant_id', restaurantId)
+    .in('customer_phone', variants)
+    .eq('feedback_sent', true)
+    .eq('manager_notified', false)
+    .order('freed_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return data || null;
 }
 
 async function closeAllStaleFeedbackInvites(restaurantId, phone) {

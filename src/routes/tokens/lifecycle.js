@@ -11,6 +11,7 @@ const {
   sendWhatsAppInteractive,
   isWhatsAppConfigured,
   getOperationalAlertPhones,
+  getRestaurantConfig,
   sendOperationalAlerts,
   validateScheduledDeliverySlot,
   assignAndNotifyCaptainTakeaway,
@@ -20,6 +21,7 @@ const {
   cancelScheduledJobsForBooking,
   calculateWaitEstimate,
   buildDineInCustomerMessage,
+  buildTableReadyMessage,
   releaseTablesForToken,
   writeAuditLog,
   authenticateToken,
@@ -77,9 +79,23 @@ router.put('/:id/assign', outletAuth, async (req, res) => {
 
     let menuSendResult = {};
     if (token.phone && await isWhatsAppConfigured(restaurantId)) {
+      let outlet = {};
+      try {
+        const cfg = await getRestaurantConfig(restaurantId);
+        if (cfg) {
+          outlet = {
+            displayName: cfg.display_name || cfg.name,
+            city: cfg.city,
+          };
+        }
+      } catch (_e) { /* non-fatal */ }
       await sendWhatsAppMessage(
         token.phone,
-        `✅ *Your table is ready!*\n\nToken: *${token.id}*\nTable: *Table ${table_number}*\n\nPlease proceed to your table. Enjoy! 🍽️`,
+        buildTableReadyMessage({
+          ...outlet,
+          tokenId: token.id,
+          tableNumber: table_number,
+        }),
         restaurantId
       );
       await new Promise((resolve) => setTimeout(resolve, 1500));

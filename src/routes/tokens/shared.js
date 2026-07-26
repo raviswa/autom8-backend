@@ -3,13 +3,13 @@
 const { supabase, supabaseAdmin } = require('../../config/supabase');
 const { broadcastToRestaurant }   = require('../../websocket');
 const { sendWhatsAppMessage, sendWhatsAppCatalogWithSpecials, sendWhatsAppInteractive, isWhatsAppConfigured } = require('../../helpers/whatsapp');
-const { getOperationalAlertPhones } = require('../../helpers/restaurantConfig');
+const { getOperationalAlertPhones, getRestaurantConfig } = require('../../helpers/restaurantConfig');
 const { sendOperationalAlerts } = require('../../helpers/operationalAlerts');
 const { validateScheduledDeliverySlot } = require('../../helpers/deliverySlots');
 const { assignAndNotifyCaptainTakeaway } = require('../../helpers/captainAssignment');
 const { syncConversationForTokenApproval, syncConversationForScheduledDeliveryApproval, syncConversationForScheduledTakeawayApproval } = require('../../helpers/conversationState');
 const { cancelScheduledJobsForBooking } = require('../../helpers/scheduledJobs');
-const { calculateWaitEstimate, buildDineInCustomerMessage } = require('../../helpers/waitEstimate');
+const { calculateWaitEstimate, buildDineInCustomerMessage, buildTableReadyMessage } = require('../../helpers/waitEstimate');
 const { releaseTablesForToken } = require('../../helpers/tableRelease');
 const { writeAuditLog } = require('../../helpers/auditLog');
 const { authenticateToken, getRestaurantId } = require('../../middleware/auth');
@@ -492,6 +492,7 @@ module.exports = {
   sendWhatsAppInteractive,
   isWhatsAppConfigured,
   getOperationalAlertPhones,
+  getRestaurantConfig,
   sendOperationalAlerts,
   validateScheduledDeliverySlot,
   assignAndNotifyCaptainTakeaway,
@@ -501,6 +502,7 @@ module.exports = {
   cancelScheduledJobsForBooking,
   calculateWaitEstimate,
   buildDineInCustomerMessage,
+  buildTableReadyMessage,
   releaseTablesForToken,
   writeAuditLog,
   authenticateToken,

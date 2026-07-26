@@ -6,28 +6,31 @@ const { canonicalPhone, phoneVariants } = require('../../helpers/conversationSta
 async function getSession(restaurantId, phone) {
   if (!restaurantId || !phone) return null;
 
-  for (const variant of phoneVariants(phone)) {
-    const { data, error } = await supabaseAdmin
-      .from('conversation_states')
-      .select('id, restaurant_id, customer_phone, current_state, context')
-      .eq('restaurant_id', restaurantId)
-      .eq('customer_phone', variant)
-      .maybeSingle();
+  const variants = phoneVariants(phone);
+  if (!variants.length) return null;
 
-    if (error) {
-      console.warn('[sessionStore] getSession query failed:', error.message);
-      return null;
-    }
+  const { data, error } = await supabaseAdmin
+    .from('conversation_states')
+    .select('id, restaurant_id, customer_phone, current_state, context')
+    .eq('restaurant_id', restaurantId)
+    .in('customer_phone', variants)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-    if (data) {
-      return {
-        id: data.id,
-        restaurant_id: data.restaurant_id,
-        phone: data.customer_phone,
-        current_state: data.current_state,
-        context: data.context || {},
-      };
-    }
+  if (error) {
+    console.warn('[sessionStore] getSession query failed:', error.message);
+    return null;
+  }
+
+  if (data) {
+    return {
+      id: data.id,
+      restaurant_id: data.restaurant_id,
+      phone: data.customer_phone,
+      current_state: data.current_state,
+      context: data.context || {},
+    };
   }
 
   const canonical = canonicalPhone(phone);
