@@ -43,6 +43,7 @@ const RESTAURANT_SELECT_FULL = [
   'subscribed_features',
   'whatsapp_needs_existing_pin',
   'allow_manager_menu_upload',    //expose allow_manager_menu_upload to the frontend
+  'order_ops_mode',
   'shiprocket_connected', 'shiprocket_email', 'shiprocket_api_key', 'intra_city_charge', 'outstation_charge', 'free_delivery_above',
   'cod_enabled_city', 'cod_enabled_outstation',
   'shipping_provider', 'courier_name', 'courier_rate_card',
@@ -59,6 +60,7 @@ const RESTAURANT_SELECT_BASE = [
   'subscribed_features',
   'whatsapp_needs_existing_pin',
   'allow_manager_menu_upload',  //expose allow_manager_menu_upload to the frontend
+  'order_ops_mode',
 ].join(', ');
 
 async function fetchRestaurantRow(restaurantId) {
@@ -72,7 +74,7 @@ async function fetchRestaurantRow(restaurantId) {
     return { data: sanitizeRestaurantForClient(data), error: null };
   }
 
-  if (/kitchen_workflow|kot_printer|meta_catalog_id|parcel_charge_per_item|takeaway_ready_range|delivery_ready_range|kitchen_busy|restaurant_type|delivery_charge|scheduled_delivery|scheduled_takeaway|max_delivery_radius|shipping_provider|courier_rate_card|courier_name|fssai_license|sac_code|receipt_tagline|gstin|shiprocket_api_key|business_family|business_vertical/i.test(error.message)) {
+  if (/kitchen_workflow|kot_printer|meta_catalog_id|parcel_charge_per_item|takeaway_ready_range|delivery_ready_range|kitchen_busy|restaurant_type|delivery_charge|scheduled_delivery|scheduled_takeaway|max_delivery_radius|shipping_provider|courier_rate_card|courier_name|fssai_license|sac_code|receipt_tagline|gstin|shiprocket_api_key|business_family|business_vertical|order_ops_mode/i.test(error.message)) {
     const fallback = await supabaseAdmin
       .from('tenants')
       .select(RESTAURANT_SELECT_BASE)
@@ -98,6 +100,7 @@ async function fetchRestaurantRow(restaurantId) {
       fallback.data.business_vertical = null;
       fallback.data.business_vertical_other = null;
       fallback.data.allow_manager_menu_upload = fallback.data.allow_manager_menu_upload ?? false;
+      fallback.data.order_ops_mode = fallback.data.order_ops_mode || 'combined';
 
     }
     return { data: sanitizeRestaurantForClient(fallback.data), error: fallback.error };
@@ -887,6 +890,12 @@ router.get('/shipment-lookup', authenticateToken, getRestaurantId, requireOutlet
     });
     if (!booking) return res.status(404).json({ error: 'Booking not found' });
 
+    const { data: restaurant } = await supabaseAdmin
+      .from('tenants')
+      .select('id, lob_type, shipping_provider, shiprocket_email, shiprocket_api_key, shiprocket_connected, postal_code')
+      .eq('id', req.restaurant_id)
+      .maybeSingle();
+
     res.json({
       success: true,
       booking_id: booking.id,
@@ -896,10 +905,43 @@ router.get('/shipment-lookup', authenticateToken, getRestaurantId, requireOutlet
       fulfillment_type: booking.meta?.fulfillment_type || null,
       delivery_channel: booking.meta?.delivery_channel || null,
       delivery_channel_status: booking.meta?.delivery_channel_status || null,
-      shipment: shipmentPayloadFromMeta(booking.meta || {}),
+      shipment: {
+        ...shipmentPayloadFromMeta(booking.meta || {}),
+        tracking_url: require('../helpers/orderJourney').trackUrlFromMeta(booking.meta || {}),
+      },
+      skip_reason: require('../helpers/orderJourney').skipReasonFor({
+        meta: booking.meta || {},
+        restaurant,
+        serviceType: booking.service_type,
+      }),
     });
   } catch (err) {
     console.error('[dashboard/shipment-lookup]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/dashboard/orders/journey — packaged LOB order lifecycle ───────────
+router.get('/orders/journey', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
+  try {
+    const { buildOrderJourney, normalizeOpsMode } = require('../helpers/orderJourney');
+    const { data: restaurant } = await supabaseAdmin
+      .from('tenants')
+      .select('id, lob_type, shipping_provider, shiprocket_email, shiprocket_api_key, shiprocket_connected, postal_code, order_ops_mode')
+      .eq('id', req.restaurant_id)
+      .maybeSingle();
+
+    const orders = await buildOrderJourney({
+      restaurantId: req.restaurant_id,
+      restaurant,
+    });
+    res.json({
+      success: true,
+      order_ops_mode: normalizeOpsMode(restaurant?.order_ops_mode),
+      orders,
+    });
+  } catch (err) {
+    console.error('[dashboard/orders/journey]', err.message);
     res.status(500).json({ error: err.message });
   }
 });

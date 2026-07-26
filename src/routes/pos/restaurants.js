@@ -229,6 +229,7 @@ router.put(
   'subscribed_features', 'enabled_services',
   'lob_type', 'allow_manager_menu_upload',
   'business_family', 'business_vertical', 'business_vertical_other',
+  'order_ops_mode',
     ];
 
     // These two fields are owner-governed only — a manager may have general
@@ -328,6 +329,11 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
 
     if (updates.shipping_provider !== undefined) {
       updates.shipping_provider = normalizeShippingProvider(updates.shipping_provider);
+    }
+
+    if (updates.order_ops_mode !== undefined) {
+      const mode = String(updates.order_ops_mode || '').toLowerCase();
+      updates.order_ops_mode = mode === 'split' ? 'split' : 'combined';
     }
 
     // shiprocket_api_key stores the Shiprocket API User password (misnamed historically).
