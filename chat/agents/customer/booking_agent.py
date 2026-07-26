@@ -477,6 +477,22 @@ async def handle_booking_flow(
                 customer_phone, restaurant_id, customer_name, session_state,
             )
         choice = _SERVICE_TEXT_MAP.get(_raw_choice.lower(), _raw_choice)
+
+        async def _resend_service_menu_for_greeting() -> dict:
+            greeting = await build_conversation_greeting(
+                session_state, restaurant_id, customer_phone, customer_name,
+            )
+            await send_service_menu(
+                customer_phone, restaurant_id, greeting, session_state, announce_closed=False,
+            )
+            session_state["booking_step"] = "awaiting_service_selection"
+            return {"status": "awaiting_service_selection"}
+
+        def _is_soft_reopen(text: str) -> bool:
+            return is_greeting(text) or text.lower() in (
+                "good morning", "good afternoon", "good evening", "morning", "gm",
+            )
+
         try:
             service_type, order_mode = await resolve_service_selection(
                 restaurant_id, choice, session_state,
@@ -495,26 +511,40 @@ async def handle_booking_flow(
                     if fb.get("completed"):
                         mark_session_visit_complete(session_state)
                     return {"status": session_state.get("booking_step", "awaiting_service_selection")}
-            if is_greeting(_raw_choice) or _raw_choice.lower() in (
-                "good morning", "good afternoon", "good evening", "morning", "gm",
-            ):
-                greeting = await build_conversation_greeting(
-                    session_state, restaurant_id, customer_phone, customer_name,
-                )
-                await send_service_menu(
-                    customer_phone, restaurant_id, greeting, session_state, announce_closed=False,
-                )
-                session_state["booking_step"] = "awaiting_service_selection"
-                return {"status": "awaiting_service_selection"}
+            # #region agent log
+            logger.info(
+                "[DBG-c76584] awaiting_service ValueError branch "
+                f"choice={_raw_choice!r} is_greeting={is_greeting(_raw_choice)} "
+                f"soft_reopen={_is_soft_reopen(_raw_choice)} hypothesisId=H1"
+            )
+            # #endregion
+            if _is_soft_reopen(_raw_choice):
+                return await _resend_service_menu_for_greeting()
+            from locales.customer import reply as _creply, session_lang as _slang
             await send_whatsapp_message(
-                customer_phone, "Sorry, I did not catch that. Please tap one of the options above." + _HOME_HINT, restaurant_id
+                customer_phone,
+                _creply(_slang(session_state), "service_choice_unclear") + _HOME_HINT,
+                restaurant_id,
             )
             return {"status": "error"}
 
+        # resolve_service_selection returns (None, None) for unknown text — it does
+        # NOT raise. Greetings must be handled here or they hit the English sorry.
         if service_type is None:
+            # #region agent log
+            logger.info(
+                "[DBG-c76584] awaiting_service None path "
+                f"choice={_raw_choice!r} is_greeting={is_greeting(_raw_choice)} "
+                f"soft_reopen={_is_soft_reopen(_raw_choice)} lang={session_state.get('preferred_language')!r} "
+                f"hypothesisId=H1"
+            )
+            # #endregion
+            if _is_soft_reopen(_raw_choice):
+                return await _resend_service_menu_for_greeting()
+            from locales.customer import reply as _creply, session_lang as _slang
             await send_whatsapp_message(
                 customer_phone,
-                "Sorry, I did not catch that. Please tap one of the options above." + _HOME_HINT,
+                _creply(_slang(session_state), "service_choice_unclear") + _HOME_HINT,
                 restaurant_id,
             )
             session_state["booking_step"] = "awaiting_service_selection"

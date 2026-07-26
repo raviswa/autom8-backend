@@ -18,18 +18,13 @@ _SEEN: dict[str, float] = {}
 _DEDUP_TTL = 120  # seconds
 
 _HOME_WORDS = {"home", "start", "menu", "main menu"}
-_GREET_WORDS = {"hi", "hello", "hey", "hii", "helo"}
 
 # DEFECT FIX (2026-07-06): "Hi Munafe" / "Hi psl" sent by a customer who is
 # already mid-session (pinned, booking_step already set) used to fail the
-# exact-match _GREET_WORDS check below, fall through into the booking flow's
+# exact-match greeting check below, fall through into the booking flow's
 # awaiting_service_selection handler, miss _SERVICE_TEXT_MAP, and dead-end on
-# the generic "Sorry, I did not catch that" fallback. A bare greeting word
-# followed by a single trailing token (restaurant name / short code) should
-# still be treated as a fresh greeting. Multi-word messages after the
-# greeting ("hi, I'd like a table for 4") are intentionally NOT matched here,
-# so real free-text messages keep going through the normal flow.
-_GREETING_PREFIX_RE = re.compile(r"^(hi|hello|hey|hii|helo|hola|namaste)\b")
+# the generic "Sorry, I did not catch that" fallback.
+# Use booking_helpers.is_greeting so Tamil/Hindi/etc. scripts match too.
 
 
 def _norm(text: str) -> str:
@@ -38,17 +33,15 @@ def _norm(text: str) -> str:
 
 def _is_greeting_like(user_text: str) -> bool:
     """
-    True for a bare greeting ("hi") or a greeting plus a single trailing
-    word ("hi munafe", "hi psl"). `user_text` is expected to already be
-    normalized (lowercased, whitespace-collapsed) via `_norm()`.
+    True for a bare greeting ("hi" / "வணக்கம்") or a greeting plus a single
+    trailing word ("hi munafe", "வணக்கம் அம்மா"). Prefer the shared
+    is_greeting helper so all Indic scripts stay in sync.
     """
-    if user_text in _GREET_WORDS:
-        return True
-    match = _GREETING_PREFIX_RE.match(user_text)
-    if not match:
-        return False
-    remainder = user_text[match.end():].strip()
-    return len(remainder.split()) <= 1
+    try:
+        from agents.customer.booking_helpers import is_greeting
+        return is_greeting(user_text)
+    except Exception:
+        return user_text in {"hi", "hello", "hey", "hii", "helo", "hola", "namaste"}
 
 def _is_duplicate(wamid: str) -> bool:
     now = time.monotonic()
@@ -313,6 +306,13 @@ async def route_message(
         return result
 
     if _is_greeting_like(user_text) and session_state.get("booking_step") in (None, "awaiting_service_selection", "ask_service"):
+        # #region agent log
+        logger.info(
+            "[DBG-c76584] root greeting-like reopen "
+            f"text={user_text!r} step={session_state.get('booking_step')!r} "
+            f"hypothesisId=H2"
+        )
+        # #endregion
         session_state["current_state"] = "booking"
         session_state["booking_step"] = "ask_service"
 

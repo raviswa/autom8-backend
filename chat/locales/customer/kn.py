@@ -166,4 +166,5 @@ REPLIES = {
     "service_menu_footer": 'ಆರ್ಡರ್ ಪ್ರಾರಂಭಿಸಲು ಕೆಳಗೆ ಟ್ಯಾಪ್ ಮಾಡಿ',
     "service_menu_button": 'ಸೇವೆ ಆಯ್ಕೆ',
     "service_menu_ready_takeaway": 'ನಿಮ್ಮ ಟೇಕ್\u200cಅವೇ ಆರ್ಡರ್ *{token}* ಸಿದ್ಧ — ಕೌಂಟರ್\u200cನಲ್ಲಿ ತೆಗೆದುಕೊಳ್ಳಿ.',
+    "service_choice_unclear": 'ಕ್ಷಮಿಸಿ, ಅರ್ಥವಾಗಲಿಲ್ಲ. ದಯವಿಟ್ಟು ಮೇಲಿನ ಆಯ್ಕೆಗಳಲ್ಲಿ ಒಂದನ್ನು ಟ್ಯಾಪ್ ಮಾಡಿ.',
 }

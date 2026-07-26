@@ -455,9 +455,22 @@ _GREETING_WORDS: set[str] = {
     "hi","hello","holla","hola","hey","howdy","sup","yo","ok","okay","k",
     "yes","no","yep","nope","thanks","thank you","thankyou","bye","goodbye",
     "help","start","back","reset","restart","cancel",
-    # Tamil script + common transliterations
+    "namaste", "namaskar",
+    # Tamil
     "வணக்கம்", "ஹி", "ஹலோ", "ஹாய்",
     "vanakkam", "vanakam", "vankkam",
+    # Hindi / Marathi (Devanagari)
+    "नमस्ते", "नमस्कार", "हाय", "हेलो", "हॅलो",
+    # Telugu
+    "నమస్తే", "నమస్కారం", "హాయ్", "హలో",
+    # Kannada
+    "ನಮಸ್ತೆ", "ನಮಸ್ಕಾರ", "ಹಾಯ್", "ಹಲೋ",
+    # Malayalam
+    "നമസ്തേ", "നമസ്കാരം", "ഹായ്", "ഹലോ",
+    # Gujarati
+    "નમસ્તે", "નમસ્કાર", "હાય", "હેલો",
+    # Bengali
+    "নমস্তে", "নমস্কার", "হাই", "হ্যালো",
 }
 _RESET_KEYWORDS: set[str] = _DIRECT_RESET_KEYWORDS | _FULL_RESET_KEYWORDS | {"begin"}
 

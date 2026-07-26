@@ -133,6 +133,9 @@ REPLIES = {
     "service_menu_ready_takeaway": (
         "Your takeaway order *{token}* is ready — pick up at the counter."
     ),
+    "service_choice_unclear": (
+        "Sorry, I did not catch that. Please tap one of the options above."
+    ),
 
     # Customer-facing service labels (display only — DB keeps English codes)
     "svc_takeaway": "Takeaway",
