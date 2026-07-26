@@ -3668,9 +3668,21 @@ _PIN_TTL_HOURS = 24   # stale pin → keyword routing re-evaluated on next messa
 _KEYWORD_GREETING_WORDS: set[str] = {
     "hi", "hey", "hello", "hlo", "hii", "hai", "hola",
     "namaste", "namaskar", "vanakkam",
-    # Common Indic-script greetings (full forms + pulli-stripped forms)
-    "வணக்கம்", "வணககம", "ஹாய்", "ஹய", "ஹி", "ஹ", "नमस्ते", "नमसत",
-    "నమస్కారం", "ನಮಸ್ಕಾರ", "നമസ്കാരം", "নমস্কার", "નમસ્તે",
+    # Indic-script greetings across all supported locales
+    # Tamil (incl. pulli-stripped fallbacks from older normalizer)
+    "வணக்கம்", "வணககம", "ஹாய்", "ஹய", "ஹி", "ஹ", "ஹலோ",
+    # Hindi / Marathi (Devanagari)
+    "नमस्ते", "नमसत", "नमस्कार", "हाय", "हेलो", "हॅलो",
+    # Telugu
+    "నమస్తే", "నమస్కారం", "హాయ్", "హలో",
+    # Kannada
+    "ನಮಸ್ತೆ", "ನಮಸ್ಕಾರ", "ಹಾಯ್", "ಹಲೋ",
+    # Malayalam
+    "നമസ്തേ", "നമസ്കാരം", "ഹായ്", "ഹലോ",
+    # Gujarati
+    "નમસ્તે", "નમસ્કાર", "હાય", "હેલો",
+    # Bengali
+    "নমস্তে", "নমস্কার", "হাই", "হ্যালো",
     "good", "morning", "evening", "afternoon", "night", "noon",
     "dear", "sir", "madam", "team",
 }

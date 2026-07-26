@@ -514,13 +514,27 @@ def is_feedback_aspect_reply(text: str) -> bool:
     return False
 
 
-# Latin greetings keep \b; Tamil must use (?=\s|$) — Tamil ends in Mn/Mc so \b never fires.
+# Latin greetings keep \b; Indic scripts must use (?=\s|$) — they end in
+# Mn/Mc combining marks so \b never fires.
 _GREETING_PREFIX_RE = re.compile(
     r"^(?:"
-    r"hi|hello|hey|hii|helo|hola|namaste|vanakkam|vanakam|vankkam"
+    r"hi|hello|hey|hii|helo|hola|namaste|namaskar|vanakkam|vanakam|vankkam"
     r")\b"
     r"|^(?:"
+    # Tamil
     r"ஹி|வணக்கம்|ஹலோ|ஹாய்"
+    # Hindi / Marathi (Devanagari)
+    r"|नमस्ते|नमस्कार|हाय|हेलो|हॅलो"
+    # Telugu
+    r"|నమస్తే|నమస్కారం|హాయ్|హలో"
+    # Kannada
+    r"|ನಮಸ್ತೆ|ನಮಸ್ಕಾರ|ಹಾಯ್|ಹಲೋ"
+    # Malayalam
+    r"|നമസ്തേ|നമസ്കാരം|ഹായ്|ഹലോ"
+    # Gujarati
+    r"|નમસ્તે|નમસ્કાર|હાય|હેલો"
+    # Bengali
+    r"|নমস্তে|নমস্কার|হাই|হ্যালো"
     r")(?=\s|$)",
     re.IGNORECASE,
 )
