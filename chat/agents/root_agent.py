@@ -69,9 +69,15 @@ def _extract_interactive_reply_id(raw_message: Dict[str, Any] | str) -> str:
         interactive = raw_message.get("interactive", {})
         itype = interactive.get("type")
         if itype == "list_reply":
-            return interactive.get("list_reply", {}).get("id", "")
+            lr = interactive.get("list_reply", {}) or {}
+            return str(lr.get("id") or lr.get("title") or "")
         elif itype == "button_reply":
-            return interactive.get("button_reply", {}).get("id", "")
+            br = interactive.get("button_reply", {}) or {}
+            return str(br.get("id") or br.get("title") or "")
+
+    if msg_type == "button":
+        btn = raw_message.get("button", {}) or {}
+        return str(btn.get("payload") or btn.get("text") or "")
 
     return raw_message.get("text", {}).get("body", str(raw_message))
 

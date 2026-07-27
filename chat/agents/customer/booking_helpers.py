@@ -1043,6 +1043,7 @@ async def send_service_menu(
     # Prefer interactive media carousel (2–10 cards). Fall back to list, then text.
     from tools.feature_gate import (
         service_card_body_text,
+        service_card_button_title,
         service_card_image_url,
     )
 
@@ -1065,6 +1066,11 @@ async def send_service_menu(
             if not image_url:
                 cards = []
                 break
+            # Unique titles per card — identical "Select" labels can make Meta
+            # echo only the label (தேர்வு) with no usable service id.
+            btn_title = service_card_button_title(row["id"], row.get("title"))
+            if not btn_title:
+                btn_title = select_cta
             cards.append({
                 "card_index": idx,
                 "type": "cta_url",
@@ -1085,7 +1091,7 @@ async def send_service_menu(
                             "type": "quick_reply",
                             "quick_reply": {
                                 "id": str(row["id"])[:256],
-                                "title": select_cta,
+                                "title": btn_title[:20],
                             },
                         }
                     ],

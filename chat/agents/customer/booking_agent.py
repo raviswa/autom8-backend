@@ -481,7 +481,11 @@ async def handle_booking_flow(
             return await prompt_name_verification(
                 customer_phone, restaurant_id, customer_name, session_state,
             )
-        choice = _SERVICE_TEXT_MAP.get(_raw_choice.lower(), _raw_choice)
+        from tools.feature_gate import match_service_row_choice
+        _matched = match_service_row_choice(
+            _raw_choice, session_state.get("_service_menu_rows"),
+        )
+        choice = _matched or _SERVICE_TEXT_MAP.get(_raw_choice.lower(), _raw_choice)
 
         async def _resend_service_menu_for_greeting() -> dict:
             greeting = await build_conversation_greeting(

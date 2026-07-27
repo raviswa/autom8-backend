@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -353,6 +354,59 @@ def _parse_row_id(row_id: str) -> tuple[str | None, str | None]:
     return mapping.get(row_id, (None, None))
 
 
+def _strip_emoji_title(title: str) -> str:
+    """ASCII-ish short label for carousel button titles (max 20)."""
+    cleaned = re.sub(r"[^\w\s/&+-]", " ", title or "", flags=re.UNICODE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:20] or "Select"
+
+
+def service_card_button_title(row_id: str, title: str | None = None) -> str:
+    """Unique per-card WhatsApp button title (must differ across carousel cards)."""
+    cfg = SERVICE_ROW_CONFIG.get(row_id) or {}
+    return _strip_emoji_title(title or cfg.get("title") or row_id)
+
+
+def match_service_row_choice(
+    choice: str,
+    rows: list[dict] | None = None,
+) -> str | None:
+    """Map a webhook id/title/body fragment back to a service row id."""
+    raw = (choice or "").strip()
+    if not raw:
+        return None
+
+    def _norm(s: str) -> str:
+        s = (s or "").strip().strip("*").strip()
+        s = _strip_emoji_title(s).lower()
+        s = s.replace("-", " ")
+        return re.sub(r"\s+", " ", s).strip()
+
+    candidates = rows or [
+        {"id": rid, "title": cfg["title"], "description": cfg["description"]}
+        for rid, cfg in SERVICE_ROW_CONFIG.items()
+    ]
+    lower = raw.lower()
+    norm_raw = _norm(raw)
+    for row in candidates:
+        rid = str(row.get("id") or "")
+        if not rid or rid == "nothing":
+            continue
+        if raw == rid or lower == rid.lower():
+            return rid
+        title = str(row.get("title") or "")
+        if title and (raw == title or lower == title.lower() or norm_raw == _norm(title)):
+            return rid
+        btn = service_card_button_title(rid, title)
+        if btn and (raw == btn or lower == btn.lower() or norm_raw == _norm(btn)):
+            return rid
+        body = service_card_body_text(rid, title=title, description=row.get("description"))
+        first = body.split("\n", 1)[0].strip().strip("*")
+        if first and (raw == first or lower == first.lower() or norm_raw == _norm(first)):
+            return rid
+    return None
+
+
 def build_service_selection_payload(restaurant: dict) -> dict | None:
     services_enabled = _normalize_services_enabled(restaurant)
     scheduled_delivery_enabled = bool(restaurant.get("scheduled_delivery_enabled"))
@@ -444,9 +498,10 @@ def _resolve_choice_from_rows(
     rows: list[dict],
 ) -> tuple[str | None, str | None]:
     valid_ids = {row.get("id") for row in rows}
-    if choice_id not in valid_ids:
+    rid = choice_id if choice_id in valid_ids else match_service_row_choice(choice_id, rows)
+    if not rid or rid not in valid_ids:
         return (None, None)
-    return _parse_row_id(choice_id)
+    return _parse_row_id(rid)
 
 
 async def resolve_service_selection(

@@ -218,19 +218,23 @@ def _extract_message_body(message_obj: dict) -> str:
         return message_obj.get("text", {}).get("body", "").strip()
 
     if msg_type == "button":
-        return message_obj.get("button", {}).get("text", "").strip()
+        # Template / some carousel taps send payload=id, text=label.
+        btn = message_obj.get("button", {}) or {}
+        return str(btn.get("payload") or btn.get("text") or "").strip()
 
     if msg_type == "interactive":
         interactive      = message_obj.get("interactive", {})
         interactive_type = interactive.get("type", "")
 
         if interactive_type == "button_reply":
-            # Use ID not title — handlers match on IDs like "1", "2", "SKIP", "YES"
-            return interactive.get("button_reply", {}).get("id", "").strip()
+            # Prefer ID; fall back to title (carousel may echo label only).
+            br = interactive.get("button_reply", {}) or {}
+            return str(br.get("id") or br.get("title") or "").strip()
 
         if interactive_type == "list_reply":
-            # Use ID not title — handlers match on IDs like "4", "CAT:..."
-            return interactive.get("list_reply", {}).get("id", "").strip()
+            # Prefer ID; fall back to title.
+            lr = interactive.get("list_reply", {}) or {}
+            return str(lr.get("id") or lr.get("title") or "").strip()
 
         if interactive_type == "nfm_reply":
             # WhatsApp Flow completion payload.
