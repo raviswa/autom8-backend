@@ -207,7 +207,7 @@ function formatOutletLabel(displayName, city) {
  * @param {{ estimate_minutes: number, display?: string }} estimate
  * @param {{ displayName?: string, city?: string }} [outlet]
  */
-def buildDineInCustomerMessage(partySize, tokenId, estimate, outlet = {}) {
+function buildDineInCustomerMessage(partySize, tokenId, estimate, outlet = {}) {
   const pax = Math.max(1, parseInt(partySize, 10) || 1);
   const guests = `${pax} ${pax === 1 ? 'guest' : 'guests'}`;
   const outletLabel = formatOutletLabel(outlet.displayName, outlet.city);
