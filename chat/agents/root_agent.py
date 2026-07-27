@@ -191,7 +191,7 @@ async def route_message(
     message = _extract_interactive_reply_id(message)
 
     # Latch preferred_language from the customer's typed greeting/script before
-    # identity or booking replies (QR check-in leaves the chat blank on purpose).
+    # identity or booking replies. Mid-flow stays sticky until visit_complete.
     try:
         from locales.customer import latch_indic_from_text
         latch_indic_from_text(session_state, str(message or ""))

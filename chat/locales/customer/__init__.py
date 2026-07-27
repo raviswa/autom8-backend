@@ -156,7 +156,7 @@ def contains_tamil_script(text: str | None) -> bool:
     return detect_script_locale(text) == "ta"
 
 
-# Latin openers that mean "switch back to English" (not mid-flow "ok"/"pay").
+# Latin openers that mean "switch back to English" on a *new* booking only.
 _LATIN_LANG_SWITCH_RE = re.compile(
     r"^(?:"
     r"hi|hello|hey|hii|helo|hola|namaste|namaskar|vanakkam|vanakam|vankkam"
@@ -165,13 +165,17 @@ _LATIN_LANG_SWITCH_RE = re.compile(
     re.IGNORECASE,
 )
 
+# After receipt / visit end, the next customer message may pick a new language.
+_LANGUAGE_RESET_STEPS = frozenset({
+    None,
+    "",
+    "visit_complete",
+    "awaiting_payment",
+})
+
 
 def is_latin_language_switch(text: str | None) -> bool:
-    """True for Latin greetings / explicit English requests with no Indic script.
-
-    Lets customers leave a sticky Tamil/Hindi session by typing Hi/Hello or
-    English — without resetting language on mid-flow words like OK / PAY.
-    """
+    """True for Latin greetings / explicit English requests with no Indic script."""
     raw = (text or "").strip()
     if not raw or detect_script_locale(raw):
         return False
@@ -180,23 +184,46 @@ def is_latin_language_switch(text: str | None) -> bool:
     if not match:
         return False
     remainder = normalized[match.end():].strip()
-    # "hi" / "hi munafe" / "english please" — not a long free-text order
     return len(remainder.split()) <= 2
 
 
-def latch_indic_from_text(session_state: dict, text: str | None) -> str:
-    """Latch preferred_language from inbound script or Latin greeting switch.
+def language_reset_allowed(session_state: dict | None) -> bool:
+    """True when preferred_language may change (new booking / post-receipt).
 
-    - Indic script → that locale (may switch away from a previous Indic latch)
-    - Latin greeting / "English" → English (escape hatch from sticky local lang)
-    - Otherwise keep the existing session preference
+    Mid-flow (menu → order → receipt) stays sticky so Hi/OK do not flip
+    language until the current visit completes.
+    """
+    if not isinstance(session_state, dict):
+        return True
+    if not session_state.get("preferred_language"):
+        return True
+    step = session_state.get("booking_step")
+    return step in _LANGUAGE_RESET_STEPS
+
+
+def latch_indic_from_text(
+    session_state: dict,
+    text: str | None,
+    *,
+    allow_reset: bool | None = None,
+) -> str:
+    """Latch preferred_language from inbound script or (on new booking) Latin Hi.
+
+    During an active booking flow language is sticky until visit_complete
+    (after receipt). On the next booking opener, Indic script or Latin
+    Hi/Hello/English may set a new preferred_language.
     """
     if not isinstance(session_state, dict):
         return "en"
+    if allow_reset is None:
+        allow_reset = language_reset_allowed(session_state)
+
     code = detect_script_locale(text)
     if code:
-        return apply_detected_language(session_state, code, allow_switch=True)
-    if is_latin_language_switch(text):
+        return apply_detected_language(
+            session_state, code, allow_switch=allow_reset,
+        )
+    if allow_reset and is_latin_language_switch(text):
         session_state["preferred_language"] = "en"
         return "en"
     return session_lang(session_state)
@@ -216,9 +243,9 @@ def apply_detected_language(
     """Persist preferred_language from a confident language detection.
 
     By default English / mixed do not overwrite an existing non-English
-    preference (so mid-flow "OK"/"PAY" keep Tamil). When allow_switch is True
-    (script latch from a new message), a different supported locale replaces
-    the previous one.
+    preference (so mid-flow stays sticky until receipt / visit_complete).
+    When allow_switch is True (new booking opener), a different supported
+    locale replaces the previous one.
     """
     detected = normalize_lang(language)
     existing = normalize_lang(session_state.get("preferred_language"))

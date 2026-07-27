@@ -126,6 +126,7 @@ async def handle_booking_flow(
 
     session_state["restaurant_id"] = restaurant_id
     # Latch preferred language from inbound script before outbound greetings.
+    # Mid-flow stays sticky until visit_complete (receipt); next booking may reset.
     from locales.customer import latch_indic_from_text
     latch_indic_from_text(session_state, message)
 
@@ -134,8 +135,8 @@ async def handle_booking_flow(
         session_state, customer_id=customer_id, customer_name=customer_name,
     ):
         current_step = session_state.get("booking_step") or "ask_service"
-        # clear() can wipe preferred_language; re-latch from this message.
-        latch_indic_from_text(session_state, message)
+        # Ended previous visit — allow language from this opener.
+        latch_indic_from_text(session_state, message, allow_reset=True)
 
     msg_lower = message.strip().lower()
 
@@ -259,7 +260,6 @@ async def handle_booking_flow(
         _prev_visits = session_state.get("visit_count", 0)
         _prev_last   = session_state.get("last_order_summary", "")
         _prev_svc    = session_state.get("service_type") or session_state.get("last_service_type")
-        _prev_lang   = session_state.get("preferred_language")
         _pending_pay = session_state.get("pending_prepay_fulfillment")
         session_state.clear()
         if _prev_cid:    session_state["customer_id"]          = _prev_cid
@@ -269,10 +269,9 @@ async def handle_booking_flow(
         if _prev_visits: session_state["visit_count"]          = _prev_visits
         if _prev_last:   session_state["last_order_summary"]   = strip_order_quantity(_prev_last)
         if _prev_svc:    session_state["last_service_type"]    = _prev_svc
-        if _prev_lang:   session_state["preferred_language"]   = _prev_lang
         if _pending_pay: session_state["pending_prepay_fulfillment"] = _pending_pay
-        # Re-latch in case clear raced before the inbound greeting was stored.
-        latch_indic_from_text(session_state, message)
+        # New booking: language comes from this message (not the previous visit).
+        latch_indic_from_text(session_state, message, allow_reset=True)
         session_state["booking_step"] = "ask_service"
         current_step = "ask_service"
 
