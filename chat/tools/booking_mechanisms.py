@@ -588,10 +588,10 @@ async def check_large_party_seating(party_size: int, restaurant_id: str) -> dict
 def format_combo_message(combo: list, party_size: int) -> str:
     lines = "\n".join(f"• Table {t[0]} — {t[2]} of {t[1]} seats" for t in combo)
     return (
-        f"We can seat your party of *{party_size}* across multiple tables:\n\n"
+        f"We can seat *{party_size} guests* across multiple tables:\n\n"
         f"{lines}\n\n"
         f"Would you like to confirm this arrangement?\n\n"
-        f"Or tap *Reserve* to book for a future date, or *Change* to enter a different party size."
+        f"Or tap *Reserve* to book for a future date, or *Change* to enter a different guest count."
     )
 
 
@@ -1678,8 +1678,8 @@ async def _send_web_menu_message(
         body_text = (
             f"📍 {display_name}\n"
             f"{service_icon} {service_label}\n\n"
-            "Tap the button below to browse our full menu with search "
-            "and easy selection. Add items to your cart and submit when ready!"
+            "Tap below to browse our full menu, add items to your cart, "
+            "and place your order."
         )
         if intro and intro.strip():
             body_text = f"{intro.strip()}\n\n{body_text}"
@@ -1690,7 +1690,7 @@ async def _send_web_menu_message(
             body_text=body_text,
             button_text="View Menu",
             url=url,
-            header_text="🍽️ Browse Our Menu",
+            header_text="Browse our menu",
         )
         if cta_sent:
             return True

@@ -71,7 +71,7 @@ async def _offer_reserve_calendar(
         flow_header="📅 Reserve a Table",
         flow_body=(
             f"Hi {customer_name}! Tap below to pick your reservation date and time "
-            f"for your party of {party_size} guests.{window_hint}"
+            f"for {party_size} guests.{window_hint}"
         ),
         booking_step="awaiting_flow_datetime",
         failure_message=(

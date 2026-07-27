@@ -232,8 +232,8 @@ async function autoApproveLargePartyToken(token, restaurantId, combo, tablesByNu
     token,
     restaurantId,
     tableNumbers,
-    `✅ *Your table arrangement has been confirmed.*\n\nToken: *${token.id}*\n`
-    + `Party of: *${token.pax} people*\nTables: *${tableNumbers.join(', ')}*\n\n`
+    `✅ *Your table arrangement has been confirmed.*\n\nQueue number: *${token.id}*\n`
+    + `Guests: *${token.pax}*\nTables: *${tableNumbers.join(', ')}*\n\n`
     + `Please head to the restaurant! 🍽️`,
   );
 

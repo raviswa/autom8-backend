@@ -11,6 +11,7 @@ from agents.customer.booking_helpers import (
     parse_party_size,
     mark_session_visit_complete,
 )
+from locales.customer import reply, session_lang
 
 logger = logging.getLogger(__name__)
 
@@ -23,24 +24,6 @@ def _outlet_label(restaurant: Dict[str, Any] | None) -> str:
     if name and city:
         return f"{name}, {city}"
     return name or "us"
-
-
-def _queue_welcome_message(*, outlet: str, token: str) -> str:
-    return (
-        f"Hey there, welcome to *{outlet}* 🙏\n\n"
-        f"Thanks for checking in! Token: *{token}*\n\n"
-        f"We've received your request — our team will assist you shortly.\n"
-        f"Thank you for your patience 🤗"
-    )
-
-
-def _queue_fallback_message(*, outlet: str) -> str:
-    return (
-        f"Hey there, welcome to *{outlet}* 🙏\n\n"
-        f"Thanks for checking in! We've noted your visit — "
-        f"our team will assist you shortly.\n"
-        f"Thank you for your patience 🤗"
-    )
 
 
 async def handle_token_queue_flow(
@@ -58,12 +41,13 @@ async def handle_token_queue_flow(
     Does not allocate tables, open a cart, or start payment/receipt.
     """
     booking_step = session_state.get("booking_step")
+    lang = session_lang(session_state)
 
     # First entry from service selection — ask party size
     if booking_step != "awaiting_party_size":
         await send_whatsapp_message(
             customer_phone,
-            "How many people in your party?",
+            reply(lang, "party_size_ask_queue"),
             restaurant_id,
         )
         session_state["booking_step"] = "awaiting_party_size"
@@ -77,7 +61,7 @@ async def handle_token_queue_flow(
     except Exception:
         await send_whatsapp_message(
             customer_phone,
-            "Please reply with the number of people (e.g. *2* or *4*).",
+            reply(lang, "party_size_invalid"),
             restaurant_id,
         )
         return {"status": "awaiting_party_size"}
@@ -108,7 +92,7 @@ async def handle_token_queue_flow(
         )
         await send_whatsapp_message(
             customer_phone,
-            _queue_fallback_message(outlet=outlet),
+            reply(lang, "queue_joined_noted", outlet=outlet, n=party_size),
             restaurant_id,
         )
         if manager_phone:
@@ -116,7 +100,7 @@ async def handle_token_queue_flow(
                 manager_phone,
                 f"⚠️ *Queue token sync failed — add manually*\n"
                 f"👤 {customer_name} · {party_size} "
-                f"{'person' if party_size == 1 else 'people'}\n"
+                f"{'guest' if party_size == 1 else 'guests'}\n"
                 f"📱 {customer_phone}",
                 restaurant_id,
             )
@@ -137,7 +121,13 @@ async def handle_token_queue_flow(
 
     await send_whatsapp_message(
         customer_phone,
-        _queue_welcome_message(outlet=outlet, token=display_token),
+        reply(
+            lang,
+            "queue_joined",
+            outlet=outlet,
+            token=display_token,
+            n=party_size,
+        ),
         restaurant_id,
     )
 

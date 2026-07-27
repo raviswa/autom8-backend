@@ -912,8 +912,11 @@ async def send_service_menu(
 
         if service_type == "token_management":
             state["last_service_type"] = "token_management"
+            from locales.customer import reply as _reply, session_lang as _slang
             await send_whatsapp_message(
-                customer_phone, "How many people in your party?", restaurant_id,
+                customer_phone,
+                _reply(_slang(state), "party_size_ask_queue"),
+                restaurant_id,
             )
             state["booking_step"] = "awaiting_party_size"
             return
@@ -925,7 +928,14 @@ async def send_service_menu(
             )
             if not resumed:
                 state["last_service_type"] = "dine_in"
-                await send_whatsapp_message(customer_phone, "How many people are dining today?", restaurant_id)
+                from locales.customer import reply as _reply, session_lang as _slang
+                await send_whatsapp_message(
+                    customer_phone,
+                    _reply(_slang(state), "service_selected_dine_in")
+                    + "\n\n"
+                    + _reply(_slang(state), "party_size_ask_dine_in"),
+                    restaurant_id,
+                )
                 state["booking_step"] = "awaiting_party_size"
             return
 
@@ -956,20 +966,22 @@ async def send_service_menu(
                 )
                 return
             from tools.whatsapp_tools import send_location_request
+            from locales.customer import reply as _reply, session_lang as _slang
+            _lang = _slang(state)
             await send_whatsapp_message(
                 customer_phone,
-                "🚚 *Delivery Order*\nWe need your delivery address.",
+                _reply(_lang, "delivery_need_address"),
                 restaurant_id,
             )
             sent = await send_location_request(
                 customer_phone,
                 restaurant_id,
-                body_text="📍 Please share your delivery location",
+                body_text=_reply(_lang, "delivery_share_location"),
             )
             if not sent:
                 await send_whatsapp_message(
                     customer_phone,
-                    "Please share your location pin or type your full delivery address.",
+                    _reply(_lang, "delivery_share_or_type"),
                     restaurant_id,
                 )
             state["booking_step"] = "awaiting_address"
@@ -978,8 +990,8 @@ async def send_service_menu(
         elif service_type == "reserve_table":
             await send_whatsapp_message(
                 customer_phone,
-                "Great! You've selected *Reserve a Table* (for future booking) 🗓️\n\n"
-                "How many people will be dining?",
+                "Great! You have selected *Reserve a Table* (for a future date).\n\n"
+                "How many guests will be dining?",
                 restaurant_id,
             )
             state["booking_step"] = "awaiting_party_size"
@@ -1362,8 +1374,9 @@ async def handle_awaiting_prepay(
         if recovery["state"] == "kds_retry_failed":
             await send_whatsapp_message(
                 customer_phone,
-                "Your order is confirmed ✅ but the kitchen display didn't update.\n\n"
-                "Please show staff your token at the counter — we're retrying in the background."
+                "Your order is confirmed ✅\n\n"
+                "Please show staff your queue number at the counter — "
+                "we are finishing the handoff to the kitchen."
                 + _HOME_HINT,
                 restaurant_id,
             )

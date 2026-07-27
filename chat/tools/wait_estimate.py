@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import math
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
@@ -19,17 +19,17 @@ MIN_REMAINING_FLOOR = 5
 RANGE_BUFFER = 10
 
 
-def _auto_assign_time_message() -> str:
-    """Mirror the Node auto-assign grace-period configuration."""
+def _auto_assign_wait_window() -> str:
+    """Customer-facing wait window; defaults 1–2 minutes."""
     try:
-        low = max(1, int(os.getenv("DINEIN_AUTO_ASSIGN_MIN_MINUTES", "2")))
+        low = max(1, int(os.getenv("DINEIN_AUTO_ASSIGN_MIN_MINUTES", "1")))
     except (TypeError, ValueError):
-        low = 2
+        low = 1
     try:
-        high = max(low, int(os.getenv("DINEIN_AUTO_ASSIGN_MAX_MINUTES", "4")))
+        high = max(low, int(os.getenv("DINEIN_AUTO_ASSIGN_MAX_MINUTES", "2")))
     except (TypeError, ValueError):
-        high = max(low, 4)
-    return f"{low} minutes" if low == high else f"{low}–{high} minutes"
+        high = max(low, 2)
+    return f"{low} minutes" if low == high else f"{low} to {high} minutes"
 
 
 def _dropout_rate(party_size: int) -> float:
@@ -49,36 +49,46 @@ def format_wait_display(low: int, high: int, estimate_minutes: int) -> str:
     if low < 15:
         return "Less than 15 minutes"
     if low < 30:
-        return "Around 20–30 minutes"
-    return f"Approximately {low}–{high} minutes"
+        return "Around 20 to 30 minutes"
+    return f"Approximately {low} to {high} minutes"
 
 
-def build_dinein_customer_message(party_size: int, token_id: str, estimate: dict[str, Any]) -> str:
+def build_dinein_customer_message(
+    party_size: int,
+    token_id: str,
+    estimate: dict[str, Any],
+    *,
+    lang: str | None = None,
+) -> str:
+    """Warm, translation-safe dine-in check-in copy (no Party of / system logic)."""
+    from locales.customer import reply
+
     pax = max(1, int(party_size or 1))
-    people = f"{pax} {'person' if pax == 1 else 'people'}"
     est_min = int(estimate.get("estimate_minutes", 0))
 
     if est_min == 0:
-        return (
-            f"Your token is *{token_id}* 🎟\n"
-            f"Party of {people}\n"
-            f"A suitable table is available. The manager can assign it now; if they "
-            f"haven't responded, we'll automatically assign it within about "
-            f"*{_auto_assign_time_message()}* and send your table number here."
+        return reply(
+            lang,
+            "table_finding_ready_now",
+            n=pax,
+            token=token_id,
         )
     if est_min < 0:
-        return (
-            f"Party of *{pax}* — we've noted your visit! 🍽️\n\n"
-            f"*Token: {token_id}*\n\n"
-            f"Our team will assist you shortly — please speak with the host. 🙏"
+        return reply(
+            lang,
+            "table_finding_host",
+            n=pax,
+            token=token_id,
         )
     display = estimate.get("display") or format_wait_display(
         estimate.get("low", 0), estimate.get("high", 0), est_min,
     )
-    return (
-        f"Your token is *{token_id}* 🎟\n"
-        f"Party of {people} · *{display}*\n"
-        f"We'll notify you when your table is ready."
+    return reply(
+        lang,
+        "table_finding_with_estimate",
+        n=pax,
+        token=token_id,
+        estimate=display,
     )
 
 

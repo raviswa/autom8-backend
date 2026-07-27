@@ -88,30 +88,30 @@ import aiohttp
 
 
 def _auto_assign_time_message() -> str:
-    """Customer-facing grace period; mirrors Node dineInAutoAssign env defaults."""
+    """Customer-facing wait window; defaults 1–2 minutes (env-overridable)."""
     try:
-        min_minutes = max(1, int(os.getenv("DINEIN_AUTO_ASSIGN_MIN_MINUTES", "2")))
+        min_minutes = max(1, int(os.getenv("DINEIN_AUTO_ASSIGN_MIN_MINUTES", "1")))
     except (TypeError, ValueError):
-        min_minutes = 2
+        min_minutes = 1
     try:
         max_minutes = max(
             min_minutes,
-            int(os.getenv("DINEIN_AUTO_ASSIGN_MAX_MINUTES", "4")),
+            int(os.getenv("DINEIN_AUTO_ASSIGN_MAX_MINUTES", "2")),
         )
     except (TypeError, ValueError):
-        max_minutes = max(min_minutes, 4)
+        max_minutes = max(min_minutes, 2)
 
     if min_minutes == max_minutes:
-        return f"within about *{min_minutes} minutes*"
-    return f"within about *{min_minutes}–{max_minutes} minutes*"
+        return f"within *{min_minutes} minutes*"
+    return f"within *{min_minutes} to {max_minutes} minutes*"
 
 
 def _auto_assign_escalation_minutes() -> int:
     """Allow one scheduler tick beyond the configured maximum before escalation."""
     try:
-        max_minutes = int(os.getenv("DINEIN_AUTO_ASSIGN_MAX_MINUTES", "4"))
+        max_minutes = int(os.getenv("DINEIN_AUTO_ASSIGN_MAX_MINUTES", "2"))
     except (TypeError, ValueError):
-        max_minutes = 4
+        max_minutes = 2
     return max(2, max_minutes + 1)
 
 logger = logging.getLogger(__name__)
@@ -576,9 +576,9 @@ async def _confirm_dine_in_order(
 
     prepay_pending = prepay_fulfillment_required(session_state)
     confirmation = (
-        f"Your order has been placed! 🎉\n"
+        f"Please review your order before confirming.\n"
         f"────────────────────\n"
-        f"Token: {token}\nOrder: {order_text}\n"
+        f"Queue number: {token}\nOrder: {order_text}\n"
         f"────────────────────\n"
         f"Total: ₹{total:.0f}\n\n{payment_line}"
     )
@@ -756,23 +756,30 @@ async def resume_active_dine_in_token(
 
     if status == "pending_approval":
         session_state["booking_step"] = "awaiting_manager_approval"
+        from locales.customer import reply, session_lang
         await send_whatsapp_message(
             customer_phone,
-            f"We're still confirming your table for *{session_state.get('party_size', token.get('pax'))}* "
-            f"guests (Token *{token_id}*). If the manager hasn't responded, we'll "
-            f"automatically confirm an available arrangement {_auto_assign_time_message()}. 🙏",
+            reply(
+                session_lang(session_state),
+                "table_confirming_guests",
+                n=session_state.get("party_size", token.get("pax")),
+                token=token_id,
+                wait_window=_auto_assign_time_message().replace("*", ""),
+            ),
             restaurant_id,
         )
         return {"status": "awaiting_manager_approval"}
 
     if status == "waiting":
         session_state["booking_step"] = "awaiting_table_assignment"
+        from locales.customer import reply, session_lang
         await send_whatsapp_message(
             customer_phone,
-            f"We're still finding your table, {customer_name}! 🍽️\n\n"
-            f"*Token: {token_id}* — we'll message you when it's ready. If the manager "
-            f"hasn't assigned one, we'll automatically assign an available table "
-            f"{_auto_assign_time_message()}.",
+            reply(
+                session_lang(session_state),
+                "table_finding_still",
+                token=token_id,
+            ),
             restaurant_id,
         )
         return {"status": "awaiting_table_assignment"}
@@ -808,7 +815,7 @@ async def handle_dine_in_flow(
                                 f"😔 We're sorry — we currently only have "
                                 f"*{avail} seat{'s' if avail != 1 else ''}* available "
                                 f"across all our tables, which isn't enough for "
-                                f"your party of *{party_size}*.\n\n"
+                                f"*{party_size} guests*.\n\n"
                                 f"We'd love to host you! Would you like to:\n"
                                 f"• *Reserve* a table for a future date\n"
                                 f"• Come with a smaller group today"
@@ -882,8 +889,9 @@ async def handle_dine_in_flow(
                 )
                 await send_whatsapp_message(
                     customer_phone,
-                    f"Thanks, {customer_name}! We've noted your party of *{party_size}*.\n\n"
-                    f"Our team is confirming your table — you'll get a WhatsApp shortly. 🙏",
+                    f"Thanks, {customer_name}! We have noted your visit for "
+                    f"*{party_size} guests*.\n\n"
+                    f"Our team is confirming your table — we will message you shortly. 🙏",
                     restaurant_id,
                 )
                 session_state["booking_step"] = "awaiting_table_assignment"
@@ -900,6 +908,7 @@ async def handle_dine_in_flow(
             est_min = (token_row or {}).get("estimated_wait_minutes")
 
             if token_row and estimate_display is not None and est_min is not None:
+                from locales.customer import session_lang
                 customer_msg = build_dinein_customer_message(
                     party_size,
                     portal_token_id,
@@ -909,14 +918,16 @@ async def handle_dine_in_flow(
                         "low": 0,
                         "high": 0,
                     },
+                    lang=session_lang(session_state),
                 )
             else:
-                customer_msg = (
-                    f"Party of *{party_size}* — perfect! We're finding you a table... 🍽️\n\n"
-                    f"*Token: {portal_token_id}*\n\n"
-                    f"If the manager hasn't assigned one, we'll automatically assign an "
-                    f"available table {_auto_assign_time_message()}.\n"
-                    f"We'll send you our menu on WhatsApp once your table is ready. 🙏"
+                from locales.customer import reply, session_lang
+                customer_msg = reply(
+                    session_lang(session_state),
+                    "table_finding_guests",
+                    n=party_size,
+                    token=portal_token_id,
+                    wait_window=_auto_assign_time_message().replace("*", ""),
                 )
 
             await send_whatsapp_message(customer_phone, customer_msg, restaurant_id)
@@ -945,8 +956,11 @@ async def handle_dine_in_flow(
             session_state.pop("party_size", None)
             session_state.pop("_pending_combo", None)
             session_state["booking_step"] = "awaiting_party_size"
+            from locales.customer import reply, session_lang
             await send_whatsapp_message(
-                customer_phone, "No problem! How many people will be dining today?", restaurant_id
+                customer_phone,
+                reply(session_lang(session_state), "party_size_ask_retry"),
+                restaurant_id,
             )
             return {"status": "awaiting_party_size"}
 
@@ -979,8 +993,8 @@ async def handle_dine_in_flow(
                 )
                 await send_whatsapp_message(
                     customer_phone,
-                    f"Thanks! Your party of *{party_size}* is being confirmed by our team. "
-                    f"We'll message you shortly. 🙏",
+                    f"Thanks! Your request for *{party_size} guests* is being confirmed. "
+                    f"We will message you shortly. 🙏",
                     restaurant_id,
                 )
                 session_state["booking_step"] = "awaiting_manager_approval"
@@ -989,15 +1003,16 @@ async def handle_dine_in_flow(
             session_state["display_token"] = portal_token_id
             session_state["token_number"]  = portal_token_id
 
-            # Manager alert is sent by POST /api/tokens (notify=true).
+            from locales.customer import reply, session_lang
             await send_whatsapp_message(
                 customer_phone,
-                f"✅ Your request for *{party_size} people* has been sent to our manager for approval.\n\n"
-                f"Token: *{portal_token_id}*\n\n"
-                f"If the manager hasn't responded, we'll automatically confirm the "
-                f"available arrangement {_auto_assign_time_message()}.\n"
-                f"If you don't hear back within {_auto_assign_escalation_minutes()} minutes, "
-                f"please speak to our staff directly. 😊",
+                reply(
+                    session_lang(session_state),
+                    "table_confirming_guests",
+                    n=party_size,
+                    token=portal_token_id,
+                    wait_window=_auto_assign_time_message().replace("*", ""),
+                ),
                 restaurant_id,
             )
             session_state["booking_step"] = "awaiting_manager_approval"
@@ -1027,12 +1042,16 @@ async def handle_dine_in_flow(
             tables = session_state.get("assigned_tables") or [session_state.get("table_number")]
             tables_txt = ", ".join(str(t) for t in tables if t)
             token = session_state.get("display_token", "")
+            from locales.customer import reply, session_lang
+            table_part = tables_txt or "?"
             await send_whatsapp_message(
                 customer_phone,
-                f"✅ Great news — your tables are confirmed"
-                + (f" (*{tables_txt}*)" if tables_txt else "")
-                + (f"\nToken: *{token}*" if token else "")
-                + "\n\nBrowse the menu below to place your order 🍽️",
+                reply(
+                    session_lang(session_state),
+                    "table_ready_browse",
+                    token=token or "—",
+                    table=table_part,
+                ),
                 restaurant_id,
             )
             if session_state.get("cart"):
@@ -1044,12 +1063,13 @@ async def handle_dine_in_flow(
             await send_catalog_with_fallback(customer_phone, restaurant_id, session_state)
             return {"status": status_after_booking_menu(session_state)}
 
+        from locales.customer import reply, session_lang
         await send_whatsapp_message(
             customer_phone,
-            "⏳ We're still waiting for manager confirmation on your table arrangement. "
-            f"If it remains available, we'll automatically confirm it "
-            f"{_auto_assign_time_message()}. 😊\n\n"
-            "If it's urgent, please speak to our staff directly."
+            reply(
+                session_lang(session_state),
+                "table_confirming_still",
+            )
             + _HOME_HINT,
             restaurant_id,
         )
@@ -1084,16 +1104,22 @@ async def handle_dine_in_flow(
             if table_assigned:
                 session_state["table_number"] = table_assigned
 
+        from locales.customer import reply, session_lang
+        token = session_state.get("display_token") or session_state.get("token_number") or "—"
         if table_assigned:
             session_state["booking_step"] = "awaiting_order"
+            key = (
+                "table_ready_continue"
+                if session_state.get("_catalog_sent_after_party")
+                else "table_ready_browse"
+            )
             await send_whatsapp_message(
                 customer_phone,
-                f"✅ Your table has been confirmed — *Table {table_assigned}*!\n\n"
-                + (
-                    "You can continue adding items from the menu above, "
-                    "or type *MENU* to reopen it. 🍽️"
-                    if session_state.get("_catalog_sent_after_party")
-                    else "Browse our menu below and place your order 🍽️"
+                reply(
+                    session_lang(session_state),
+                    key,
+                    token=token,
+                    table=table_assigned,
                 ),
                 restaurant_id,
             )
@@ -1104,10 +1130,11 @@ async def handle_dine_in_flow(
         else:
             await send_whatsapp_message(
                 customer_phone,
-                "⏳ We're still assigning your table. You'll receive a WhatsApp message "
-                f"with your table number {_auto_assign_time_message()}. "
-                f"If you've been waiting more than {_auto_assign_escalation_minutes()} minutes, "
-                "please speak to our staff directly. 😊"
+                reply(
+                    session_lang(session_state),
+                    "table_finding_still",
+                    token=token,
+                )
                 + _HOME_HINT,
                 restaurant_id,
             )

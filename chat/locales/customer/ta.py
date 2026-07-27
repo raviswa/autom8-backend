@@ -1,174 +1,159 @@
 REPLIES = {
-    "period_morning": "காலை",
-    "period_afternoon": "மதியம்",
-    "period_evening": "மாலை",
-    "period_night": "இரவு",
-
-    # Conversational greetings (avoid literary "இனிய … வணக்கம்" calques).
-    "greet_good_period": "{period} வணக்கம் 👋",
-    "greet_good_period_named": "{period} வணக்கம், {first} 👋",
-    "welcome_new": "*{display}* க்கு வரவேற்கிறோம் 🙏",
-    "welcome_back": "*{display}* க்கு மீண்டும் வரவேற்கிறோம் 🙏",
-    "welcome_new_named": "வணக்கம் {first}, *{display}* க்கு வரவேற்கிறோம் 🙏",
-    "welcome_back_named": "வணக்கம் {first}, *{display}* க்கு மீண்டும் வரவேற்கிறோம் 🙏",
-    "cuisine_default": "நல்ல உணவு, உங்கள் விருப்பப்படி.",
-    "cuisine_veg": "தினமும் புதிய சைவ உணவு தயார் செய்கிறோம்.",
-    "cuisine_non_veg": "தினமும் புதிய அசைவ உணவு தயார் செய்கிறோம்.",
-    "cuisine_asian": "தினமும் புதிய ஆசிய சுவைகள் தயார் செய்கிறோம்.",
-    "cuisine_continental": "தினமும் புதிய கான்டினென்டல் உணவு தயார் செய்கிறோம்.",
-    "cuisine_fast_food": "தினமும் சூடான, புதிய உணவு தயார் செய்கிறோம்.",
-    "menu_hook_default": "நீங்கள் ஆர்டர் செய்ததும் புதிதாக தயார் செய்கிறோம்.",
-    "menu_hook_veg": "எங்கள் மெனு முழுவதும் முழு சைவம்.",
-    "menu_hook_non_veg": "ஸ்டார்ட்டர் முதல் மெயின் வரை — எல்லாம் புதிதாக.",
-    "menu_hook_asian": "ஒவ்வொரு ஆர்டரும் புதிதாக தயார்.",
-    "menu_hook_continental": "ஆர்டருக்கு ஏற்ப தயார், கவனத்துடன்.",
-    "menu_hook_fast_food": "வேகமாக, புதிதாக, உங்கள் விருப்பப்படி.",
-    "menu_intro_header": "🍽️ *{display}*",
-    "menu_intro_named": "இன்று உள்ளவை இதோ, {first}:\n",
-    "menu_intro_cta": "கீழே உள்ள மெனுவைப் பார்த்து உங்களுக்கு வேண்டியதைத் தேர்ந்தெடுங்கள் — மீதியை நாங்கள் பார்த்துக்கொள்கிறோம்.",
-
-    "lob_psl_hook": "பிட்சா, ஐஸ்கிரீம் மற்றும் மேலும் — அனைவருக்கும் ஏதோ ஒன்று உண்டு.",
-    "lob_food_products_hook": "நாங்கள் கவனத்துடன் புதிய பேக்கரி பொருட்களையும் இனிப்புகளையும் தயார் செய்கிறோம். பாருங்கள்!",
-    "lob_retail_hook": "எங்கள் கேட்டலாகைப் பாருங்கள் — இன்று உங்களுக்கு வேண்டியதைக் கண்டுபிடிக்கலாம்.",
-    "lob_cta_header_order": "ஆர்டர் செய்யுங்கள்",
-    "lob_cta_header_shop": "வாங்கத் தொடங்குங்கள்",
-    "lob_cta_button_order": "மெனு திறக்க",
-    "lob_cta_button_shop": "கேட்டலாக் திறக்க",
-
-    "welcome_returning_named": "வணக்கம் {first}! *{display}* க்கு மீண்டும் வரவேற்கிறோம் {icon}",
-    "welcome_named": "வணக்கம் {first}! *{display}* க்கு வரவேற்கிறோம் {icon}",
-    "welcome_anon": "வணக்கம்! *{display}* க்கு வரவேற்கிறோம் {icon}",
-    "welcome_browse_cta": (
-        "கீழே உள்ள மெனுவைத் திறந்து உங்களுக்கு வேண்டியதைத் தேர்ந்தெடுத்து, "
-        "பாதுகாப்பாக ஆன்லைனில் பணம் செலுத்துங்கள்."
+    'period_morning': 'காலை',
+    'period_afternoon': 'மதியம்',
+    'period_evening': 'மாலை',
+    'period_night': 'இரவு',
+    'greet_good_period': '{period} வணக்கம் 👋',
+    'greet_good_period_named': '{period} வணக்கம், {first} 👋',
+    'welcome_new': '*{display}* க்கு வரவேற்கிறோம் 🙏',
+    'welcome_back': '*{display}* க்கு மீண்டும் வரவேற்கிறோம் 🙏',
+    'welcome_new_named': 'வணக்கம் {first}, *{display}* க்கு வரவேற்கிறோம் 🙏',
+    'welcome_back_named': 'வணக்கம் {first}, *{display}* க்கு மீண்டும் வரவேற்கிறோம் 🙏',
+    'cuisine_default': 'சிறந்த உணவு, உங்களுக்காக.',
+    'cuisine_veg': 'தினமும் புதிய சைவ உணவு தயார் செய்கிறோம்.',
+    'cuisine_non_veg': 'தினமும் புதிய அசைவ உணவு தயார் செய்கிறோம்.',
+    'cuisine_asian': 'தினமும் புதிய ஆசிய சுவைகள் தயார் செய்கிறோம்.',
+    'cuisine_continental': 'தினமும் புதிய கான்டினென்டல் உணவு தயார் செய்கிறோம்.',
+    'cuisine_fast_food': 'தினமும் சூடான, புதிய உணவு தயார் செய்கிறோம்.',
+    'menu_hook_default': 'நீங்கள் ஆர்டர் செய்ததும் புதிதாக தயார் செய்கிறோம்.',
+    'menu_hook_veg': 'எங்கள் மெனு முழுவதும் முழு சைவம்.',
+    'menu_hook_non_veg': 'ஸ்டார்ட்டர் முதல் மெயின் வரை — எல்லாம் புதிதாக.',
+    'menu_hook_asian': 'ஒவ்வொரு ஆர்டரும் புதிதாக தயார்.',
+    'menu_hook_continental': 'ஆர்டருக்கு ஏற்ப தயார், கவனத்துடன்.',
+    'menu_hook_fast_food': 'வேகமாக, புதிதாக, உங்கள் விருப்பப்படி.',
+    'menu_intro_header': '🍽️ *{display}*',
+    'menu_intro_named': 'இன்று உள்ளவை இதோ, {first}:\n',
+    'menu_intro_cta': 'கீழே உள்ள மெனுவைப் பார்த்து உங்களுக்கு வேண்டியதைத் தேர்ந்தெடுங்கள் — மீதியை நாங்கள் பார்த்துக்கொள்கிறோம்.',
+    'lob_psl_hook': 'பிட்சா, ஐஸ்கிரீம் மற்றும் மேலும் — அனைவருக்கும் ஏதோ ஒன்று உண்டு.',
+    'lob_food_products_hook': 'நாங்கள் கவனத்துடன் புதிய பேக்கரி பொருட்களையும் இனிப்புகளையும் தயார் செய்கிறோம். பாருங்கள்!',
+    'lob_retail_hook': 'எங்கள் கேட்டலாகைப் பாருங்கள் — இன்று உங்களுக்கு வேண்டியதைக் கண்டுபிடிக்கலாம்.',
+    'lob_cta_header_order': 'ஆர்டர் செய்யுங்கள்',
+    'lob_cta_header_shop': 'வாங்கத் தொடங்குங்கள்',
+    'lob_cta_button_order': 'மெனு திறக்க',
+    'lob_cta_button_shop': 'கேட்டலாக் திறக்க',
+    'welcome_returning_named': 'வணக்கம் {first}! *{display}* க்கு மீண்டும் வரவேற்கிறோம் {icon}',
+    'welcome_named': 'வணக்கம் {first}! *{display}* க்கு வரவேற்கிறோம் {icon}',
+    'welcome_anon': 'வணக்கம்! *{display}* க்கு வரவேற்கிறோம் {icon}',
+    'welcome_browse_cta': 'கீழே உள்ள மெனுவைத் திறந்து உங்களுக்கு வேண்டியதைத் தேர்ந்தெடுத்து, பாதுகாப்பாக ஆன்லைனில் பணம் செலுத்துங்கள்.',
+    'welcome_fulfillment_hint': 'ஆர்டர் முடிக்கும்போது கடையில் எடுத்துச் செல்லலாம் அல்லது வீட்டுக்கு அனுப்பச் சொல்லலாம்.',
+    'welcome_repeat_hint': 'முன்பு ஆர்டர் செய்திருக்கிறீர்களா? அதே பொருட்களை மீண்டும் ஆர்டர் செய்ய எப்போதும் *REPEAT* என்று பதிலளிக்கவும்.',
+    'menu_link_failed': 'மன்னிக்கவும், இப்போது மெனுவைத் திறக்க முடியவில்லை. சிறிது நேரம் கழித்து மீண்டும் முயற்சிக்கவும். 🙏',
+    'repeat_unavailable': '*{display}* இல் உங்களுக்கான முந்தைய ஆர்டரைக் கண்டுபிடிக்க முடியவில்லை. 🙏\n\nநாங்கள் அனுப்பும் மெனு இணைப்பைத் தட்டவும், அல்லது தொடங்க *Hi* என்று பதிலளிக்கவும்.',
+    'repeat_confirm': (
+        'உறுதிப்படுத்தும் முன் உங்கள் மீண்டும் ஆர்டரை மீண்டும் பாருங்கள்.\n\n'
+        'ஆர்டர் எண்: {order_ref}\n'
+        'வரிசை எண்: {token_label}\n'
+        'மொத்தம்: ₹{total:.0f}\n\n'
+        '{order_preview}\n\n'
+        'பாதுகாப்பாக பணம் செலுத்த Confirm and Pay ஐத் தட்டவும்.'
     ),
-    "welcome_fulfillment_hint": (
-        "ஆர்டர் முடிக்கும்போது கடையில் எடுத்துச் செல்லலாம் அல்லது வீட்டுக்கு அனுப்பச் சொல்லலாம்."
-    ),
-    "welcome_repeat_hint": (
-        "முன்பு ஆர்டர் செய்திருக்கிறீர்களா? அதே பொருட்களை மீண்டும் ஆர்டர் செய்ய "
-        "எப்போதும் *REPEAT* என்று பதிலளிக்கவும்."
-    ),
-    "menu_link_failed": (
-        "மன்னிக்கவும், இப்போது மெனுவைத் திறக்க முடியவில்லை. சிறிது நேரம் கழித்து மீண்டும் முயற்சிக்கவும். 🙏"
-    ),
-    "repeat_unavailable": (
-        "*{display}* இல் உங்களுக்கான முந்தைய ஆர்டரைக் கண்டுபிடிக்க முடியவில்லை. 🙏\n\n"
-        "நாங்கள் அனுப்பும் மெனு இணைப்பைத் தட்டவும், அல்லது தொடங்க *Hi* என்று பதிலளிக்கவும்."
-    ),
-    "repeat_confirm": (
-        "உங்கள் மீண்டும் ஆர்டர் பணம் செலுத்த தயாராக உள்ளது.\n\n"
-        "ஆர்டர் எண்: {order_ref}\n"
-        "டோக்கன்: {token_label}\n"
-        "மொத்தம்: INR {total:.0f}\n\n"
-        "{order_preview}\n\n"
-        "{gateway_label} மூலம் பாதுகாப்பாக பணம் செலுத்த Confirm & Pay ஐத் தட்டவும்."
-    ),
-    "short_redirect": (
-        "நாங்கள் அனுப்பிய மெனு இணைப்பில் பார்த்து பணம் செலுத்துங்கள். புதிய இணைப்பு வேண்டுமா? *Hi* என்று பதிலளிக்கவும்."
-    ),
-    "short_redirect_repeat": (
-        "நாங்கள் அனுப்பிய மெனு இணைப்பில் பார்த்து பணம் செலுத்துங்கள். புதிய இணைப்பு வேண்டுமா? *Hi* என்று பதிலளிக்கவும்.\n"
-        "அதே பொருட்களை மீண்டும் ஆர்டர் செய்ய *REPEAT* என்று பதிலளிக்கவும்."
-    ),
-
-    "webcart_confirm_header": "ஆர்டரை உறுதிப்படுத்துங்கள்",
-    "webcart_confirm_body": (
-        "உங்கள் ஆர்டர் பணம் செலுத்த தயாராக உள்ளது.\n\n"
-        "ஆர்டர் எண்: {order_ref}\n"
-        "டோக்கன்: {token_label}\n"
-        "மொத்தம்: INR {total:.0f}\n\n"
-        "{order_preview}\n\n"
-        "{gateway_label} மூலம் பாதுகாப்பாக பணம் செலுத்த Confirm & Pay ஐத் தட்டவும்."
-    ),
-    "webcart_confirm_button": "Confirm & Pay",
-    "webcart_confirm_footer": "{gateway_label} மூலம் பாதுகாப்பான பணம் செலுத்துதல்",
-    "webcart_confirm_fallback": (
-        "உங்கள் ஆர்டர் பணம் செலுத்த தயாராக உள்ளது.\n"
-        "ஆர்டர் எண்: {order_ref}\n"
-        "மொத்தம்: INR {total:.0f}\n\n"
-        "Confirm & Pay:\n"
-        "{payment_link}"
-    ),
-    "webcart_confirm_more_items": "- +{count} மேலும் உருப்படி(கள்)",
-
-    "prepay_reminder_body": (
-        "வணக்கம் {name}! 👋\n\n"
-        "உங்கள் {service_label} ஆர்டர் இன்னும் பணம் செலுத்த காத்திருக்கிறது.\n\n"
-        "{gateway_label} மூலம் பாதுகாப்பாக பணம் செலுத்த Confirm & Pay ஐத் தட்டவும்.\n\n"
-        "உங்கள் நிலுவை ஆர்டர் குறித்து ஒரு சிறிய நினைவூட்டல். "
-        "பேமெண்ட் இணைப்பு காலாவதியானால் கவலை வேண்டாம் — *Home* (அல்லது *Hi*) என்று பதிலளித்தால் "
-        "புதிய ஆர்டரை அமைத்துத் தருகிறோம்."
-    ),
-    "prepay_reminder_fallback": (
-        "வணக்கம் {name}! 👋\n\n"
-        "உங்கள் {service_label} ஆர்டர் இன்னும் பணம் செலுத்த காத்திருக்கிறது."
-        "{pay_line}\n\n"
-        "உங்கள் நிலுவை ஆர்டர் குறித்து ஒரு சிறிய நினைவூட்டல். "
-        "பேமெண்ட் இணைப்பு காலாவதியானால் கவலை வேண்டாம் — *Home* (அல்லது *Hi*) என்று பதிலளித்தால் "
-        "புதிய ஆர்டரை அமைத்துத் தருகிறோம்."
-    ),
-    "prepay_reminder_header": "பணம் செலுத்த நிலுவை",
-    "prepay_reminder_button": "Confirm & Pay",
-    "prepay_reminder_footer": "{gateway_label} மூலம் பாதுகாப்பான பணம் செலுத்துதல்",
-    "webcart_footer": "எங்கள் ஆன்லைன் மெனுவில் பாதுகாப்பாக பணம் செலுத்துங்கள்",
-
-    "abandoned_cart_body": (
-        "வணக்கம் {name}! 👋\n\n"
-        "*{store_name}* இல் உங்கள் கார்ட்டில் உருப்படிகள் உள்ளன. "
-        "தயார் ஆனதும் ஆர்டரை முடிக்க கீழே தட்டவும்."
-    ),
-    "abandoned_cart_header": "உங்கள் கார்ட் காத்திருக்கிறது",
-    "abandoned_cart_button": "ஆர்டர் தொடரவும்",
-    "abandoned_cart_footer": "ஒரே நினைவூட்டல் — மீண்டும் செய்தி அனுப்ப மாட்டோம்.",
-"identity_welcome_confirm": "வணக்கம்! நீங்கள் *{name}* தானா?",
-    "identity_ask_name": "வணக்கம்! உங்கள் பெயர் என்ன?",
-    "identity_type_name": "சரி! உங்கள் பெயரைத் தட்டச்சு செய்யுங்கள்:",
-    "identity_missed_confirm": "உங்களை நினைத்தோம்! 😊 உங்கள் பெயர் இன்னும் *{name}* தானா?",
-    "identity_type_correct_name": "சரி! சரியான பெயரைத் தட்டச்சு செய்யுங்கள்:",
-    "identity_btn_yes": "✅ ஆம், நான் தான்",
-    "identity_btn_edit": "✏️ பெயர் உள்ளிட",
-    "identity_btn_diff": "✏️ வேறு பெயர்",
-
-    # Post-payment confirmation + receipt
-    "payment_received": 'பணம் பெறப்பட்டது! ✅',
-    "token_line": 'டோக்கன்: {token}',
-    "receipt_message": '🧾 *உங்கள் ரசீது — டோக்கன் {token}*\n\n{url}\n\n⏰ _இந்த இணைப்பு 48 மணி நேரத்தில் காலாவதியாகும். தேவைப்பட்டால் ஒரு நகலை சேமிக்கவும்._',
-    "totals_items": 'பொருட்கள்: ₹{amount}',
-    "totals_packaging": 'பார்சல்/பேக்கிங்: ₹{amount}',
-    "totals_delivery": 'டெலிவரி: ₹{amount}',
-    "totals_total_plain": '*மொத்தம்: ₹{amount}*',
-    "totals_total_incl": '*மொத்தம்: ₹{amount}* ({parts} சேர்த்து)',
-    "totals_part_packaging": '₹{amount} பேக்கிங்',
-    "totals_part_delivery": '₹{amount} டெலிவரி',
-    "confirmed_delivery_deferred": 'உங்கள் டெலிவரி ஆர்டர் உறுதியானது.',
-    "confirmed_takeaway_deferred": 'உங்கள் டேக்அவே ஆர்டர் உறுதியானது.',
-    "confirmed_generic_deferred": 'உங்கள் ஆர்டர் உறுதியானது.',
-    "confirmed_delivery_dispatch": 'உங்கள் டெலிவரி ஆர்டர் உறுதியானது — அனுப்புவதற்கு தயார் செய்கிறோம்.',
-    "confirmed_takeaway_pickup_prep": 'உங்கள் ஆர்டர் உறுதியானது — பிக்அப்புக்கு தயார் செய்கிறோம்.',
-    "confirmed_generic_prep": 'உங்கள் ஆர்டர் உறுதியானது — இப்போது தயார் செய்கிறோம்.',
-    "confirmed_kitchen_delivery": 'உங்கள் டெலிவரி ஆர்டர் உறுதியானது — சமையலறைக்கு அனுப்பப்பட்டது.',
-    "confirmed_kitchen_takeaway": 'உங்கள் டேக்அவே ஆர்டர் உறுதியானது — சமையலறைக்கு அனுப்பப்பட்டது.',
-    "confirmed_kitchen_dinein": 'உங்கள் ஆர்டர் உறுதியானது — சமையலறைக்கு அனுப்பப்பட்டது. நன்றாக சாப்பிடுங்கள்! 🍽️',
-    "confirmed_kitchen_generic": 'உங்கள் ஆர்டர் உறுதியானது — சமையலறைக்கு அனுப்பப்பட்டது.',
-    "confirmed_scheduled_takeaway": 'உங்கள் திட்டமிட்ட டேக்அவே *{slot}* க்கு உறுதியானது.',
-    "confirmed_scheduled_delivery": 'உங்கள் திட்டமிட்ட டெலிவரி *{slot}* க்கு உறுதியானது.',
-    "totals_gst": 'GST ({rate}%): ₹{amount}',
-
-    # Customer-facing service labels (display only)
-    "svc_takeaway": 'டேக்அவே',
-    "svc_delivery": 'டெலிவரி',
-    "svc_dine_in": 'டைன்-இன்',
-    "svc_scheduled_takeaway": 'திட்டமிட்ட டேக்அவே',
-    "svc_scheduled_delivery": 'திட்டமிட்ட டெலிவரி',
-    "svc_scheduled_pickup": 'திட்டமிட்ட பிக்அப்',
-    "svc_order": 'ஆர்டர்',
-
-    # Service picker chrome
-    "service_menu_help": 'இன்று எப்படி உதவலாம்?',
-    "service_menu_footer": 'ஆர்டர் செய்ய கீழே தட்டவும்',
-    "service_menu_button": 'சேவை தேர்வு',
-    "service_menu_ready_takeaway": 'உங்கள் டேக்அவே ஆர்டர் *{token}* தயார் — கவுண்டரில் எடுத்துக்கொள்ளுங்கள்.',
-    "service_card_select": 'தேர்வு',
-    "service_choice_unclear": 'மன்னிக்கவும், புரியவில்லை. மேலே உள்ள விருப்பங்களில் ஒன்றைத் தட்டவும்.',
+    'short_redirect': 'நாங்கள் அனுப்பிய மெனு இணைப்பில் பார்த்து பணம் செலுத்துங்கள். புதிய இணைப்பு வேண்டுமா? *Hi* என்று பதிலளிக்கவும்.',
+    'short_redirect_repeat': 'நாங்கள் அனுப்பிய மெனு இணைப்பில் பார்த்து பணம் செலுத்துங்கள். புதிய இணைப்பு வேண்டுமா? *Hi* என்று பதிலளிக்கவும்.\nஅதே பொருட்களை மீண்டும் ஆர்டர் செய்ய *REPEAT* என்று பதிலளிக்கவும்.',
+    'webcart_confirm_header': 'ஆர்டரை மீண்டும் பாருங்கள்',
+    'webcart_confirm_body': 'உறுதிப்படுத்தும் முன் உங்கள் ஆர்டரை மீண்டும் பாருங்கள்.\n\nஆர்டர் எண்: {order_ref}\nவரிசை எண்: {token_label}\nமொத்தம்: ₹{total:.0f}\n\nஆர்டர் செய்தவை:\n{order_preview}\n\nபாதுகாப்பாக பணம் செலுத்த Confirm and Pay ஐத் தட்டவும்.',
+    'webcart_confirm_button': 'Confirm and Pay',
+    'webcart_confirm_footer': '{gateway_label} மூலம் பாதுகாப்பான பணம் செலுத்துதல்',
+    'webcart_confirm_fallback': 'உங்கள் ஆர்டர் பணம் செலுத்த தயாராக உள்ளது.\nஆர்டர் எண்: {order_ref}\nமொத்தம்: INR {total:.0f}\n\nConfirm & Pay:\n{payment_link}',
+    'webcart_confirm_more_items': '- +{count} மேலும் உருப்படி(கள்)',
+    'payment_final_note': 'பணம் செலுத்திய பின் இந்த ஆர்டரை மாற்ற முடியாது.',
+    'pay_cta_label': 'Tap to pay and confirm your order:',
+    'prepay_reminder_body': 'வணக்கம் {name}! 👋\n\nஉங்கள் {service_label} ஆர்டர் இன்னும் பணம் செலுத்த காத்திருக்கிறது.\n\n{gateway_label} மூலம் பாதுகாப்பாக பணம் செலுத்த Confirm & Pay ஐத் தட்டவும்.\n\nஉங்கள் நிலுவை ஆர்டர் குறித்து ஒரு சிறிய நினைவூட்டல். பேமெண்ட் இணைப்பு காலாவதியானால் கவலை வேண்டாம் — *Home* (அல்லது *Hi*) என்று பதிலளித்தால் புதிய ஆர்டரை அமைத்துத் தருகிறோம்.',
+    'prepay_reminder_fallback': 'வணக்கம் {name}! 👋\n\nஉங்கள் {service_label} ஆர்டர் இன்னும் பணம் செலுத்த காத்திருக்கிறது.{pay_line}\n\nஉங்கள் நிலுவை ஆர்டர் குறித்து ஒரு சிறிய நினைவூட்டல். பேமெண்ட் இணைப்பு காலாவதியானால் கவலை வேண்டாம் — *Home* (அல்லது *Hi*) என்று பதிலளித்தால் புதிய ஆர்டரை அமைத்துத் தருகிறோம்.',
+    'prepay_reminder_header': 'பணம் செலுத்த நிலுவை',
+    'prepay_reminder_button': 'Confirm & Pay',
+    'prepay_reminder_footer': '{gateway_label} மூலம் பாதுகாப்பான பணம் செலுத்துதல்',
+    'webcart_footer': 'எங்கள் ஆன்லைன் மெனுவில் பாதுகாப்பாக பணம் செலுத்துங்கள்',
+    'abandoned_cart_body': 'வணக்கம் {name}! 👋\n\n*{store_name}* இல் உங்கள் கார்ட்டில் உருப்படிகள் உள்ளன. தயார் ஆனதும் ஆர்டரை முடிக்க கீழே தட்டவும்.',
+    'abandoned_cart_header': 'உங்கள் கார்ட் காத்திருக்கிறது',
+    'abandoned_cart_button': 'ஆர்டர் தொடரவும்',
+    'abandoned_cart_footer': 'ஒரே நினைவூட்டல் — மீண்டும் செய்தி அனுப்ப மாட்டோம்.',
+    'service_menu_help': 'இன்று எப்படி உதவலாம்?',
+    'service_menu_footer': 'ஆர்டர் செய்ய கீழே தட்டவும்',
+    'service_menu_button': 'சேவை தேர்வு',
+    'service_menu_ready_takeaway': 'உங்கள் டேக்அவே ஆர்டர் *{token}* தயார் — கவுண்டரில் எடுத்துக்கொள்ளுங்கள்.',
+    'service_card_select': 'தேர்வு',
+    'service_choice_unclear': 'மன்னிக்கவும், புரியவில்லை. மேலே உள்ள விருப்பங்களில் ஒன்றைத் தட்டவும்.',
+    'svc_takeaway': 'டேக்அவே',
+    'svc_delivery': 'டெலிவரி',
+    'svc_dine_in': 'டைன்-இன்',
+    'svc_scheduled_takeaway': 'திட்டமிட்ட டேக்அவே',
+    'svc_scheduled_delivery': 'திட்டமிட்ட டெலிவரி',
+    'svc_scheduled_pickup': 'திட்டமிட்ட பிக்அப்',
+    'svc_order': 'ஆர்டர்',
+    'payment_received': 'பணம் பெறப்பட்டது. ✅',
+    'token_line': 'வரிசை எண்: {token}',
+    'receipt_message': 'உங்கள் ரசீது — வரிசை எண் {token}\n\n{url}\n\nஇந்த இணைப்பு 48 மணி நேரத்தில் காலாவதியாகும். தேவைப்பட்டால் சேமித்து வைக்கவும்.',
+    'prepay_footer_kitchen': '_பணம் பெற்ற பிறகு உங்கள் ஆர்டர் சமையலறைக்கு அனுப்பப்படும்._',
+    'prepay_footer_shipped': '_பணம் பெற்ற பிறகு உங்கள் ஆர்டர் தயாரிக்கப்படும்._',
+    'totals_items': 'பொருட்கள்: ₹{amount}',
+    'totals_packaging': 'பார்சல்/பேக்கிங்: ₹{amount}',
+    'totals_delivery': 'டெலிவரி: ₹{amount}',
+    'totals_gst': 'GST ({rate}%): ₹{amount}',
+    'totals_total_plain': '*மொத்தம்: ₹{amount}*',
+    'totals_total_incl': '*மொத்தம்: ₹{amount}* ({parts} சேர்த்து)',
+    'totals_part_packaging': '₹{amount} பேக்கிங்',
+    'totals_part_delivery': '₹{amount} டெலிவரி',
+    'confirmed_delivery_deferred': 'உங்கள் டெலிவரி ஆர்டர் உறுதியானது.',
+    'confirmed_takeaway_deferred': 'உங்கள் டேக்அவே ஆர்டர் உறுதியானது.',
+    'confirmed_generic_deferred': 'உங்கள் ஆர்டர் உறுதியானது.',
+    'confirmed_delivery_dispatch': 'உங்கள் டெலிவரி ஆர்டர் உறுதியானது — அனுப்புவதற்கு தயார் செய்கிறோம்.',
+    'confirmed_takeaway_pickup_prep': 'உங்கள் ஆர்டர் உறுதியானது — பிக்அப்புக்கு தயார் செய்கிறோம்.',
+    'confirmed_generic_prep': 'உங்கள் ஆர்டர் உறுதியானது — இப்போது தயார் செய்கிறோம்.',
+    'confirmed_kitchen_delivery': 'உங்கள் டெலிவரி ஆர்டர் உறுதியானது — சமையலறைக்கு அனுப்பப்பட்டது.',
+    'confirmed_kitchen_takeaway': 'உங்கள் டேக்அவே ஆர்டர் உறுதியானது — சமையலறைக்கு அனுப்பப்பட்டது.',
+    'confirmed_kitchen_dinein': 'உங்கள் ஆர்டர் உறுதிப்படுத்தப்பட்டு சமையலறைக்கு அனுப்பப்பட்டது.\nஉணவை அனுபவியுங்கள்! 🍽️',
+    'confirmed_kitchen_generic': 'உங்கள் ஆர்டர் உறுதியானது — சமையலறைக்கு அனுப்பப்பட்டது.',
+    'confirmed_scheduled_takeaway': 'உங்கள் திட்டமிட்ட டேக்அவே *{slot}* க்கு உறுதியானது.',
+    'confirmed_scheduled_delivery': 'உங்கள் திட்டமிட்ட டெலிவரி *{slot}* க்கு உறுதியானது.',
+    'confirmed_help_delivery': 'Your delivery order is confirmed. We are preparing it for dispatch. Please message us if you need help.',
+    'confirmed_help_generic': 'Your order is confirmed. We are preparing it now. Please message us if you need help.',
+    'service_selected_dine_in': 'நன்று! நீங்கள் டைன்-இன் தேர்வு செய்துள்ளீர்கள்.',
+    'party_size_ask_dine_in': 'இன்று எத்தனை விருந்தினர்கள் உணவு அருந்துகிறீர்கள்?',
+    'party_size_ask_retry': 'பரவாயில்லை! இன்று எத்தனை விருந்தினர்கள் உணவு அருந்துவீர்கள்?',
+    'party_size_ask_queue': 'உங்கள் குழுவில் எத்தனை விருந்தினர்கள்?',
+    'party_size_invalid': 'விருந்தினர்களின் எண்ணிக்கையை அனுப்புங்கள் (எ.கா. *2* அல்லது *4*).',
+    'party_size_invalid_short': 'Please enter a valid number of guests (e.g. 2).',
+    'table_finding_guests': 'நன்றி! {n} விருந்தினர்களுக்கு மேசை தேடுகிறோம். 🙏\n\nஉங்கள் வரிசை எண்: {token}\n\nமேசை விவரங்களை {wait_window} அனுப்புவோம்.',
+    'table_finding_with_estimate': 'நன்றி! {n} விருந்தினர்களுக்கு மேசை தேடுகிறோம். 🙏\n\nஉங்கள் வரிசை எண்: {token}\nமதிப்பிட்ட காத்திருப்பு: {estimate}\n\nமேசை தயாரானதும் செய்தி அனுப்புவோம்.',
+    'table_finding_ready_now': 'நன்றி! {n} விருந்தினர்களுக்கு மேசை உள்ளது. 🙏\n\nஉங்கள் வரிசை எண்: {token}\n\nவரவேற்புக்கு வாருங்கள் — எங்கள் குழு உங்களை அமர வைக்கும்.',
+    'table_finding_host': 'நன்றி! {n} விருந்தினர்களுக்கான வருகையை பதிவு செய்துள்ளோம். 🙏\n\nஉங்கள் வரிசை எண்: {token}\n\nவரவேற்பாளரிடம் பேசுங்கள். எங்கள் குழு விரைவில் உதவியளிக்கும்.',
+    'table_finding_still': 'காத்திருப்பதற்கு நன்றி. 🙏\n\nஇன்னும் உங்கள் மேசையைத் தேடுகிறோம்.\nவரிசை எண்: {token}\n\nதயாரானதும் செய்தி அனுப்புவோம்.',
+    'table_ready_customer': 'உங்கள் மேசை தயார்! ✅\n\nவரிசை எண்: {token}\nமேசை: மேசை {table}\n\nதயவுசெய்து உங்கள் மேசைக்குச் செல்லுங்கள். உங்களுக்கு சேவை செய்ய ஆவலாக உள்ளோம்.',
+    'table_ready_browse': 'உங்கள் மேசை தயார்! ✅\n\nவரிசை எண்: {token}\nமேசை: மேசை {table}\n\nகீழே உள்ள மெனுவைப் பார்த்து ஆர்டர் செய்யுங்கள். 🍽️',
+    'table_ready_continue': 'உங்கள் மேசை தயார்! ✅\n\nமேசை: மேசை {table}\n\nமேலே உள்ள மெனுவில் தொடர்ந்து சேர்க்கலாம், அல்லது மீண்டும் திறக்க *MENU* என்று தட்டச்சு செய்யுங்கள். 🍽️',
+    'table_cancelled': 'Your queue number {token} has been cancelled.\n\nReply *Home* anytime to start a new booking.',
+    'table_cancelled_generic': 'Your table request has been cancelled.\nReply *Home* anytime to start a new booking.',
+    'table_confirming_guests': 'நன்றி! {n} விருந்தினர்களுக்கு மேசையை உறுதிப்படுத்துகிறோம். 🙏\n\nவரிசை எண்: {token}\n\nமேசை விவரங்களை {wait_window} அனுப்புவோம்.',
+    'table_confirming_still': 'காத்திருப்பதற்கு நன்றி. இன்னும் உங்கள் மேசையை உறுதிப்படுத்துகிறோம். 🙏\n\nதயாரானதும் செய்தி அனுப்புவோம்.',
+    'menu_cta_dine_in_body': '📍 {display}\n🍽️ Dine-in\n\nTap below to browse our full menu, add items to your cart, and place your order.',
+    'menu_cta_header': 'Browse our menu',
+    'menu_cta_button': 'View Menu',
+    'delivery_need_address': '🚚 *டெலிவரி ஆர்டர்*\n\nஉங்கள் டெலிவரி முகவரி தேவை.',
+    'delivery_share_location': '📍 தயவுசெய்து உங்கள் டெலிவரி இருப்பிடத்தைப் பகிரவும்',
+    'delivery_share_or_type': 'இருப்பிட பின்னைப் பகிரவும், அல்லது முழு டெலிவரி முகவரியைத் தட்டச்சு செய்யவும்.',
+    'delivery_type_address': 'Please type your full delivery address (house no., street, area, city, pincode).',
+    'delivery_confirm_address_header': 'Confirm your delivery address',
+    'delivery_found_addresses': 'We found these addresses near your location. Please choose one.',
+    'delivery_thank_browse': "Thank you! Browse today's menu below.",
+    'schedule_pick_pickup': 'Hi {name}! Tap below to choose your pickup date and time.',
+    'schedule_pick_delivery': 'Hi {name}! Tap below to choose your delivery date and time.',
+    'schedule_slot_pickup': 'Got it — we will have your order ready for pickup on *{when}*.',
+    'schedule_slot_delivery': 'Got it — we will deliver on *{when}*.',
+    'schedule_confirming_time': 'உங்கள் விருப்ப நேரத்தை உறுதிப்படுத்துகிறோம்.\nபணம் செலுத்தலாம் என செய்தி அனுப்புவோம்.',
+    'schedule_waiting_confirm': '⏳ We are confirming your preferred time.\nWe will message you shortly.',
+    'eta_ready_mins': '⏱ Usually ready in {range} minutes.',
+    'eta_deliver_mins': '⏱ Usually delivered in {lo} to {hi} minutes.',
+    'takeaway_ready': '✅ *Your takeaway order is ready!*\n\nQueue number: *{token}*\nOrder: *{order}*\n\nPlease pick up at the counter. Show your receipt QR when you collect.',
+    'delivery_ready': '✅ *Your delivery order is ready!*\n\n{token_line}Order: *{order}*\n\nYour order is packed and on its way to you shortly. 🛵',
+    'order_ready_dine_in': '✅ *Your order is ready!*\n\nOrder: *{order}*\n{table_line}\nYour food will be served at your table shortly. Enjoy! 🍽️',
+    'queue_joined': '*{outlet}* இல் வரிசையில் சேர்ந்துள்ளீர்கள். 🙏\n\nவரிசை எண்: {token}\nவிருந்தினர்கள்: {n}\n\nஉதவத் தயாரானதும் செய்தி அனுப்புவோம்.\nபொறுமைக்கு நன்றி.',
+    'queue_joined_noted': '*{outlet}* இல் வரிசையில் சேர்ந்துள்ளீர்கள். 🙏\n\nவிருந்தினர்கள்: {n}\n\nஉங்கள் வருகையை பதிவு செய்துள்ளோம். எங்கள் குழு விரைவில் உதவியளிக்கும்.\nபொறுமைக்கு நன்றி.',
+    'identity_welcome_confirm': 'வணக்கம்! நீங்கள் *{name}* தானா?',
+    'identity_ask_name': 'வணக்கம்! உங்கள் பெயர் என்ன?',
+    'identity_type_name': 'சரி! உங்கள் பெயரைத் தட்டச்சு செய்யுங்கள்:',
+    'identity_missed_confirm': 'உங்களை நினைத்தோம்! 😊 உங்கள் பெயர் இன்னும் *{name}* தானா?',
+    'identity_type_correct_name': 'சரி! சரியான பெயரைத் தட்டச்சு செய்யுங்கள்:',
+    'identity_btn_yes': '✅ ஆம், நான் தான்',
+    'identity_btn_edit': '✏️ பெயர் உள்ளிட',
+    'identity_btn_diff': '✏️ வேறு பெயர்',
 }

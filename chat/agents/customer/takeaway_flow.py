@@ -104,8 +104,8 @@ from tools.delivery_slots import build_flow_calendar_data, format_schedule_windo
 logger = logging.getLogger(__name__)
 
 _MANAGER_APPROVAL_NOTE = (
-    "\n\n📋 *Scheduled take-away needs manager approval before payment.* "
-    "We'll message you once your slot is confirmed."
+    "\n\nWe are confirming your preferred time. "
+    "We will message you when you can pay."
 )
 
 
@@ -586,8 +586,8 @@ async def _submit_scheduled_takeaway_for_approval(
     if session_state.get("kitchen_start_at_label"):
         confirmation += f"\n👨‍🍳 Kitchen start: *{session_state['kitchen_start_at_label']}*"
     confirmation += (
-        "\n\n⏳ *Manager approval required* before payment.\n"
-        "We'll message you as soon as your slot is confirmed — usually within a few minutes."
+        "\n\nWe are confirming your preferred time.\n"
+        "We will message you when you can pay — usually within a few minutes."
     )
     await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
 
@@ -801,8 +801,8 @@ async def handle_takeaway_flow(
                     ),
                 )
                 confirmation = (
-                    f"Order received! 🛍️\n────────────────────\n"
-                    f"Token: {display_token}\nBooking Time: {booking_time}\n"
+                    f"Please review your order before confirming.\n────────────────────\n"
+                    f"Queue number: {display_token}\nBooking Time: {booking_time}\n"
                     f"Order: {order_text_display}\n────────────────────\n"
                     f"{format_order_total_lines(totals)}\n\n{payment_line}\n\n"
                     f"{PREPAY_PENDING_FOOTER}"

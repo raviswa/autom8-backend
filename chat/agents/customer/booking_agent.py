@@ -590,8 +590,11 @@ async def handle_booking_flow(
 
         if service_type == "token_management":
             session_state["last_service_type"] = "token_management"
+            from locales.customer import reply as _creply, session_lang as _slang
             await send_whatsapp_message(
-                customer_phone, "How many people in your party?", restaurant_id,
+                customer_phone,
+                _creply(_slang(session_state), "party_size_ask_queue"),
+                restaurant_id,
             )
             session_state["booking_step"] = "awaiting_party_size"
         elif service_type == "dine_in":
@@ -605,7 +608,14 @@ async def handle_booking_flow(
                 return resumed
 
             session_state["last_service_type"] = "dine_in"
-            await send_whatsapp_message(customer_phone, "How many people are dining today?", restaurant_id)
+            from locales.customer import reply as _creply, session_lang as _slang
+            await send_whatsapp_message(
+                customer_phone,
+                _creply(_slang(session_state), "service_selected_dine_in")
+                + "\n\n"
+                + _creply(_slang(session_state), "party_size_ask_dine_in"),
+                restaurant_id,
+            )
             session_state["booking_step"] = "awaiting_party_size"
             session_state["table_number"] = table_number
         elif service_type == "takeaway":
@@ -642,20 +652,22 @@ async def handle_booking_flow(
                 touch_session_activity(session_state)
                 return result
             from tools.whatsapp_tools import send_location_request
+            from locales.customer import reply as _creply, session_lang as _slang
+            _lang = _slang(session_state)
             await send_whatsapp_message(
                 customer_phone,
-                "🚚 *Delivery Order*\nWe need your delivery address.",
+                _creply(_lang, "delivery_need_address"),
                 restaurant_id,
             )
             sent = await send_location_request(
                 customer_phone,
                 restaurant_id,
-                body_text="📍 Please share your delivery location",
+                body_text=_creply(_lang, "delivery_share_location"),
             )
             if not sent:
                 await send_whatsapp_message(
                     customer_phone,
-                    "Please share your location pin on WhatsApp (tap 📎 -> Location) or type your full delivery address.",
+                    _creply(_lang, "delivery_share_or_type"),
                     restaurant_id,
                 )
             session_state["booking_step"] = "awaiting_address"
@@ -663,8 +675,8 @@ async def handle_booking_flow(
         elif service_type == "reserve_table":
             await send_whatsapp_message(
                 customer_phone,
-                "Great! You've selected *Reserve a Table* (for future booking) 📅\n\n"
-                "How many people will be dining?",
+                "Great! You have selected *Reserve a Table* (for a future date).\n\n"
+                "How many guests will be dining?",
                 restaurant_id,
             )
             session_state["booking_step"] = "awaiting_party_size"

@@ -106,8 +106,8 @@ from tools.kitchen_scheduler import (
 logger = logging.getLogger(__name__)
 
 _MANAGER_APPROVAL_NOTE = (
-    "\n\n📋 *Scheduled door deliveries need manager approval before payment.* "
-    "We'll message you once confirmed."
+    "\n\nWe are confirming your preferred time. "
+    "We will message you when you can pay."
 )
 
 _RESCHEDULE_HINT = (
@@ -281,7 +281,7 @@ async def offer_delivery_schedule(
     )
     needs_approval = bool(session_state.get("scheduled_delivery_enabled"))
     approval_note = (
-        "\n\nScheduled deliveries need manager approval before payment."
+        "\n\nWe are confirming scheduled delivery times before payment."
         if needs_approval else ""
     )
     earliest_hint = ""
@@ -411,12 +411,13 @@ async def _advance_after_delivery_time_set(
         note = ""
         if session_state.get("scheduled_delivery_enabled"):
             note = (
-                "\n\n📋 *Scheduled door deliveries need manager approval before payment.* "
-                "Share your address next, then add items — we'll notify the manager when you submit."
+                "\n\nWe are confirming your preferred time. "
+                "Share your address next, then add items — "
+                "we will message you when you can pay."
             )
         await send_whatsapp_message(
             customer_phone,
-            f"Got it — we'll deliver on *{when_label}*.{note}",
+            f"Got it — we will deliver on *{when_label}*.{note}",
             restaurant_id,
         )
 
@@ -424,7 +425,7 @@ async def _advance_after_delivery_time_set(
         loc_purpose = "scheduled" if scheduled is not None else "immediate"
         await send_whatsapp_message(
             customer_phone,
-            "🚚 *Delivery Order*\nWe need your delivery address.",
+            "🚚 *Delivery order*\n\nWe need your delivery address.",
             restaurant_id,
         )
         sent = await send_location_request(
@@ -785,7 +786,7 @@ async def _submit_scheduled_delivery_for_approval(
             logger.warning(f"[delivery] manager portal-failure alert failed: {alert_err}")
         await send_whatsapp_message(
             customer_phone,
-            "We couldn't submit your scheduled delivery for manager approval right now. "
+            "We could not submit your scheduled delivery right now. "
             "Please contact the restaurant directly, or reply *Home* to try again later."
             + _HOME_HINT,
             restaurant_id,
@@ -799,8 +800,8 @@ async def _submit_scheduled_delivery_for_approval(
     session_state["booking_step"] = "awaiting_scheduled_delivery_approval"
 
     confirmation = (
-        f"Your scheduled delivery request has been submitted! 📋\n────────────────────\n"
-        f"Token: {session_state.get('token_number', token)}\n"
+        f"Your scheduled delivery request has been submitted.\n────────────────────\n"
+        f"Queue number: {session_state.get('token_number', token)}\n"
         f"Order: {order_text}\n"
         f"────────────────────\n"
         f"{format_order_total_lines(totals, session_state=session_state)}"
@@ -808,8 +809,8 @@ async def _submit_scheduled_delivery_for_approval(
     if sched_label:
         confirmation += f"\n\n🕐 Door delivery at: *{sched_label}*"
     confirmation += (
-        "\n\n⏳ *Manager approval required* before payment.\n"
-        "We'll message you as soon as your slot is confirmed — usually within a few minutes."
+        "\n\nWe are confirming your preferred time.\n"
+        "We will message you when you can pay — usually within a few minutes."
     )
     await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
 
@@ -1203,8 +1204,8 @@ async def handle_delivery_flow(
             )
         await send_whatsapp_message(
             customer_phone,
-            "⏳ Your scheduled delivery is still awaiting manager approval.\n\n"
-            "We'll message you as soon as it's confirmed — no payment needed until then."
+            "⏳ We are confirming your preferred delivery time.\n\n"
+            "We will message you when you can pay — no payment needed until then."
             + _HOME_HINT,
             restaurant_id,
         )
@@ -1293,8 +1294,8 @@ async def handle_delivery_flow(
             )
 
             confirmation = (
-                f"Your order has been placed! 🎉\n────────────────────\n"
-                f"Token: {token}\nBooking Time: {booking_time}\nOrder: {order_text}\n"
+                f"Please review your order before confirming.\n────────────────────\n"
+                f"Queue number: {token}\nBooking Time: {booking_time}\nOrder: {order_text}\n"
                 f"────────────────────\n"
                 f"{format_order_total_lines(totals, session_state=session_state)}\n\n{payment_line}"
             )

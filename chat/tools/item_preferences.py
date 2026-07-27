@@ -594,7 +594,7 @@ async def handle_booking_flow(
             await send_whatsapp_message(
                 customer_phone,
                 "Great! You've selected Dine-in now 🍽️\n\n"
-                "How many people are dining today?",
+                "How many guests are dining today?",
                 restaurant_id,
             )
             session_state["booking_step"] = "awaiting_party_size"
@@ -635,7 +635,7 @@ async def handle_booking_flow(
             await send_whatsapp_message(
                 customer_phone,
                 "Great! You've selected Reserve a Table (for future booking) 📅\n\n"
-                "How many people will be dining?",
+                "How many guests will be dining?",
                 restaurant_id,
             )
             session_state["booking_step"] = "awaiting_party_size"

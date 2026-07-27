@@ -715,8 +715,9 @@ async def send_delayed_menu_prompts():
             if b.get("phone") and b.get("restaurant_id"):
                 message = (
                     f"Hi {b.get('customer_name', '')}! "
-                    f"Your table {b.get('table_number')} is ready. "
-                    "Here is our menu — tap to browse and pre-order your starters! 🍽️"
+                    f"Your table {b.get('table_number')} is ready. ✅\n\n"
+                    "Please proceed to your table. "
+                    "Tap below when you see the menu to place your order. 🍽️"
                 )
                 await send_whatsapp_message(b["phone"], message, b["restaurant_id"])
                 await mark_menu_prompt_sent(b["id"])

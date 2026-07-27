@@ -21,8 +21,8 @@ function formatWaitDisplay(low, high, estimateMinutes) {
   if (estimateMinutes === 0) return 'Ready to seat now';
   if (estimateMinutes < 0) return 'No suitable table available';
   if (low < 15) return 'Less than 15 minutes';
-  if (low < 30) return 'Around 20–30 minutes';
-  return `Approximately ${low}–${high} minutes`;
+  if (low < 30) return 'Around 20 to 30 minutes';
+  return `Approximately ${low} to ${high} minutes`;
 }
 
 function todayStartUtc() {
@@ -207,38 +207,35 @@ function formatOutletLabel(displayName, city) {
  * @param {{ estimate_minutes: number, display?: string }} estimate
  * @param {{ displayName?: string, city?: string }} [outlet]
  */
-function buildDineInCustomerMessage(partySize, tokenId, estimate, outlet = {}) {
+def buildDineInCustomerMessage(partySize, tokenId, estimate, outlet = {}) {
   const pax = Math.max(1, parseInt(partySize, 10) || 1);
-  const people = `${pax} ${pax === 1 ? 'person' : 'people'}`;
+  const guests = `${pax} ${pax === 1 ? 'guest' : 'guests'}`;
   const outletLabel = formatOutletLabel(outlet.displayName, outlet.city);
 
   if (estimate.estimate_minutes === 0) {
     return (
-      `Hey there, welcome to *${outletLabel}* 🙏\n\n`
-      + `Thanks for checking in! Token: *${tokenId}*\n`
-      + `Party of ${people}\n\n`
-      + `*Your table is ready* — please make your way to the host stand.\n`
-      + `Thank you for your patience 🤗`
+      `Thank you! A table is available for ${guests}. 🙏\n\n`
+      + `Your queue number: ${tokenId}\n\n`
+      + `Please come to the reception — our team will seat you shortly.`
+      + (outletLabel ? `\n\nWelcome to *${outletLabel}*.` : '')
     );
   }
 
   if (estimate.estimate_minutes < 0) {
     return (
-      `Hey there, welcome to *${outletLabel}* 🙏\n\n`
-      + `Thanks for checking in! Token: *${tokenId}*\n`
-      + `Party of ${people}\n\n`
-      + `We've received your request — our team will assist you shortly.\n`
-      + `Please speak with the host. Thank you for your patience 🤗`
+      `Thank you! We have noted your visit for ${guests}. 🙏\n\n`
+      + `Your queue number: ${tokenId}\n\n`
+      + `Please speak with the host. Our team will assist you shortly.`
+      + (outletLabel ? `\n\nWelcome to *${outletLabel}*.` : '')
     );
   }
 
   return (
-    `Hey there, welcome to *${outletLabel}* 🙏\n\n`
-    + `Thanks for checking in! Token: *${tokenId}*\n`
-    + `Party of ${people} · *${estimate.display}*\n\n`
-    + `We've received your request and are preparing a table for you.\n`
-    + `We'll notify you as soon as it's ready.\n`
-    + `Thank you for your patience 🤗`
+    `Thank you! We will find a table for ${guests}. 🙏\n\n`
+    + `Your queue number: ${tokenId}\n`
+    + `Estimated wait: ${estimate.display}\n\n`
+    + `We will send you a message as soon as your table is ready.`
+    + (outletLabel ? `\n\nWelcome to *${outletLabel}*.` : '')
   );
 }
 
@@ -249,11 +246,12 @@ function buildTableReadyMessage({ displayName, city, tokenId, tableNumber } = {}
   const outletLabel = formatOutletLabel(displayName, city);
   const table = tableNumber != null ? String(tableNumber) : '';
   return (
-    `Great news! 🎉\n\n`
-    + `Your table is now ready. Please make your way to the host stand`
-    + (table ? ` — our team will help you to *Table ${table}*.` : '.')
-    + `\n\nToken: *${tokenId}*\n`
-    + `We look forward to serving you at *${outletLabel}*!`
+    `Your table is ready! ✅\n\n`
+    + `Queue number: ${tokenId}\n`
+    + (table ? `Table: Table ${table}\n\n` : '\n')
+    + `Please proceed to your table. We look forward to serving you`
+    + (outletLabel ? ` at *${outletLabel}*` : '')
+    + '.'
   );
 }
 

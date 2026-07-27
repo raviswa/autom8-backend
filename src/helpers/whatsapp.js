@@ -531,7 +531,7 @@ async function sendWebCartMenuLink(toNumber, restaurantId, walkInTokenId = null)
         body: {
           text:
             'Tap below to browse our full menu, add items to your cart, ' +
-            'and place your order right from your table. 🪑',
+            'and place your order.',
         },
         footer: { text: 'Prices excl. GST' },
         action: {
@@ -628,9 +628,9 @@ async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
         await sendWhatsAppMessage(
           phone,
           `✅ *Your takeaway order is ready!*\n\n` +
-          `Token: *${tokenLabel}*\n` +
+          `Queue number: *${tokenLabel}*\n` +
           `Order: *${updated.order_number}*\n\n` +
-          `Please pick up at the counter. Show your receipt QR when you collect. 🛍️`,
+          `Please pick up at the counter. Show your receipt QR when you collect.`,
           restaurantId,
         );
       } else if (isDelivery) {
@@ -638,18 +638,16 @@ async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
         await sendWhatsAppMessage(
           phone,
           `✅ *Your delivery order is ready!*\n\n` +
-          (tokenLabel ? `Token: *${tokenLabel}*\n` : '') +
+          (tokenLabel ? `Queue number: *${tokenLabel}*\n` : '') +
           `Order: *${updated.order_number}*\n\n` +
-          `Our kitchen has finished preparing your order. It will be packed and ` +
-          `sent out to your delivery address shortly.\n\n` +
-          `You'll receive another message when it's on the way. 🛵`,
+          `Your order is packed and on its way to you shortly. 🛵`,
           restaurantId,
         );
       } else {
         await sendWhatsAppMessage(
           phone,
           `✅ *Your order is ready!*\n\nOrder: *${updated.order_number}*\n` +
-          (updated.table?.table_number ? `Table: *${updated.table.table_number}*\n` : '') +
+          (updated.table?.table_number ? `Table: Table ${updated.table.table_number}\n` : '') +
           `\nYour food will be served at your table shortly. Enjoy! 🍽️`,
           restaurantId,
         );

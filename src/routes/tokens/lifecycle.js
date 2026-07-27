@@ -274,7 +274,7 @@ router.put('/:id/approve', outletAuth, async (req, res) => {
     if (token.phone && await isWhatsAppConfigured(restaurantId)) {
       await sendWhatsAppMessage(
         token.phone,
-        `✅ *Your table arrangement has been confirmed.*\n\nToken: *${token.id}*\nParty of: *${token.pax} people*\nTables: *${tableNumbers.join(', ')}*\n\nPlease head to the restaurant! 🍽️`,
+        `✅ *Your table arrangement has been confirmed.*\n\nQueue number: *${token.id}*\nGuests: *${token.pax}*\nTables: *${tableNumbers.join(', ')}*\n\nPlease head to the restaurant! 🍽️`,
         restaurantId
       );
       await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -373,7 +373,7 @@ router.put('/:id/reject', outletAuth, async (req, res) => {
       const reasonLine = req.body.reason ? `\n\nReason: ${req.body.reason}` : '';
       await sendWhatsAppMessage(
         token.phone,
-        `😔 *We're unable to accommodate your party of ${token.pax} right now.*${reasonLine}\n\nReply *RESERVE* to book for a future date. 🙏`,
+        `😔 *We're unable to accommodate ${token.pax} guests right now.*${reasonLine}\n\nReply *RESERVE* to book for a future date. 🙏`,
         restaurantId
       );
     }

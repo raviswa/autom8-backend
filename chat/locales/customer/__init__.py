@@ -2,8 +2,9 @@
 # Localized reply strings for the customer WhatsApp ordering agent.
 # Add a language by creating <code>.py with a REPLIES dict and registering it below.
 #
-# Tone rules (see glossary.py): warm, contemporary, e-commerce-friendly.
-# Keep placeholders, bot commands (REPEAT/Home/Hi), and Confirm & Pay intact.
+# Tone rules: warm, short sentences, translation-safe.
+# Prefer "guests" over "party"; no system-logic or legal-notice voice in chat.
+# Keep placeholders, bot commands (REPEAT/Home/Hi), and Confirm and Pay intact.
 # Webcart HTML UI i18n is deferred to a future build.
 
 from __future__ import annotations

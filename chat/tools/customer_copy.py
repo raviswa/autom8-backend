@@ -25,10 +25,12 @@ def resolve_lob_from_payload(payload: dict[str, Any] | None) -> str:
     )
 
 
-def prepay_pending_footer(lob_type: Any = None) -> str:
+def prepay_pending_footer(lob_type: Any = None, lang: str | None = None) -> str:
+    from locales.customer import reply
+
     if is_shipped_lob(lob_type):
-        return "_Your order will be prepared after payment is received._"
-    return "_Your order will be sent to the kitchen after payment is received._"
+        return reply(lang, "prepay_footer_shipped")
+    return reply(lang, "prepay_footer_kitchen")
 
 
 def order_confirmed_line(
@@ -39,9 +41,9 @@ def order_confirmed_line(
     deferred: bool = False,
     lang: str | None = None,
 ) -> str:
-    """Customer-facing paid-order confirmation line (no staff/KDS jargon for shipped LOBs).
+    """Customer-facing paid-order confirmation line (no staff/KDS jargon).
 
-    Localized via chat locales; rare not-dispatched warning variants stay English.
+    Localized via chat locales.
     """
     from locales.customer import reply
 
@@ -72,14 +74,8 @@ def order_confirmed_line(
             }.get(label, "confirmed_generic_prep")
             return reply(lang, key)
         if label == "delivery":
-            return (
-                "Your delivery order is confirmed. "
-                "We're preparing it for dispatch — please message us if you need help."
-            )
-        return (
-            "Your order is confirmed. "
-            "We're preparing it now — please message us if you need help."
-        )
+            return reply(lang, "confirmed_help_delivery")
+        return reply(lang, "confirmed_help_generic")
 
     # Restaurant LOB — keep kitchen wording
     if dispatched:
@@ -89,19 +85,7 @@ def order_confirmed_line(
             "dine_in": "confirmed_kitchen_dinein",
         }.get(label, "confirmed_kitchen_generic")
         return reply(lang, key)
+    # Soft fallback — no KDS / kitchen-display jargon for customers
     if label == "delivery":
-        return (
-            "Your delivery order is confirmed. "
-            "We're pushing it to the kitchen display — please alert staff if it doesn't appear shortly."
-        )
-    if label == "takeaway":
-        return (
-            "Your takeaway order is confirmed. "
-            "We're pushing it to the kitchen display — please alert staff if it doesn't appear shortly."
-        )
-    if label == "dine_in":
-        return (
-            "We're sending your order to the kitchen now — "
-            "please alert staff if it doesn't appear on the display within a minute."
-        )
-    return reply(lang, "confirmed_generic_deferred")
+        return reply(lang, "confirmed_help_delivery")
+    return reply(lang, "confirmed_help_generic")

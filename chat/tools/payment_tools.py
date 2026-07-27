@@ -65,18 +65,15 @@ def compute_fee_inclusive_total(subtotal: float, method: str) -> dict[str, float
         "customer_total": base,
     }
 
-RAZORPAY_NON_REFUND_NOTICE = (
-    "⚠️ *Please note:* Payment cannot be reversed once completed. "
-    "Cancellations or amendments are *not* possible after payment."
-)
+RAZORPAY_NON_REFUND_NOTICE = "Once paid, this order cannot be changed."
 
 
 def format_razorpay_payment_line(
     link: str,
     *,
-    label: str = "💳 Tap to pay and confirm your order:",
+    label: str = "Tap to pay and confirm your order:",
 ) -> str:
-    """Payment link block with non-refundable disclaimer shown before the link."""
+    """Payment link block with a short final-payment note before the link."""
     return f"{RAZORPAY_NON_REFUND_NOTICE}\n\n{label}\n{link}"
 
 _RAZORPAY_IMPORT_ERROR: str | None = None
