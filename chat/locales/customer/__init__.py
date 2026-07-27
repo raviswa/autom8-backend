@@ -156,17 +156,49 @@ def contains_tamil_script(text: str | None) -> bool:
     return detect_script_locale(text) == "ta"
 
 
-def latch_indic_from_text(session_state: dict, text: str | None) -> str:
-    """If inbound text has a supported Indic script, latch preferred_language.
+# Latin openers that mean "switch back to English" (not mid-flow "ok"/"pay").
+_LATIN_LANG_SWITCH_RE = re.compile(
+    r"^(?:"
+    r"hi|hello|hey|hii|helo|hola|namaste|namaskar|vanakkam|vanakam|vankkam"
+    r"|english|eng"
+    r")\b",
+    re.IGNORECASE,
+)
 
-    Cheap, sync, and runs before the first outbound reply so welcome copy can
-    use the matching locale without waiting on Gemini classify.
+
+def is_latin_language_switch(text: str | None) -> bool:
+    """True for Latin greetings / explicit English requests with no Indic script.
+
+    Lets customers leave a sticky Tamil/Hindi session by typing Hi/Hello or
+    English — without resetting language on mid-flow words like OK / PAY.
+    """
+    raw = (text or "").strip()
+    if not raw or detect_script_locale(raw):
+        return False
+    normalized = re.sub(r"\s+", " ", raw.lower())
+    match = _LATIN_LANG_SWITCH_RE.match(normalized)
+    if not match:
+        return False
+    remainder = normalized[match.end():].strip()
+    # "hi" / "hi munafe" / "english please" — not a long free-text order
+    return len(remainder.split()) <= 2
+
+
+def latch_indic_from_text(session_state: dict, text: str | None) -> str:
+    """Latch preferred_language from inbound script or Latin greeting switch.
+
+    - Indic script → that locale (may switch away from a previous Indic latch)
+    - Latin greeting / "English" → English (escape hatch from sticky local lang)
+    - Otherwise keep the existing session preference
     """
     if not isinstance(session_state, dict):
         return "en"
     code = detect_script_locale(text)
     if code:
-        return apply_detected_language(session_state, code)
+        return apply_detected_language(session_state, code, allow_switch=True)
+    if is_latin_language_switch(text):
+        session_state["preferred_language"] = "en"
+        return "en"
     return session_lang(session_state)
 
 
@@ -175,16 +207,27 @@ def latch_tamil_from_text(session_state: dict, text: str | None) -> str:
     return latch_indic_from_text(session_state, text)
 
 
-def apply_detected_language(session_state: dict, language: str | None) -> str:
-    """Persist preferred_language on first confident non-English detection.
+def apply_detected_language(
+    session_state: dict,
+    language: str | None,
+    *,
+    allow_switch: bool = False,
+) -> str:
+    """Persist preferred_language from a confident language detection.
 
-    English / mixed do not overwrite an existing non-English preference.
-    Returns the locale code to use for this turn's outbound copy.
+    By default English / mixed do not overwrite an existing non-English
+    preference (so mid-flow "OK"/"PAY" keep Tamil). When allow_switch is True
+    (script latch from a new message), a different supported locale replaces
+    the previous one.
     """
     detected = normalize_lang(language)
     existing = normalize_lang(session_state.get("preferred_language"))
 
-    # Sticky: once a supported local language is set, keep it for the session.
+    if allow_switch and detected in _CATALOGS and detected != "en":
+        session_state["preferred_language"] = detected
+        return detected
+
+    # Sticky: once a supported local language is set, keep it unless switched.
     if existing in _CATALOGS and existing != "en":
         return existing
 
