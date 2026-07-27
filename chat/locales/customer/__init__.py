@@ -165,12 +165,16 @@ _LATIN_LANG_SWITCH_RE = re.compile(
     re.IGNORECASE,
 )
 
-# After receipt / visit end, the next customer message may pick a new language.
+# Language may change on a fresh opener — before the customer commits to a
+# service, and again after receipt (visit_complete). Mid-order steps stay sticky.
 _LANGUAGE_RESET_STEPS = frozenset({
     None,
     "",
     "visit_complete",
     "awaiting_payment",
+    "ask_service",
+    "awaiting_service_selection",
+    "kitchen_closed",
 })
 
 
@@ -188,10 +192,11 @@ def is_latin_language_switch(text: str | None) -> bool:
 
 
 def language_reset_allowed(session_state: dict | None) -> bool:
-    """True when preferred_language may change (new booking / post-receipt).
+    """True when preferred_language may change from this inbound message.
 
-    Mid-flow (menu → order → receipt) stays sticky so Hi/OK do not flip
-    language until the current visit completes.
+    Sticky only after a service is chosen (party size / cart / pay / etc.) so
+    Hi on the service menu can still switch English↔Tamil; mid-order Hi/OK
+    will not flip language until the visit completes.
     """
     if not isinstance(session_state, dict):
         return True
@@ -207,11 +212,10 @@ def latch_indic_from_text(
     *,
     allow_reset: bool | None = None,
 ) -> str:
-    """Latch preferred_language from inbound script or (on new booking) Latin Hi.
+    """Latch preferred_language from inbound script or (when allowed) Latin Hi.
 
-    During an active booking flow language is sticky until visit_complete
-    (after receipt). On the next booking opener, Indic script or Latin
-    Hi/Hello/English may set a new preferred_language.
+    Before service selection and after visit_complete, Indic script or Latin
+    Hi/Hello/English may set a new preferred_language. Mid-order stays sticky.
     """
     if not isinstance(session_state, dict):
         return "en"
