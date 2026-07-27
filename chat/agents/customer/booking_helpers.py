@@ -209,7 +209,7 @@ def expire_session_if_stale(
     _prev_visits = session_state.get("visit_count", 0)
     _prev_last = session_state.get("last_order_summary", "")
     _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
-    _prev_lang = session_state.get("preferred_language")
+    _prev_order_lang = session_state.get("last_order_language")
     _pending_pay = session_state.get("pending_prepay_fulfillment")
     _booking_id = session_state.get("booking_id")
     _payment_link = session_state.get("payment_link")
@@ -231,8 +231,9 @@ def expire_session_if_stale(
         session_state["last_order_summary"] = strip_order_quantity(_prev_last)
     if _prev_svc:
         session_state["last_service_type"] = _prev_svc
-    if _prev_lang:
-        session_state["preferred_language"] = _prev_lang
+    # Do not carry preferred_language — next opener sets language fresh.
+    if _prev_order_lang:
+        session_state["last_order_language"] = _prev_order_lang
     if _pending_pay:
         session_state["pending_prepay_fulfillment"] = _pending_pay
     if _booking_id:
@@ -578,6 +579,8 @@ def should_skip_feedback_bridge(text: str) -> bool:
 
 def mark_session_visit_complete(session_state: Dict[str, Any]) -> None:
     """End a visit: clear prepay UX keys, keep identity and last order for greetings."""
+    from locales.customer import end_language_preference
+
     summary = session_state.get("order_confirmed_summary")
     if summary:
         cleaned = _clean_order_summary(str(summary))
@@ -591,6 +594,8 @@ def mark_session_visit_complete(session_state: Dict[str, Any]) -> None:
         "order_total",
     ):
         session_state.pop(key, None)
+    # Language preference ends at receipt / visit complete — next opener re-latches.
+    end_language_preference(session_state)
     session_state["booking_step"] = "visit_complete"
 
 
@@ -660,9 +665,12 @@ async def start_fresh_visit(
     restaurant_id: str,
     customer_name: str,
     session_state: Dict[str, Any],
+    *,
+    opener_message: str | None = None,
 ) -> Dict[str, Any]:
     """Clear mid-flow state and show the service menu (Home / Hi after an order)."""
     from agents.customer.message_templates import build_conversation_greeting
+    from locales.customer import latch_indic_from_text
 
     await abandon_incomplete_session(customer_phone, restaurant_id, session_state)
 
@@ -671,7 +679,7 @@ async def start_fresh_visit(
     _prev_visits = session_state.get("visit_count", 0)
     _prev_last = session_state.get("last_order_summary", "")
     _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
-    _prev_lang = session_state.get("preferred_language")
+    _prev_order_lang = session_state.get("last_order_language")
     _pending_pay = session_state.get("pending_prepay_fulfillment")
     _abandoned = session_state.pop("_last_visit_abandoned", False)
     session_state.clear()
@@ -687,12 +695,15 @@ async def start_fresh_visit(
         session_state["last_order_summary"] = strip_order_quantity(_prev_last)
     if _prev_svc:
         session_state["last_service_type"] = _prev_svc
-    if _prev_lang:
-        session_state["preferred_language"] = _prev_lang
+    # Language comes only from this opener — never carry preferred_language.
+    if _prev_order_lang:
+        session_state["last_order_language"] = _prev_order_lang
     if _pending_pay:
         session_state["pending_prepay_fulfillment"] = _pending_pay
     if _abandoned:
         session_state["_last_visit_abandoned"] = True
+    if opener_message:
+        latch_indic_from_text(session_state, opener_message, allow_reset=True)
     session_state["booking_step"] = "ask_service"
     greeting = await build_conversation_greeting(
         session_state, restaurant_id, customer_phone, _prev_cname or customer_name,
@@ -739,7 +750,10 @@ async def ask_continue_or_reset(
 async def do_reset(
     customer_id: str, customer_name: str, customer_phone: str,
     restaurant_id: str, session_state: Dict[str, Any], *, full_restart: bool = False,
+    opener_message: str | None = None,
 ) -> None:
+    from locales.customer import latch_indic_from_text
+
     booking_id = session_state.get("booking_id")
     await abandon_incomplete_session(customer_phone, restaurant_id, session_state)
 
@@ -757,7 +771,7 @@ async def do_reset(
         _prev_visits = session_state.get("visit_count", 0)
         _prev_last   = session_state.get("last_order_summary", "")
         _prev_svc    = session_state.get("service_type") or session_state.get("last_service_type")
-        _prev_lang   = session_state.get("preferred_language")
+        _prev_order_lang = session_state.get("last_order_language")
         session_state.clear()
         session_state["next_state"]    = "identity"
         session_state["identity_step"] = "initial"
@@ -772,8 +786,10 @@ async def do_reset(
             session_state["last_order_summary"] = strip_order_quantity(_prev_last)
         if _prev_svc:
             session_state["last_service_type"] = _prev_svc
-        if _prev_lang:
-            session_state["preferred_language"] = _prev_lang
+        if _prev_order_lang:
+            session_state["last_order_language"] = _prev_order_lang
+        if opener_message:
+            latch_indic_from_text(session_state, opener_message, allow_reset=True)
         return
 
     _cid     = session_state.get("customer_id")
@@ -784,7 +800,7 @@ async def do_reset(
     _is_new  = session_state.get("is_new_customer")
     _visits  = session_state.get("visit_count", 0)
     _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
-    _prev_lang = session_state.get("preferred_language")
+    _prev_order_lang = session_state.get("last_order_language")
     session_state.clear()
     if _cid:    session_state["customer_id"]           = _cid
     if _cname:  session_state["customer_name"]         = _cname
@@ -798,7 +814,10 @@ async def do_reset(
         session_state["is_returning_customer"] = True
     if _visits: session_state["visit_count"]           = _visits
     if _prev_svc: session_state["last_service_type"]   = _prev_svc
-    if _prev_lang: session_state["preferred_language"] = _prev_lang
+    if _prev_order_lang:
+        session_state["last_order_language"] = _prev_order_lang
+    if opener_message:
+        latch_indic_from_text(session_state, opener_message, allow_reset=True)
     session_state["booking_step"]          = "awaiting_service_selection"
 
     from agents.customer.message_templates import build_conversation_greeting
@@ -999,6 +1018,9 @@ async def send_service_menu(
 
     # Partition rows into explicit structured sections.
     # Preserve feature_gate order (token_queue only when dine_in is off).
+    from locales.customer import reply as _reply, session_lang as _session_lang
+    _lang = _session_lang(state)
+
     _sec1_order = ("token_queue", "dine_in_now", "door_delivery_now", "takeaway_now")
     _sec2_order = ("table_reservation", "scheduled_delivery", "scheduled_pickup")
     by_id = {r["id"]: r for r in rows}
@@ -1009,25 +1031,22 @@ async def send_service_menu(
     sections = []
     if section1_rows:
         sections.append({
-            "title": "🚀 INSTANT / NOW"[:24],
+            "title": _reply(_lang, "service_section_instant")[:24],
             "rows": section1_rows,
         })
     if section2_rows:
         sections.append({
-            "title": "⏰ PLANNED / LATER"[:24],
+            "title": _reply(_lang, "service_section_planned")[:24],
             "rows": section2_rows,
         })
     if nothing_rows:
         sections.append({
-            "title": "Exit"[:24],
+            "title": _reply(_lang, "service_section_exit")[:24],
             "rows": nothing_rows,
         })
 
     normalize_last_order_summary(state)
     header = (state.get("_restaurant_display_name") or "Service Menu").strip()
-
-    from locales.customer import reply as _reply, session_lang as _session_lang
-    _lang = _session_lang(state)
 
     body_lines = []
     if greeting and greeting.strip():
@@ -1339,6 +1358,7 @@ async def handle_awaiting_prepay(
     ):
         return await start_fresh_visit(
             customer_phone, restaurant_id, customer_name, session_state,
+            opener_message=message,
         )
 
     booking_id = session_state.get("booking_id")

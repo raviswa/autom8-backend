@@ -149,7 +149,7 @@ async def handle_booking_flow(
             full = msg_lower in _FULL_RESET_KEYWORDS
             await do_reset(
                 customer_id, customer_name, customer_phone, restaurant_id,
-                session_state, full_restart=full,
+                session_state, full_restart=full, opener_message=message,
             )
             touch_session_activity(session_state)
             return {"status": "identity_restart" if full else "reset_complete"}
@@ -230,6 +230,7 @@ async def handle_booking_flow(
     if is_greeting(message) and current_step in _SCHEDULED_WAIT_STEPS:
         return await start_fresh_visit(
             customer_phone, restaurant_id, customer_name, session_state,
+            opener_message=message,
         )
 
     # ── Scheduled payment steps — route before visit_complete reset ───────────
@@ -260,6 +261,7 @@ async def handle_booking_flow(
         _prev_visits = session_state.get("visit_count", 0)
         _prev_last   = session_state.get("last_order_summary", "")
         _prev_svc    = session_state.get("service_type") or session_state.get("last_service_type")
+        _prev_order_lang = session_state.get("last_order_language")
         _pending_pay = session_state.get("pending_prepay_fulfillment")
         session_state.clear()
         if _prev_cid:    session_state["customer_id"]          = _prev_cid
@@ -269,6 +271,8 @@ async def handle_booking_flow(
         if _prev_visits: session_state["visit_count"]          = _prev_visits
         if _prev_last:   session_state["last_order_summary"]   = strip_order_quantity(_prev_last)
         if _prev_svc:    session_state["last_service_type"]    = _prev_svc
+        if _prev_order_lang:
+            session_state["last_order_language"] = _prev_order_lang
         if _pending_pay: session_state["pending_prepay_fulfillment"] = _pending_pay
         # New booking: language comes from this message (not the previous visit).
         latch_indic_from_text(session_state, message, allow_reset=True)
@@ -284,7 +288,7 @@ async def handle_booking_flow(
             full = msg_lower in _FULL_RESET_KEYWORDS
             await do_reset(
                 customer_id, customer_name, customer_phone, restaurant_id,
-                session_state, full_restart=full,
+                session_state, full_restart=full, opener_message=message,
             )
             touch_session_activity(session_state)
             return {"status": "identity_restart" if full else "reset_complete"}
@@ -366,6 +370,7 @@ async def handle_booking_flow(
         if kitchen_accepting_orders(session_state):
             return await start_fresh_visit(
                 customer_phone, restaurant_id, customer_name, session_state,
+                opener_message=message,
             )
         if is_reset_keyword(message) or is_greeting(message):
             await send_whatsapp_message(
@@ -712,7 +717,7 @@ async def handle_booking_flow(
             full_restart = session_state.pop("_full_restart_pending", False)
             await do_reset(
                 customer_id, customer_name, customer_phone, restaurant_id,
-                session_state, full_restart=full_restart,
+                session_state, full_restart=full_restart, opener_message=message,
             )
             return {"status": "identity_restart" if full_restart else "reset_complete"}
         else:

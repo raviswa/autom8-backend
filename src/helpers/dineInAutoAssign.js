@@ -98,12 +98,39 @@ async function notifyCustomerSeated(token, restaurantId, tableNumbers, messagePr
     return { catalogOk: false, pickerSent: false, specialsSent: false, mechanism: 'none' };
   }
 
-  const tablesLabel = tableNumbers.length === 1
-    ? `Table ${tableNumbers[0]}`
-    : `Tables ${tableNumbers.join(', ')}`;
-
-  const body = messagePrefix
-    ?? `✅ *Your table is ready!*\n\nToken: *${token.id}*\nTable: *${tablesLabel}*\n\nPlease proceed to your table. Enjoy! 🍽️`;
+  let body = messagePrefix;
+  if (!body) {
+    let lang = 'en';
+    let outlet = {};
+    try {
+      const { getSession } = require('../bot/session/sessionStore');
+      const { preferredLanguageFromSession } = require('./customerCopy');
+      const { buildTableReadyMessage } = require('./waitEstimate');
+      const { getRestaurantConfig } = require('./restaurantConfig');
+      const sess = await getSession(restaurantId, token.phone);
+      lang = preferredLanguageFromSession(sess);
+      try {
+        const cfg = await getRestaurantConfig(restaurantId);
+        if (cfg) {
+          outlet = {
+            displayName: cfg.display_name || cfg.name,
+            city: cfg.city,
+          };
+        }
+      } catch (_cfg) { /* non-fatal */ }
+      body = buildTableReadyMessage({
+        ...outlet,
+        tokenId: token.id,
+        tableNumber: tableNumbers?.[0],
+        lang,
+      });
+    } catch (_e) {
+      const tablesLabel = tableNumbers.length === 1
+        ? `Table ${tableNumbers[0]}`
+        : `Tables ${tableNumbers.join(', ')}`;
+      body = `✅ *Your table is ready!*\n\nToken: *${token.id}*\nTable: *${tablesLabel}*\n\nPlease proceed to your table. Enjoy! 🍽️`;
+    }
+  }
 
   await sendWhatsAppMessage(token.phone, body, restaurantId);
   // Brief pause — back-to-back text + interactive often fails on Meta.

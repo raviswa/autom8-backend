@@ -471,6 +471,8 @@ async def _complete_scheduled_takeaway_after_approval(
         clear_cart(session_state)
         return {"status": "awaiting_prepay", "booking_id": booking_id, "total": total}
 
+    from locales.customer import end_language_preference
+    end_language_preference(session_state)
     session_state["booking_step"] = "visit_complete"
     clear_cart(session_state)
     return {"status": "visit_complete", "booking_id": booking_id, "total": total}
@@ -565,6 +567,8 @@ async def _submit_scheduled_takeaway_for_approval(
             + _HOME_HINT,
             restaurant_id,
         )
+        from locales.customer import end_language_preference
+        end_language_preference(session_state)
         session_state["booking_step"] = "visit_complete"
         clear_cart(session_state)
         return {"status": "error", "reason": "portal_token_missing"}
@@ -672,6 +676,8 @@ async def handle_takeaway_flow(
                 "Please pick another time or reply *Home* to start over." + _HOME_HINT,
                 restaurant_id,
             )
+            from locales.customer import end_language_preference
+            end_language_preference(session_state)
             session_state["booking_step"] = "visit_complete"
             clear_cart(session_state)
             return {"status": "rejected"}
@@ -890,6 +896,8 @@ async def handle_takeaway_flow(
             session_state["visit_count"]           = session_state.get("visit_count", 0) + 1
 
             # Fix 38: transition to visit_complete so next-day "Hi" starts fresh
+            from locales.customer import end_language_preference
+            end_language_preference(session_state)
             session_state["booking_step"] = "visit_complete"
             clear_cart(session_state)
 

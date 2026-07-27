@@ -12,7 +12,17 @@ from __future__ import annotations
 import re
 
 from . import bn, en, gu, hi, kn, ml, mr, ta, te
-from .glossary import SERVICE_TYPE_LABELS_EN, STORAGE_LANGUAGE, SUPPORTED_LOCALES
+from .glossary import (
+    DO_NOT_TRANSLATE,
+    NEEDS_NATIVE_REVIEW,
+    PREFERRED_TRANSLATION,
+    SCHEDULED_ORDER_MAX_DAYS_AHEAD,
+    SERVICE_TYPE_LABELS_EN,
+    SPECIAL_REVIEW_KEYS,
+    STORAGE_LANGUAGE,
+    SUPPORTED_LOCALES,
+    get_scheduled_order_footnote,
+)
 
 _CATALOGS: dict[str, dict[str, str]] = {
     "en": en.REPLIES,
@@ -141,6 +151,31 @@ def session_lang(session_state: dict | None) -> str:
     if not isinstance(session_state, dict):
         return "en"
     return normalize_lang(session_state.get("preferred_language"))
+
+
+def end_language_preference(session_state: dict | None) -> None:
+    """End the visit's language preference (call when receipt / visit completes).
+
+    Clears preferred_language so the next session starts fresh from the
+    customer's opener. Keeps last_order_language for post-visit proactive
+    messages (order ready, etc.) that still belong to this completed order.
+    """
+    if not isinstance(session_state, dict):
+        return
+    lang = session_state.get("preferred_language")
+    if lang:
+        session_state["last_order_language"] = normalize_lang(lang)
+    session_state.pop("preferred_language", None)
+
+
+def proactive_lang(session_state: dict | None) -> str:
+    """Language for post-visit outbound alerts (ready / ETA) after preference ended."""
+    if not isinstance(session_state, dict):
+        return "en"
+    return normalize_lang(
+        session_state.get("preferred_language")
+        or session_state.get("last_order_language")
+    )
 
 
 def detect_script_locale(text: str | None) -> str | None:

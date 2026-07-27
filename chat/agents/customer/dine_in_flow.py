@@ -87,7 +87,7 @@ from agents.customer.conversation_helpers import safe_build_order_suggestion
 import aiohttp
 
 
-def _auto_assign_time_message() -> str:
+def _auto_assign_time_message(session_state: dict | None = None) -> str:
     """Customer-facing wait window; defaults 1–2 minutes (env-overridable)."""
     try:
         min_minutes = max(1, int(os.getenv("DINEIN_AUTO_ASSIGN_MIN_MINUTES", "1")))
@@ -101,9 +101,16 @@ def _auto_assign_time_message() -> str:
     except (TypeError, ValueError):
         max_minutes = max(min_minutes, 2)
 
-    if min_minutes == max_minutes:
-        return f"within *{min_minutes} minutes*"
-    return f"within *{min_minutes} to {max_minutes} minutes*"
+    try:
+        from locales.customer import reply, session_lang
+        lang = session_lang(session_state) if session_state is not None else "en"
+        if min_minutes == max_minutes:
+            return reply(lang, "wait_within_mins", n=min_minutes)
+        return reply(lang, "wait_within_range", lo=min_minutes, hi=max_minutes)
+    except Exception:
+        if min_minutes == max_minutes:
+            return f"within {min_minutes} minutes"
+        return f"within {min_minutes} to {max_minutes} minutes"
 
 
 def _auto_assign_escalation_minutes() -> int:
@@ -311,6 +318,8 @@ async def _finalize_special_notes_and_kitchen(
                     restaurant_id,
                 )
         session_state["special_notes"] = special_notes
+        from locales.customer import end_language_preference
+        end_language_preference(session_state)
         session_state["booking_step"] = "visit_complete"
         session_state["_customer_finalize_sent"] = True
         session_state.pop("_pending_kitchen", None)
@@ -426,6 +435,8 @@ async def _finalize_special_notes_and_kitchen(
     except Exception as fb_err:
         logger.warning(f"[feedback-queue] Non-fatal: {fb_err}")
 
+    from locales.customer import end_language_preference
+    end_language_preference(session_state)
     session_state["booking_step"] = "visit_complete"
     session_state["_customer_finalize_sent"] = True
     session_state.pop("_pending_kitchen", None)
@@ -764,7 +775,7 @@ async def resume_active_dine_in_token(
                 "table_confirming_guests",
                 n=session_state.get("party_size", token.get("pax")),
                 token=token_id,
-                wait_window=_auto_assign_time_message().replace("*", ""),
+                wait_window=_auto_assign_time_message(session_state),
             ),
             restaurant_id,
         )
@@ -909,14 +920,16 @@ async def handle_dine_in_flow(
 
             if token_row and estimate_display is not None and est_min is not None:
                 from locales.customer import session_lang
+                # Recompute display in session language (DB may store English).
+                est_i = int(est_min)
                 customer_msg = build_dinein_customer_message(
                     party_size,
                     portal_token_id,
                     {
-                        "estimate_minutes": est_min,
-                        "display": estimate_display,
-                        "low": 0,
-                        "high": 0,
+                        "estimate_minutes": est_i,
+                        "display": None,
+                        "low": max(5, est_i - 10) if est_i > 0 else 0,
+                        "high": est_i + 10 if est_i > 0 else 0,
                     },
                     lang=session_lang(session_state),
                 )
@@ -927,7 +940,7 @@ async def handle_dine_in_flow(
                     "table_finding_guests",
                     n=party_size,
                     token=portal_token_id,
-                    wait_window=_auto_assign_time_message().replace("*", ""),
+                    wait_window=_auto_assign_time_message(session_state),
                 )
 
             await send_whatsapp_message(customer_phone, customer_msg, restaurant_id)
@@ -1011,7 +1024,7 @@ async def handle_dine_in_flow(
                     "table_confirming_guests",
                     n=party_size,
                     token=portal_token_id,
-                    wait_window=_auto_assign_time_message().replace("*", ""),
+                    wait_window=_auto_assign_time_message(session_state),
                 ),
                 restaurant_id,
             )
@@ -1029,6 +1042,8 @@ async def handle_dine_in_flow(
     # ── awaiting_manager_approval ─────────────────────────────────────────────
     elif booking_step == "awaiting_manager_approval":
         if msg_lower in ("cancel", "cancel request", "cancel order"):
+            from locales.customer import end_language_preference
+            end_language_preference(session_state)
             session_state["booking_step"] = "visit_complete"
             await send_whatsapp_message(
                 customer_phone,
@@ -1078,6 +1093,8 @@ async def handle_dine_in_flow(
     # ── awaiting_table_assignment ─────────────────────────────────────────────
     elif booking_step == "awaiting_table_assignment":
         if msg_lower in ("cancel", "cancel request", "cancel order"):
+            from locales.customer import end_language_preference
+            end_language_preference(session_state)
             session_state["booking_step"] = "visit_complete"
             await send_whatsapp_message(
                 customer_phone,

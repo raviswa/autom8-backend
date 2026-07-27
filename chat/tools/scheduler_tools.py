@@ -350,8 +350,9 @@ async def send_prepay_payment_reminders():
 
                 pref_lang = "en"
                 try:
+                    from locales.customer import proactive_lang
                     sess = await get_session_state(restaurant_id, phone) or {}
-                    pref_lang = str(sess.get("preferred_language") or "en")
+                    pref_lang = proactive_lang(sess)
                 except Exception:
                     pref_lang = "en"
                 from locales.customer import customer_service_label
@@ -383,8 +384,9 @@ async def send_prepay_payment_reminders():
 
                 pref_lang = "en"
                 try:
+                    from locales.customer import proactive_lang
                     sess = await get_session_state(restaurant_id, phone) or {}
-                    pref_lang = str(sess.get("preferred_language") or "en")
+                    pref_lang = proactive_lang(sess)
                 except Exception:
                     pref_lang = "en"
                 pay_line = ""
@@ -440,8 +442,9 @@ async def send_abandoned_webcart_reminders():
 
             pref_lang = "en"
             try:
+                from locales.customer import proactive_lang
                 sess = await get_session_state(restaurant_id, phone) or {}
-                pref_lang = str(sess.get("preferred_language") or "en")
+                pref_lang = proactive_lang(sess)
             except Exception:
                 pref_lang = "en"
 

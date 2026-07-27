@@ -89,12 +89,20 @@ router.put('/:id/assign', outletAuth, async (req, res) => {
           };
         }
       } catch (_e) { /* non-fatal */ }
+      let lang = 'en';
+      try {
+        const { getSession } = require('../../bot/session/sessionStore');
+        const { preferredLanguageFromSession } = require('../../helpers/customerCopy');
+        const sess = await getSession(restaurantId, token.phone);
+        lang = preferredLanguageFromSession(sess);
+      } catch (_langErr) { /* non-fatal */ }
       await sendWhatsAppMessage(
         token.phone,
         buildTableReadyMessage({
           ...outlet,
           tokenId: token.id,
           tableNumber: table_number,
+          lang,
         }),
         restaurantId
       );

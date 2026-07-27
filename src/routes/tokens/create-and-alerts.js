@@ -199,6 +199,14 @@ router.post('/', requireKdsSecretOrJwt, async (req, res) => {
               };
             }
           } catch (_e) { /* non-fatal */ }
+          try {
+            if (cleanPhone) {
+              const { getSession } = require('../../bot/session/sessionStore');
+              const { preferredLanguageFromSession } = require('../../helpers/customerCopy');
+              const sess = await getSession(restaurant_id, cleanPhone);
+              outlet.lang = preferredLanguageFromSession(sess);
+            }
+          } catch (_langErr) { /* non-fatal */ }
           await sendWhatsAppMessage(
             cleanPhone,
             buildDineInCustomerMessage(partySize, finalToken.id, estimate, outlet),

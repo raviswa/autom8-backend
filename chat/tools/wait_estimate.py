@@ -19,8 +19,8 @@ MIN_REMAINING_FLOOR = 5
 RANGE_BUFFER = 10
 
 
-def _auto_assign_wait_window() -> str:
-    """Customer-facing wait window; defaults 1–2 minutes."""
+def _auto_assign_wait_window(lang: str | None = None) -> str:
+    """Customer-facing bare wait window (e.g. '1 to 2 minutes'); defaults 1–2."""
     try:
         low = max(1, int(os.getenv("DINEIN_AUTO_ASSIGN_MIN_MINUTES", "1")))
     except (TypeError, ValueError):
@@ -29,7 +29,13 @@ def _auto_assign_wait_window() -> str:
         high = max(low, int(os.getenv("DINEIN_AUTO_ASSIGN_MAX_MINUTES", "2")))
     except (TypeError, ValueError):
         high = max(low, 2)
-    return f"{low} minutes" if low == high else f"{low} to {high} minutes"
+    try:
+        from locales.customer import reply
+        if low == high:
+            return reply(lang, "wait_mins_bare", n=low)
+        return reply(lang, "wait_range_bare", lo=low, hi=high)
+    except Exception:
+        return f"{low} minutes" if low == high else f"{low} to {high} minutes"
 
 
 def _dropout_rate(party_size: int) -> float:
@@ -41,16 +47,24 @@ def _dropout_rate(party_size: int) -> float:
     return 0.15
 
 
-def format_wait_display(low: int, high: int, estimate_minutes: int) -> str:
+def format_wait_display(
+    low: int,
+    high: int,
+    estimate_minutes: int,
+    *,
+    lang: str | None = None,
+) -> str:
+    from locales.customer import reply
+
     if estimate_minutes == 0:
-        return "Ready to seat now"
+        return reply(lang, "wait_ready_now")
     if estimate_minutes < 0:
-        return "No suitable table available"
+        return reply(lang, "wait_no_table")
     if low < 15:
-        return "Less than 15 minutes"
+        return reply(lang, "wait_under_15")
     if low < 30:
-        return "Around 20 to 30 minutes"
-    return f"Approximately {low} to {high} minutes"
+        return reply(lang, "wait_around_20_30")
+    return reply(lang, "wait_approx_range", lo=low, hi=high)
 
 
 def build_dinein_customer_message(
@@ -81,7 +95,7 @@ def build_dinein_customer_message(
             token=token_id,
         )
     display = estimate.get("display") or format_wait_display(
-        estimate.get("low", 0), estimate.get("high", 0), est_min,
+        estimate.get("low", 0), estimate.get("high", 0), est_min, lang=lang,
     )
     return reply(
         lang,

@@ -163,30 +163,46 @@ SERVICE_ROW_CONFIG: dict[str, dict[str, str]] = {
     "token_queue": {
         "title": "🎫 Token / Queue",
         "description": "Get a queue token, we'll take it from there",
+        "title_key": "svc_card_token_queue_title",
+        "desc_key": "svc_card_token_queue_desc",
     },
     "dine_in_now": {
         "title": "🍽️ Dine-In Now",
         "description": "Order food at your table",
+        "title_key": "svc_card_dine_in_now_title",
+        "desc_key": "svc_card_dine_in_now_desc",
     },
     "door_delivery_now": {
         "title": "🛵 Home Delivery",
         "description": "Fresh food delivered to your door",
+        "title_key": "svc_card_door_delivery_now_title",
+        "desc_key": "svc_card_door_delivery_now_desc",
     },
     "takeaway_now": {
         "title": "🛍️ Take Away",
         "description": "Skip the line, pick up now",
+        "title_key": "svc_card_takeaway_now_title",
+        "desc_key": "svc_card_takeaway_now_desc",
     },
     "table_reservation": {
         "title": "🗓️ Future Reservation",
         "description": "Book your preferred table in advance",
+        "title_key": "svc_card_table_reservation_title",
+        "desc_key": "svc_card_table_reservation_desc",
     },
     "scheduled_delivery": {
         "title": "🕒 Scheduled Delivery",
-        "description": "Schedule a delivery up to 7 days ahead",
+        "description": "Schedule a delivery for later",
+        "title_key": "svc_card_scheduled_delivery_title",
+        "desc_key": "svc_card_scheduled_delivery_desc",
+        "footnote": "scheduled",
     },
     "scheduled_pickup": {
         "title": "🚗 Scheduled Take Away",
         "description": "Plan your pick-up time in advance",
+        "title_key": "svc_card_scheduled_pickup_title",
+        "desc_key": "svc_card_scheduled_pickup_desc",
+        "footnote": "scheduled",
     },
 }
 
@@ -331,12 +347,32 @@ def _normalize_services_enabled(restaurant: dict) -> list[str]:
     return [str(x) for x in services_enabled]
 
 
-def _service_row(row_id: str) -> dict[str, str]:
+def _service_row(row_id: str, lang: str | None = None) -> dict[str, str]:
     cfg = SERVICE_ROW_CONFIG[row_id]
+    title = cfg["title"]
+    description = cfg["description"]
+    code = lang or "en"
+    if lang:
+        try:
+            from locales.customer import reply
+            if cfg.get("title_key"):
+                title = reply(lang, cfg["title_key"])
+            if cfg.get("desc_key"):
+                description = reply(lang, cfg["desc_key"])
+        except Exception:
+            pass
+    if cfg.get("footnote") == "scheduled":
+        try:
+            from locales.customer import get_scheduled_order_footnote, normalize_lang
+            footnote = get_scheduled_order_footnote(normalize_lang(code))
+            if footnote and footnote not in description:
+                description = f"{description.rstrip('. ')}. {footnote}"
+        except Exception:
+            pass
     return {
         "id": row_id,
-        "title": cfg["title"],
-        "description": cfg["description"],
+        "title": title,
+        "description": description,
     }
 
 
@@ -407,7 +443,11 @@ def match_service_row_choice(
     return None
 
 
-def build_service_selection_payload(restaurant: dict) -> dict | None:
+def build_service_selection_payload(
+    restaurant: dict,
+    *,
+    lang: str | None = None,
+) -> dict | None:
     services_enabled = _normalize_services_enabled(restaurant)
     scheduled_delivery_enabled = bool(restaurant.get("scheduled_delivery_enabled"))
     scheduled_takeaway_enabled = bool(restaurant.get("scheduled_takeaway_enabled"))
@@ -420,21 +460,21 @@ def build_service_selection_payload(restaurant: dict) -> dict | None:
     # Token / Queue is a walk-in handoff for restaurants WITHOUT Dine-In ordering.
     # When Dine-In is opted in, hide Token / Queue — customers should use Dine-In Now.
     if Feature.TOKEN_MANAGEMENT in services_enabled and not dine_in_on:
-        rows_sec1.append(_service_row("token_queue"))
+        rows_sec1.append(_service_row("token_queue", lang=lang))
 
     if dine_in_on:
-        rows_sec1.append(_service_row("dine_in_now"))
-        rows_sec2.append(_service_row("table_reservation"))
+        rows_sec1.append(_service_row("dine_in_now", lang=lang))
+        rows_sec2.append(_service_row("table_reservation", lang=lang))
 
     if Feature.DELIVERY in services_enabled:
-        rows_sec1.append(_service_row("door_delivery_now"))
+        rows_sec1.append(_service_row("door_delivery_now", lang=lang))
         if scheduled_delivery_enabled:
-            rows_sec2.append(_service_row("scheduled_delivery"))
+            rows_sec2.append(_service_row("scheduled_delivery", lang=lang))
 
     if Feature.TAKEAWAY in services_enabled:
-        rows_sec1.append(_service_row("takeaway_now"))
+        rows_sec1.append(_service_row("takeaway_now", lang=lang))
         if scheduled_takeaway_enabled:
-            rows_sec2.append(_service_row("scheduled_pickup"))
+            rows_sec2.append(_service_row("scheduled_pickup", lang=lang))
 
     total_rows = len(rows_sec1) + len(rows_sec2)
 
@@ -446,21 +486,31 @@ def build_service_selection_payload(restaurant: dict) -> dict | None:
             },
         }
 
+    try:
+        from locales.customer import reply
+        sec1_title = reply(lang, "service_section_instant") if lang else "🚀 INSTANT / NOW"
+        sec2_title = reply(lang, "service_section_planned") if lang else "⏰ PLANNED / LATER"
+        help_text = reply(lang, "service_menu_help") if lang else "How can we help you today?"
+        btn = reply(lang, "service_menu_button") if lang else "👉 Select Service"
+    except Exception:
+        sec1_title, sec2_title = "🚀 INSTANT / NOW", "⏰ PLANNED / LATER"
+        help_text, btn = "How can we help you today?", "👉 Select Service"
+
     sections = []
     if rows_sec1:
-        sections.append({"title": "🚀 INSTANT / NOW", "rows": rows_sec1})
+        sections.append({"title": sec1_title[:24], "rows": rows_sec1})
     if rows_sec2:
-        sections.append({"title": "⏰ PLANNED / LATER", "rows": rows_sec2})
+        sections.append({"title": sec2_title[:24], "rows": rows_sec2})
 
     return {
         "type": "interactive",
         "interactive": {
             "type": "list",
             "body": {
-                "text": "How can we help you today?",
+                "text": help_text,
             },
             "action": {
-                "button": "👉 Select Service",
+                "button": (btn[:20] if btn else "Select Service"),
                 "sections": sections,
             },
         },
@@ -477,8 +527,15 @@ async def build_service_menu_rows(
     state = session_state or {}
     await refresh_kitchen_acceptance(state, restaurant_id)
 
+    lang = None
+    try:
+        from locales.customer import session_lang
+        lang = session_lang(state)
+    except Exception:
+        lang = None
+
     info = await fetch_restaurant_info(restaurant_id)
-    payload = build_service_selection_payload(info)
+    payload = build_service_selection_payload(info, lang=lang)
 
     if not payload or payload.get("type") != "interactive":
         return []

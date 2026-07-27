@@ -45,7 +45,6 @@ from tools.whatsapp_tools import (
     send_whatsapp_message,
     send_location_request,
     send_whatsapp_flow,
-    send_whatsapp_list,
 )
 from tools.cart_tools import cart_to_order_text, clear_cart
 from tools.order_pricing import (
@@ -60,9 +59,6 @@ from tools.order_timing import ready_time_note_from_session
 from tools.delivery_distance import (
     finalize_delivery_address,
     format_distance_label,
-    reverse_geocode_candidates,
-    compute_delivery_distance,
-    check_delivery_radius,
 )
 from tools.booking_mechanisms import (
     RECEIPT_AVAILABLE,
@@ -405,39 +401,38 @@ async def _advance_after_delivery_time_set(
 
     when_label = None
     if scheduled is not None:
+        from locales.customer import reply as _reply, session_lang as _slang
         h = scheduled.hour % 12 or 12
         ampm = "PM" if scheduled.hour >= 12 else "AM"
         when_label = f"{scheduled.strftime('%d %b %Y')}, {h}:{scheduled.minute:02d} {ampm}"
         note = ""
         if session_state.get("scheduled_delivery_enabled"):
-            note = (
-                "\n\nWe are confirming your preferred time. "
-                "Share your address next, then add items — "
-                "we will message you when you can pay."
-            )
+            note = "\n\n" + _reply(_slang(session_state), "schedule_confirming_time")
         await send_whatsapp_message(
             customer_phone,
-            f"Got it — we will deliver on *{when_label}*.{note}",
+            _reply(_slang(session_state), "schedule_slot_delivery", when=when_label) + note,
             restaurant_id,
         )
 
     if not session_state.get("delivery_address"):
+        from locales.customer import reply as _reply, session_lang as _slang
+        _lang = _slang(session_state)
         loc_purpose = "scheduled" if scheduled is not None else "immediate"
         await send_whatsapp_message(
             customer_phone,
-            "🚚 *Delivery order*\n\nWe need your delivery address.",
+            _reply(_lang, "delivery_need_address"),
             restaurant_id,
         )
         sent = await send_location_request(
             customer_phone, restaurant_id,
             purpose=loc_purpose,
             scheduled_label=when_label,
-            body_text="📍 Please share your delivery location",
+            body_text=_reply(_lang, "delivery_share_location"),
         )
         if not sent:
             await send_whatsapp_message(
                 customer_phone,
-                "Please share your location pin or type your full delivery address.",
+                _reply(_lang, "delivery_share_or_type"),
                 restaurant_id,
             )
         session_state["booking_step"] = "awaiting_address"
@@ -610,6 +605,8 @@ async def _complete_scheduled_delivery_after_approval(
     session_state["last_order_summary"] = _first_item
     session_state["is_returning_customer"] = True
     session_state["visit_count"] = session_state.get("visit_count", 0) + 1
+    from locales.customer import end_language_preference
+    end_language_preference(session_state)
     session_state["booking_step"] = "visit_complete"
     clear_cart(session_state)
 
@@ -791,6 +788,8 @@ async def _submit_scheduled_delivery_for_approval(
             + _HOME_HINT,
             restaurant_id,
         )
+        from locales.customer import end_language_preference
+        end_language_preference(session_state)
         session_state["booking_step"] = "visit_complete"
         clear_cart(session_state)
         return {"status": "error", "reason": "portal_token_missing"}
@@ -815,55 +814,6 @@ async def _submit_scheduled_delivery_for_approval(
     await send_whatsapp_message(customer_phone, confirmation, restaurant_id)
 
     return {"status": "awaiting_scheduled_delivery_approval", "booking_id": booking_id}
-
-
-def _truncate_wa(text: str, max_len: int) -> str:
-    clean = str(text or "").strip()
-    if len(clean) <= max_len:
-        return clean
-    return f"{clean[: max_len - 1]}…"
-
-
-async def _send_address_choice_list(
-    customer_phone: str,
-    restaurant_id: str,
-    session_state: Dict[str, Any],
-    candidates: list,
-) -> bool:
-    """Offer reverse-geocoded nearby addresses (+ type own) as a WhatsApp list."""
-    rows = []
-    for index, candidate in enumerate(candidates[:4]):
-        formatted = (candidate.get("formatted_address") or "").strip()
-        if not formatted:
-            continue
-        title = (candidate.get("short_label") or formatted).strip()
-        rows.append({
-            "id": f"addr_{index}",
-            "title": _truncate_wa(title, 24),
-            "description": _truncate_wa(formatted, 72),
-        })
-    rows.append({
-        "id": "addr_custom",
-        "title": "Type my own address",
-        "description": "Enter your delivery address manually",
-    })
-
-    session_state["pending_address_candidates"] = candidates[:4]
-    session_state["awaiting_custom_address"] = False
-    session_state["booking_step"] = "awaiting_address_choice"
-
-    return await send_whatsapp_list(
-        customer_phone,
-        restaurant_id,
-        header_text="Confirm your delivery address",
-        body_text=(
-            "We found these addresses near your location. "
-            "Select the one that best matches, or type your own:"
-        ),
-        button_text="Choose Address",
-        section_title="Nearby addresses",
-        rows=rows,
-    )
 
 
 async def _finalize_and_continue_after_address(
@@ -925,14 +875,13 @@ async def _proceed_to_delivery_menu(
     session_state: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Send catalog after scheduled time (and address) are collected."""
-    intro = "Thank you! Browse today's menu below and add items to your basket 🛒"
+    from locales.customer import reply as _reply, session_lang as _slang
+    _lang = _slang(session_state)
+    intro = _reply(_lang, "delivery_thank_browse_basket")
     if session_state.get("scheduled_at") and session_state.get("scheduled_delivery_enabled"):
-        intro = (
-            "Thank you! Add items for your scheduled delivery below 🛒"
-            + _MANAGER_APPROVAL_NOTE
-        )
+        intro = _reply(_lang, "delivery_scheduled_browse") + _MANAGER_APPROVAL_NOTE
     elif session_state.get("scheduled_at"):
-        intro = "Thank you! Add items for your scheduled delivery below 🛒"
+        intro = _reply(_lang, "delivery_scheduled_browse")
     await send_catalog_with_fallback(customer_phone, restaurant_id, session_state, intro=intro)
     clear_cart(session_state)
     session_state["booking_step"] = "awaiting_order"
@@ -954,78 +903,93 @@ async def handle_delivery_flow(
         return resend
 
     # ── awaiting_address ──────────────────────────────────────────────────────
+    # WhatsApp's location preview is the customer's confirmation — use their
+    # pin label directly (no reverse-geocode / address-choice step).
     if booking_step == "awaiting_address":
         raw = message.strip()
-        location_shared = False
-        pin_label = ""
+        maps_link = ""
+
         if raw.startswith("LOCATION:"):
             try:
                 coords_part, label = raw[len("LOCATION:"):].split("|", 1)
                 lat, lng = coords_part.split(",", 1)
-                session_state["delivery_lat"] = float(lat.strip())
-                session_state["delivery_lng"] = float(lng.strip())
-                pin_label = label.strip()
-                delivery_address = pin_label or f"{lat.strip()},{lng.strip()}"
-                location_shared = True
+                lat_s, lng_s = lat.strip(), lng.strip()
+                session_state["delivery_lat"] = float(lat_s)
+                session_state["delivery_lng"] = float(lng_s)
+                maps_link = f"https://maps.google.com/?q={lat_s},{lng_s}"
+                delivery_address = label.strip() or f"{lat_s},{lng_s}"
+                address_display = f"{delivery_address}\n📍 {maps_link}"
             except Exception:
                 delivery_address = raw
+                address_display = raw
         else:
             delivery_address = raw
+            address_display = raw
 
-        session_state["delivery_address"] = delivery_address
+        # Precise label (+ Maps link when pin shared) for customer + manager copy
+        session_state["delivery_address"] = (
+            address_display if maps_link else delivery_address
+        )
+        session_state.pop("pending_address_candidates", None)
+        session_state["awaiting_custom_address"] = False
         await cache_restaurant_pricing(session_state, restaurant_id)
 
-        if location_shared:
-            await compute_delivery_distance(session_state)
-            allowed, reject_msg = check_delivery_radius(session_state)
-            if not allowed:
-                await send_whatsapp_message(customer_phone, reject_msg or "", restaurant_id)
-                session_state["booking_step"] = "awaiting_address"
-                return {"status": "awaiting_address"}
-
-            candidates = await reverse_geocode_candidates(
-                float(session_state["delivery_lat"]),
-                float(session_state["delivery_lng"]),
-                limit=4,
-                pin_label=pin_label,
+        addr_result = await finalize_delivery_address(
+            session_state,
+            address_text=None if maps_link else delivery_address,
+        )
+        if not addr_result.get("ok"):
+            await send_whatsapp_message(
+                customer_phone, addr_result.get("message", ""), restaurant_id,
             )
+            session_state["booking_step"] = "awaiting_address"
+            return {"status": "awaiting_address"}
 
-            if candidates:
-                sent = await _send_address_choice_list(
-                    customer_phone, restaurant_id, session_state, candidates,
-                )
-                if sent:
-                    return {"status": "awaiting_address_choice"}
+        from tools.feature_gate import ORDER_MODE_SCHEDULED
+        from locales.customer import reply as _reply, session_lang as _slang
 
-            # List send failed — fall back to pin label when it is a real place name
-            if pin_label and not pin_label.replace(".", "").replace(",", "").replace("-", "").replace(" ", "").isdigit():
-                return await _finalize_and_continue_after_address(
-                    customer_phone, restaurant_id, session_state,
-                    customer_id=customer_id, customer_name=customer_name,
-                )
-
+        _lang = _slang(session_state)
+        mode = session_state.get("order_mode", "immediate")
+        if mode == ORDER_MODE_SCHEDULED and not session_state.get("scheduled_at"):
             await send_whatsapp_message(
                 customer_phone,
-                "📍 Location received. Please type your full delivery address "
-                "(house no., street, area, city, pincode).",
+                _reply(_lang, "delivery_delivering_to_short", address=address_display),
                 restaurant_id,
             )
-            session_state["awaiting_custom_address"] = True
-            session_state["booking_step"] = "awaiting_address_choice"
-            return {"status": "awaiting_address_choice"}
+            if addr_result.get("message"):
+                await send_whatsapp_message(
+                    customer_phone, addr_result["message"], restaurant_id,
+                )
+            return await _prompt_delivery_schedule(
+                customer_phone, restaurant_id, customer_id, customer_name, session_state,
+            )
 
-        return await _finalize_and_continue_after_address(
-            customer_phone, restaurant_id, session_state,
-            customer_id=customer_id, customer_name=customer_name,
-            address_text=delivery_address,
+        clear_cart(session_state)
+        if session_state.get("scheduled_at") and session_state.get("scheduled_delivery_enabled"):
+            intro = (
+                _reply(_lang, "delivery_scheduled_browse_addr", address=address_display)
+                + _MANAGER_APPROVAL_NOTE
+            )
+        elif session_state.get("scheduled_at"):
+            intro = _reply(_lang, "delivery_scheduled_browse_addr", address=address_display)
+        else:
+            intro = _reply(_lang, "delivery_delivering_to", address=address_display)
+        await send_catalog_with_fallback(
+            customer_phone, restaurant_id, session_state, intro=intro,
         )
+        if session_state.get("booking_step") not in (
+            "awaiting_category_selection", "awaiting_numbered_order",
+        ):
+            session_state["booking_step"] = "awaiting_order"
+        return {"status": session_state["booking_step"]}
 
-    # ── awaiting_address_choice ───────────────────────────────────────────────
+    # ── awaiting_address_choice (legacy — no longer offered) ──────────────────
+    # In-flight sessions that still have the old "Choose Address" list open:
+    # accept their pick, or re-enter the pin/typed-address path.
     elif booking_step == "awaiting_address_choice":
         raw = message.strip()
 
         if raw.startswith("LOCATION:"):
-            # Customer shared a new pin — restart address capture
             session_state["booking_step"] = "awaiting_address"
             session_state.pop("pending_address_candidates", None)
             session_state["awaiting_custom_address"] = False
@@ -1035,12 +999,12 @@ async def handle_delivery_flow(
             )
 
         if raw == "addr_custom":
+            from locales.customer import reply as _reply, session_lang as _slang
             session_state["awaiting_custom_address"] = True
             session_state.pop("pending_address_candidates", None)
             await send_whatsapp_message(
                 customer_phone,
-                "Please type your full delivery address "
-                "(house no., street, area, city, pincode).",
+                _reply(_slang(session_state), "delivery_type_address"),
                 restaurant_id,
             )
             return {"status": "awaiting_address_choice"}
@@ -1053,9 +1017,11 @@ async def handle_delivery_flow(
             candidates = session_state.get("pending_address_candidates") or []
             selected = candidates[index] if 0 <= index < len(candidates) else None
             if not selected:
+                from locales.customer import reply as _reply, session_lang as _slang
+                _lang = _slang(session_state)
                 await send_whatsapp_message(
                     customer_phone,
-                    "Sorry, that selection expired. Please share your location again.",
+                    _reply(_lang, "delivery_share_or_type"),
                     restaurant_id,
                 )
                 session_state["booking_step"] = "awaiting_address"
@@ -1064,26 +1030,24 @@ async def handle_delivery_flow(
                 sent = await send_location_request(
                     customer_phone, restaurant_id,
                     purpose="scheduled" if session_state.get("scheduled_at") else "immediate",
-                    body_text="📍 Please share your delivery location",
+                    body_text=_reply(_lang, "delivery_share_location"),
                 )
                 if not sent:
                     await send_whatsapp_message(
                         customer_phone,
-                        "Please share your location pin or type your full delivery address.",
+                        _reply(_lang, "delivery_share_or_type"),
                         restaurant_id,
                     )
                 return {"status": "awaiting_address"}
 
             formatted = (selected.get("formatted_address") or "").strip()
             session_state["delivery_address"] = formatted
-            # Keep the original pin coords for distance; do not overwrite with candidate
             await cache_restaurant_pricing(session_state, restaurant_id)
             return await _finalize_and_continue_after_address(
                 customer_phone, restaurant_id, session_state,
                 customer_id=customer_id, customer_name=customer_name,
             )
 
-        # Free-text custom address (after addr_custom or empty-candidates prompt)
         if session_state.get("awaiting_custom_address") or len(raw) >= 8:
             session_state["delivery_address"] = raw
             await cache_restaurant_pricing(session_state, restaurant_id)
@@ -1093,9 +1057,10 @@ async def handle_delivery_flow(
                 address_text=raw,
             )
 
+        from locales.customer import reply as _reply, session_lang as _slang
         await send_whatsapp_message(
             customer_phone,
-            "Please choose an address from the list, or type your full delivery address.",
+            _reply(_slang(session_state), "delivery_type_address"),
             restaurant_id,
         )
         return {"status": "awaiting_address_choice"}
@@ -1166,6 +1131,8 @@ async def handle_delivery_flow(
                 "Please try a different time or contact the restaurant." + _HOME_HINT,
                 restaurant_id,
             )
+            from locales.customer import end_language_preference
+            end_language_preference(session_state)
             session_state["booking_step"] = "visit_complete"
             clear_cart(session_state)
             return {"status": "visit_complete"}
@@ -1377,7 +1344,6 @@ async def handle_delivery_flow(
             session_state["last_order_summary"]    = _first_item
             session_state["is_returning_customer"] = True
             session_state["visit_count"]           = session_state.get("visit_count", 0) + 1
-
             session_state["booking_step"] = "visit_complete"
             clear_cart(session_state)
 
@@ -1427,6 +1393,7 @@ async def handle_delivery_flow(
 
             if RECEIPT_AVAILABLE:
                 try:
+                    from locales.customer import session_lang as _session_lang
                     r_info = await fetch_restaurant_info(restaurant_id)
                     receipt_data = _ReceiptData(
                         restaurant_name=r_info.get("name", ""),
@@ -1450,12 +1417,19 @@ async def handle_delivery_flow(
                     )
                     receipt_path = _generate_receipt(receipt_data)
                     logger.info(f"[receipt] Delivery receipt saved: {receipt_path}")
-                    await upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, token)
+                    await upload_and_send_receipt(
+                        receipt_path, customer_phone, restaurant_id, token,
+                        lang=_session_lang(session_state),
+                    )
                     await update_booking_status(booking_id, "confirmed")
                     logger.info(f"[receipt] Booking {booking_id} marked confirmed")
                 except Exception as _re:
                     import traceback as _tb
                     logger.warning(f"[receipt] Generation failed (non-fatal): {_re}\n{_tb.format_exc()}")
+
+            # Preference ends once the customer has received the receipt (or visit ends).
+            from locales.customer import end_language_preference
+            end_language_preference(session_state)
 
             return {"status": "visit_complete", "booking_id": booking_id, "total": total}
 

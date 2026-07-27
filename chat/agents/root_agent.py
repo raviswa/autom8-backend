@@ -197,7 +197,8 @@ async def route_message(
     message = _extract_interactive_reply_id(message)
 
     # Latch preferred_language from the customer's typed greeting/script before
-    # identity or booking replies. Mid-flow stays sticky until visit_complete.
+    # identity or booking replies. Sticky mid-visit; cleared after receipt /
+    # visit_complete so the next session starts from a fresh opener.
     try:
         from locales.customer import latch_indic_from_text
         latch_indic_from_text(session_state, str(message or ""))

@@ -746,13 +746,28 @@ def build_distance_charge_preview(session_state: dict[str, Any], charge: float |
     )
     travel_note = ""
     travel = session_state.get("delivery_travel_minutes")
-    if travel and session_state.get("delivery_distance_method") == "road":
-        traffic = " (current traffic)" if session_state.get("delivery_travel_traffic_aware") else ""
-        travel_note = f" Drive time{traffic}: *~{int(travel)} mins*."
-    return (
-        f"📍 You're about *{dist_label}* from our kitchen.{travel_note} "
-        f"Delivery charge: *₹{fee:.0f}*."
-    )
+    try:
+        from locales.customer import reply as _reply, session_lang as _slang
+        lang = _slang(session_state)
+        if travel and session_state.get("delivery_distance_method") == "road":
+            traffic = " (current traffic)" if session_state.get("delivery_travel_traffic_aware") else ""
+            travel_note = _reply(
+                lang, "delivery_distance_drive",
+                traffic=traffic,
+                mins=int(travel),
+            )
+        return _reply(
+            lang, "delivery_distance_preview",
+            dist_label=dist_label, travel_note=travel_note, fee=fee,
+        )
+    except Exception:
+        if travel and session_state.get("delivery_distance_method") == "road":
+            traffic = " (current traffic)" if session_state.get("delivery_travel_traffic_aware") else ""
+            travel_note = f" Drive time{traffic}: *~{int(travel)} mins*."
+        return (
+            f"📍 You're about *{dist_label}* from our kitchen.{travel_note} "
+            f"Delivery charge: *₹{fee:.0f}*."
+        )
 
 
 def format_delivery_line(totals: dict[str, float], session_state: dict[str, Any] | None) -> str:

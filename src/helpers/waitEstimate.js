@@ -5,6 +5,8 @@
  * See product spec: wave algorithm with tiered dropout.
  */
 
+const { customerReply } = require('./customerCopy');
+
 const DEFAULT_DINING_MINUTES = 45;
 const TURNOVER_MINUTES = 5;
 const MIN_REMAINING_FLOOR = 5;
@@ -17,12 +19,12 @@ function dropoutRate(partySize) {
   return 0.15;
 }
 
-function formatWaitDisplay(low, high, estimateMinutes) {
-  if (estimateMinutes === 0) return 'Ready to seat now';
-  if (estimateMinutes < 0) return 'No suitable table available';
-  if (low < 15) return 'Less than 15 minutes';
-  if (low < 30) return 'Around 20 to 30 minutes';
-  return `Approximately ${low} to ${high} minutes`;
+function formatWaitDisplay(low, high, estimateMinutes, lang = 'en') {
+  if (estimateMinutes === 0) return customerReply(lang, 'wait_ready_now');
+  if (estimateMinutes < 0) return customerReply(lang, 'wait_no_table');
+  if (low < 15) return customerReply(lang, 'wait_under_15');
+  if (low < 30) return customerReply(lang, 'wait_around_20_30');
+  return customerReply(lang, 'wait_approx_range', { lo: low, hi: high });
 }
 
 function todayStartUtc() {
@@ -205,54 +207,49 @@ function formatOutletLabel(displayName, city) {
  * @param {number|string} partySize
  * @param {string} tokenId
  * @param {{ estimate_minutes: number, display?: string }} estimate
- * @param {{ displayName?: string, city?: string }} [outlet]
+ * @param {{ displayName?: string, city?: string, lang?: string }} [outlet]
  */
 function buildDineInCustomerMessage(partySize, tokenId, estimate, outlet = {}) {
   const pax = Math.max(1, parseInt(partySize, 10) || 1);
-  const guests = `${pax} ${pax === 1 ? 'guest' : 'guests'}`;
+  const lang = outlet.lang || 'en';
   const outletLabel = formatOutletLabel(outlet.displayName, outlet.city);
+  const welcome = outletLabel ? `\n\nWelcome to *${outletLabel}*.` : '';
 
   if (estimate.estimate_minutes === 0) {
-    return (
-      `Thank you! A table is available for ${guests}. 🙏\n\n`
-      + `Your queue number: ${tokenId}\n\n`
-      + `Please come to the reception — our team will seat you shortly.`
-      + (outletLabel ? `\n\nWelcome to *${outletLabel}*.` : '')
-    );
+    return customerReply(lang, 'table_finding_ready_now', { n: pax, token: tokenId }) + welcome;
   }
 
   if (estimate.estimate_minutes < 0) {
-    return (
-      `Thank you! We have noted your visit for ${guests}. 🙏\n\n`
-      + `Your queue number: ${tokenId}\n\n`
-      + `Please speak with the host. Our team will assist you shortly.`
-      + (outletLabel ? `\n\nWelcome to *${outletLabel}*.` : '')
-    );
+    return customerReply(lang, 'table_finding_host', { n: pax, token: tokenId }) + welcome;
   }
 
-  return (
-    `Thank you! We will find a table for ${guests}. 🙏\n\n`
-    + `Your queue number: ${tokenId}\n`
-    + `Estimated wait: ${estimate.display}\n\n`
-    + `We will send you a message as soon as your table is ready.`
-    + (outletLabel ? `\n\nWelcome to *${outletLabel}*.` : '')
+  const display = formatWaitDisplay(
+    estimate.low || 0,
+    estimate.high || 0,
+    estimate.estimate_minutes,
+    lang,
   );
+  return customerReply(lang, 'table_finding_with_estimate', {
+    n: pax,
+    token: tokenId,
+    estimate: display,
+  }) + welcome;
 }
 
 /**
  * Warm table-ready WhatsApp copy after manager assigns a table.
  */
-function buildTableReadyMessage({ displayName, city, tokenId, tableNumber } = {}) {
+function buildTableReadyMessage({
+  displayName, city, tokenId, tableNumber, lang = 'en',
+} = {}) {
   const outletLabel = formatOutletLabel(displayName, city);
   const table = tableNumber != null ? String(tableNumber) : '';
-  return (
-    `Your table is ready! ✅\n\n`
-    + `Queue number: ${tokenId}\n`
-    + (table ? `Table: Table ${table}\n\n` : '\n')
-    + `Please proceed to your table. We look forward to serving you`
-    + (outletLabel ? ` at *${outletLabel}*` : '')
-    + '.'
-  );
+  const outlet = outletLabel ? ` at *${outletLabel}*` : '';
+  return customerReply(lang, 'table_ready_customer', {
+    token: tokenId,
+    table: table || '—',
+    outlet,
+  });
 }
 
 module.exports = {

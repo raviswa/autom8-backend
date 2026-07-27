@@ -164,7 +164,7 @@ async def handle_global_shortcut(
         customer_id = session_state.get("customer_id", "")
         await do_reset(
             str(customer_id), customer_name, customer_phone, restaurant_id,
-            session_state, full_restart=False,
+            session_state, full_restart=False, opener_message=token,
         )
         touch_session_activity(session_state)
         return {"status": "reset_complete"}

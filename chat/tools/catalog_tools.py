@@ -317,15 +317,16 @@ async def send_catalog_category_picker(
         ensure_restaurant_greeting_context,
         resolve_is_new_customer,
     )
-    from locales.customer import session_lang
+    from locales.customer import reply, session_lang
     await ensure_restaurant_greeting_context(state, restaurant_id or "")
     is_new = await resolve_is_new_customer(state, restaurant_id or "", customer_phone)
+    lang = session_lang(state)
     menu_body = build_menu_intro(
         restaurant_display_name=state.get("_restaurant_display_name", restaurant_label),
         restaurant_cuisine=state.get("_restaurant_cuisine", []),
         customer_name=state.get("_customer_db_name") or state.get("customer_name"),
         is_new=is_new,
-        lang=session_lang(state),
+        lang=lang,
     )
     categories = _ordered_categories(available)
     rows: list[dict] = []
@@ -355,7 +356,7 @@ async def send_catalog_category_picker(
             "type": "list",
             "header": {"type": "text", "text": _truncate(f"🍽️ {restaurant_label}", 60)},
             "body": {"text": menu_body},
-            "footer": {"text": "Prices excl. GST"},
+            "footer": {"text": reply(lang, "prices_excl_gst")},
             "action": {
                 "button": "Browse menu",
                 "sections": [{"title": "Menu categories", "rows": rows}],
@@ -431,13 +432,15 @@ async def _send_whatsapp_product_list(
         return False
 
     product_count = sum(len(s.get("product_items") or []) for s in sections)
+    from locales.customer import reply
+    gst_footer = f"{reply('en', 'prices_excl_gst')} • {restaurant_label}"
     ok = await _send_whatsapp_interactive(
         customer_phone,
         {
             "type": "product_list",
             "header": {"type": "text", "text": _truncate(header, 60)},
             "body":   {"text": body},
-            "footer": {"text": f"Prices excl. GST • {restaurant_label}"},
+            "footer": {"text": gst_footer},
             "action": {"catalog_id": catalog_id, "sections": sections},
         },
         restaurant_id,
@@ -577,6 +580,7 @@ async def send_whatsapp_catalog_message(
         sections = [{"title": "Today's Menu", "product_items": product_items}]
 
     from tools.restaurant_config import get_meta_catalog_id
+    from locales.customer import reply
     catalog_id = await get_meta_catalog_id(restaurant_id)
     if not catalog_id:
         logger.error(f"[catalog] meta_catalog_id not set for restaurant {restaurant_id}")
@@ -594,7 +598,7 @@ async def send_whatsapp_catalog_message(
                     "When you're done, tap *Review your order* to send us your basket."
                 ),
             },
-            "footer": {"text": f"Prices excl. GST • {restaurant_label}"},
+            "footer": {"text": f"{reply('en', 'prices_excl_gst')} • {restaurant_label}"},
             "action": {"catalog_id": catalog_id, "sections": sections},
         },
         restaurant_id,

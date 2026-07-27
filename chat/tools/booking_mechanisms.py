@@ -1461,18 +1461,28 @@ def _slugify_subdomain(name: str) -> str:
     return clean or 'restaurant'
 
 
-def _service_label_and_icon(session_state: dict[str, Any]) -> tuple[str, str]:
+def _service_label_and_icon(
+    session_state: dict[str, Any],
+    *,
+    lang: str | None = None,
+) -> tuple[str, str]:
+    from locales.customer import reply, session_lang
+    code = lang or session_lang(session_state)
     service = str(session_state.get('service_type') or '').strip().lower()
     mode = str(session_state.get('order_mode') or '').strip().lower()
     if service == 'dine_in':
-        return 'Dine-in Now', '🍽️'
+        return reply(code, 'svc_dine_in_now'), '🍽️'
     if service == 'takeaway':
-        return ('Scheduled Pickup', '📅') if mode == 'scheduled' else ('Takeaway Now', '🥡')
+        if mode == 'scheduled':
+            return reply(code, 'svc_scheduled_pickup'), '📅'
+        return reply(code, 'svc_takeaway_now'), '🥡'
     if service == 'delivery':
-        return ('Scheduled Delivery', '📅') if mode == 'scheduled' else ('Home Delivery', '🛵')
+        if mode == 'scheduled':
+            return reply(code, 'svc_scheduled_delivery'), '📅'
+        return reply(code, 'svc_home_delivery'), '🛵'
     if service == 'reserve_table':
-        return 'Table Reservation', '🪑'
-    return 'Order Now', '🍽️'
+        return reply(code, 'svc_table_reservation'), '🪑'
+    return reply(code, 'svc_order_now'), '🍽️'
 
 
 def _normalize_phone_digits(phone: str) -> str:
@@ -1634,7 +1644,9 @@ async def _send_web_menu_message(
     restaurant = await get_restaurant_by_id(restaurant_id)
     display_name = (restaurant or {}).get('name') or 'Munafe'
     slug = _slugify_subdomain(display_name)
-    service_label, service_icon = _service_label_and_icon(session_state)
+    from locales.customer import reply as _reply, session_lang as _slang
+    _lang = _slang(session_state)
+    service_label, service_icon = _service_label_and_icon(session_state, lang=_lang)
     phone_digits = _normalize_phone_digits(customer_phone)
 
     token_id, token_id_is_real_walk_row = await _resolve_menu_walk_in_token(
@@ -1675,11 +1687,12 @@ async def _send_web_menu_message(
             session_state['menu_session_token'] = str(token_id)
 
         url = _build_web_menu_url(slug, url_token, phone_digits)
-        body_text = (
-            f"📍 {display_name}\n"
-            f"{service_icon} {service_label}\n\n"
-            "Tap below to browse our full menu, add items to your cart, "
-            "and place your order."
+        body_text = _reply(
+            _lang,
+            "menu_cta_body",
+            display=display_name,
+            service_icon=service_icon,
+            service_label=service_label,
         )
         if intro and intro.strip():
             body_text = f"{intro.strip()}\n\n{body_text}"
@@ -1688,39 +1701,41 @@ async def _send_web_menu_message(
             customer_phone,
             restaurant_id,
             body_text=body_text,
-            button_text="View Menu",
+            button_text=_reply(_lang, "menu_cta_button")[:20],
             url=url,
-            header_text="Browse our menu",
+            header_text=_reply(_lang, "menu_cta_header")[:60],
         )
         if cta_sent:
             return True
 
         # Fallback: plain-text link if the CTA button send fails
         # (e.g. older template/account restrictions).
-        message = (
-            "🍽️ Browse Our Menu\n"
-            f"📍 {display_name}\n"
-            f"{service_icon} {service_label}\n\n"
-            "Tap the button below to browse our full menu with search "
-            "and easy selection. Add items to your cart and submit when ready!\n\n"
-            "👉 View Menu\n"
-            f"{url}"
-        )
-        if intro and intro.strip():
-            message = f"{intro.strip()}\n\n{message}"
+        fallback_btn = _reply(_lang, "menu_cta_button")
+        message = f"{body_text}\n\n👉 {fallback_btn}\n{url}"
         await send_whatsapp_message(customer_phone, message, restaurant_id)
         logger.info(f"[BOOKING] {customer_phone} → Web menu sent ({url})")
         return True
     except Exception:
         logger.exception("[BOOKING] %s → Web menu token generation failed", customer_phone)
-        fallback = (
-            "🍽️ Browse Our Menu\n"
-            f"📍 {display_name}\n"
-            f"{service_icon} {service_label}\n\n"
-            "Tap the button below to browse our full menu with search "
-            "and easy selection. Add items to your cart and submit when ready!\n"
-            "Reply Hi in a moment and we'll get your menu ready."
-        )
+        try:
+            from locales.customer import reply as _reply2, session_lang as _slang2
+            _lang2 = _slang2(session_state)
+            fallback = _reply2(
+                _lang2,
+                "menu_cta_body",
+                display=display_name,
+                service_icon=service_icon,
+                service_label=service_label,
+            ) + "\n" + _reply2(_lang2, "menu_link_failed")
+        except Exception:
+            fallback = (
+                "🍽️ Browse Our Menu\n"
+                f"📍 {display_name}\n"
+                f"{service_icon} {service_label}\n\n"
+                "Tap the button below to browse our full menu with search "
+                "and easy selection. Add items to your cart and submit when ready!\n"
+                "Reply Hi in a moment and we'll get your menu ready."
+            )
         await send_whatsapp_message(customer_phone, fallback, restaurant_id)
         return False
 
