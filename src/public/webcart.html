@@ -858,6 +858,7 @@
           </label>
         </div>
         <textarea id="notes" rows="2" placeholder="Special request (optional)"></textarea>
+        <div id="giftWrap" style="display:none">
         <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;cursor:pointer">
           <input type="checkbox" id="giftToggle" />
           This is a gift — get a shareable link
@@ -872,6 +873,7 @@
             <input class="field" id="giftRecipientPincode" placeholder="Recipient's pincode (6 digits)" inputmode="numeric" maxlength="6" />
             <div id="giftDeliveryQuoteHint" class="delivery-quote-hint" style="display:none"></div>
           </div>
+        </div>
         </div>
         </div>
         <div class="cart-foot">
@@ -1311,6 +1313,22 @@
 
     function needsAddressForOrder() {
       return requiresShipping() && !isPickupOrder();
+    }
+
+    /** Gift share links are for packaged/shipping LOBs only — not restaurant dine-in. */
+    function syncGiftVisibility() {
+      const wrap = $('giftWrap');
+      if (!wrap) return;
+      const allowGift = requiresShipping();
+      wrap.style.display = allowGift ? '' : 'none';
+      if (!allowGift) {
+        const toggle = $('giftToggle');
+        if (toggle?.checked) toggle.checked = false;
+        const fields = $('giftFields');
+        if (fields) fields.style.display = 'none';
+        const shipWrap = $('giftShipWrap');
+        if (shipWrap) shipWrap.style.display = 'none';
+      }
     }
 
     function renderFulfillmentChoices() {
@@ -1899,6 +1917,7 @@ function cartTotals() {
       } = cartTotals();
 
       renderFulfillmentChoices();
+      syncGiftVisibility();
 
       const deliveryWrap = $('deliveryDetailsWrap');
       if (deliveryWrap) {
