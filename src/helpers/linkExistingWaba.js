@@ -12,6 +12,7 @@ const { isPhoneNumberIdExempt } = require('./registrationGuards');
 const { isLifetimeTenant, getDemoWhatsAppNumber } = require('./subscriptionAccess');
 const { invalidateRestaurantConfigCache } = require('./restaurantConfig');
 const { writeAuditLog } = require('./auditLog');
+const { recordActivationEvent } = require('./tenantActivation');
 
 function isHotelMunafeDemoName(tenant = {}) {
   const blob = `${tenant.name || ''} ${tenant.display_name || ''}`.toLowerCase();
@@ -212,6 +213,10 @@ async function linkExistingWabaToRestaurant(restaurantId, opts = {}) {
       auto: Boolean(opts.auto),
     },
   });
+
+  recordActivationEvent(restaurantId, 'whatsapp_connected', {
+    source: opts.auto ? 'link_existing_auto' : 'link_existing',
+  }).catch(() => {});
 
   return {
     success: true,

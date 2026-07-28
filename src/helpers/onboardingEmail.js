@@ -7,6 +7,7 @@
 
 const { sendEmail } = require('../config/mailer');
 const { onboardingWelcome } = require('./emailTemplates');
+const { recordActivationEvent } = require('./tenantActivation');
 
 function resolveTenantEmail(tenant) {
   const raw =
@@ -44,7 +45,11 @@ async function sendOnboardingWelcomeEmail(tenant, opts = {}) {
       setupUrl,
       hiccupNote: opts.hiccupNote || null,
     });
-    return await sendEmail({ to, subject, html, text });
+    const result = await sendEmail({ to, subject, html, text });
+    if (result?.sent && tenant.id) {
+      recordActivationEvent(tenant.id, 'welcome_email_sent', { to }).catch(() => {});
+    }
+    return result;
   } catch (err) {
     console.error('[email/onboarding] send failed', {
       tenant_id: tenant.id || null,

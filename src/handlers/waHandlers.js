@@ -536,6 +536,11 @@ async function handleWhatsAppOrder(message, metadata, preResolvedRestaurantId = 
       return;
     }
 
+    try {
+      const { onOrderCreatedForChurn } = require('../helpers/churnReminders');
+      await onOrderCreatedForChurn(restaurantId);
+    } catch (_) { /* non-fatal */ }
+
     // ── Process items ─────────────────────────────────────────────────────────
     let subtotal = 0;
     const kdsInserts = [];

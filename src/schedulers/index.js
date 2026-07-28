@@ -39,6 +39,14 @@ try {
   console.warn('[schedulers] billingReminders not installed — subscription reminder scheduler disabled');
 }
 
+let runChurnReminderCheck = null;
+try {
+  ({ runChurnReminderCheck } = require('../helpers/churnReminders'));
+} catch (err) {
+  if (err.code !== 'MODULE_NOT_FOUND') throw err;
+  console.warn('[schedulers] churnReminders not installed — churn win-back scheduler disabled');
+}
+
 // Slot helpers live in catalog.js (single source of truth — shared with POST /catalog/slot-sync)
 const {
   getCurrentSlotIST,
@@ -445,6 +453,23 @@ function startSubscriptionReminderScheduler() {
   console.log('📧 Billing reminder scheduler started (tenants+suppliers, every 6h, IST cadence via dedup)');
 }
 
+function startChurnReminderScheduler() {
+  if (typeof runChurnReminderCheck !== 'function') {
+    console.log('💌 Churn reminder scheduler skipped (churnReminders module absent)');
+    return;
+  }
+  const tick = async () => {
+    try {
+      await runChurnReminderCheck();
+    } catch (err) {
+      console.error('[churn-reminders] Error:', err.message);
+    }
+  };
+  setTimeout(tick, 90 * 1000);
+  setInterval(tick, 6 * 60 * 60 * 1000);
+  console.log('💌 Churn win-back scheduler started (every 6h, dedup via churn_outreach_sent)');
+}
+
 function startProductAffinityScheduler() {
   const tick = async () => {
     try {
@@ -519,6 +544,7 @@ function startAllSchedulers() {
   startDineInAutoAssignScheduler();
   startScheduledJobsRunner();
   startSubscriptionReminderScheduler();
+  startChurnReminderScheduler();
   startProductAffinityScheduler();
   startDailySettlementScheduler();
   startWeeklyPromoScheduler();

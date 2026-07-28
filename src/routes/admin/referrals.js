@@ -14,7 +14,10 @@
 const express = require('express');
 const router = express.Router();
 
-const { requireKdsSecret } = require('../../middleware/internalAuth');
+const {
+  requirePlatformAdmin,
+  requireSuperAdmin,
+} = require('../../helpers/platformAdminAuth');
 const {
   createReferral,
   listReferrals,
@@ -24,15 +27,21 @@ const {
 } = require('../../helpers/referrals');
 const { sendEmail } = require('../../config/mailer');
 
-router.use(requireKdsSecret);
+router.use(requirePlatformAdmin);
 
-// ── GET /api/admin/ping — secret check only (owner console login) ─────────────
-router.get('/ping', async (_req, res) => {
-  res.json({ success: true, ok: true, service: 'autom8-admin' });
+// ── GET /api/admin/ping — secret check + role for owner console login ─────────
+router.get('/ping', async (req, res) => {
+  res.json({
+    success: true,
+    ok: true,
+    service: 'autom8-admin',
+    role: req.adminRole,
+    label: req.adminLabel,
+  });
 });
 
 // ── POST /api/admin/referrals ─────────────────────────────────────────────────
-router.post('/referrals', async (req, res) => {
+router.post('/referrals', requireSuperAdmin, async (req, res) => {
   try {
     const {
       referrer_restaurant_id,

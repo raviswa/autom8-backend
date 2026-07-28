@@ -108,6 +108,7 @@ app.use('/api/portal-access', require('./src/routes/portalAccess'));
 app.use('/api/audit-log',     require('./src/routes/auditLog'));
 app.use('/api/admin',       require('./src/routes/admin/referrals'));
 app.use('/api/admin',       require('./src/routes/admin/platform'));
+app.use('/api/public',      require('./src/routes/public/churnFeedback'));
 
 // ── POS router (catch-all for /api/*) — must be last under /api ──────────────
 app.use('/api',             require('./src/routes/pos'));

@@ -15,6 +15,7 @@ const {
   parseBoolCell,
   parseKitchenStation,
 } = require('./shared/uploadParse');
+const { recordActivationEvent } = require('../../helpers/tenantActivation');
 // ── POST /api/menu/upload (and /api/catalog/menu-upload) — Bulk menu upload ──
 
 async function handleMenuUpload(req, res) {
@@ -321,6 +322,11 @@ async function handleMenuUpload(req, res) {
       action: 'Menu items uploaded via Excel',
       details: { mode, missing_policy: missingPolicy, stock_policy: stockPolicy, created, updated, skipped, archived, marked_sold_out: markedSoldOut },
     });
+
+    recordActivationEvent(restaurantId, 'catalog_uploaded', {
+      upserted: created + updated,
+      source: 'menu_upload',
+    }).catch(() => {});
 
     triggerMetaFeedRefetch().catch(e => console.warn('[menu/upload] Meta trigger failed:', e.message));
 

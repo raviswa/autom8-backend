@@ -13,6 +13,7 @@ const router   = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const { requestPasswordReset } = require('../helpers/passwordReset');
 const { requestLoginOtp, verifyLoginOtp } = require('../helpers/loginOtp');
+const { recordActivationEvent } = require('../helpers/tenantActivation');
 
 const BRAND_ROLES = ['brand_owner', 'brand_manager'];
 
@@ -66,6 +67,10 @@ router.post('/login', async (req, res) => {
       return res.status(403).json({ error: 'Your account has been deactivated. Contact your manager.' });
 
     await supabaseAdmin.from('employees').update({ last_login: new Date() }).eq('id', data.user.id);
+
+    if (emp.role === 'owner' && emp.restaurant_id) {
+      recordActivationEvent(emp.restaurant_id, 'first_login', { employee_id: emp.id }).catch(() => {});
+    }
 
     // ── Build scope-aware user object ─────────────────────────────────────────
     const isBrandEmployee = BRAND_ROLES.includes(emp.role);

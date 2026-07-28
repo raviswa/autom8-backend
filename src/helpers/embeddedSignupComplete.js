@@ -8,6 +8,7 @@ const { supabaseAdmin } = require('../config/supabase');
 const { invalidateRestaurantConfigCache } = require('./restaurantConfig');
 const { writeAuditLog } = require('./auditLog');
 const { assertWhatsAppAssetsAvailable } = require('./registrationGuards');
+const { recordActivationEvent } = require('./tenantActivation');
 
 const GRAPH_VERSION = () => process.env.META_GRAPH_VERSION || 'v21.0';
 
@@ -333,6 +334,11 @@ async function completeEmbeddedSignupForRestaurant(restaurantId, opts) {
       whatsapp_number: whatsappNumber,
     },
   });
+
+  recordActivationEvent(restaurantId, 'whatsapp_connected', {
+    source: 'embedded_signup',
+    waba_id: String(waba_id),
+  }).catch(() => {});
 
   return {
     success: true,

@@ -37,7 +37,7 @@ const {
   linkExistingWabaToRestaurant,
   autoLinkDemoWhatsAppIfNeeded,
 } = require('../helpers/linkExistingWaba');
-
+const { recordActivationEvent } = require('../helpers/tenantActivation');
 const DEFAULT_FEATURES = DEFAULT_SERVICES;
 
 const { parseRegistrationLobType, REGISTER_LOB_TYPES } = require('../config/catalogSchemas');
@@ -132,6 +132,12 @@ async function seedCatalogFromRegistration(restaurantId, rawRows, lobType) {
     json(payload) { result = { code: this._code || 200, payload }; return this; },
   };
   await handleMenuUpload(fakeReq, fakeRes);
+  if (result && (result.code || 200) < 400 && (result.payload?.upserted > 0 || result.payload?.success)) {
+    recordActivationEvent(restaurantId, 'catalog_uploaded', {
+      upserted: result.payload?.upserted || 0,
+      source: 'registration',
+    }).catch(() => {});
+  }
   return result;
 }
 function resolveRegistrationLobType(body) {
@@ -354,6 +360,9 @@ router.post(['/register', '/register/upload'], async (req, res) => {
       embeddedSignup,
       referral_source: req.body.referral_source || null,
       referrer_waba: req.body.referrer_waba || null,
+      signup_source_detail: req.body.signup_source_detail || null,
+      utm_source: req.body.utm_source || null,
+      utm_campaign: req.body.utm_campaign || null,
     });
   }
 
@@ -380,6 +389,9 @@ router.post(['/register', '/register/upload'], async (req, res) => {
     slug: req.body.slug || null,
     referral_source: req.body.referral_source || null,
     referrer_waba: req.body.referrer_waba || null,
+    signup_source_detail: req.body.signup_source_detail || null,
+    utm_source: req.body.utm_source || null,
+    utm_campaign: req.body.utm_campaign || null,
   });
 });
 
@@ -792,6 +804,9 @@ async function registerStandalone(req, res, opts) {
     slug = null,
     referral_source = null,
     referrer_waba = null,
+    signup_source_detail = null,
+    utm_source = null,
+    utm_campaign = null,
   } = opts;
 
   let restaurantId = null;
@@ -1017,6 +1032,9 @@ async function registerStandalone(req, res, opts) {
         newTenantId: restaurantId,
         referralSource: referral_source,
         referrerWaba: referrer_waba,
+        signupSourceDetail: signup_source_detail,
+        utmSource: utm_source,
+        utmCampaign: utm_campaign,
       });
       console.log('[onboarding] referral attribution', {
         restaurantId,
@@ -1026,6 +1044,15 @@ async function registerStandalone(req, res, opts) {
     } catch (refErr) {
       console.error('[onboarding] referral attribution failed (non-fatal):', refErr.message);
     }
+
+    await recordActivationEvent(restaurantId, 'signed_up', {
+      lob_type,
+      referral_source: referral_source || null,
+    });
+    if (whatsapp?.success !== false && (whatsapp?.phone_number_id || whatsapp?.waba_id)) {
+      await recordActivationEvent(restaurantId, 'whatsapp_connected', { source: 'register' });
+    }
+    await recordActivationEvent(restaurantId, 'trial_started', {});
 
     // Mail 1 — welcome to onboarded owner (never fail registration).
     const hiccupNote = whatsapp?.success === false
@@ -1112,6 +1139,9 @@ async function registerChain(req, res, opts) {
     embeddedSignup = null,
     referral_source = null,
     referrer_waba = null,
+    signup_source_detail = null,
+    utm_source = null,
+    utm_campaign = null,
   } = opts;
 
   let brandId    = null;
@@ -1302,6 +1332,9 @@ async function registerChain(req, res, opts) {
           newTenantId: restaurantId,
           referralSource: referral_source,
           referrerWaba: referrer_waba,
+          signupSourceDetail: signup_source_detail,
+          utmSource: utm_source,
+          utmCampaign: utm_campaign,
         });
         console.log('[onboarding/chain] referral attribution', {
           restaurantId,
@@ -1311,6 +1344,15 @@ async function registerChain(req, res, opts) {
       } catch (refErr) {
         console.error('[onboarding/chain] referral attribution failed (non-fatal):', refErr.message);
       }
+
+      await recordActivationEvent(restaurantId, 'signed_up', {
+        mode: 'chain',
+        referral_source: referral_source || null,
+      });
+      if (whatsapp?.success !== false && (whatsapp?.phone_number_id || whatsapp?.waba_id)) {
+        await recordActivationEvent(restaurantId, 'whatsapp_connected', { source: 'register_chain' });
+      }
+      await recordActivationEvent(restaurantId, 'trial_started', { mode: 'chain' });
 
       const { data: outletRow } = await supabaseAdmin
         .from('tenants')

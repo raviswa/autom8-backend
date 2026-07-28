@@ -297,6 +297,55 @@ function tokenQueueFeatureLive(tenant) {
   return { subject, html, text };
 }
 
+/** Churn win-back — miss_you / miss_you_final with tap-a-reason links. */
+function missYouEmail(tenant, opts = {}) {
+  const name = tenantLabel(tenant);
+  const outreachType = opts.outreachType === 'miss_you_final' ? 'miss_you_final' : 'miss_you';
+  const token = opts.token || '';
+  const base = String(opts.feedbackBaseUrl || '').replace(/\/$/, '');
+  const reasons = Array.isArray(opts.reasons) && opts.reasons.length
+    ? opts.reasons
+    : ['too_expensive', 'too_complex', 'found_alternative', 'seasonal_pause', 'technical_issues', 'other'];
+  const labels = {
+    too_expensive: 'Too expensive',
+    too_complex: 'Too complex',
+    found_alternative: 'Found another tool',
+    seasonal_pause: 'Seasonal pause',
+    technical_issues: 'Technical issues',
+    other: 'Other',
+  };
+  const subject = outreachType === 'miss_you_final'
+    ? `Still here if you need us — ${name}`
+    : `We miss you at Autom8 — ${name}`;
+  const intro = outreachType === 'miss_you_final'
+    ? `We noticed ${name} has been quiet for a while. This is our last check-in — tap a reason below so we can improve, or sign in anytime to pick up where you left off.`
+    : `It has been a while since ${name} took an order on Autom8. We would love to help you get back on track — or hear what got in the way.`;
+  const loginUrl = (process.env.FRONTEND_URL || 'https://app.autom8.works').replace(/\/$/, '') + '/login';
+  const reasonLinksText = reasons
+    .map((r) => {
+      const url = `${base}?token=${encodeURIComponent(token)}&reason=${encodeURIComponent(r)}`;
+      return `- ${labels[r] || r}: ${url}`;
+    })
+    .join('\n');
+  const reasonLinksHtml = reasons
+    .map((r) => {
+      const url = `${base}?token=${encodeURIComponent(token)}&reason=${encodeURIComponent(r)}`;
+      return `<li style="margin:8px 0;"><a href="${esc(url)}">${esc(labels[r] || r)}</a></li>`;
+    })
+    .join('');
+  const text =
+    `Hi,\n\n${intro}\n\nSign in: ${loginUrl}\n\nQuick feedback (one tap):\n${reasonLinksText}\n\n— Autom8 Works\n`;
+  const html = wrap(
+    `<p>Hi,</p>
+     <p>${esc(intro)}</p>
+     <p><a href="${esc(loginUrl)}" style="display:inline-block;padding:10px 16px;background:#047857;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;">Sign in to Autom8</a></p>
+     <p>Or tell us why you paused (one tap):</p>
+     <ul>${reasonLinksHtml}</ul>
+     <p>— Autom8 Works</p>`,
+  );
+  return { subject, html, text };
+}
+
 module.exports = {
   onboardingWelcome,
   trialEndingReminder,
@@ -306,4 +355,5 @@ module.exports = {
   billingReminderEmail,
   supplierOnboardingWelcome,
   tokenQueueFeatureLive,
+  missYouEmail,
 };

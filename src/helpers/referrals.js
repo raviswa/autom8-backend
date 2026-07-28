@@ -226,6 +226,9 @@ async function applyOnboardingReferral({
   newTenantId,
   referralSource = null,
   referrerWaba = null,
+  signupSourceDetail = null,
+  utmSource = null,
+  utmCampaign = null,
 }) {
   const source = String(referralSource || '').trim().toLowerCase() || null;
   const wabaRaw = String(referrerWaba || '').trim() || null;
@@ -235,6 +238,12 @@ async function applyOnboardingReferral({
     referral_source: source,
     referrer_waba: wabaDigits || null,
   };
+  const detail = String(signupSourceDetail || '').trim().slice(0, 500) || null;
+  const utmS = String(utmSource || '').trim().slice(0, 120) || null;
+  const utmC = String(utmCampaign || '').trim().slice(0, 120) || null;
+  if (detail) updates.signup_source_detail = detail;
+  if (utmS) updates.utm_source = utmS;
+  if (utmC) updates.utm_campaign = utmC;
 
   let referrer = null;
   let creditResult = null;
@@ -292,8 +301,16 @@ async function applyOnboardingReferral({
       .eq('id', newTenantId);
     if (updErr) {
       // Older DBs without migration — strip new columns and retry core fields only.
-      if (/referral_source|referrer_waba|referred_by/i.test(updErr.message || '')) {
-        console.warn('[referrals] attribution columns missing — skip tenant update:', updErr.message);
+      if (/referral_source|referrer_waba|referred_by|signup_source_detail|utm_/i.test(updErr.message || '')) {
+        console.warn('[referrals] attribution columns missing — retry core fields only:', updErr.message);
+        const core = {
+          referral_source: updates.referral_source,
+          referrer_waba: updates.referrer_waba,
+        };
+        if (updates.referred_by_restaurant_id) {
+          core.referred_by_restaurant_id = updates.referred_by_restaurant_id;
+        }
+        await supabaseAdmin.from('tenants').update(core).eq('id', newTenantId).catch(() => {});
       } else {
         logReferralError('applyOnboardingReferral.update', updErr, { newTenantId });
       }

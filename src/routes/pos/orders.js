@@ -144,6 +144,11 @@ router.post('/orders', authenticateToken, getRestaurantId, async (req, res) => {
       });
     } catch (_) {}
 
+    try {
+      const { onOrderCreatedForChurn } = require('../../helpers/churnReminders');
+      await onOrderCreatedForChurn(req.restaurant_id);
+    } catch (_) { /* non-fatal */ }
+
     res.json({ success: true, order: { ...orderData, subtotal, tax, total_amount: total, order_items: orderItems } });
   } catch (err) {
     res.status(400).json({ error: err.message });

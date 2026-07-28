@@ -8,7 +8,11 @@ const { isValidKdsSecret, extractInternalSecret } = require('../config/internalS
 
 /** Require AUTOM8_KDS_SECRET (body, Bearer, or x-internal-secret). */
 function requireKdsSecret(req, res, next) {
-  if (isValidKdsSecret(extractInternalSecret(req))) return next();
+  if (isValidKdsSecret(extractInternalSecret(req))) {
+    req.adminRole = 'super_admin';
+    req.adminLabel = 'autom8.admin';
+    return next();
+  }
   return res.status(403).json({ error: 'Forbidden' });
 }
 

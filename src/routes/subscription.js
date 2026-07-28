@@ -140,6 +140,14 @@ async function markSubscriptionPaid({ restaurantId, paymentRowId, amountInr, mer
       renews_at: renews.toISOString(),
     });
   }
+
+  try {
+    const { recordActivationEvent } = require('../helpers/tenantActivation');
+    await recordActivationEvent(restaurantId, 'subscription_activated', {
+      amount_inr: amountInr,
+      merchant_txn_id: merchantTxnId,
+    });
+  } catch (_) { /* non-fatal */ }
 }
 
 async function assertOutletAccess(req, restaurantId) {
