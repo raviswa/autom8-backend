@@ -81,7 +81,13 @@ async function getCurrentBonusDays() {
   ]);
 
   if (!tiers.length) {
-    throw new Error('No referral_program_tiers rows configured');
+    // Empty config must not break admin login / ops reads — default 30-day bonus.
+    return {
+      bonusDays: 30,
+      tier: null,
+      cumulativeCount,
+      tiers: [],
+    };
   }
 
   // Highest min_cumulative_count that is still <= live count.
