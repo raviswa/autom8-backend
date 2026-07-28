@@ -12,6 +12,7 @@ const { supabaseAdmin } = require('../config/supabase');
 const { computeDashboardInsights, fetchOrderRevenueById, nearestTokenForOrder } = require('../helpers/dashboardAnalytics');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { getKdsSecret } = require('../config/internalSecret');
+const { autoLinkDemoWhatsAppIfNeeded } = require('../helpers/linkExistingWaba');
 
 const CHAT_SERVICE_URL = (process.env.CHAT_SERVICE_URL || 'http://localhost:8001').replace(/\/$/, '');
 
@@ -74,38 +75,35 @@ async function fetchRestaurantRow(restaurantId) {
     return { data: sanitizeRestaurantForClient(data), error: null };
   }
 
-  if (/kitchen_workflow|kot_printer|meta_catalog_id|parcel_charge_per_item|takeaway_ready_range|delivery_ready_range|kitchen_busy|restaurant_type|delivery_charge|scheduled_delivery|scheduled_takeaway|max_delivery_radius|shipping_provider|courier_rate_card|courier_name|fssai_license|sac_code|receipt_tagline|gstin|shiprocket_api_key|business_family|business_vertical|order_ops_mode/i.test(error.message)) {
-    const fallback = await supabaseAdmin
-      .from('tenants')
-      .select(RESTAURANT_SELECT_BASE)
-      .eq('id', restaurantId)
-      .maybeSingle();
-    if (fallback.data) {
-      fallback.data.kitchen_workflow = 'Both_KOT_and_KDS';
-      fallback.data.kot_printer_enabled = false;
-      fallback.data.meta_catalog_id = null;
-      fallback.data.parcel_charge_per_item = 0;
-      fallback.data.takeaway_ready_range = null;
-      fallback.data.delivery_ready_range = null;
-      fallback.data.kitchen_busy = false;
-      fallback.data.scheduled_delivery_enabled = false;
-      fallback.data.scheduled_takeaway_enabled = false;
-      fallback.data.max_delivery_radius_km = 0;
-      fallback.data.delivery_charge_default = 30;
-      fallback.data.delivery_charge_tiers = [];
-      fallback.data.min_delivery_order_amount = 0;
-      fallback.data.min_takeaway_order_amount = 0;
-      fallback.data.lob_type = fallback.data.lob_type || 'restaurant';
-      fallback.data.business_family = null;
-      fallback.data.business_vertical = null;
-      fallback.data.business_vertical_other = null;
-      fallback.data.allow_manager_menu_upload = fallback.data.allow_manager_menu_upload ?? false;
-      fallback.data.order_ops_mode = fallback.data.order_ops_mode || 'combined';
-
-    }
-    return { data: sanitizeRestaurantForClient(fallback.data), error: fallback.error };
+  console.warn('[dashboard] full tenant select failed — falling back to base columns:', error.message);
+  const fallback = await supabaseAdmin
+    .from('tenants')
+    .select(RESTAURANT_SELECT_BASE)
+    .eq('id', restaurantId)
+    .maybeSingle();
+  if (fallback.data) {
+    fallback.data.kitchen_workflow = 'Both_KOT_and_KDS';
+    fallback.data.kot_printer_enabled = false;
+    fallback.data.meta_catalog_id = null;
+    fallback.data.parcel_charge_per_item = 0;
+    fallback.data.takeaway_ready_range = null;
+    fallback.data.delivery_ready_range = null;
+    fallback.data.kitchen_busy = false;
+    fallback.data.scheduled_delivery_enabled = false;
+    fallback.data.scheduled_takeaway_enabled = false;
+    fallback.data.max_delivery_radius_km = 0;
+    fallback.data.delivery_charge_default = 30;
+    fallback.data.delivery_charge_tiers = [];
+    fallback.data.min_delivery_order_amount = 0;
+    fallback.data.min_takeaway_order_amount = 0;
+    fallback.data.lob_type = fallback.data.lob_type || 'restaurant';
+    fallback.data.business_family = fallback.data.business_family || null;
+    fallback.data.business_vertical = fallback.data.business_vertical || null;
+    fallback.data.business_vertical_other = fallback.data.business_vertical_other || null;
+    fallback.data.allow_manager_menu_upload = fallback.data.allow_manager_menu_upload ?? false;
+    fallback.data.order_ops_mode = fallback.data.order_ops_mode || 'combined';
   }
-  return { data: null, error };
+  return { data: sanitizeRestaurantForClient(fallback.data), error: fallback.error };
 }
 
 /** Never send Shiprocket password (stored in shiprocket_api_key) to the browser. */
@@ -121,6 +119,7 @@ function sanitizeRestaurantForClient(row) {
 // ── GET /api/dashboard/waba ───────────────────────────────────────────────────
 router.get('/waba', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
   try {
+    await autoLinkDemoWhatsAppIfNeeded(req.restaurant_id);
     const { data, error } = await fetchRestaurantRow(req.restaurant_id);
 
     if (error) console.error('[dashboard/waba]', error.message);
