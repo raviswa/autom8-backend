@@ -223,6 +223,7 @@ async function rollbackRegistration({
 
 module.exports = {
   assertWhatsAppAssetsAvailable,
+  isPhoneNumberIdExempt,
   recordRegistrationFailure,
   verifiedDeleteTenant,
   verifiedDeleteTenantEmployees,

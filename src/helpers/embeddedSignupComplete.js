@@ -216,6 +216,7 @@ async function completeEmbeddedSignupForRestaurant(restaurantId, opts) {
     provider:        'meta',
     channel:         'whatsapp',
     phone_number_id: String(phone_number_id),
+    waba_id:         String(waba_id),
     access_token:    businessToken,
     is_active:       true,
     updated_at:      new Date().toISOString(),
@@ -261,6 +262,63 @@ async function completeEmbeddedSignupForRestaurant(restaurantId, opts) {
     integration = data;
   }
 
+  // Guarantee an active integration row (retry once if missing / inactive).
+  if (!integration?.id || integration.is_active === false) {
+    console.warn('[embedded-signup] integration missing/inactive after write — retrying', {
+      restaurantId,
+      phone_number_id,
+    });
+    const { data: existingRetry } = await supabaseAdmin
+      .from('tenant_integrations')
+      .select('id')
+      .eq('restaurant_id', restaurantId)
+      .eq('provider', 'meta')
+      .eq('channel', 'whatsapp')
+      .maybeSingle();
+    let retried;
+    let retryErr;
+    if (existingRetry?.id) {
+      ({ data: retried, error: retryErr } = await supabaseAdmin
+        .from('tenant_integrations')
+        .update({ ...integrationPayload, is_active: true })
+        .eq('id', existingRetry.id)
+        .select()
+        .single());
+    } else {
+      ({ data: retried, error: retryErr } = await supabaseAdmin
+        .from('tenant_integrations')
+        .insert({ restaurant_id: restaurantId, ...integrationPayload, is_active: true })
+        .select()
+        .single());
+    }
+    if (retryErr) {
+      console.error('[embedded-signup] integration retry failed:', retryErr.message);
+      throw retryErr;
+    }
+    integration = retried;
+  }
+
+  const { data: verifyInt } = await supabaseAdmin
+    .from('tenant_integrations')
+    .select('id, is_active, phone_number_id')
+    .eq('restaurant_id', restaurantId)
+    .eq('provider', 'meta')
+    .eq('channel', 'whatsapp')
+    .eq('is_active', true)
+    .maybeSingle();
+
+  if (!verifyInt?.id) {
+    const err = new Error('WhatsApp connected at Meta but failed to save integration — retry connect');
+    err.status = 500;
+    err.code = 'integration_persist_failed';
+    throw err;
+  }
+
+  // Ensure tenant WA fields persisted (whatsapp_number may be null if Graph display fetch failed).
+  if (!whatsappNumber) {
+    console.warn('[embedded-signup] whatsapp_number missing after ES — tenant still has waba_id');
+  }
+
   invalidateRestaurantConfigCache(restaurantId);
 
   await writeAuditLog({
@@ -268,7 +326,7 @@ async function completeEmbeddedSignupForRestaurant(restaurantId, opts) {
     actor_id:      actorId,
     action:        'whatsapp.embedded_signup.complete',
     entity_type:   'tenant_integrations',
-    entity_id:     integration?.id || null,
+    entity_id:     integration?.id || verifyInt.id || null,
     meta: {
       waba_id: String(waba_id),
       phone_number_id: String(phone_number_id),
@@ -281,7 +339,7 @@ async function completeEmbeddedSignupForRestaurant(restaurantId, opts) {
     waba_id: String(waba_id),
     phone_number_id: String(phone_number_id),
     whatsapp_number: whatsappNumber,
-    integration_id: integration?.id || null,
+    integration_id: integration?.id || verifyInt.id || null,
     access_token: businessToken,
     whatsapp_needs_existing_pin: needsExistingPin,
   };

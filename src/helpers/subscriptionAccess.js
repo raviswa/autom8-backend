@@ -22,6 +22,30 @@ const GRACE_PERIOD_DAYS = Math.max(
 
 const LAPSED_ERROR = 'subscription_lapsed';
 
+/**
+ * Demo / platform-owner outlets that never soft-lock (comma-separated UUIDs).
+ * Hotel Munafe and similar demos: put the tenant id in Railway LIFETIME_TENANT_IDS.
+ */
+function parseLifetimeTenantIds() {
+  return new Set(
+    String(process.env.LIFETIME_TENANT_IDS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+}
+
+function isLifetimeTenant(restaurantId) {
+  if (!restaurantId) return false;
+  return parseLifetimeTenantIds().has(String(restaurantId).trim());
+}
+
+/** Shared demo WABA digits used for Hotel Munafe link-existing recovery. */
+function getDemoWhatsAppNumber() {
+  const raw = String(process.env.DEMO_WHATSAPP_NUMBER || '919500996033').replace(/\D/g, '');
+  return raw || null;
+}
+
 /** Status written at T+0 / T+15 when unpaid — matches each table's vocabulary. */
 const OVERDUE_STATUS = {
   tenant: 'past_due',
@@ -97,8 +121,15 @@ function getCycleAnchor(sub) {
 /**
  * Soft-lock is active when the account is at/past grace expiry.
  * Used by billing reminders (grace_expired) and supplyAuth / feature_gate.
+ * Lifetime / demo tenants (LIFETIME_TENANT_IDS) are never soft-locked.
+ *
+ * @param {object|null} sub
+ * @param {Date} [now]
+ * @param {string|null} [restaurantId] — preferred; also reads sub.restaurant_id
  */
-function isSubscriptionSoftLocked(sub, now = new Date()) {
+function isSubscriptionSoftLocked(sub, now = new Date(), restaurantId = null) {
+  const rid = restaurantId || sub?.restaurant_id || null;
+  if (isLifetimeTenant(rid)) return false;
   if (!sub) return false;
   if (sub.status === 'cancelled') return true;
   const anchor = getCycleAnchor(sub);
@@ -153,6 +184,9 @@ module.exports = {
   toDateKey,
   daysRelativeToAnchor,
   getCycleAnchor,
+  isLifetimeTenant,
+  getDemoWhatsAppNumber,
+  parseLifetimeTenantIds,
   isSubscriptionSoftLocked,
   buildLapsedPayload,
   checkpointForRelativeDays,

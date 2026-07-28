@@ -9,6 +9,20 @@ Additive onboarding so clients connect WhatsApp inside the app without Meta for 
 3. If using a Partner Solution, copy `solution_id`.
 4. **WhatsApp → Configuration**: keep existing webhook URL + verify token; subscribe `messages` and `account_update`.
 5. Ensure the Settings page host uses valid SSL (required by Meta for Embedded Signup).
+6. **Facebook Login → Settings → Allowed Domains for the JavaScript SDK** — **origin only** (no path/query/fragment). Meta rejects entries like `…/setup` with “JSSDK Host domain urls cannot contain any query, path or fragment information.” Domains must match the browser host **exactly** (e.g. `automb.works` does **not** cover `app.autom8.works`):
+   - `https://app.autom8.works/` (owner portal) — **required**
+   - `https://autom8.works/` and/or `https://www.autom8.works/` (registration hosts, if used)
+   - Do **not** put `/setup` or any other path here
+7. **App settings → Basic → App Domains**: `app.autom8.works`, `autom8.works` (no `https://` prefix here).
+8. **Facebook Login for Business → Settings → Valid OAuth Redirect URIs** (paths **are** allowed here; Strict Mode is usually on). Put portal pages used as `fallback_redirect_uri` — a lone Railway webhook URI is **not** enough:
+   - `https://app.autom8.works/`
+   - `https://app.autom8.works/setup`
+   - (optional) registration hosts if Embedded Signup runs there
+   - Click **Save Changes** after edits (blue Save with no confirmation = settings not applied)
+9. Set **Force Web OAuth reauthentication** to **No** for Embedded Signup (Yes often yields Meta’s blank “Sorry, something went wrong” popup).
+10. Confirm `META_EMBEDDED_SIGNUP_CONFIG_ID` matches a **WhatsApp Embedded Signup** configuration under **Facebook Login for Business → Configurations**. If that row shows **“Some permissions have been restricted…”**, fix/re-approve those permissions (or switch Railway to a healthy config such as `Munafe_WhatsApp_Onboarding`) — restricted configs often yield Meta’s “Sorry, something went wrong” popup even when domains/redirects are correct.
+11. **App settings → Basic**: Privacy Policy URL set; App Domains includes `app.autom8.works`.
+12. After saving, wait 1–2 minutes, hard-refresh the portal (or try an Incognito window), and retry Connect WhatsApp. A CSP “inline script” warning inside Facebook’s own `dialog/oauth` console is usually unrelated noise.
 
 ## Backend environment variables
 

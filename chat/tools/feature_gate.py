@@ -75,8 +75,25 @@ def get_cycle_anchor(sub: dict | None) -> Any:
     return sub.get("renews_at") or sub.get("trial_ends_at")
 
 
-def is_subscription_soft_locked(sub: dict | None, now: datetime | None = None) -> bool:
-    """Authoritative soft-lock: daysPast(anchor) >= GRACE_PERIOD_DAYS."""
+def is_lifetime_tenant(restaurant_id: str | None) -> bool:
+    if not restaurant_id:
+        return False
+    raw = os.getenv("LIFETIME_TENANT_IDS", "") or ""
+    ids = {s.strip() for s in raw.split(",") if s.strip()}
+    return str(restaurant_id).strip() in ids
+
+
+def is_subscription_soft_locked(
+    sub: dict | None,
+    now: datetime | None = None,
+    restaurant_id: str | None = None,
+) -> bool:
+    """Authoritative soft-lock: daysPast(anchor) >= GRACE_PERIOD_DAYS.
+    Lifetime / demo tenants (LIFETIME_TENANT_IDS) are never soft-locked.
+    """
+    rid = restaurant_id or (sub or {}).get("restaurant_id")
+    if is_lifetime_tenant(rid):
+        return False
     if not sub:
         return False
     if sub.get("status") == "cancelled":
@@ -154,7 +171,7 @@ async def assert_tenant_subscription_allows(
     if action not in blocked:
         return True, None
     sub = await fetch_tenant_subscription(restaurant_id)
-    if not is_subscription_soft_locked(sub):
+    if not is_subscription_soft_locked(sub, restaurant_id=restaurant_id):
         return True, None
     return False, build_lapsed_payload(sub)
 

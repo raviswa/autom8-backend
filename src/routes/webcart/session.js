@@ -252,7 +252,15 @@ router.get('/api/webcart/session', async (req, res) => {
       kitchen_busy: !!restaurant.kitchen_busy,
       preferred_category: preferredCategory,
       category_slots: categorySlotMap,
-      promotions: [],
+      promotions: await (async () => {
+        try {
+          const { getActivePromotionsForSession } = require('../../helpers/tenantPromoCodes');
+          return await getActivePromotionsForSession(restaurant.id);
+        } catch (e) {
+          console.warn('[webcart/session] promotions:', e.message);
+          return [];
+        }
+      })(),
       fulfillment: (() => {
         const { packagedServicesEnabled, hasShiprocketCreds, isShippedLob } = require('../../helpers/fulfillmentChannels');
         if (!isShippedLob(lobType) && !catalogLob) {

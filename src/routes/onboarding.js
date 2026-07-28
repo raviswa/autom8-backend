@@ -14,10 +14,26 @@ const { supabaseAdmin } = require('../config/supabase');
 const { ensureRestaurantSubscription, DEFAULT_SERVICES } = require('../helpers/subscriptionBilling');
 const { writeAuditLog } = require('../helpers/auditLog');
 const { sendOnboardingWelcomeEmail } = require('../helpers/onboardingEmail');
+const {
+  applyOnboardingReferral,
+  findTenantByWaba,
+  normalizeWabaDigits,
+} = require('../helpers/referrals');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { enabledOrderServices, resolvePaidFeatures, resolveEnabledFeatures } = require('../helpers/subscriptionFeatures');
 const { MONTHLY_PRICE_INR } = require('../helpers/phonepeSubscription');
-const { isSubscriptionSoftLocked } = require('../helpers/subscriptionAccess');
+const {
+  isSubscriptionSoftLocked,
+  isLifetimeTenant,
+  getDemoWhatsAppNumber,
+} = require('../helpers/subscriptionAccess');
+const {
+  getPhonePeGateway,
+  getPhonePePartnerReferralUrl,
+  summarizePhonePeMerchant,
+} = require('../helpers/tenantPaymentGateways');
+const { normalizeWhatsAppNumber, completeEmbeddedSignupForRestaurant } = require('../helpers/embeddedSignupComplete');
+const { invalidateRestaurantConfigCache } = require('../helpers/restaurantConfig');
 
 const DEFAULT_FEATURES = DEFAULT_SERVICES;
 
@@ -27,7 +43,6 @@ const {
   formatBusinessLabel,
   getVertical,
 } = require('../config/lobTaxonomy');
-const { completeEmbeddedSignupForRestaurant } = require('../helpers/embeddedSignupComplete');
 const { slugify, selectDroppingMissingColumns } = require('./webcart/shared');
 const { handleMenuUpload } = require('./catalog/menu-items');
 const { buildTenantInsertFields } = require('../helpers/registrationPayload');
@@ -334,6 +349,8 @@ router.post(['/register', '/register/upload'], async (req, res) => {
       outlet_owner_name:     outlet_owner_name     || null,
       outlet_owner_password: outlet_owner_password || null,
       embeddedSignup,
+      referral_source: req.body.referral_source || null,
+      referrer_waba: req.body.referrer_waba || null,
     });
   }
 
@@ -358,6 +375,8 @@ router.post(['/register', '/register/upload'], async (req, res) => {
     kitchen_workflow: req.body.kitchen_workflow || null,
     cuisines: req.body.cuisines || req.body.categories || null,
     slug: req.body.slug || null,
+    referral_source: req.body.referral_source || null,
+    referrer_waba: req.body.referrer_waba || null,
   });
 });
 
@@ -372,21 +391,23 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
     }
 
     const restaurantId = req.restaurant_id;
+    const lifetime = isLifetimeTenant(restaurantId);
 
     const [
       { data: tenant },
       { data: integration },
       { count: menuCount },
       { data: sub },
+      phonepeGateway,
     ] = await Promise.all([
       supabaseAdmin
         .from('tenants')
-        .select('id, name, display_name, subscribed_features, whatsapp_needs_existing_pin, lob_type')
+        .select('id, name, display_name, subscribed_features, whatsapp_needs_existing_pin, lob_type, whatsapp_number, waba_id')
         .eq('id', restaurantId)
         .maybeSingle(),
       supabaseAdmin
         .from('tenant_integrations')
-        .select('id, phone_number_id, waba_id, is_active')
+        .select('id, phone_number_id, waba_id, is_active, access_token')
         .eq('restaurant_id', restaurantId)
         .eq('provider', 'meta')
         .eq('channel', 'whatsapp')
@@ -398,9 +419,10 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
         .eq('restaurant_id', restaurantId),
       supabaseAdmin
         .from('tenant_subscriptions')
-        .select('plan, status, trial_ends_at, renews_at, base_price, final_price, billing_cycle')
+        .select('plan, status, trial_ends_at, renews_at, base_price, final_price, billing_cycle, restaurant_id')
         .eq('restaurant_id', restaurantId)
         .maybeSingle(),
+      getPhonePeGateway(restaurantId).catch(() => null),
     ]);
 
     if (!tenant) {
@@ -412,14 +434,55 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
       });
     }
 
+    let activeIntegration = integration || null;
+
+    // Self-heal: tenant has WA fields but inactive/orphaned integration for this restaurant.
+    const tenantWaba = tenant.waba_id ? String(tenant.waba_id).trim() : '';
+    const tenantWaDigits = normalizeWabaDigits(tenant.whatsapp_number || '');
+    const hasTenantWaFields = Boolean(tenantWaba && tenantWaDigits);
+
+    if (!activeIntegration && hasTenantWaFields) {
+      const { data: inactive } = await supabaseAdmin
+        .from('tenant_integrations')
+        .select('id, phone_number_id, waba_id, is_active, access_token')
+        .eq('restaurant_id', restaurantId)
+        .eq('provider', 'meta')
+        .eq('channel', 'whatsapp')
+        .order('updated_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (inactive?.id) {
+        const { data: healed, error: healErr } = await supabaseAdmin
+          .from('tenant_integrations')
+          .update({ is_active: true, updated_at: new Date().toISOString() })
+          .eq('id', inactive.id)
+          .select('id, phone_number_id, waba_id, is_active, access_token')
+          .single();
+        if (!healErr && healed) {
+          activeIntegration = healed;
+          console.warn('[onboarding/status] reactivated inactive WhatsApp integration', {
+            restaurantId,
+            integrationId: healed.id,
+          });
+        }
+      } else {
+        console.warn('[onboarding/status] WhatsApp drift: tenant has waba_id+whatsapp_number but no integration row', {
+          restaurantId,
+          waba_id: tenantWaba,
+          whatsapp_number: tenantWaDigits,
+        });
+      }
+    }
+
     const paidFeatures = resolvePaidFeatures(sub);
     const enabledFeatures = resolveEnabledFeatures(tenant, paidFeatures);
     const services = enabledOrderServices(enabledFeatures);
     const fulfillmentConfigured = services.length > 0;
-    const whatsappConnected = Boolean(integration?.id);
+    const whatsappConnected = Boolean(activeIntegration?.id) || hasTenantWaFields;
     const catalogUploaded = (menuCount || 0) > 0;
     const needsPin = Boolean(tenant.whatsapp_needs_existing_pin);
-    const softLocked = isSubscriptionSoftLocked(sub);
+    const softLocked = isSubscriptionSoftLocked(sub, new Date(), restaurantId);
     const lobType = tenant.lob_type || 'restaurant';
     const isPackaged = ['food_products', 'retail', 'psl', 'b2b', 'jewellery'].includes(lobType);
 
@@ -436,7 +499,89 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
       lob_type: lobType,
     });
 
+    // Lifetime demo outlets skip subscription traps; Setup still tracks WA/catalog/fulfillment.
     const setupComplete = whatsappConnected && !needsPin && catalogUploaded && fulfillmentConfigured;
+    const pinDone = whatsappConnected && !needsPin;
+
+    // Linkable demo WABA: another Autom8 tenant already has this number live.
+    let whatsappLinkable = false;
+    let linkableWhatsappNumber = null;
+    let linkableSourceName = null;
+    if (!activeIntegration?.id) {
+      const demoDigits = getDemoWhatsAppNumber();
+      const lookupDigits = tenantWaDigits || demoDigits;
+      if (lookupDigits && (lifetime || demoDigits)) {
+        try {
+          const source = await findTenantByWaba(lookupDigits);
+          if (source?.id && source.id !== restaurantId) {
+            const { data: srcInt } = await supabaseAdmin
+              .from('tenant_integrations')
+              .select('id')
+              .eq('restaurant_id', source.id)
+              .eq('provider', 'meta')
+              .eq('channel', 'whatsapp')
+              .eq('is_active', true)
+              .maybeSingle();
+            if (srcInt?.id) {
+              whatsappLinkable = true;
+              linkableWhatsappNumber = normalizeWabaDigits(source.whatsapp_number) || lookupDigits;
+              linkableSourceName = source.display_name || source.name || null;
+            }
+          }
+        } catch (linkErr) {
+          console.warn('[onboarding/status] linkable check failed:', linkErr.message);
+        }
+      }
+    }
+
+    const checklist = [
+      {
+        id: 'account_created',
+        label: 'Account created',
+        status: 'done',
+        detail: 'Your Autom8 business account is ready',
+      },
+      {
+        id: 'whatsapp_connected',
+        label: 'WhatsApp connected',
+        status: whatsappConnected ? 'done' : 'pending',
+        detail: whatsappConnected
+          ? 'Business WhatsApp is linked'
+          : 'Connect WhatsApp so customers can message you',
+      },
+      {
+        id: 'whatsapp_pin',
+        label: 'WhatsApp 2FA PIN verified',
+        status: !whatsappConnected ? 'pending' : (pinDone ? 'done' : 'warn'),
+        detail: !whatsappConnected
+          ? 'Finish WhatsApp connect first'
+          : (pinDone
+            ? 'Two-factor PIN is set'
+            : 'Enter the existing WhatsApp 2FA PIN to finish linking'),
+      },
+      {
+        id: 'catalog_uploaded',
+        label: isPackaged ? 'Product catalog uploaded' : 'Menu catalog uploaded',
+        status: catalogUploaded ? 'done' : 'pending',
+        detail: catalogUploaded
+          ? 'At least one catalog item found'
+          : 'Upload items so customers can order',
+      },
+      {
+        id: 'fulfillment_configured',
+        label: 'Fulfillment modes configured',
+        status: fulfillmentConfigured ? 'done' : 'pending',
+        detail: fulfillmentConfigured
+          ? 'At least one order service is enabled'
+          : (isPackaged
+            ? 'Enable pickup or delivery in Settings'
+            : 'Enable dine-in, takeaway, or delivery in Settings'),
+      },
+    ];
+
+    const subStatus = lifetime
+      ? 'active'
+      : (sub?.status || 'trial');
 
     res.json({
       success: true,
@@ -454,24 +599,234 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
       }),
       whatsapp_connected: whatsappConnected,
       whatsapp_needs_existing_pin: needsPin,
+      whatsapp_linkable: whatsappLinkable,
+      linkable_whatsapp_number: linkableWhatsappNumber,
+      linkable_source_name: linkableSourceName,
       catalog_uploaded: catalogUploaded,
       fulfillment_configured: fulfillmentConfigured,
       setup_complete: setupComplete,
+      lifetime,
+      checklist,
       fulfillment_hint: isPackaged
         ? 'Enable pickup or delivery in Settings'
         : 'Enable dine-in, takeaway, or delivery in Settings',
+      phonepe_partner_referral_url: getPhonePePartnerReferralUrl(),
+      phonepe_merchant: summarizePhonePeMerchant(phonepeGateway),
       subscription: {
-        status: sub?.status || 'trial',
+        status: subStatus,
         trial_ends_at: sub?.trial_ends_at || null,
         renews_at: sub?.renews_at || null,
         price: MONTHLY_PRICE_INR,
         currency: 'INR',
         soft_locked: softLocked,
+        lifetime,
       },
     });
   } catch (err) {
     console.error('[onboarding/status]', err.message);
     res.status(500).json({ error: err.message || 'Failed to load onboarding status' });
+  }
+});
+
+/**
+ * Attach an already-live Autom8 WABA onto the current restaurant (demo recovery).
+ * Copies tenant_integrations credentials from the source tenant that owns the digits.
+ */
+router.post('/link-existing-waba', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const restaurantId = req.restaurant_id;
+    if (!restaurantId) {
+      return res.status(400).json({ error: 'No outlet selected' });
+    }
+
+    const lifetime = isLifetimeTenant(restaurantId);
+    const rawDigits = String(req.body?.whatsapp_number || req.body?.waba || getDemoWhatsAppNumber() || '').trim();
+    const digits = normalizeWabaDigits(rawDigits);
+    if (digits.length < 10) {
+      return res.status(400).json({ error: 'whatsapp_number / waba digits required' });
+    }
+
+    const source = await findTenantByWaba(digits);
+    if (!source?.id) {
+      return res.status(404).json({ error: 'No Autom8 account found with that WhatsApp number', code: 'waba_not_found' });
+    }
+    if (source.id === restaurantId) {
+      // Already on this tenant — ensure integration is active
+      const { data: own } = await supabaseAdmin
+        .from('tenant_integrations')
+        .select('id, is_active')
+        .eq('restaurant_id', restaurantId)
+        .eq('provider', 'meta')
+        .eq('channel', 'whatsapp')
+        .maybeSingle();
+      if (own?.id && !own.is_active) {
+        await supabaseAdmin
+          .from('tenant_integrations')
+          .update({ is_active: true, updated_at: new Date().toISOString() })
+          .eq('id', own.id);
+      }
+      await supabaseAdmin
+        .from('tenants')
+        .update({ whatsapp_needs_existing_pin: false, updated_at: new Date().toISOString() })
+        .eq('id', restaurantId);
+      return res.json({ success: true, linked: true, already_owned: true });
+    }
+
+    // Non-lifetime targets may only link when uniqueness is exempt (shared test MID).
+    if (!lifetime) {
+      const { data: srcCheck } = await supabaseAdmin
+        .from('tenant_integrations')
+        .select('phone_number_id')
+        .eq('restaurant_id', source.id)
+        .eq('provider', 'meta')
+        .eq('channel', 'whatsapp')
+        .eq('is_active', true)
+        .maybeSingle();
+      const { isPhoneNumberIdExempt } = require('../helpers/registrationGuards');
+      if (!isPhoneNumberIdExempt(srcCheck?.phone_number_id)) {
+        return res.status(403).json({
+          error: 'Linking an existing WhatsApp is only available for Autom8 demo outlets',
+          code: 'link_not_allowed',
+        });
+      }
+    }
+
+    const { data: srcTenant } = await supabaseAdmin
+      .from('tenants')
+      .select('id, waba_id, whatsapp_number, whatsapp_needs_existing_pin')
+      .eq('id', source.id)
+      .maybeSingle();
+
+    const { data: srcInt } = await supabaseAdmin
+      .from('tenant_integrations')
+      .select('id, phone_number_id, waba_id, access_token, webhook_secret, webhook_verify_token, config, is_active')
+      .eq('restaurant_id', source.id)
+      .eq('provider', 'meta')
+      .eq('channel', 'whatsapp')
+      .eq('is_active', true)
+      .maybeSingle();
+
+    if (!srcInt?.phone_number_id || !srcInt?.access_token) {
+      return res.status(404).json({
+        error: 'Source WhatsApp credentials are incomplete',
+        code: 'source_integration_missing',
+      });
+    }
+
+    const now = new Date().toISOString();
+    const wabaId = srcTenant?.waba_id || srcInt.waba_id || null;
+    const waNumber = normalizeWhatsAppNumber(srcTenant?.whatsapp_number || digits);
+
+    // Unique active phone_number_id: for lifetime demos, free the MID from the source outlet first
+    // (exempt shared test MIDs may stay multi-active).
+    const { isPhoneNumberIdExempt } = require('../helpers/registrationGuards');
+    if (lifetime && !isPhoneNumberIdExempt(srcInt.phone_number_id)) {
+      await supabaseAdmin
+        .from('tenant_integrations')
+        .update({ is_active: false, updated_at: now })
+        .eq('id', srcInt.id);
+    }
+
+    await supabaseAdmin
+      .from('tenants')
+      .update({
+        waba_id: wabaId,
+        whatsapp_number: waNumber,
+        whatsapp_needs_existing_pin: false,
+        updated_at: now,
+      })
+      .eq('id', restaurantId);
+
+    const integrationPayload = {
+      provider: 'meta',
+      channel: 'whatsapp',
+      phone_number_id: String(srcInt.phone_number_id),
+      access_token: srcInt.access_token,
+      waba_id: wabaId ? String(wabaId) : null,
+      is_active: true,
+      updated_at: now,
+      webhook_secret: srcInt.webhook_secret || null,
+      webhook_verify_token: srcInt.webhook_verify_token || null,
+      config: {
+        ...(srcInt.config && typeof srcInt.config === 'object' ? srcInt.config : {}),
+        linked_from_restaurant_id: source.id,
+        linked_at: now,
+      },
+    };
+
+    const { data: existing } = await supabaseAdmin
+      .from('tenant_integrations')
+      .select('id')
+      .eq('restaurant_id', restaurantId)
+      .eq('provider', 'meta')
+      .eq('channel', 'whatsapp')
+      .maybeSingle();
+
+    let integration;
+    if (existing?.id) {
+      const { data, error } = await supabaseAdmin
+        .from('tenant_integrations')
+        .update(integrationPayload)
+        .eq('id', existing.id)
+        .select()
+        .single();
+      if (error) throw error;
+      integration = data;
+    } else {
+      const { data, error } = await supabaseAdmin
+        .from('tenant_integrations')
+        .insert({ restaurant_id: restaurantId, ...integrationPayload })
+        .select()
+        .single();
+      if (error) throw error;
+      integration = data;
+    }
+
+    invalidateRestaurantConfigCache(restaurantId);
+
+    await writeAuditLog({
+      restaurant_id: restaurantId,
+      actor_id: req.user?.id || req.user_id || null,
+      action: 'whatsapp.link_existing_waba',
+      entity_type: 'tenant_integrations',
+      entity_id: integration?.id || null,
+      meta: {
+        source_restaurant_id: source.id,
+        whatsapp_number: waNumber,
+        waba_id: wabaId,
+      },
+    });
+
+    res.json({
+      success: true,
+      linked: true,
+      whatsapp_number: waNumber,
+      waba_id: wabaId,
+      integration_id: integration?.id || null,
+    });
+  } catch (err) {
+    console.error('[onboarding/link-existing-waba]', err.message);
+    const status = err.status || 500;
+    res.status(status).json({ error: err.message || 'Failed to link WhatsApp' });
+  }
+});
+// Soft lookup for registration UX — returns display name only (no email/ids leaked beyond name).
+router.get('/referrer-lookup', async (req, res) => {
+  try {
+    const waba = String(req.query.waba || '').trim();
+    const digits = normalizeWabaDigits(waba);
+    if (digits.length < 10) {
+      return res.json({ found: false });
+    }
+    const tenant = await findTenantByWaba(digits);
+    if (!tenant) return res.json({ found: false });
+    return res.json({
+      found: true,
+      name: tenant.display_name || tenant.name || null,
+    });
+  } catch (err) {
+    console.error('[onboarding/referrer-lookup]', err.message);
+    res.status(500).json({ found: false, error: 'lookup_failed' });
   }
 });
 
@@ -589,6 +944,8 @@ async function registerStandalone(req, res, opts) {
     kitchen_workflow = null,
     cuisines = null,
     slug = null,
+    referral_source = null,
+    referrer_waba = null,
   } = opts;
 
   let restaurantId = null;
@@ -808,8 +1165,32 @@ async function registerStandalone(req, res, opts) {
       }
     }
 
-    // Welcome email — never fail registration if mail is down / missing address.
-    sendOnboardingWelcomeEmail(restaurant).catch((e) =>
+    // Referral attribution + free month for referrer (non-fatal). Mail 2 = thank-you.
+    try {
+      const referralOutcome = await applyOnboardingReferral({
+        newTenantId: restaurantId,
+        referralSource: referral_source,
+        referrerWaba: referrer_waba,
+      });
+      console.log('[onboarding] referral attribution', {
+        restaurantId,
+        reason: referralOutcome.reason,
+        referrer: referralOutcome.referrer_restaurant_id,
+      });
+    } catch (refErr) {
+      console.error('[onboarding] referral attribution failed (non-fatal):', refErr.message);
+    }
+
+    // Mail 1 — welcome to onboarded owner (never fail registration).
+    const hiccupNote = whatsapp?.success === false
+      ? 'WhatsApp could not be connected during signup — finish it from the setup checklist after login.'
+      : (whatsapp?.whatsapp_needs_existing_pin
+        ? 'WhatsApp is linked but still needs your existing 2FA PIN — open the setup checklist to finish.'
+        : null);
+    sendOnboardingWelcomeEmail(
+      { ...restaurant, email: email.trim().toLowerCase(), contact_email: restaurant.contact_email || email },
+      { hiccupNote },
+    ).catch((e) =>
       console.error('[onboarding] welcome email failed (non-fatal):', e.message)
     );
 
@@ -883,6 +1264,8 @@ async function registerChain(req, res, opts) {
     first_outlet,
     outlet_owner_email, outlet_owner_name, outlet_owner_password,
     embeddedSignup = null,
+    referral_source = null,
+    referrer_waba = null,
   } = opts;
 
   let brandId    = null;
@@ -1068,18 +1451,36 @@ async function registerChain(req, res, opts) {
     }
 
     if (restaurantId) {
+      try {
+        const referralOutcome = await applyOnboardingReferral({
+          newTenantId: restaurantId,
+          referralSource: referral_source,
+          referrerWaba: referrer_waba,
+        });
+        console.log('[onboarding/chain] referral attribution', {
+          restaurantId,
+          reason: referralOutcome.reason,
+          referrer: referralOutcome.referrer_restaurant_id,
+        });
+      } catch (refErr) {
+        console.error('[onboarding/chain] referral attribution failed (non-fatal):', refErr.message);
+      }
+
       const { data: outletRow } = await supabaseAdmin
         .from('tenants')
         .select('id, name, contact_email, email')
         .eq('id', restaurantId)
         .maybeSingle();
       if (outletRow) {
+        const hiccupNote = whatsapp?.success === false
+          ? 'WhatsApp could not be connected during signup — finish it from the setup checklist after login.'
+          : null;
         sendOnboardingWelcomeEmail({
           ...outletRow,
           // Prefer brand contact email when outlet row has an internal placeholder.
           email: (outlet_owner_email || email || outletRow.email || '').trim(),
           contact_email: outletRow.contact_email || outlet_owner_email || email || null,
-        }).catch((e) =>
+        }, { hiccupNote }).catch((e) =>
           console.error('[onboarding/chain] welcome email failed (non-fatal):', e.message)
         );
       }

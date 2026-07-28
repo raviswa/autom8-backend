@@ -369,6 +369,24 @@ router.post('/api/webcart/submit', async (req, res) => {
     }
 
     const subtotal = normalizedItems.reduce((sum, line) => sum + Number(line.line_total || 0), 0);
+
+    let promoDiscount = 0;
+    let promoApplied = null;
+    if (promo_code) {
+      try {
+        const { applyPromoToSubtotal } = require('../../helpers/tenantPromoCodes');
+        const promoResult = await applyPromoToSubtotal(restaurant.id, promo_code, subtotal);
+        if (!promoResult.ok) {
+          return res.status(400).json({ ok: false, error: promoResult.error || 'Invalid promo code' });
+        }
+        promoDiscount = Number(promoResult.amount || 0);
+        promoApplied = promoResult.promo;
+      } catch (promoErr) {
+        console.warn('[webcart/submit] promo:', promoErr.message);
+        return res.status(400).json({ ok: false, error: 'Could not validate promo code' });
+      }
+    }
+
     const sessionMeta = session?.meta || {};
     const rawType = String(session?.type || sessionMeta.service_type || 'takeaway').toLowerCase();
     const orderMode = String(
@@ -439,7 +457,8 @@ router.post('/api/webcart/submit', async (req, res) => {
       });
     }
 
-    const preGst = Math.round((subtotal + parcelCharge + deliveryCharge) * 100) / 100;
+    const discountedSubtotal = Math.max(0, subtotal - promoDiscount);
+    const preGst = Math.round((discountedSubtotal + parcelCharge + deliveryCharge) * 100) / 100;
     const gstAmount = Math.round(preGst * gstRate / 100 * 100) / 100;
     let totalAmount = Math.round((preGst + gstAmount) * 100) / 100;
 
@@ -536,6 +555,7 @@ router.post('/api/webcart/submit', async (req, res) => {
         items: normalizedItems,
         parcel_charge: parcelCharge,
         delivery_charge: deliveryCharge,
+        promo_discount: promoDiscount || 0,
         gst_rate: gstRate,
         gst_amount: gstAmount,
         pre_gst_total: preGst,
@@ -599,6 +619,21 @@ router.post('/api/webcart/submit', async (req, res) => {
       delivery_channel_status: fulfillmentMeta.delivery_channel_status || undefined,
       courier_zone: fulfillmentMeta.courier_zone || undefined,
     });
+
+    if (promoApplied && promoDiscount > 0) {
+      try {
+        const { recordPromoRedemption } = require('../../helpers/tenantPromoCodes');
+        await recordPromoRedemption({
+          promo: promoApplied,
+          restaurantId: restaurant.id,
+          orderId: confirmResult?.booking_id || session?.id || null,
+          customerPhone: session?.phone || safePhone,
+          discountAmount: promoDiscount,
+        });
+      } catch (recErr) {
+        console.warn('[webcart/submit] promo redemption record:', recErr.message);
+      }
+    }
 
     // Persist fulfillment meta on booking when chat returns an id
     if (confirmResult?.booking_id) {

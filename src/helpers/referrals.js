@@ -144,11 +144,174 @@ async function assertReferredExists(referredType, referredId) {
   throw err;
 }
 
+function normalizeWabaDigits(raw) {
+  return String(raw || '').replace(/\D/g, '');
+}
+
+function wabaLookupVariants(raw) {
+  const digits = normalizeWabaDigits(raw);
+  if (!digits || digits.length < 10) return [];
+  const last10 = digits.slice(-10);
+  const with91 = last10.length === 10 ? `91${last10}` : digits;
+  return [...new Set([digits, last10, with91].filter(Boolean))];
+}
+
+/**
+ * Resolve an active tenant by WhatsApp business display / stored digits.
+ * Returns { id, name, whatsapp_number, contact_email, email } or null.
+ */
+async function findTenantByWaba(waba) {
+  const variants = wabaLookupVariants(waba);
+  if (!variants.length) return null;
+
+  const orClause = variants.map((v) => `whatsapp_number.eq.${v}`).join(',');
+  const { data, error } = await supabaseAdmin
+    .from('tenants')
+    .select('id, name, display_name, whatsapp_number, contact_email, email, is_active')
+    .eq('is_active', true)
+    .or(orClause)
+    .limit(5);
+
+  if (error) {
+    logReferralError('findTenantByWaba', error, { variants });
+    throw new Error(error.message);
+  }
+
+  const rows = data || [];
+  if (!rows.length) return null;
+
+  // Prefer exact full-digit match, then last-10 match.
+  const digits = normalizeWabaDigits(waba);
+  const last10 = digits.slice(-10);
+  const exact = rows.find((r) => normalizeWabaDigits(r.whatsapp_number) === digits)
+    || rows.find((r) => normalizeWabaDigits(r.whatsapp_number).slice(-10) === last10)
+    || rows[0];
+  return exact;
+}
+
+async function resolveReferrerEmail(referrerId) {
+  const { data: referrer } = await supabaseAdmin
+    .from('tenants')
+    .select('id, name, contact_email, email')
+    .eq('id', referrerId)
+    .maybeSingle();
+
+  let to = (referrer?.contact_email || referrer?.email || '').trim();
+  if (!to) {
+    const { data: owner } = await supabaseAdmin
+      .from('employees')
+      .select('email')
+      .eq('restaurant_id', referrerId)
+      .eq('role', 'owner')
+      .eq('is_active', true)
+      .order('hired_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    to = (owner?.email || '').trim();
+  }
+  return { referrer, to: to || null };
+}
+
+/**
+ * Persist attribution + optionally create/credit a fixed 30-day referral.
+ * Never throws for product flow — logs and returns { credited, reason }.
+ */
+async function applyOnboardingReferral({
+  newTenantId,
+  referralSource = null,
+  referrerWaba = null,
+}) {
+  const source = String(referralSource || '').trim().toLowerCase() || null;
+  const wabaRaw = String(referrerWaba || '').trim() || null;
+  const wabaDigits = wabaRaw ? normalizeWabaDigits(wabaRaw) : null;
+
+  const updates = {
+    referral_source: source,
+    referrer_waba: wabaDigits || null,
+  };
+
+  let referrer = null;
+  let creditResult = null;
+  let reason = 'attribution_only';
+
+  if (source === 'existing_owner' && wabaDigits) {
+    try {
+      referrer = await findTenantByWaba(wabaDigits);
+    } catch (err) {
+      console.error('[referrals] applyOnboardingReferral lookup failed', err.message);
+      reason = 'lookup_failed';
+    }
+
+    if (referrer && referrer.id === newTenantId) {
+      referrer = null;
+      reason = 'self_referral';
+    } else if (referrer) {
+      updates.referred_by_restaurant_id = referrer.id;
+      try {
+        const created = await createReferral({
+          referrerRestaurantId: referrer.id,
+          referredType: 'tenant',
+          referredId: newTenantId,
+          createdBy: 'onboarding',
+          bonusDays: 30,
+          creditImmediately: true,
+        });
+        creditResult = created.creditResult;
+        reason = creditResult?.credited ? 'credited' : (creditResult?.reason || 'pending');
+      } catch (err) {
+        if (err.code === 'duplicate_referral') {
+          reason = 'duplicate_referral';
+          try {
+            creditResult = await creditReferralIfPending('tenant', newTenantId);
+            if (creditResult?.credited) reason = 'credited';
+          } catch (_) { /* ignore */ }
+        } else {
+          console.error('[referrals] applyOnboardingReferral create failed', {
+            newTenantId,
+            error: err.message,
+            code: err.code,
+          });
+          reason = 'create_failed';
+        }
+      }
+    } else if (reason === 'attribution_only') {
+      reason = 'referrer_not_found';
+    }
+  }
+
+  try {
+    const { error: updErr } = await supabaseAdmin
+      .from('tenants')
+      .update(updates)
+      .eq('id', newTenantId);
+    if (updErr) {
+      // Older DBs without migration — strip new columns and retry core fields only.
+      if (/referral_source|referrer_waba|referred_by/i.test(updErr.message || '')) {
+        console.warn('[referrals] attribution columns missing — skip tenant update:', updErr.message);
+      } else {
+        logReferralError('applyOnboardingReferral.update', updErr, { newTenantId });
+      }
+    }
+  } catch (err) {
+    console.error('[referrals] applyOnboardingReferral update exception', err.message);
+  }
+
+  return {
+    referral_source: source,
+    referrer_waba: wabaDigits,
+    referrer_restaurant_id: referrer?.id || null,
+    creditResult,
+    reason,
+  };
+}
+
 async function createReferral({
   referrerRestaurantId,
   referredType,
   referredId,
   createdBy = null,
+  bonusDays: bonusDaysOverride = null,
+  creditImmediately = false,
 }) {
   if (!referrerRestaurantId) {
     const err = new Error('referrer_restaurant_id is required');
@@ -204,7 +367,15 @@ async function createReferral({
     throw err;
   }
 
-  const { bonusDays, tier } = await getCurrentBonusDays();
+  let bonusDays;
+  let tier = null;
+  if (bonusDaysOverride != null && Number.isFinite(Number(bonusDaysOverride))) {
+    bonusDays = Math.max(1, Math.round(Number(bonusDaysOverride)));
+  } else {
+    const current = await getCurrentBonusDays();
+    bonusDays = current.bonusDays;
+    tier = current.tier;
+  }
 
   const { data: row, error: insertErr } = await supabaseAdmin
     .from('tenant_referrals')
@@ -233,11 +404,10 @@ async function createReferral({
     throw new Error(insertErr.message);
   }
 
-  // Suppliers activate at registration. If the referral is linked after the
-  // supplier already exists, credit immediately so sales-led linking works.
+  // Suppliers activate at registration. Onboarding tenant referrals credit immediately.
   let creditResult = null;
-  if (referredType === 'supplier') {
-    creditResult = await creditReferralIfPending('supplier', referredId);
+  if (referredType === 'supplier' || creditImmediately) {
+    creditResult = await creditReferralIfPending(referredType, referredId);
   }
 
   return { referral: row, tier, creditResult };
@@ -289,15 +459,9 @@ async function sendReferralCreditedEmail(creditResult, referredType, referredId)
   const { referralCredited } = require('./emailTemplates');
 
   const referrerId = creditResult.referrer_restaurant_id;
-  const { data: referrer } = await supabaseAdmin
-    .from('tenants')
-    .select('id, name, contact_email, email')
-    .eq('id', referrerId)
-    .maybeSingle();
-
-  const to = referrer?.contact_email || referrer?.email;
+  const { referrer, to } = await resolveReferrerEmail(referrerId);
   if (!to) {
-    console.warn('[referrals] Skipping referralCredited email — no contact_email/email on referrer', {
+    console.warn('[referrals] Skipping referralCredited email — no email on referrer tenant/owner', {
       referrerId,
     });
     return;
@@ -435,4 +599,8 @@ module.exports = {
   listReferrals,
   listTiers,
   getTierStatus,
+  normalizeWabaDigits,
+  findTenantByWaba,
+  applyOnboardingReferral,
+  resolveReferrerEmail,
 };

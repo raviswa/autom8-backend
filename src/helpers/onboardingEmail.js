@@ -21,7 +21,7 @@ function resolveTenantEmail(tenant) {
   return raw;
 }
 
-async function sendOnboardingWelcomeEmail(tenant) {
+async function sendOnboardingWelcomeEmail(tenant, opts = {}) {
   if (!tenant) {
     console.warn('[email/onboarding] skip — no tenant');
     return { sent: false, reason: 'no_tenant' };
@@ -36,8 +36,14 @@ async function sendOnboardingWelcomeEmail(tenant) {
     return { sent: false, reason: 'no_email' };
   }
 
+  const frontend = (process.env.FRONTEND_URL || 'https://app.autom8.works').replace(/\/$/, '');
+  const setupUrl = opts.setupUrl || `${frontend}/setup`;
+
   try {
-    const { subject, html, text } = onboardingWelcome(tenant);
+    const { subject, html, text } = onboardingWelcome(tenant, {
+      setupUrl,
+      hiccupNote: opts.hiccupNote || null,
+    });
     return await sendEmail({ to, subject, html, text });
   } catch (err) {
     console.error('[email/onboarding] send failed', {

@@ -31,6 +31,7 @@ const {
 } = require('../helpers/subscriptionFeatures');
 const {
   isSubscriptionSoftLocked,
+  isLifetimeTenant,
   getCycleAnchor,
   daysRelativeToAnchor,
   GRACE_PERIOD_DAYS,
@@ -46,6 +47,8 @@ const {
 const {
   getPhonePeGateway,
   upsertPhonePeGateway,
+  markPhonePeReferralIntent,
+  getPhonePePartnerReferralUrl,
 } = require('../helpers/tenantPaymentGateways');
 
 const BRAND_ROLES = ['brand_owner', 'brand_manager'];
@@ -81,8 +84,8 @@ async function loadOfferByCode(code) {
   return data;
 }
 
-function computeBillingFlags(sub) {
-  const softLocked = isSubscriptionSoftLocked(sub);
+function computeBillingFlags(sub, restaurantId = null) {
+  const softLocked = isSubscriptionSoftLocked(sub, new Date(), restaurantId || sub?.restaurant_id || null);
   const anchor = getCycleAnchor(sub);
   const relative = daysRelativeToAnchor(anchor);
   let daysUntilDue = null;
@@ -207,9 +210,10 @@ router.get('/', authenticateToken, getRestaurantId, async (req, res) => {
     const now         = new Date();
     const trialActive = sub?.trial_ends_at ? new Date(sub.trial_ends_at) > now : true;
     const isActive    = status === 'active' || (status === 'trial' && trialActive);
-    const billing     = computeBillingFlags(sub);
+    const billing     = computeBillingFlags(sub, req.restaurant_id);
     const referralBonusDays = await loadReferralBonusDays(req.restaurant_id);
     const phonepeGateway = await getPhonePeGateway(req.restaurant_id).catch(() => null);
+    const lifetime = isLifetimeTenant(req.restaurant_id);
 
     const { data: payments } = await supabaseAdmin
       .from('tenant_subscription_payments')
@@ -241,6 +245,7 @@ router.get('/', authenticateToken, getRestaurantId, async (req, res) => {
       features:         enabledFeatures,
       subscribed_features: enabledFeatures,
       soft_locked:      billing.soft_locked,
+      lifetime:         lifetime,
       grace_period_days: billing.grace_period_days,
       days_until_due:   billing.days_until_due,
       referral_bonus_days: referralBonusDays,
@@ -293,7 +298,7 @@ router.get('/brand', authenticateToken, getRestaurantId, async (req, res) => {
         .select('status, trial_ends_at, renews_at, final_price')
         .eq('restaurant_id', o.id)
         .maybeSingle();
-      const billing = computeBillingFlags(sub);
+      const billing = computeBillingFlags(sub, o.id);
       list.push({
         restaurant_id: o.id,
         name: o.display_name || o.name,
@@ -303,6 +308,7 @@ router.get('/brand', authenticateToken, getRestaurantId, async (req, res) => {
         renews_at: sub?.renews_at || null,
         price: MONTHLY_PRICE_INR,
         soft_locked: billing.soft_locked,
+        lifetime: isLifetimeTenant(o.id),
         days_until_due: billing.days_until_due,
         phonepe_merchant: await getPhonePeGateway(o.id).catch(() => null),
       });
@@ -332,6 +338,22 @@ router.get('/payment-gateway', authenticateToken, getRestaurantId, async (req, r
     const restaurantId = req.query.restaurant_id || req.restaurant_id;
     await assertOutletAccess(req, restaurantId);
     const gateway = await getPhonePeGateway(restaurantId);
+    res.json({
+      success: true,
+      gateway,
+      referral_url: getPhonePePartnerReferralUrl(),
+    });
+  } catch (err) {
+    const status = err.status || 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+router.post('/payment-gateway/referral-intent', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const restaurantId = req.body?.restaurant_id || req.restaurant_id;
+    await assertOutletAccess(req, restaurantId);
+    const gateway = await markPhonePeReferralIntent(restaurantId);
     res.json({ success: true, gateway });
   } catch (err) {
     const status = err.status || 500;
@@ -738,6 +760,66 @@ router.post('/offers', requireKdsSecret, async (req, res) => {
 
     if (error) return res.status(400).json({ error: error.message });
     res.status(201).json({ success: true, offer: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/subscription/offers — ops list (KDS secret only) ─────────────────
+
+router.get('/offers', requireKdsSecret, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('subscription_offers')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, offers: data || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── PUT /api/subscription/offers/:id — ops update / deactivate ────────────────
+
+router.put('/offers/:id', requireKdsSecret, async (req, res) => {
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(400).json({ error: 'id required' });
+
+    const allowed = [
+      'discount_type',
+      'discount_value',
+      'applies_to_lob',
+      'valid_from',
+      'valid_until',
+      'max_redemptions',
+      'is_active',
+      'code',
+    ];
+    const updates = {};
+    for (const key of allowed) {
+      if (req.body?.[key] !== undefined) updates[key] = req.body[key];
+    }
+    if (updates.code != null) updates.code = String(updates.code).trim().toUpperCase();
+    if (updates.discount_type && !['percent', 'flat'].includes(updates.discount_type)) {
+      return res.status(400).json({ error: 'discount_type must be percent or flat' });
+    }
+    if (updates.discount_value != null) updates.discount_value = Number(updates.discount_value);
+    if (!Object.keys(updates).length) {
+      return res.status(400).json({ error: 'no updatable fields provided' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('subscription_offers')
+      .update(updates)
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+    if (!data) return res.status(404).json({ error: 'offer not found' });
+    res.json({ success: true, offer: data });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

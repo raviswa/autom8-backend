@@ -41,18 +41,36 @@ ${bodyHtml}
 }
 
 /** Sent once when a tenant is created / activated. */
-function onboardingWelcome(tenant) {
+function onboardingWelcome(tenant, opts = {}) {
   const name = tenantLabel(tenant);
+  const setupUrl = opts.setupUrl || 'https://app.autom8.works/setup';
+  const hiccup = opts.hiccupNote ? String(opts.hiccupNote).trim() : '';
   const subject = `Welcome to Autom8 — ${name}`;
   const text =
     `Hi,\n\n` +
     `${name} is set up on Autom8.\n` +
-    `Sign in at https://app.autom8.works when you are ready.\n\n` +
+    `Open your setup checklist: ${setupUrl}\n` +
+    `Track what's done and what's pending:\n` +
+    `- Account created\n` +
+    `- WhatsApp connected\n` +
+    `- Catalog uploaded\n` +
+    `- Fulfillment modes configured\n` +
+    (hiccup ? `\nNote: ${hiccup}\n` : '') +
+    `\nSign in at https://app.autom8.works if you are not already logged in.\n` +
     `If you did not expect this email, reply and we will sort it out.\n`;
   const html = wrap(
     `<p>Hi,</p>
      <p><strong>${esc(name)}</strong> is set up on Autom8.</p>
-     <p>Sign in at <a href="https://app.autom8.works">https://app.autom8.works</a> when you are ready.</p>
+     <p><a href="${esc(setupUrl)}" style="display:inline-block;padding:10px 16px;background:#047857;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;">Open setup checklist</a></p>
+     <p>Use the checklist to see what is done and what is still pending:</p>
+     <ul>
+       <li>Account created</li>
+       <li>WhatsApp connected</li>
+       <li>Catalog uploaded</li>
+       <li>Fulfillment modes configured</li>
+     </ul>` +
+      (hiccup ? `<p><strong>Note:</strong> ${esc(hiccup)}</p>` : '') +
+      `<p>Sign in at <a href="https://app.autom8.works">https://app.autom8.works</a> if needed.</p>
      <p>If you did not expect this email, reply and we will sort it out.</p>`,
   );
   return { subject, html, text };
@@ -142,21 +160,28 @@ function referralCredited(opts) {
   const name = tenantLabel(tenant);
   const days = Number(bonusDays || 0);
   const who = referredName || 'your referral';
-  const tierLabel = tier?.tier_order
+  const freeMonth = days >= 28 && days <= 31;
+  const tierLabel = !freeMonth && tier?.tier_order
     ? ` (tier ${tier.tier_order} bonus)`
     : '';
-  const subject = `Referral credited — ${days} free days added`;
+  const rewardLine = freeMonth
+    ? '1 free month (we will not charge for that cycle)'
+    : `${days} free days${tierLabel}`;
+  const subject = freeMonth
+    ? `Referral credited — 1 free month added`
+    : `Referral credited — ${days} free days added`;
   const text =
     `Hi,\n\n` +
-    `You earned ${days} free days${tierLabel} for referring ${who}.\n` +
-    (newExpiryDate ? `New expiry: ${formatDate(newExpiryDate)}.\n` : '') +
+    `Thank you for referring ${who}.\n` +
+    `You earned ${rewardLine}.\n` +
+    (newExpiryDate ? `New access / billing date: ${formatDate(newExpiryDate)}.\n` : '') +
     `This applies to ${name}.\n`;
   const html = wrap(
     `<p>Hi,</p>
-     <p>You earned <strong>${esc(days)} free days</strong>${esc(tierLabel)} ` +
-      `for referring <strong>${esc(who)}</strong>.</p>` +
+     <p>Thank you for referring <strong>${esc(who)}</strong>.</p>
+     <p>You earned <strong>${esc(rewardLine)}</strong>.</p>` +
       (newExpiryDate
-        ? `<p>New expiry: <strong>${esc(formatDate(newExpiryDate))}</strong>.</p>`
+        ? `<p>New access / billing date: <strong>${esc(formatDate(newExpiryDate))}</strong>.</p>`
         : '') +
       `<p>This applies to <strong>${esc(name)}</strong>.</p>`,
   );

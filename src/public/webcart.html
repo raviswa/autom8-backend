@@ -1047,6 +1047,7 @@
       availableNow: [],
       submitting: false,
       orderingEnabled: true,
+      promotions: [],
       lastSubmittedFingerprint: null,
       lastSubmittedAt: 0,
       lastSubmittedOrderRef: null,
@@ -1710,9 +1711,18 @@
       const code = ($('promo').value || '').trim().toUpperCase();
       let amount = 0;
       let label = '';
-      if (code === 'MUNAFE10') {
-        amount += Math.round(subtotal * 0.1);
-        label = code;
+      const list = Array.isArray(state.promotions) ? state.promotions : [];
+      const match = list.find((p) => String(p.code || '').toUpperCase() === code);
+      if (match) {
+        const min = match.min_order_amount != null ? Number(match.min_order_amount) : 0;
+        if (subtotal >= min) {
+          if (String(match.discount_type) === 'flat') {
+            amount += Math.min(Math.round(Number(match.discount_value) || 0), Math.round(subtotal));
+          } else {
+            amount += Math.round(subtotal * ((Number(match.discount_value) || 0) / 100));
+          }
+          label = code;
+        }
       }
       const loy = state.loyalty || {};
       const redeemPts = Number(loy.redeem_points || 100);
@@ -3288,6 +3298,7 @@ $('subtotal').textContent = money(subtotal);
       state.menu = data.menu_items || [];
       state.pricingConfig = data.pricing_config || {};
       state.loyalty = data.loyalty || { balance: 0, redeem_points: 100, redeem_inr: 50, points_per_100: 1 };
+      state.promotions = Array.isArray(data.promotions) ? data.promotions : [];
       const loyWrap = $('loyaltyWrap');
       const loyLabel = $('loyaltyLabel');
       const loyCheck = $('loyaltyRedeem');

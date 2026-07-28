@@ -9,6 +9,11 @@ const { supabaseAdmin } = require('../config/supabase');
 
 const ALLOWED_STATUS = new Set(['pending', 'live', 'kyc_failed', 'inactive']);
 
+function getPhonePePartnerReferralUrl() {
+  const raw = String(process.env.PHONEPE_PARTNER_REFERRAL_URL || '').trim();
+  return raw || null;
+}
+
 function sanitizeGatewayInput(body = {}) {
   const merchant_id = String(body.merchant_id || '').trim();
   const merchant_name = body.merchant_name != null
@@ -39,7 +44,7 @@ async function getPhonePeGateway(restaurantId) {
 
 /**
  * Upsert PhonePe merchant registry for an outlet.
- * Does not accept or store secrets.
+ * Does not accept or store secrets. Requires merchant_id (self-report path).
  */
 async function upsertPhonePeGateway(restaurantId, body = {}) {
   const input = sanitizeGatewayInput(body);
@@ -82,8 +87,71 @@ async function upsertPhonePeGateway(restaurantId, body = {}) {
   return data;
 }
 
+/**
+ * Record that the owner opened the PhonePe partner referral link.
+ * Idempotent: does not clobber an existing row that already has a MID.
+ */
+async function markPhonePeReferralIntent(restaurantId) {
+  if (!restaurantId) {
+    const err = new Error('restaurant_id is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const existing = await getPhonePeGateway(restaurantId);
+  if (existing) {
+    return existing;
+  }
+
+  const now = new Date().toISOString();
+  const { data, error } = await supabaseAdmin
+    .from('tenant_payment_gateways')
+    .insert({
+      restaurant_id: restaurantId,
+      provider: 'phonepe',
+      merchant_id: null,
+      merchant_name: null,
+      partner_referral_code: null,
+      status: 'pending',
+      is_active: true,
+      linked_at: null,
+      created_at: now,
+      updated_at: now,
+    })
+    .select('id, restaurant_id, provider, merchant_id, merchant_name, partner_referral_code, status, linked_at, is_active, created_at, updated_at')
+    .single();
+
+  if (error) {
+    // Race: another request inserted — return that row
+    if (error.code === '23505') {
+      return getPhonePeGateway(restaurantId);
+    }
+    throw error;
+  }
+  return data;
+}
+
+function summarizePhonePeMerchant(gateway) {
+  if (!gateway) {
+    return {
+      status: null,
+      has_merchant_id: false,
+      merchant_id: null,
+    };
+  }
+  const mid = gateway.merchant_id != null ? String(gateway.merchant_id).trim() : '';
+  return {
+    status: gateway.status || null,
+    has_merchant_id: Boolean(mid),
+    merchant_id: mid || null,
+  };
+}
+
 module.exports = {
   ALLOWED_STATUS,
+  getPhonePePartnerReferralUrl,
   getPhonePeGateway,
   upsertPhonePeGateway,
+  markPhonePeReferralIntent,
+  summarizePhonePeMerchant,
 };
