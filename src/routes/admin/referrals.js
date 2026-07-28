@@ -26,6 +26,11 @@ const { sendEmail } = require('../../config/mailer');
 
 router.use(requireKdsSecret);
 
+// ── GET /api/admin/ping — secret check only (owner console login) ─────────────
+router.get('/ping', async (_req, res) => {
+  res.json({ success: true, ok: true, service: 'autom8-admin' });
+});
+
 // ── POST /api/admin/referrals ─────────────────────────────────────────────────
 router.post('/referrals', async (req, res) => {
   try {
