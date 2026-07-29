@@ -15,7 +15,7 @@ const MIGRATIONS_DIR = path.join(__dirname, '..', '..', 'migrations');
 function parseMigrationColumns() {
   const byTable = new Map(); // table -> Map(column -> sourceFile)
 
-  let files = [];
+  let files;
   try {
     files = fs.readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql'));
   } catch (e) {

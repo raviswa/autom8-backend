@@ -8,6 +8,8 @@
     "dev": "nodemon server.js",
     "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
+    "lint": "eslint src/ server.js",
+    "lint:fix": "eslint --fix src/ server.js",
     "seed:outlets": "node scripts/seedOutlets.js",
     "simulate:location-flow": "node scripts/simulateLocationFlow.js"
   },
@@ -34,6 +36,9 @@
     "ws": "^8.14.2"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^9.39.5",
+    "globals": "^17.8.0",
     "nodemon": "^3.0.2"
   },
   "engines": {
