@@ -37,6 +37,10 @@ const {
   linkExistingWabaToRestaurant,
   autoLinkDemoWhatsAppIfNeeded,
 } = require('../helpers/linkExistingWaba');
+const {
+  getActiveWhatsAppIntegration,
+  getLatestWhatsAppIntegration,
+} = require('../helpers/tenantIntegrations');
 const { recordActivationEvent } = require('../helpers/tenantActivation');
 const DEFAULT_FEATURES = DEFAULT_SERVICES;
 
@@ -409,11 +413,16 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
     const lifetime = isLifetimeTenant(restaurantId);
 
     // Demo outlets (Hotel Munafe / LIFETIME): re-attach shared WABA if credentials drifted.
-    await autoLinkDemoWhatsAppIfNeeded(restaurantId);
+    // Never fail /status if demo auto-link hits a schema gap.
+    try {
+      await autoLinkDemoWhatsAppIfNeeded(restaurantId);
+    } catch (autoLinkErr) {
+      console.warn('[onboarding/status] auto-link skipped:', autoLinkErr.message);
+    }
 
     const [
       { data: tenant },
-      { data: integration },
+      integration,
       { count: menuCount },
       { data: sub },
       phonepeGateway,
@@ -423,14 +432,10 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
         .select('id, name, display_name, subscribed_features, whatsapp_needs_existing_pin, lob_type, whatsapp_number, waba_id')
         .eq('id', restaurantId)
         .maybeSingle(),
-      supabaseAdmin
-        .from('tenant_integrations')
-        .select('id, phone_number_id, waba_id, is_active, access_token')
-        .eq('restaurant_id', restaurantId)
-        .eq('provider', 'meta')
-        .eq('channel', 'whatsapp')
-        .eq('is_active', true)
-        .maybeSingle(),
+      getActiveWhatsAppIntegration(restaurantId).catch((err) => {
+        console.warn('[onboarding/status] integration read skipped:', err.message);
+        return null;
+      }),
       supabaseAdmin
         .from('menu_items')
         .select('id', { count: 'exact', head: true })
@@ -460,25 +465,20 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
     const hasTenantWaFields = Boolean(tenantWaba && tenantWaDigits);
 
     if (!activeIntegration && hasTenantWaFields) {
-      const { data: inactive } = await supabaseAdmin
-        .from('tenant_integrations')
-        .select('id, phone_number_id, waba_id, is_active, access_token')
-        .eq('restaurant_id', restaurantId)
-        .eq('provider', 'meta')
-        .eq('channel', 'whatsapp')
-        .order('updated_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      const inactive = await getLatestWhatsAppIntegration(restaurantId).catch((err) => {
+        console.warn('[onboarding/status] latest integration read skipped:', err.message);
+        return null;
+      });
 
       if (inactive?.id) {
         const { data: healed, error: healErr } = await supabaseAdmin
           .from('tenant_integrations')
           .update({ is_active: true, updated_at: new Date().toISOString() })
           .eq('id', inactive.id)
-          .select('id, phone_number_id, waba_id, is_active, access_token')
+          .select('id, phone_number_id, is_active, access_token')
           .single();
         if (!healErr && healed) {
-          activeIntegration = healed;
+          activeIntegration = { ...healed, waba_id: inactive.waba_id || null };
           console.warn('[onboarding/status] reactivated inactive WhatsApp integration', {
             restaurantId,
             integrationId: healed.id,

@@ -211,8 +211,19 @@ router.get('/tenants', async (req, res) => {
       if (actRes.error) {
         console.warn('[admin/tenants] tenant_activity unavailable:', actRes.error.message);
       }
-
-      integrations = intRes.data || [];
+      if (intRes.error) {
+        console.warn('[admin/tenants] integrations query (retry without waba_id):', intRes.error.message);
+        const fallback = await supabaseAdmin
+          .from('tenant_integrations')
+          .select('id, restaurant_id, phone_number_id, is_active')
+          .in('restaurant_id', ids)
+          .eq('provider', 'meta')
+          .eq('channel', 'whatsapp')
+          .eq('is_active', true);
+        integrations = (fallback.data || []).map((row) => ({ ...row, waba_id: null }));
+      } else {
+        integrations = intRes.data || [];
+      }
       subscriptions = subRes.data || [];
       activityRows = actRes.error ? [] : (actRes.data || []);
       for (const row of menuRes.data || []) {
@@ -354,7 +365,19 @@ router.get('/tenants/:id', async (req, res) => {
       lifetimeOrders: act.lifetime_orders,
     });
     const sub = subRes.data;
-    const integ = integRes.data;
+    let integ = integRes.data;
+    if (integRes.error) {
+      console.warn('[admin/tenants/:id] integration query (retry without waba_id):', integRes.error.message);
+      const fallback = await supabaseAdmin
+        .from('tenant_integrations')
+        .select('id, phone_number_id, is_active, updated_at')
+        .eq('restaurant_id', id)
+        .eq('provider', 'meta')
+        .eq('channel', 'whatsapp')
+        .eq('is_active', true)
+        .maybeSingle();
+      integ = fallback.data ? { ...fallback.data, waba_id: null } : null;
+    }
 
     res.json({
       success: true,

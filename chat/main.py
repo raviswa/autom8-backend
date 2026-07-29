@@ -9,6 +9,7 @@ import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -93,6 +94,24 @@ async def lifespan(app: FastAPI):
 
 logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger(__name__)
+
+
+def _debug_log(location: str, message: str, data: dict, *, hypothesis_id: str) -> None:
+    try:
+        payload = {
+            "sessionId": "6134e5",
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        log_path = Path(__file__).resolve().parents[2] / "debug-6134e5.log"
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 class _LatencyTrace:
@@ -477,21 +496,78 @@ async def _process_meta_payload(payload: dict):
         phone_number_id = metadata.get("phone_number_id")
         restaurant      = None
         keyword         = extract_short_code(message_body or "")
+        route_source    = None
+        generic_greeting = False
+        if not keyword:
+            try:
+                from agents.customer.booking_helpers import is_greeting as _is_greeting
+                generic_greeting = _is_greeting(message_body or "")
+            except Exception:
+                generic_greeting = False
+
+        # region agent log
+        _debug_log(
+            "chat/main.py:494",
+            "shared_waba_resolution_start",
+            {
+                "phone": phone[-4:] if phone else None,
+                "waba": restaurant_whatsapp,
+                "phone_number_id": str(phone_number_id or ""),
+                "msg_type": msg_type,
+                "message_body": str(message_body or "")[:80],
+                "keyword": keyword,
+            },
+            hypothesis_id="H1,H2",
+        )
+        logger.info(
+            "[DBG shared_waba_start] phone=%s keyword=%s pnid=%s body=%r",
+            phone[-4:] if phone else None,
+            keyword,
+            str(phone_number_id or ""),
+            str(message_body or "")[:80],
+        )
+        # endregion
 
         # 3a. Explicit keyword — only acts when it resolves to a real, active tenant
         if keyword:
             candidate = await get_restaurant_by_short_code(restaurant_whatsapp, keyword)
             if candidate:
                 restaurant = candidate
+                route_source = "keyword"
                 logger.info(f"[routing] keyword '{keyword}' → {restaurant['name']}")
 
         # 3b. Pin table — mid-conversation continuation
-        if not restaurant:
+        if not restaurant and not generic_greeting:
             pinned_id = await get_active_restaurant_for_phone(restaurant_whatsapp, phone)
+            # region agent log
+            _debug_log(
+                "chat/main.py:518",
+                "shared_waba_pin_lookup",
+                {
+                    "phone": phone[-4:] if phone else None,
+                    "waba": restaurant_whatsapp,
+                    "keyword": keyword,
+                    "pinned_restaurant_id": pinned_id,
+                },
+                hypothesis_id="H1",
+            )
+            logger.info(
+                "[DBG shared_waba_pin] phone=%s keyword=%s pinned_restaurant_id=%s",
+                phone[-4:] if phone else None,
+                keyword,
+                pinned_id,
+            )
+            # endregion
             if pinned_id:
                 restaurant = await get_restaurant_by_id(pinned_id)
                 if restaurant:
+                    route_source = "pin"
                     logger.info(f"[routing] pin hit: {phone[-4:]} → {restaurant['name']}")
+        elif generic_greeting:
+            logger.info(
+                "[routing] generic greeting from %s on shared WABA — bypassing pin, using default route",
+                phone[-4:] if phone else None,
+            )
 
         # 3c. Unrecognized keyword AND no pin — genuinely fresh, unknown-outlet contact
         if not restaurant and keyword:
@@ -515,11 +591,14 @@ async def _process_meta_payload(payload: dict):
         if not restaurant and phone_number_id:
             restaurant = await get_restaurant_by_phone_number_id(str(phone_number_id))
             if restaurant:
+                route_source = "phone_number_id"
                 logger.debug(f"[routing] phone_number_id hit: {phone_number_id}")
 
         # 3e. Default fallback — plain "Hi" routes to is_default_for_number=True tenant
         if not restaurant:
             restaurant = await get_restaurant_by_whatsapp_number(restaurant_whatsapp)
+            if restaurant:
+                route_source = "default"
 
         if not restaurant:
             lat.mark("resolve_restaurant")
@@ -532,6 +611,31 @@ async def _process_meta_payload(payload: dict):
         # Refresh pin on every message — keeps subsequent turns fast
         await pin_active_restaurant_for_phone(restaurant_whatsapp, phone, restaurant["id"])
         lat.mark("resolve_restaurant")
+
+        # region agent log
+        _debug_log(
+            "chat/main.py:567",
+            "shared_waba_resolution_done",
+            {
+                "phone": phone[-4:] if phone else None,
+                "keyword": keyword,
+                "route_source": route_source,
+                "restaurant_id": restaurant.get("id"),
+                "restaurant_name": restaurant.get("name"),
+                "lob_type": restaurant.get("lob_type"),
+                "short_code": restaurant.get("short_code"),
+            },
+            hypothesis_id="H1,H2",
+        )
+        logger.info(
+            "[DBG shared_waba_done] phone=%s route=%s restaurant=%s lob=%s short_code=%s",
+            phone[-4:] if phone else None,
+            route_source,
+            restaurant.get("name"),
+            restaurant.get("lob_type"),
+            restaurant.get("short_code"),
+        )
+        # endregion
 
         # 3e. LOB dispatch — non-restaurant tenants go to their own agent
         lob_type      = restaurant.get("lob_type") or "restaurant"

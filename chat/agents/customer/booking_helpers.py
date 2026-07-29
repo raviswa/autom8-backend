@@ -173,7 +173,7 @@ def is_session_stale(session_state: Dict[str, Any]) -> bool:
     raw = session_state.get("_last_activity_at")
     if not raw:
         # Legacy sessions without timestamp — any mid-flow step is treated as stale.
-        if step in ("visit_complete", "ask_service", "awaiting_service_selection"):
+        if step in ("visit_complete", "ask_service"):
             return False
         return bool(step)
     try:
@@ -199,7 +199,7 @@ def expire_session_if_stale(
     if step in _SCHEDULED_PAYMENT_IDLE_EXEMPT:
         touch_session_activity(session_state)
         return False
-    if step in ("visit_complete", "ask_service", "awaiting_service_selection", None, ""):
+    if step in ("visit_complete", "ask_service", None, ""):
         touch_session_activity(session_state)
         return False
 

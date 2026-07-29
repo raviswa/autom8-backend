@@ -13,6 +13,10 @@ const { isLifetimeTenant, getDemoWhatsAppNumber } = require('./subscriptionAcces
 const { invalidateRestaurantConfigCache } = require('./restaurantConfig');
 const { writeAuditLog } = require('./auditLog');
 const { recordActivationEvent } = require('./tenantActivation');
+const {
+  getActiveWhatsAppIntegration,
+  upsertWhatsAppIntegration,
+} = require('./tenantIntegrations');
 
 function isHotelMunafeDemoName(tenant = {}) {
   const blob = `${tenant.name || ''} ${tenant.display_name || ''}`.toLowerCase();
@@ -23,19 +27,6 @@ function isDemoOutlet(restaurantId, tenant = null) {
   if (isLifetimeTenant(restaurantId)) return true;
   if (tenant && isHotelMunafeDemoName(tenant)) return true;
   return false;
-}
-
-async function getActiveWhatsAppIntegration(restaurantId) {
-  const { data, error } = await supabaseAdmin
-    .from('tenant_integrations')
-    .select('id, phone_number_id, waba_id, access_token, is_active')
-    .eq('restaurant_id', restaurantId)
-    .eq('provider', 'meta')
-    .eq('channel', 'whatsapp')
-    .eq('is_active', true)
-    .maybeSingle();
-  if (error) throw error;
-  return data || null;
 }
 
 /**
@@ -109,14 +100,7 @@ async function linkExistingWabaToRestaurant(restaurantId, opts = {}) {
     .eq('id', source.id)
     .maybeSingle();
 
-  const { data: srcInt } = await supabaseAdmin
-    .from('tenant_integrations')
-    .select('id, phone_number_id, waba_id, access_token, webhook_secret, webhook_verify_token, config, is_active')
-    .eq('restaurant_id', source.id)
-    .eq('provider', 'meta')
-    .eq('channel', 'whatsapp')
-    .eq('is_active', true)
-    .maybeSingle();
+  const srcInt = await getActiveWhatsAppIntegration(source.id);
 
   if (!srcInt?.phone_number_id || !srcInt?.access_token) {
     const err = new Error('Source WhatsApp credentials are incomplete');
@@ -154,8 +138,6 @@ async function linkExistingWabaToRestaurant(restaurantId, opts = {}) {
     .eq('id', restaurantId);
 
   const integrationPayload = {
-    provider: 'meta',
-    channel: 'whatsapp',
     phone_number_id: String(srcInt.phone_number_id),
     access_token: srcInt.access_token,
     waba_id: wabaId ? String(wabaId) : null,
@@ -170,33 +152,7 @@ async function linkExistingWabaToRestaurant(restaurantId, opts = {}) {
     },
   };
 
-  const { data: existing } = await supabaseAdmin
-    .from('tenant_integrations')
-    .select('id')
-    .eq('restaurant_id', restaurantId)
-    .eq('provider', 'meta')
-    .eq('channel', 'whatsapp')
-    .maybeSingle();
-
-  let integration;
-  if (existing?.id) {
-    const { data, error } = await supabaseAdmin
-      .from('tenant_integrations')
-      .update(integrationPayload)
-      .eq('id', existing.id)
-      .select()
-      .single();
-    if (error) throw error;
-    integration = data;
-  } else {
-    const { data, error } = await supabaseAdmin
-      .from('tenant_integrations')
-      .insert({ restaurant_id: restaurantId, ...integrationPayload })
-      .select()
-      .single();
-    if (error) throw error;
-    integration = data;
-  }
+  const integration = await upsertWhatsAppIntegration(restaurantId, integrationPayload);
 
   invalidateRestaurantConfigCache(restaurantId);
 

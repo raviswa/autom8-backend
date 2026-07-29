@@ -9,9 +9,8 @@ const MIGRATIONS_DIR = path.join(__dirname, '..', '..', 'migrations');
 
 /**
  * Reads every migrations/*.sql file and extracts (table, column, sourceFile)
- * for each `ALTER TABLE x ADD COLUMN IF NOT EXISTS y` statement.
- * This is how we know, generically, which columns the *code* now assumes
- * exist — without hand-maintaining a separate list that goes stale.
+ * for each `ALTER TABLE … ADD COLUMN IF NOT EXISTS` statement.
+ * Handles optional schema qualifiers (public.tenants) and multi-column ALTERs.
  */
 function parseMigrationColumns() {
   const byTable = new Map(); // table -> Map(column -> sourceFile)
@@ -24,15 +23,30 @@ function parseMigrationColumns() {
     return byTable;
   }
 
-  const alterRe = /ALTER TABLE\s+(\w+)\s+ADD COLUMN IF NOT EXISTS\s+(\w+)/gi;
+  const alterTableRe = /ALTER TABLE\s+(?:\w+\.)?(\w+)/gi;
+  const addColRe = /ADD COLUMN IF NOT EXISTS\s+(\w+)/gi;
 
   for (const file of files) {
     const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
-    let match;
-    while ((match = alterRe.exec(sql)) !== null) {
-      const [, table, column] = match;
-      if (!byTable.has(table)) byTable.set(table, new Map());
-      byTable.get(table).set(column, file);
+    // Walk line-by-line so multi-column ALTER blocks keep the current table.
+    let currentTable = null;
+    for (const line of sql.split(/\r?\n/)) {
+      alterTableRe.lastIndex = 0;
+      const alterMatch = alterTableRe.exec(line);
+      if (alterMatch) currentTable = alterMatch[1];
+
+      if (!currentTable) continue;
+
+      addColRe.lastIndex = 0;
+      let colMatch;
+      while ((colMatch = addColRe.exec(line)) !== null) {
+        const column = colMatch[1];
+        if (!byTable.has(currentTable)) byTable.set(currentTable, new Map());
+        byTable.get(currentTable).set(column, file);
+      }
+
+      // Next statement starts after semicolon — clear table context.
+      if (/;/.test(line)) currentTable = null;
     }
   }
 

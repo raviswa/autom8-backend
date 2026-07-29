@@ -9,6 +9,10 @@ const { invalidateRestaurantConfigCache } = require('./restaurantConfig');
 const { writeAuditLog } = require('./auditLog');
 const { assertWhatsAppAssetsAvailable } = require('./registrationGuards');
 const { recordActivationEvent } = require('./tenantActivation');
+const {
+  getActiveWhatsAppIntegration,
+  upsertWhatsAppIntegration,
+} = require('./tenantIntegrations');
 
 const GRAPH_VERSION = () => process.env.META_GRAPH_VERSION || 'v21.0';
 
@@ -214,8 +218,6 @@ async function completeEmbeddedSignupForRestaurant(restaurantId, opts) {
   if (tenantErr) throw tenantErr;
 
   const integrationPayload = {
-    provider:        'meta',
-    channel:         'whatsapp',
     phone_number_id: String(phone_number_id),
     waba_id:         String(waba_id),
     access_token:    businessToken,
@@ -228,40 +230,7 @@ async function completeEmbeddedSignupForRestaurant(restaurantId, opts) {
     },
   };
 
-  const { data: existing } = await supabaseAdmin
-    .from('tenant_integrations')
-    .select('id, config')
-    .eq('restaurant_id', restaurantId)
-    .eq('provider', 'meta')
-    .eq('channel', 'whatsapp')
-    .maybeSingle();
-
-  let integration;
-  if (existing) {
-    const mergedConfig = {
-      ...(existing.config && typeof existing.config === 'object' ? existing.config : {}),
-      ...integrationPayload.config,
-    };
-    const { data, error } = await supabaseAdmin
-      .from('tenant_integrations')
-      .update({ ...integrationPayload, config: mergedConfig })
-      .eq('id', existing.id)
-      .select()
-      .single();
-    if (error) throw error;
-    integration = data;
-  } else {
-    const { data, error } = await supabaseAdmin
-      .from('tenant_integrations')
-      .insert({
-        restaurant_id: restaurantId,
-        ...integrationPayload,
-      })
-      .select()
-      .single();
-    if (error) throw error;
-    integration = data;
-  }
+  let integration = await upsertWhatsAppIntegration(restaurantId, integrationPayload);
 
   // Guarantee an active integration row (retry once if missing / inactive).
   if (!integration?.id || integration.is_active === false) {
@@ -269,34 +238,15 @@ async function completeEmbeddedSignupForRestaurant(restaurantId, opts) {
       restaurantId,
       phone_number_id,
     });
-    const { data: existingRetry } = await supabaseAdmin
-      .from('tenant_integrations')
-      .select('id')
-      .eq('restaurant_id', restaurantId)
-      .eq('provider', 'meta')
-      .eq('channel', 'whatsapp')
-      .maybeSingle();
-    let retried;
-    let retryErr;
-    if (existingRetry?.id) {
-      ({ data: retried, error: retryErr } = await supabaseAdmin
-        .from('tenant_integrations')
-        .update({ ...integrationPayload, is_active: true })
-        .eq('id', existingRetry.id)
-        .select()
-        .single());
-    } else {
-      ({ data: retried, error: retryErr } = await supabaseAdmin
-        .from('tenant_integrations')
-        .insert({ restaurant_id: restaurantId, ...integrationPayload, is_active: true })
-        .select()
-        .single());
-    }
-    if (retryErr) {
+    try {
+      integration = await upsertWhatsAppIntegration(restaurantId, {
+        ...integrationPayload,
+        is_active: true,
+      });
+    } catch (retryErr) {
       console.error('[embedded-signup] integration retry failed:', retryErr.message);
       throw retryErr;
     }
-    integration = retried;
   }
 
   const { data: verifyInt } = await supabaseAdmin
@@ -420,20 +370,16 @@ async function registerPhoneWithExistingPin(restaurantId, existingPin, actorId =
  * Account status panel data for Settings / Screen A.
  */
 async function getWhatsAppAccountStatus(restaurantId) {
-  const [{ data: tenant }, { data: integration }] = await Promise.all([
+  const [{ data: tenant }, integration] = await Promise.all([
     supabaseAdmin
       .from('tenants')
       .select('id, name, display_name, waba_id, whatsapp_number, whatsapp_needs_existing_pin, lob_type, updated_at')
       .eq('id', restaurantId)
       .maybeSingle(),
-    supabaseAdmin
-      .from('tenant_integrations')
-      .select('id, phone_number_id, waba_id, is_active, updated_at, config')
-      .eq('restaurant_id', restaurantId)
-      .eq('provider', 'meta')
-      .eq('channel', 'whatsapp')
-      .eq('is_active', true)
-      .maybeSingle(),
+    getActiveWhatsAppIntegration(restaurantId).catch((err) => {
+      console.warn('[whatsapp-status] integration read skipped:', err.message);
+      return null;
+    }),
   ]);
 
   if (!tenant) {
@@ -462,15 +408,7 @@ async function getWhatsAppAccountStatus(restaurantId) {
  * Read-only Meta message_templates for the connected WABA.
  */
 async function listMessageTemplatesForRestaurant(restaurantId) {
-  const { data: integration } = await supabaseAdmin
-    .from('tenant_integrations')
-    .select('id, waba_id, access_token, phone_number_id, is_active')
-    .eq('restaurant_id', restaurantId)
-    .eq('provider', 'meta')
-    .eq('channel', 'whatsapp')
-    .eq('is_active', true)
-    .maybeSingle();
-
+  const integration = await getActiveWhatsAppIntegration(restaurantId);
   const { data: tenant } = await supabaseAdmin
     .from('tenants')
     .select('waba_id')

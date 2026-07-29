@@ -11,8 +11,12 @@ import logging
 import re
 import secrets
 from datetime import datetime
+import json
+import time
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from agents.customer.minimal_message_templates import (
     build_repeat_confirm_body,
@@ -48,6 +52,70 @@ from tools.payment_tools import ensure_prepay_payment_link, checkout_gateway_lab
 from tools.whatsapp_tools import send_whatsapp_cta_url, send_whatsapp_message
 
 logger = logging.getLogger(__name__)
+
+
+def _debug_log(location: str, message: str, data: dict, *, hypothesis_id: str) -> None:
+    try:
+        payload = {
+            "sessionId": "6134e5",
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        log_path = Path(__file__).resolve().parents[4] / "debug-6134e5.log"
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _expire_stale_minimal_session(session_state: dict[str, Any], phone: str) -> bool:
+    """Clear stale packaged-LOB chat state so a fresh opener starts clean."""
+    raw = session_state.get("_last_activity_at")
+    minimal_step = str(session_state.get("minimal_step") or "")
+    has_lang = bool(session_state.get("preferred_language"))
+    if not raw:
+        return False
+    try:
+        last = datetime.fromisoformat(str(raw))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        idle_seconds = (
+            datetime.now(ZoneInfo("Asia/Kolkata")) - last
+        ).total_seconds()
+    except Exception:
+        idle_seconds = None
+    if idle_seconds is None or idle_seconds <= (30 * 60):
+        return False
+    if not minimal_step and not has_lang:
+        return False
+
+    logger.info(
+        "[minimal-order] expiring stale minimal session for %s idle_s=%s minimal_step=%s pref=%s",
+        phone[-4:] if phone else None,
+        int(idle_seconds),
+        minimal_step,
+        session_state.get("preferred_language"),
+    )
+    keep = {
+        "customer_id": session_state.get("customer_id"),
+        "customer_name": session_state.get("customer_name"),
+        "visit_count": session_state.get("visit_count"),
+        "is_returning_customer": session_state.get("is_returning_customer"),
+        "is_new_customer": session_state.get("is_new_customer"),
+        "last_order_summary": session_state.get("last_order_summary"),
+        "last_service_type": session_state.get("service_type") or session_state.get("last_service_type"),
+        "last_order_language": session_state.get("last_order_language"),
+        "_restaurant_timezone": session_state.get("_restaurant_timezone"),
+    }
+    session_state.clear()
+    for key, value in keep.items():
+        if value not in (None, "", False):
+            session_state[key] = value
+    return True
 
 _REPEAT_RE = re.compile(r"\b(REPEAT|REORDER|SAME\s*ORDER|LAST\s*ORDER)\b", re.IGNORECASE)
 # Packaged-LOB reopeners beyond is_greeting (order/menu/shop/browse).
@@ -472,6 +540,7 @@ async def handle_minimal_order_flow(
 
     session_state["lob_type"] = lob_type
     session_state.setdefault("_restaurant_timezone", restaurant.get("timezone") or "Asia/Kolkata")
+    stale_cleared = _expire_stale_minimal_session(session_state, phone)
 
     customer, is_new = await _ensure_customer(restaurant_id, phone, profile_name)
     session_state["customer_id"] = str(customer.get("id") or "")
@@ -481,9 +550,59 @@ async def handle_minimal_order_flow(
     session_state["is_returning_customer"] = is_returning
 
     touch_session_activity(session_state)
+    # region agent log
+    _debug_log(
+        "chat/agents/customer/minimal_order_agent.py:497",
+        "minimal_flow_entry",
+        {
+            "phone": phone[-4:] if phone else None,
+            "restaurant_id": restaurant_id,
+            "lob_type": lob_type,
+            "message_body": str(message_body or "")[:80],
+            "preferred_language_before": session_state.get("preferred_language"),
+            "last_order_language": session_state.get("last_order_language"),
+            "minimal_step": session_state.get("minimal_step"),
+            "booking_step": session_state.get("booking_step"),
+        },
+        hypothesis_id="H3,H4",
+    )
+    logger.info(
+        "[DBG minimal_entry] phone=%s lob=%s stale_cleared=%s pref_before=%s last_order_lang=%s minimal_step=%s booking_step=%s body=%r",
+        phone[-4:] if phone else None,
+        lob_type,
+        stale_cleared,
+        session_state.get("preferred_language"),
+        session_state.get("last_order_language"),
+        session_state.get("minimal_step"),
+        session_state.get("booking_step"),
+        str(message_body or "")[:80],
+    )
+    # endregion
     # Latch Tamil before welcome so ta.py copy is used on this turn.
     latch_tamil_from_text(session_state, message_body)
     fresh = _is_fresh_contact(message_body, session_state)
+
+    # region agent log
+    _debug_log(
+        "chat/agents/customer/minimal_order_agent.py:515",
+        "minimal_flow_after_latch",
+        {
+            "phone": phone[-4:] if phone else None,
+            "message_body": str(message_body or "")[:80],
+            "fresh": fresh,
+            "preferred_language_after_latch": session_state.get("preferred_language"),
+            "minimal_step": session_state.get("minimal_step"),
+        },
+        hypothesis_id="H3,H4",
+    )
+    logger.info(
+        "[DBG minimal_after_latch] phone=%s fresh=%s pref_after_latch=%s minimal_step=%s",
+        phone[-4:] if phone else None,
+        fresh,
+        session_state.get("preferred_language"),
+        session_state.get("minimal_step"),
+    )
+    # endregion
 
     # Greeting / first contact: send CTA immediately. Gemini language detect and
     # last-order lookup are not needed before the first WhatsApp reply — they
@@ -543,6 +662,27 @@ async def handle_minimal_order_flow(
             {"lob_type": lob_type, "preferred_language": session_state.get("preferred_language")},
         )
         apply_language_to_session(session_state, classified.get("language"))
+        # region agent log
+        _debug_log(
+            "chat/agents/customer/minimal_order_agent.py:576",
+            "minimal_flow_language_classified",
+            {
+                "phone": phone[-4:] if phone else None,
+                "classified_language": classified.get("language"),
+                "preferred_language_after_classify": session_state.get("preferred_language"),
+                "fresh": fresh,
+                "message_body": str(message_body or "")[:80],
+            },
+            hypothesis_id="H3",
+        )
+        logger.info(
+            "[DBG minimal_lang] phone=%s classified=%s pref_after_classify=%s fresh=%s",
+            phone[-4:] if phone else None,
+            classified.get("language"),
+            session_state.get("preferred_language"),
+            fresh,
+        )
+        # endregion
     except Exception as lang_err:
         logger.debug("[minimal-order] language detect skipped: %s", lang_err)
 
