@@ -64,9 +64,9 @@ function istDateKey(iso) {
 }
 
 function bookingRevenueTotal(booking) {
-  const meta = booking.schedule_meta || {};
-  const raw = meta.total ?? meta.totals?.total ?? meta.totals?.grand_total ?? meta.payable_total ?? 0;
-  return Number(raw) || 0;
+  // Durable amount resolver — do not rely on ephemeral invoices.
+  const { bookingRevenueTotal: resolve } = require('../../helpers/paidRevenue');
+  return resolve(booking);
 }
 
 router.get('/reports/sales', authenticateToken, getRestaurantId, async (req, res) => {
@@ -89,7 +89,7 @@ router.get('/reports/sales', authenticateToken, getRestaurantId, async (req, res
         .lte('created_at', toIso),
       // bookings has no updated_at in many deployments — use created_at for range + daily buckets.
       supabaseAdmin.from('bookings')
-        .select('id, service_type, payment_status, schedule_meta, created_at, token_number')
+        .select('id, service_type, payment_status, schedule_meta, meta, order_subtotal, created_at, token_number')
         .eq('restaurant_id', req.restaurant_id)
         .eq('payment_status', 'paid')
         .gte('created_at', fromIso)

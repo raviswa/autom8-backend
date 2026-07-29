@@ -1,6 +1,6 @@
 'use strict';
 
-const { fetchInvoicedOrders, buildInvoicedPeriodSummary } = require('./invoicedRevenue');
+const { fetchPaidCollections, buildPaidPeriodSummary } = require('./paidRevenue');
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const ORDER_TOKEN_MATCH_MS = 7 * 24 * 60 * 60 * 1000;
@@ -709,15 +709,15 @@ function buildPeriodSummary(enrichedOrders, tokens) {
 }
 
 async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, endISO, preset = '30d') {
-  const invoiced = await fetchInvoicedOrders(supabaseAdmin, restaurantId, startISO, endISO);
+  // Durable SoT — invoices are ephemeral (~3d) and must not drive KPIs.
+  const paid = await fetchPaidCollections(supabaseAdmin, restaurantId, startISO, endISO);
 
-  // Synthetic "orders" shaped from invoices — revenue KPIs / spend / trends use these only.
-  const invoicedAsOrders = (invoiced.rows || []).map((r) => ({
-    id: r.order_id || r.invoice_id,
+  const paidAsOrders = (paid.rows || []).map((r) => ({
+    id: r.order_id || r.booking_id || r.id,
     created_at: r.created_at,
     total_amount: r.total_amount,
     status: 'completed',
-    source: r.service_type || 'invoice',
+    source: r.service_type || r.source || 'paid',
     service_type: r.service_type,
     token_id: r.token_id,
     customer_phone: r.customer_phone,
@@ -751,16 +751,14 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
     });
   }
 
-  // Menu / combo insights: only line items belonging to invoiced orders.
-  const orderIds = (invoiced.orderIds || []).filter(Boolean);
+  const orderIds = (paid.orderIds || []).filter(Boolean);
   const { orderItems, orderRevenueById } = await fetchOrderRevenueById(
     supabaseAdmin,
     orderIds,
     { restaurantId, startISO, endISO },
   );
 
-  // Prefer invoice grand_total over line-item backfill when both exist.
-  for (const row of invoicedAsOrders) {
+  for (const row of paidAsOrders) {
     if (row.id && Number(row.total_amount) > 0) {
       orderRevenueById[row.id] = Number(row.total_amount);
     }
@@ -768,17 +766,16 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
 
   const stockOutages = buildStockOutages(auditRes.data);
   const tokens = tokensRes.data ?? [];
-  const summary = buildInvoicedPeriodSummary(invoiced, tokens);
+  const summary = buildPaidPeriodSummary(paid, tokens);
 
   return {
     summary,
-    revenueTrend: buildRevenueTrend(invoicedAsOrders, preset),
+    revenueTrend: buildRevenueTrend(paidAsOrders, preset),
     topMenuItems: buildTopMenuItems(orderItems),
-    // Frontend no longer renders these revenue charts; keep empty-safe payloads.
     revenueHeatmap: { days: [], hours: [], matrix: [], max: 0, peaks: [], aggregation: 'revenue' },
     serviceSplit: {
       mode: 'revenue',
-      metricLabel: 'by invoiced revenue',
+      metricLabel: 'by paid revenue',
       total: summary.totalRevenue,
       totalRevenue: summary.totalRevenue,
       totalOrderCount: summary.totalOrders,
@@ -790,8 +787,8 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
       whatsappPct: 0,
       channels: [],
     },
-    repeatTrend: buildRepeatTrend(invoicedAsOrders),
-    customers: buildCustomerInsights(invoicedAsOrders, tokens, orderRevenueById),
+    repeatTrend: buildRepeatTrend(paidAsOrders),
+    customers: buildCustomerInsights(paidAsOrders, tokens, orderRevenueById),
     stockOutages,
     stockOutagesMeta: {
       source: 'audit_logs',
@@ -801,8 +798,9 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
     comboPatterns: buildComboPatterns(orderItems),
     menuQuadrant: buildMenuQuadrant(orderItems),
     meta: {
-      revenueSource: 'invoices',
-      invoicedCount: summary.invoicedCount,
+      revenueSource: 'paid_collections',
+      paidCount: summary.paidCount,
+      invoicedCount: summary.paidCount,
       incompleteTokens: summary.incompleteTokens,
     },
   };

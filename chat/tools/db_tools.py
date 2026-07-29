@@ -953,7 +953,11 @@ async def update_booking_status(booking_id: str, status: str) -> Dict[str, Any]:
 
 
 async def update_booking_payment_status(booking_id: str, payment_status: str) -> Dict[str, Any]:
-    """Update booking payment_status (pending|paid|refunded|na)."""
+    """Update booking payment_status (pending|paid|refunded|na).
+
+    When marking paid, persist a durable total onto schedule_meta so owner
+    dashboard / reports survive ephemeral invoice purge and payload clear.
+    """
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Booking).where(Booking.id == UUID(booking_id)))
         booking = result.scalar_one_or_none()
@@ -962,6 +966,66 @@ async def update_booking_payment_status(booking_id: str, payment_status: str) ->
             raise ValueError(f"Booking {booking_id} not found")
 
         booking.payment_status = payment_status
+
+        if str(payment_status or "").lower() in {"paid", "captured", "success"}:
+            try:
+                meta = booking.schedule_meta if isinstance(booking.schedule_meta, dict) else {}
+                meta = dict(meta or {})
+                bmeta = booking.meta if isinstance(getattr(booking, "meta", None), dict) else {}
+                web = (bmeta or {}).get("web_cart_submission") or meta.get("web_cart_submission") or {}
+                prepay = (bmeta or {}).get("prepay_fulfillment_payload") or meta.get("prepay_fulfillment_payload") or {}
+
+                candidates = [
+                    meta.get("total"),
+                    (meta.get("totals") or {}).get("total") if isinstance(meta.get("totals"), dict) else None,
+                    (meta.get("totals") or {}).get("grand_total") if isinstance(meta.get("totals"), dict) else None,
+                    meta.get("payable_total"),
+                    web.get("total") if isinstance(web, dict) else None,
+                    web.get("grand_total") if isinstance(web, dict) else None,
+                    web.get("amount_paid") if isinstance(web, dict) else None,
+                    web.get("razorpay_amount") if isinstance(web, dict) else None,
+                    (bmeta or {}).get("total"),
+                    (bmeta or {}).get("grand_total"),
+                    (bmeta or {}).get("amount_paid"),
+                    (bmeta or {}).get("razorpay_amount"),
+                    prepay.get("total") if isinstance(prepay, dict) else None,
+                    (prepay.get("totals") or {}).get("grand_total") if isinstance(prepay, dict) and isinstance(prepay.get("totals"), dict) else None,
+                    getattr(booking, "order_subtotal", None),
+                ]
+                amount = 0.0
+                for raw in candidates:
+                    try:
+                        n = float(raw or 0)
+                    except (TypeError, ValueError):
+                        n = 0.0
+                    if n > 0:
+                        amount = n
+                        break
+
+                if amount <= 0:
+                    cart = meta.get("cart") or (bmeta or {}).get("cart") or {}
+                    if isinstance(cart, dict):
+                        for line in cart.values():
+                            if not isinstance(line, dict):
+                                continue
+                            qty = float(line.get("qty") or line.get("quantity") or 1)
+                            price = float(line.get("unit_price") or line.get("price") or 0)
+                            amount += qty * price
+
+                if amount > 0:
+                    totals = meta.get("totals") if isinstance(meta.get("totals"), dict) else {}
+                    totals = {**totals, "total": amount, "grand_total": amount}
+                    meta["total"] = amount
+                    meta["totals"] = totals
+                    booking.schedule_meta = meta
+                    # Also stamp order_subtotal when the column exists on the model.
+                    if hasattr(booking, "order_subtotal") and not getattr(booking, "order_subtotal", None):
+                        booking.order_subtotal = amount
+            except Exception as persist_err:
+                logger.warning(
+                    f"[payment-status] Could not persist schedule_meta.total for {booking_id}: {persist_err}"
+                )
+
         session.add(booking)
         await session.commit()
 

@@ -2,6 +2,10 @@
 // ============================================================================
 // Invoice generation and accounting sync
 //
+// NOTE: Invoice rows are ephemeral (~3 day retention for receipt / Zoho push).
+// Owner dashboard KPIs MUST NOT depend on invoices — use paidRevenue.js
+// (paid bookings + completed POS orders) as the durable source of truth.
+//
 // POST /api/invoices/generate   — Manual invoice generation (dashboard / POS)
 // POST /api/invoices/webhook    — Auto-trigger on payment_status → 'paid'
 //

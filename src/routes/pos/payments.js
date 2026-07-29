@@ -53,7 +53,11 @@ router.post('/payments', authenticateToken, getRestaurantId, async (req, res) =>
       .select().single();
     if (error) throw error;
 
-    await supabaseAdmin.from('orders').update({ payment_status: 'paid', status: 'completed' }).eq('id', order_id);
+    await supabaseAdmin.from('orders').update({
+      payment_status: 'paid',
+      status: 'completed',
+      ...(Number(amount) > 0 ? { total_amount: Number(amount) } : {}),
+    }).eq('id', order_id);
     const { data: order } = await supabaseAdmin.from('orders').select('table_id').eq('id', order_id).single();
     if (order.table_id) {
       await supabaseAdmin.from('tables').update({ status: 'available' }).eq('id', order.table_id);

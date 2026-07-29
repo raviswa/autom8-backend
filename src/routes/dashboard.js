@@ -10,7 +10,7 @@ const express = require('express');
 const router  = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
 const { computeDashboardInsights } = require('../helpers/dashboardAnalytics');
-const { fetchInvoicedOrders } = require('../helpers/invoicedRevenue');
+const { fetchPaidCollections } = require('../helpers/paidRevenue');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { getKdsSecret } = require('../config/internalSecret');
 const { autoLinkDemoWhatsAppIfNeeded } = require('../helpers/linkExistingWaba');
@@ -132,17 +132,16 @@ router.get('/waba', authenticateToken, getRestaurantId, requireOutlet, async (re
 });
 
 // ── GET /api/dashboard/wa-orders ─────────────────────────────────────────────
-// Source of truth: invoices only (receipt generated). Stale / unpaid tokens excluded.
+// Durable SoT: paid bookings + completed POS orders (NOT invoices — those purge ~3d).
 router.get('/wa-orders', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
   try {
     const { start, end } = req.query;
     if (!start || !end) return res.status(400).json({ error: 'start and end required' });
 
-    const invoiced = await fetchInvoicedOrders(supabaseAdmin, req.restaurant_id, start, end);
-    const orders = (invoiced.rows || []).map((r) => ({
+    const paid = await fetchPaidCollections(supabaseAdmin, req.restaurant_id, start, end);
+    const orders = (paid.rows || []).map((r) => ({
       id: r.id,
-      invoice_id: r.invoice_id,
-      invoice_number: r.invoice_number,
+      booking_id: r.booking_id || null,
       order_id: r.order_id,
       created_at: r.created_at,
       service_type: r.service_type,
@@ -150,11 +149,10 @@ router.get('/wa-orders', authenticateToken, getRestaurantId, requireOutlet, asyn
       party_size: r.party_size,
       token_number: r.token_number,
       total_amount: r.total_amount,
-      amount_match_mode: 'invoice',
+      amount_match_mode: r.source === 'booking' ? 'paid_booking' : 'completed_order',
       customers: r.customers,
     }));
 
-    // Ops-only context: how many walk-in tokens in range never produced an invoice.
     let incompleteTokens = 0;
     try {
       const { count } = await supabaseAdmin
@@ -166,14 +164,15 @@ router.get('/wa-orders', authenticateToken, getRestaurantId, requireOutlet, asyn
       incompleteTokens = Math.max(0, (count || 0) - orders.length);
     } catch (_) { /* non-fatal */ }
 
-    console.log(`[dashboard/wa-orders] ${orders.length} invoiced orders`);
+    console.log(`[dashboard/wa-orders] ${orders.length} paid collections`);
     res.json({
       success: true,
       orders,
       meta: {
-        source: 'invoices',
-        invoicedCount: orders.length,
-        totalRevenue: invoiced.totalRevenue,
+        source: 'paid_collections',
+        paidCount: orders.length,
+        invoicedCount: orders.length, // legacy alias
+        totalRevenue: paid.totalRevenue,
         incompleteTokens,
       },
     });
