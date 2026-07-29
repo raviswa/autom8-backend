@@ -290,8 +290,11 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
     const needsPickupResolve = (
       (updates.restaurant_type === 'cloud_kitchen' || updates.pickup_address !== undefined)
       && (updates.pickup_address || req.body.maps_url)
-      && (updates.pickup_latitude === undefined && updates.pickup_longitude === undefined
-          || !updates.pickup_latitude || !updates.pickup_longitude)
+      && (
+        (updates.pickup_latitude === undefined && updates.pickup_longitude === undefined)
+        || !updates.pickup_latitude
+        || !updates.pickup_longitude
+      )
     );
     if (needsPickupResolve) {
       const { data: current } = await supabaseAdmin

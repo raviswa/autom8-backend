@@ -390,7 +390,6 @@ router.post(['/register', '/register/upload'], async (req, res) => {
     address_line1: req.body.address_line1 || null,
     kitchen_workflow: req.body.kitchen_workflow || null,
     cuisines: req.body.cuisines || req.body.categories || null,
-    slug: req.body.slug || null,
     referral_source: req.body.referral_source || null,
     referrer_waba: req.body.referrer_waba || null,
     signup_source_detail: req.body.signup_source_detail || null,

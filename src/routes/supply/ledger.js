@@ -217,8 +217,8 @@ async function adjustDebit(orderId, clientId, supplierId, oldAmount, newAmount) 
   const { error: insertErr } = await supabaseAdmin
     .from('supply_credit_ledger')
     .insert({
-      supplier_id,
-      client_id,
+      supplier_id: supplierId,
+      client_id: clientId,
       entry_date:    today,
       type:          diff > 0 ? 'debit' : 'credit',
       amount:        Math.abs(diff),
@@ -246,13 +246,13 @@ async function reverseDebit(orderId, clientId, supplierId, amount, note = 'Order
   const { data: entry, error: insertErr } = await supabaseAdmin
     .from('supply_credit_ledger')
     .insert({
-      supplier_id,
-      client_id,
+      supplier_id: supplierId,
+      client_id: clientId,
       entry_date:    today,
       type:          'credit',
       amount:        parseFloat(amount),
       balance_after: balanceAfter,
-      order_id,
+      order_id:      orderId,
       note,
     })
     .select()
