@@ -30,7 +30,7 @@ from agents.customer.conversation_helpers import (
     apply_language_to_session,
     safe_classify_intent_full,
 )
-from locales.customer import reply, session_lang, latch_tamil_from_text
+from locales.customer import reply, session_lang, latch_indic_from_text
 from tools.booking_mechanisms import (
     _build_web_menu_url,
     _normalize_phone_digits,
@@ -578,9 +578,10 @@ async def handle_minimal_order_flow(
         str(message_body or "")[:80],
     )
     # endregion
-    # Latch Tamil before welcome so ta.py copy is used on this turn.
-    latch_tamil_from_text(session_state, message_body)
+    # Fresh packaged-LOB openers must be able to reset language immediately,
+    # even if an older webcart/prepay step is still parked in the session.
     fresh = _is_fresh_contact(message_body, session_state)
+    latch_indic_from_text(session_state, message_body, allow_reset=fresh)
 
     # region agent log
     _debug_log(
