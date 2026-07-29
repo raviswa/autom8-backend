@@ -204,12 +204,16 @@ def expire_session_if_stale(
         return False
 
     logger.info(f"[session] Expiring stale step={step!r} (idle>{SESSION_IDLE_SECONDS}s)")
+    from locales.customer import language_to_carry_across_reset
+
     _prev_cid = session_state.get("customer_id") or customer_id
     _prev_cname = session_state.get("customer_name") or customer_name
     _prev_visits = session_state.get("visit_count", 0)
     _prev_last = session_state.get("last_order_summary", "")
     _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
-    _prev_order_lang = session_state.get("last_order_language")
+    # Remember active visit language so a stale button tap can recover Tamil/etc.
+    # Typed Hi after expiry still forces English via latch_indic_from_text.
+    _carry_lang = language_to_carry_across_reset(session_state)
     _pending_pay = session_state.get("pending_prepay_fulfillment")
     _booking_id = session_state.get("booking_id")
     _payment_link = session_state.get("payment_link")
@@ -231,9 +235,8 @@ def expire_session_if_stale(
         session_state["last_order_summary"] = strip_order_quantity(_prev_last)
     if _prev_svc:
         session_state["last_service_type"] = _prev_svc
-    # Do not carry preferred_language — next opener sets language fresh.
-    if _prev_order_lang:
-        session_state["last_order_language"] = _prev_order_lang
+    if _carry_lang:
+        session_state["last_order_language"] = _carry_lang
     if _pending_pay:
         session_state["pending_prepay_fulfillment"] = _pending_pay
     if _booking_id:
@@ -670,7 +673,7 @@ async def start_fresh_visit(
 ) -> Dict[str, Any]:
     """Clear mid-flow state and show the service menu (Home / Hi after an order)."""
     from agents.customer.message_templates import build_conversation_greeting
-    from locales.customer import latch_indic_from_text
+    from locales.customer import latch_indic_from_text, language_to_carry_across_reset
 
     await abandon_incomplete_session(customer_phone, restaurant_id, session_state)
 
@@ -679,7 +682,7 @@ async def start_fresh_visit(
     _prev_visits = session_state.get("visit_count", 0)
     _prev_last = session_state.get("last_order_summary", "")
     _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
-    _prev_order_lang = session_state.get("last_order_language")
+    _carry_lang = language_to_carry_across_reset(session_state)
     _pending_pay = session_state.get("pending_prepay_fulfillment")
     _abandoned = session_state.pop("_last_visit_abandoned", False)
     session_state.clear()
@@ -695,9 +698,10 @@ async def start_fresh_visit(
         session_state["last_order_summary"] = strip_order_quantity(_prev_last)
     if _prev_svc:
         session_state["last_service_type"] = _prev_svc
-    # Language comes only from this opener — never carry preferred_language.
-    if _prev_order_lang:
-        session_state["last_order_language"] = _prev_order_lang
+    # Remember prior language for non-language openers (stale buttons).
+    # Explicit Hi/Hello still switches to English in latch_indic_from_text.
+    if _carry_lang:
+        session_state["last_order_language"] = _carry_lang
     if _pending_pay:
         session_state["pending_prepay_fulfillment"] = _pending_pay
     if _abandoned:
@@ -764,6 +768,8 @@ async def do_reset(
         except Exception as e:
             logger.error(f"Failed to cancel booking {booking_id} on reset: {e}")
 
+    from locales.customer import language_to_carry_across_reset
+
     if full_restart:
         # Preserve returning-customer signals before wipe so greeting stays correct.
         _prev_ret    = session_state.get("is_returning_customer", False)
@@ -771,7 +777,7 @@ async def do_reset(
         _prev_visits = session_state.get("visit_count", 0)
         _prev_last   = session_state.get("last_order_summary", "")
         _prev_svc    = session_state.get("service_type") or session_state.get("last_service_type")
-        _prev_order_lang = session_state.get("last_order_language")
+        _carry_lang  = language_to_carry_across_reset(session_state)
         session_state.clear()
         session_state["next_state"]    = "identity"
         session_state["identity_step"] = "initial"
@@ -786,8 +792,8 @@ async def do_reset(
             session_state["last_order_summary"] = strip_order_quantity(_prev_last)
         if _prev_svc:
             session_state["last_service_type"] = _prev_svc
-        if _prev_order_lang:
-            session_state["last_order_language"] = _prev_order_lang
+        if _carry_lang:
+            session_state["last_order_language"] = _carry_lang
         if opener_message:
             latch_indic_from_text(session_state, opener_message, allow_reset=True)
         return
@@ -800,7 +806,7 @@ async def do_reset(
     _is_new  = session_state.get("is_new_customer")
     _visits  = session_state.get("visit_count", 0)
     _prev_svc = session_state.get("service_type") or session_state.get("last_service_type")
-    _prev_order_lang = session_state.get("last_order_language")
+    _carry_lang = language_to_carry_across_reset(session_state)
     session_state.clear()
     if _cid:    session_state["customer_id"]           = _cid
     if _cname:  session_state["customer_name"]         = _cname
@@ -814,8 +820,8 @@ async def do_reset(
         session_state["is_returning_customer"] = True
     if _visits: session_state["visit_count"]           = _visits
     if _prev_svc: session_state["last_service_type"]   = _prev_svc
-    if _prev_order_lang:
-        session_state["last_order_language"] = _prev_order_lang
+    if _carry_lang:
+        session_state["last_order_language"] = _carry_lang
     if opener_message:
         latch_indic_from_text(session_state, opener_message, allow_reset=True)
     session_state["booking_step"]          = "awaiting_service_selection"

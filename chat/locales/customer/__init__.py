@@ -242,21 +242,40 @@ def language_reset_allowed(session_state: dict | None) -> bool:
     return step in _LANGUAGE_RESET_STEPS
 
 
+def language_to_carry_across_reset(session_state: dict | None) -> str | None:
+    """Language to remember across stale expiry / soft reset (preferred wins)."""
+    if not isinstance(session_state, dict):
+        return None
+    raw = session_state.get("preferred_language") or session_state.get("last_order_language")
+    if not raw:
+        return None
+    code = normalize_lang(raw)
+    return code if code in _CATALOGS else None
+
+
 def latch_indic_from_text(
     session_state: dict,
     text: str | None,
     *,
     allow_reset: bool | None = None,
+    recover_last_order: bool | None = None,
 ) -> str:
     """Latch preferred_language from inbound script or (when allowed) Latin Hi.
 
     Before service selection and after visit_complete, Indic script or Latin
     Hi/Hello/English may set a new preferred_language. Mid-order stays sticky.
+
+    On visit boundaries (allow_reset / recover_last_order), when the opener has
+    no language signal — e.g. a stale WhatsApp button payload like dine_in_now —
+    reuse last_order_language so Tamil customers are not bounced to English.
+    Typed Hi/Hello still forces English.
     """
     if not isinstance(session_state, dict):
         return "en"
     if allow_reset is None:
         allow_reset = language_reset_allowed(session_state)
+    if recover_last_order is None:
+        recover_last_order = allow_reset
 
     code = detect_script_locale(text)
     if code:
@@ -266,6 +285,16 @@ def latch_indic_from_text(
     if allow_reset and is_latin_language_switch(text):
         session_state["preferred_language"] = "en"
         return "en"
+
+    # Stale button / non-language opener after a visit wipe: keep prior language.
+    if recover_last_order and not session_state.get("preferred_language"):
+        last_raw = session_state.get("last_order_language")
+        if last_raw:
+            last = normalize_lang(last_raw)
+            if last in _CATALOGS:
+                session_state["preferred_language"] = last
+                return last
+
     return session_lang(session_state)
 
 

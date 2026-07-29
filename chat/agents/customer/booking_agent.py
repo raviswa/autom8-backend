@@ -256,12 +256,14 @@ async def handle_booking_flow(
     # ── visit_complete / awaiting_payment: treat new message as fresh visit ───
     if current_step in ("visit_complete", "awaiting_payment"):
         logger.info(f"[visit_complete] New message from {customer_phone} — fresh visit.")
+        from locales.customer import language_to_carry_across_reset
+
         _prev_cid    = session_state.get("customer_id")
         _prev_cname  = session_state.get("customer_name")
         _prev_visits = session_state.get("visit_count", 0)
         _prev_last   = session_state.get("last_order_summary", "")
         _prev_svc    = session_state.get("service_type") or session_state.get("last_service_type")
-        _prev_order_lang = session_state.get("last_order_language")
+        _carry_lang  = language_to_carry_across_reset(session_state)
         _pending_pay = session_state.get("pending_prepay_fulfillment")
         session_state.clear()
         if _prev_cid:    session_state["customer_id"]          = _prev_cid
@@ -271,10 +273,10 @@ async def handle_booking_flow(
         if _prev_visits: session_state["visit_count"]          = _prev_visits
         if _prev_last:   session_state["last_order_summary"]   = strip_order_quantity(_prev_last)
         if _prev_svc:    session_state["last_service_type"]    = _prev_svc
-        if _prev_order_lang:
-            session_state["last_order_language"] = _prev_order_lang
+        if _carry_lang:
+            session_state["last_order_language"] = _carry_lang
         if _pending_pay: session_state["pending_prepay_fulfillment"] = _pending_pay
-        # New booking: language comes from this message (not the previous visit).
+        # Explicit Hi → English; stale button → recover last_order_language.
         latch_indic_from_text(session_state, message, allow_reset=True)
         session_state["booking_step"] = "ask_service"
         current_step = "ask_service"
