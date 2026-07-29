@@ -324,7 +324,9 @@ async def route_message(
             customer_name=session_state.get("customer_name", "Guest"),
             customer_phone=sender_phone,
             manager_phone=restaurant_manager_phone,
-            message="hi",
+            # Preserve the original opener so downstream language latching can
+            # honor "வணக்கம் munafe" / "नमस्ते munafe" instead of forcing English.
+            message=message,
             session_state=session_state,
             table_number=table_number,
             raw_message_obj=raw_message_obj,
