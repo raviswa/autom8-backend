@@ -514,6 +514,23 @@ router.post('/notify', async (req, res) => {
                 subtotal: orderSubtotal,
                 total_amount: orderSubtotal,
               }, tenantRow || {});
+
+              // Safety net: ensure paid_sales ledger exists for this order/booking.
+              try {
+                const { recordPaidSaleFromOrder } = require('../helpers/paidSaleLedger');
+                await recordPaidSaleFromOrder(supabaseAdmin, {
+                  ...freshOrder,
+                  restaurant_id,
+                  booking_id: booking_id || freshOrder.booking_id || null,
+                  subtotal: orderSubtotal,
+                  total_amount: orderSubtotal,
+                }, {
+                  restaurant: tenantRow,
+                  orderItems: freshOrder.order_items || [],
+                });
+              } catch (ledgerErr) {
+                console.warn(`[kds-notify] paid_sale ledger failed (non-fatal):`, ledgerErr.message);
+              }
             }
           } catch (invErr) {
             console.warn(`[kds-notify] invoice ensure failed (non-fatal):`, invErr.message);

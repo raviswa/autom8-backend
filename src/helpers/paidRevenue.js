@@ -140,9 +140,77 @@ function normalizePaidOrderRow(order, amount) {
 }
 
 /**
- * @returns {Promise<{ rows: object[], totalRevenue: number, paidCount: number, orderIds: string[], bookingIds: string[] }>}
+ * @returns {Promise<{ rows: object[], totalRevenue: number, paidCount: number, orderIds: string[], bookingIds: string[], fromLedger: boolean }>}
  */
 async function fetchPaidCollections(supabaseAdmin, restaurantId, startISO, endISO) {
+  // Prefer durable paid_sales ledger (item+GST frozen at payment success).
+  const ledgerRes = await supabaseAdmin
+    .from('paid_sales')
+    .select(`
+      id, booking_id, order_id, created_at, paid_at, service_type, token_number,
+      customer_phone, customer_name, grand_total, subtotal, gst_amount,
+      cgst_amount, sgst_amount, igst_amount, gst_rate, delivery_charge
+    `)
+    .eq('restaurant_id', restaurantId)
+    .gte('paid_at', startISO)
+    .lte('paid_at', endISO)
+    .order('paid_at', { ascending: false })
+    .limit(1000);
+
+  if (!ledgerRes.error && (ledgerRes.data || []).length > 0) {
+    const rows = (ledgerRes.data || [])
+      .map((s) => {
+        const amount = Number(s.grand_total) || 0;
+        if (!(amount > 0)) return null;
+        return {
+          id: s.id,
+          booking_id: s.booking_id || null,
+          order_id: s.order_id || null,
+          created_at: s.paid_at || s.created_at,
+          service_type: s.service_type || null,
+          status: 'paid',
+          payment_status: 'paid',
+          party_size: null,
+          token_number: s.token_number || null,
+          token_id: s.token_number || null,
+          total_amount: amount,
+          subtotal: Number(s.subtotal) || 0,
+          gst_amount: Number(s.gst_amount) || 0,
+          source: 'paid_sales',
+          customers: {
+            name: s.customer_name || null,
+            phone: s.customer_phone || null,
+          },
+          customer_name: s.customer_name || null,
+          customer_phone: s.customer_phone || null,
+        };
+      })
+      .filter(Boolean);
+
+    const totalRevenue = Math.round(
+      rows.reduce((s, r) => s + (Number(r.total_amount) || 0), 0) * 100,
+    ) / 100;
+
+    return {
+      rows,
+      totalRevenue,
+      paidCount: rows.length,
+      invoiceCount: rows.length,
+      orderIds: rows.map((r) => r.order_id).filter(Boolean),
+      bookingIds: rows.map((r) => r.booking_id).filter(Boolean),
+      fromLedger: true,
+    };
+  }
+
+  if (ledgerRes.error && !/does not exist|relation|Could not find/i.test(ledgerRes.error.message || '')) {
+    console.warn('[paidRevenue] paid_sales query failed:', ledgerRes.error.message);
+  }
+
+  // Transition fallback: paid bookings + completed POS (pre-ledger rows).
+  return fetchPaidCollectionsLegacy(supabaseAdmin, restaurantId, startISO, endISO);
+}
+
+async function fetchPaidCollectionsLegacy(supabaseAdmin, restaurantId, startISO, endISO) {
   const [bookingsRes, ordersRes] = await Promise.all([
     supabaseAdmin
       .from('bookings')
@@ -223,7 +291,6 @@ async function fetchPaidCollections(supabaseAdmin, restaurantId, startISO, endIS
     if (row.order_id) countedOrderIds.add(String(row.order_id));
   }
 
-  // Backfill zero order totals from line items for completed POS orders.
   const zeroOrderIds = orders
     .filter((o) => !(Number(o.total_amount) > 0))
     .map((o) => o.id)
@@ -243,15 +310,12 @@ async function fetchPaidCollections(supabaseAdmin, restaurantId, startISO, endIS
 
   for (const o of orders) {
     if (countedOrderIds.has(String(o.id))) continue;
-    // Skip orders already represented by a paid booking link via booking_id.
     if (o.booking_id && bookingIds.includes(o.booking_id)) continue;
 
     let amount = Number(o.total_amount) || 0;
     if (!(amount > 0)) amount = Number(itemRevenueById[o.id]) || 0;
     if (!(amount > 0)) continue;
 
-    // Prefer payment_status paid when present; still include completed POS with a total
-    // (counter cash may leave payment_status unset on older rows).
     if (o.payment_status && !isPaidStatus(o.payment_status) && String(o.payment_status).toLowerCase() !== 'na') {
       continue;
     }
@@ -270,11 +334,26 @@ async function fetchPaidCollections(supabaseAdmin, restaurantId, startISO, endIS
     rows,
     totalRevenue,
     paidCount: rows.length,
-    // Back-compat aliases used by older call sites
     invoiceCount: rows.length,
     orderIds: rows.map((r) => r.order_id).filter(Boolean),
     bookingIds,
+    fromLedger: false,
   };
+}
+
+async function fetchPaidSaleItems(supabaseAdmin, restaurantId, startISO, endISO) {
+  const { data, error } = await supabaseAdmin
+    .from('paid_sale_items')
+    .select('item_name, quantity, unit_price, line_total, menu_item_id, paid_at')
+    .eq('restaurant_id', restaurantId)
+    .gte('paid_at', startISO)
+    .lte('paid_at', endISO)
+    .limit(5000);
+  if (error) {
+    console.warn('[paidRevenue] paid_sale_items query failed:', error.message);
+    return [];
+  }
+  return data || [];
 }
 
 function buildPaidPeriodSummary(paid, tokens) {
@@ -318,6 +397,7 @@ module.exports = {
   bookingRevenueTotal,
   withPersistedBookingTotal,
   fetchPaidCollections,
+  fetchPaidSaleItems,
   buildPaidPeriodSummary,
   // Temporary aliases while callers migrate off invoice naming
   fetchInvoicedOrders: fetchPaidCollections,

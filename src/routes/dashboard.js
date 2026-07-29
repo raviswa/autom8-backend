@@ -11,6 +11,7 @@ const router  = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
 const { computeDashboardInsights } = require('../helpers/dashboardAnalytics');
 const { fetchPaidCollections } = require('../helpers/paidRevenue');
+const { backfillPaidSales } = require('../helpers/backfillPaidSales');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { getKdsSecret } = require('../config/internalSecret');
 const { autoLinkDemoWhatsAppIfNeeded } = require('../helpers/linkExistingWaba');
@@ -262,6 +263,29 @@ router.get('/insights', authenticateToken, getRestaurantId, requireOutlet, async
     res.json({ success: true, ...insights });
   } catch (err) {
     console.error('[dashboard/insights]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/dashboard/paid-sales/backfill ───────────────────────────────────
+// One-shot: freeze historical paid bookings/orders into paid_sales + items.
+router.post('/paid-sales/backfill', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
+  try {
+    if (!['owner', 'manager', 'brand_owner', 'admin'].includes(req.user_role)) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    const days = Math.min(90, Math.max(1, Number(req.body?.days) || 30));
+    const end = new Date();
+    const start = new Date(end.getTime() - days * 86400000);
+    const result = await backfillPaidSales(supabaseAdmin, req.restaurant_id, {
+      startISO: start.toISOString(),
+      endISO: end.toISOString(),
+      limit: Math.min(1000, Number(req.body?.limit) || 500),
+    });
+    console.log(`[dashboard/paid-sales/backfill] restaurant=${req.restaurant_id}`, result);
+    res.json({ success: true, days, ...result });
+  } catch (err) {
+    console.error('[dashboard/paid-sales/backfill]', err.message);
     res.status(500).json({ error: err.message });
   }
 });

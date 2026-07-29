@@ -878,12 +878,32 @@ async def _mark_paid_and_fulfill(booking_id: str, *, source: str) -> dict[str, A
 
     booking = await get_booking_with_customer(booking_id)
     if booking and booking.get("payment_status") == "paid" and booking.get("status") == "confirmed":
+        # Still ensure durable ledger exists (idempotent).
+        try:
+            from tools.paid_sale_ledger import record_paid_sale_from_booking
+            await record_paid_sale_from_booking(booking)
+        except Exception as ledger_err:
+            logger.warning(f"[razorpay] paid_sale ledger (already_done) failed: {ledger_err}")
         return {"ok": True, "booking_id": booking_id, "fulfilled": True, "source": source, "already_done": True}
 
     # Payment capture and kitchen dispatch are separate concerns.
     # Never strand payment_status when fulfillment has a transient failure.
     if not booking or booking.get("payment_status") != "paid":
         await update_booking_payment_status(booking_id, "paid")
+        booking = await get_booking_with_customer(booking_id) or booking
+
+    # Durable item+GST ledger — write even if fulfill fails (money was collected).
+    try:
+        from tools.paid_sale_ledger import record_paid_sale_from_booking
+        if booking:
+            ledger_result = await record_paid_sale_from_booking(booking)
+            logger.info(
+                f"[razorpay] paid_sale ledger booking={booking_id} "
+                f"ok={ledger_result.get('ok')} skipped={ledger_result.get('skipped')} "
+                f"err={ledger_result.get('error')}"
+            )
+    except Exception as ledger_err:
+        logger.warning(f"[razorpay] paid_sale ledger failed (non-fatal): {ledger_err}")
 
     fulfilled = await fulfill_from_webhook(booking_id)
     if not fulfilled:

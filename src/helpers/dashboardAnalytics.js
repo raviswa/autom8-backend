@@ -1,6 +1,6 @@
 'use strict';
 
-const { fetchPaidCollections, buildPaidPeriodSummary } = require('./paidRevenue');
+const { fetchPaidCollections, buildPaidPeriodSummary, fetchPaidSaleItems } = require('./paidRevenue');
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const ORDER_TOKEN_MATCH_MS = 7 * 24 * 60 * 60 * 1000;
@@ -752,15 +752,34 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
   }
 
   const orderIds = (paid.orderIds || []).filter(Boolean);
-  const { orderItems, orderRevenueById } = await fetchOrderRevenueById(
-    supabaseAdmin,
-    orderIds,
-    { restaurantId, startISO, endISO },
-  );
+  let orderItems = [];
+  let orderRevenueById = {};
 
-  for (const row of paidAsOrders) {
-    if (row.id && Number(row.total_amount) > 0) {
-      orderRevenueById[row.id] = Number(row.total_amount);
+  if (paid.fromLedger) {
+    const saleItems = await fetchPaidSaleItems(supabaseAdmin, restaurantId, startISO, endISO);
+    orderItems = saleItems.map((it) => ({
+      quantity: it.quantity,
+      unit_price: it.unit_price,
+      menu_item: { name: it.item_name, price: it.unit_price },
+      item_name: it.item_name,
+    }));
+    for (const row of paidAsOrders) {
+      if (row.id && Number(row.total_amount) > 0) {
+        orderRevenueById[row.id] = Number(row.total_amount);
+      }
+    }
+  } else {
+    const fetched = await fetchOrderRevenueById(
+      supabaseAdmin,
+      orderIds,
+      { restaurantId, startISO, endISO },
+    );
+    orderItems = fetched.orderItems;
+    orderRevenueById = fetched.orderRevenueById;
+    for (const row of paidAsOrders) {
+      if (row.id && Number(row.total_amount) > 0) {
+        orderRevenueById[row.id] = Number(row.total_amount);
+      }
     }
   }
 
@@ -798,10 +817,11 @@ async function computeDashboardInsights(supabaseAdmin, restaurantId, startISO, e
     comboPatterns: buildComboPatterns(orderItems),
     menuQuadrant: buildMenuQuadrant(orderItems),
     meta: {
-      revenueSource: 'paid_collections',
+      revenueSource: paid.fromLedger ? 'paid_sales' : 'paid_collections',
       paidCount: summary.paidCount,
       invoicedCount: summary.paidCount,
       incompleteTokens: summary.incompleteTokens,
+      fromLedger: Boolean(paid.fromLedger),
     },
   };
 }
