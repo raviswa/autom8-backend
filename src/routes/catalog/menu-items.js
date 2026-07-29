@@ -14,6 +14,7 @@ const {
   exportTimeSlotLabel,
   parseBoolCell,
   resolveKitchenStation,
+  isReadymadeCategory,
 } = require('./shared/uploadParse');
 const { recordActivationEvent } = require('../../helpers/tenantActivation');
 // ── POST /api/menu/upload (and /api/catalog/menu-upload) — Bulk menu upload ──
@@ -76,7 +77,7 @@ async function handleMenuUpload(req, res) {
 
     const { data: existingRows, error: existingErr } = await supabaseAdmin
       .from('menu_items')
-      .select('id, retailer_id, name, pack_size_label, size_label, current_stock, is_stocked, is_available, archived_at')
+      .select('id, retailer_id, name, pack_size_label, size_label, current_stock, is_stocked, is_available, archived_at, kitchen_station, category')
       .eq('restaurant_id', restaurantId)
       .order('updated_at', { ascending: false });
     if (existingErr) throw existingErr;
@@ -93,6 +94,7 @@ async function handleMenuUpload(req, res) {
     const reservedIds = new Set(existingByRetailerId.keys());
     const payloadIds = new Set();
     const validRows = [];
+    const warnings = [];
     for (let index = 0; index < items.length; index += 1) {
       const item = items[index];
       const itemName   = item.name || item.title;
@@ -111,22 +113,78 @@ async function handleMenuUpload(req, res) {
 
       const packSizeLabel = item.pack_size_label || item.size_label || null;
       const matchedByProduct = existingByProductKey.get(productMatchKey(itemName, packSizeLabel));
-      let retailerId = String(item.retailer_id || item.id || matchedByProduct?.retailer_id || '').trim();
-      if (!retailerId) {
+      const excelIdRaw = String(item.retailer_id || item.id || '').trim();
+      const excelIdKey = excelIdRaw.toUpperCase();
+
+      let retailerId;
+      let idWarning = null;
+      if (matchedByProduct) {
+        // Product match: keep stable retailer_id — never steal another SKU's id.
+        const takenByOther = excelIdKey
+          ? existingByRetailerId.get(excelIdKey)
+          : null;
+        if (
+          excelIdRaw
+          && takenByOther
+          && takenByOther.id !== matchedByProduct.id
+        ) {
+          retailerId = matchedByProduct.retailer_id;
+          idWarning = `Excel id "${excelIdRaw}" already used by another item — kept existing id "${retailerId}"`;
+        } else if (
+          excelIdRaw
+          && String(matchedByProduct.retailer_id || '').toUpperCase() === excelIdKey
+        ) {
+          retailerId = matchedByProduct.retailer_id;
+        } else if (excelIdRaw && !takenByOther) {
+          // Unused excel id on product-matched row — keep existing to avoid Meta/catalog churn
+          retailerId = matchedByProduct.retailer_id;
+          if (excelIdKey !== String(matchedByProduct.retailer_id || '').toUpperCase()) {
+            idWarning = `Ignored Excel id "${excelIdRaw}" on update — kept existing id "${retailerId}"`;
+          }
+        } else {
+          retailerId = matchedByProduct.retailer_id;
+        }
+      } else if (excelIdRaw) {
+        const taken = existingByRetailerId.get(excelIdKey);
+        if (taken) {
+          // Excel id belongs to an existing row that did not product-match — autogenerate
+          retailerId = deriveRetailerId({
+            name: itemName,
+            packSizeLabel,
+            existingIds: Array.from(reservedIds),
+          });
+          idWarning = `Excel id "${excelIdRaw}" already in catalog — assigned new id "${retailerId}"`;
+        } else {
+          retailerId = excelIdRaw;
+        }
+      } else {
         retailerId = deriveRetailerId({
           name: itemName,
           packSizeLabel,
           existingIds: Array.from(reservedIds),
         });
       }
-      const retailerKey = retailerId.toUpperCase();
-      if (payloadIds.has(retailerKey)) {
-        errors.push({ row: index + 1, row_id: retailerId, error: 'Duplicate item ID in this file' });
-        skipped++;
-        continue;
+
+      if (idWarning) {
+        warnings.push({ row: index + 1, row_id: retailerId, warning: idWarning });
       }
-      payloadIds.add(retailerKey);
-      reservedIds.add(retailerKey);
+
+      const retailerKey = String(retailerId).toUpperCase();
+      if (payloadIds.has(retailerKey)) {
+        // Same file duplicate after conflict resolution — regenerate
+        retailerId = deriveRetailerId({
+          name: itemName,
+          packSizeLabel,
+          existingIds: Array.from(reservedIds).concat(Array.from(payloadIds)),
+        });
+        warnings.push({
+          row: index + 1,
+          row_id: retailerId,
+          warning: 'Duplicate id in file — assigned a unique auto id',
+        });
+      }
+      payloadIds.add(String(retailerId).toUpperCase());
+      reservedIds.add(String(retailerId).toUpperCase());
 
       let isStocked = true;
       if (item.is_available !== undefined && item.is_available !== null && item.is_available !== '') {
@@ -139,9 +197,15 @@ async function handleMenuUpload(req, res) {
       if (stockQty === 0) isStocked = false;
       if (blockNoFssai) isStocked = false;
 
+      const category = String(item.category || '').trim() || 'General';
+      const excelStationRaw = item.kitchen_station;
+      const excelStationBlank = excelStationRaw === undefined
+        || excelStationRaw === null
+        || String(excelStationRaw).trim() === '';
+
       const now = new Date().toISOString();
       const timeSlotRaw = item.time_slot ?? item.custom_label_0 ?? item['custom_label_0'] ?? '';
-      validRows.push({
+      const rowOut = {
         restaurant_id:       restaurantId,
         retailer_id:         retailerId,
         name:                String(itemName).trim(),
@@ -149,16 +213,12 @@ async function handleMenuUpload(req, res) {
         price,
         image_url:           item.image_url || item.image_link || null,
         time_slot:           mapTimeSlot(timeSlotRaw),
-        category:            String(item.category || '').trim() || 'General',
+        category,
         is_stocked:          isStocked,
         is_available:        isStocked,
         prep_time_fixed:     Math.max(0, parseInt(item.prep_time_fixed, 10) || 5),
         batch_size:          Math.max(1, parseInt(item.batch_size, 10) || 1),
         time_per_batch:      Math.max(1, parseInt(item.time_per_batch, 10) || 10),
-        kitchen_station:     resolveKitchenStation(item.kitchen_station, {
-          category: item.category,
-          packagedLob,
-        }),
         packing_time:        Math.max(0, parseFloat(item.packing_time) || 1),
         holds_well:          parseBoolCell(item.holds_well, false),
         fulfillment_section: String(item.fulfillment_section || 'main').trim() || 'main',
@@ -211,7 +271,28 @@ async function handleMenuUpload(req, res) {
         image_url_5:         item.image_url_5 || item.image_link_5 || null,
         created_at:          now,
         updated_at:          now,
-      });
+        // Internal flags for update vs insert station handling (stripped before write)
+        _excel_station_blank: excelStationBlank,
+        _matched_product_id: matchedByProduct?.id || null,
+        _existing_station: matchedByProduct?.kitchen_station || null,
+      };
+
+      if (!excelStationBlank) {
+        rowOut.kitchen_station = resolveKitchenStation(excelStationRaw, {
+          category,
+          packagedLob,
+        });
+      } else if (!matchedByProduct) {
+        // Insert with blank station — resolve from category
+        rowOut.kitchen_station = resolveKitchenStation('', {
+          category,
+          packagedLob,
+        });
+      }
+      // else: update with blank station — omit kitchen_station so DB value is preserved
+      // (unless we upgrade assembly → sweets_counter for readymade below in write loop)
+
+      validRows.push(rowOut);
 
       // Optional Excel discount_percent + discount_days → ends_at from upload time.
       if (item.discount_percent && item.discount_days) {
@@ -249,8 +330,17 @@ async function handleMenuUpload(req, res) {
       return error;
     }
 
-    for (const row of validRows) {
+    function stripUploadFlags(row) {
+      const out = { ...row };
+      delete out._excel_station_blank;
+      delete out._matched_product_id;
+      delete out._existing_station;
+      return out;
+    }
+
+    for (const rawRow of validRows) {
       try {
+        const row = stripUploadFlags(rawRow);
         const existing = existingByRetailerId.get(String(row.retailer_id).toUpperCase())
           || existingByProductKey.get(productMatchKey(row.name, row.pack_size_label || row.size_label));
         let dbErr;
@@ -258,6 +348,22 @@ async function handleMenuUpload(req, res) {
           const patch = { ...row, archived_at: null };
           delete patch.restaurant_id;
           delete patch.created_at;
+          // Blank Excel station: preserve DB value (do not wipe sweets_counter → assembly).
+          // Upgrade legacy assembly → sweets_counter when category is readymade.
+          if (rawRow._excel_station_blank) {
+            delete patch.kitchen_station;
+            const dbStation = String(existing.kitchen_station || '').toLowerCase();
+            if (
+              isReadymadeCategory(row.category)
+              && (!dbStation || dbStation === 'assembly')
+            ) {
+              patch.kitchen_station = 'sweets_counter';
+            }
+          }
+          // Never change retailer_id on product-matched update (conflict-safe)
+          if (String(existing.retailer_id || '').toUpperCase() !== String(row.retailer_id).toUpperCase()) {
+            patch.retailer_id = existing.retailer_id;
+          }
           if (stockPolicy === 'leave') {
             delete patch.current_stock;
             delete patch.is_stocked;
@@ -277,7 +383,30 @@ async function handleMenuUpload(req, res) {
           dbErr = await writeRow('update', existing.id, patch);
           if (!dbErr) updated++;
         } else {
+          if (!row.kitchen_station) {
+            row.kitchen_station = resolveKitchenStation('', {
+              category: row.category,
+              packagedLob,
+            });
+          }
           dbErr = await writeRow('insert', null, row);
+          if (
+            dbErr
+            && /menu_items_restaurant_id_retailer_id_key|duplicate key/i.test(dbErr.message || '')
+          ) {
+            const retryId = deriveRetailerId({
+              name: row.name,
+              packSizeLabel: row.pack_size_label || row.size_label,
+              existingIds: Array.from(reservedIds),
+            });
+            reservedIds.add(String(retryId).toUpperCase());
+            row.retailer_id = retryId;
+            warnings.push({
+              row_id: retryId,
+              warning: `Insert id conflict — retried as "${retryId}"`,
+            });
+            dbErr = await writeRow('insert', null, row);
+          }
           if (!dbErr) created++;
         }
         if (dbErr) {
@@ -285,7 +414,7 @@ async function handleMenuUpload(req, res) {
           skipped++;
         }
       } catch (itemErr) {
-        errors.push({ row_id: row.retailer_id, error: itemErr.message });
+        errors.push({ row_id: rawRow.retailer_id, error: itemErr.message });
         skipped++;
       }
     }
@@ -344,12 +473,18 @@ async function handleMenuUpload(req, res) {
       item_ids: validRows.map((row) => row.retailer_id),
     };
     if (errors.length) response.errors = errors;
-    if (blockNoFssai) {
-      response.warnings = [
-        ...(response.warnings || []),
-        'No FSSAI license on file — all items were uploaded as out-of-stock. '
-          + 'Add your FSSAI license number in Settings, then re-upload to publish.',
-      ];
+    const allWarnings = [
+      ...(warnings || []),
+      ...(blockNoFssai
+        ? [{
+          warning:
+            'No FSSAI license on file — all items were uploaded as out-of-stock. '
+            + 'Add your FSSAI license number in Settings, then re-upload to publish.',
+        }]
+        : []),
+    ];
+    if (allWarnings.length) {
+      response.warnings = allWarnings.map((w) => (typeof w === 'string' ? w : w.warning || JSON.stringify(w)));
     }
     res.json(response);
   } catch (err) {

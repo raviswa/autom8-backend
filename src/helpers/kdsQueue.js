@@ -45,19 +45,25 @@ function isReadymadeCategory(category) {
  * Normalize a raw kitchen_station (+ optional category) for menu rows and KDS.
  * Blank sweets/savories/readymade categories → sweets_counter (packing).
  * Aliases like "savory" / "readymade" → sweets_counter (not assembly).
+ * Readymade categories also override legacy default `assembly` (hot stations like
+ * tawa/steamer/kadai still win when explicitly set).
  */
 function resolveKitchenStation(rawStation, opts = {}) {
   const { category = null, packagedLob = false } = opts;
   if (packagedLob || isPackagedLob(opts.lobType)) return 'sweets_counter';
 
   const raw = String(rawStation || '').toLowerCase().trim();
+  let resolved = null;
   if (raw) {
-    if (PACKING_STATION_ALIASES[raw]) return PACKING_STATION_ALIASES[raw];
-    if (KITCHEN_STATIONS.has(raw)) return raw;
+    if (PACKING_STATION_ALIASES[raw]) resolved = PACKING_STATION_ALIASES[raw];
+    else if (KITCHEN_STATIONS.has(raw)) resolved = raw;
   }
 
-  if (isReadymadeCategory(category)) return 'sweets_counter';
-  return 'assembly';
+  if (isReadymadeCategory(category) && (!resolved || resolved === 'assembly')) {
+    return 'sweets_counter';
+  }
+
+  return resolved || 'assembly';
 }
 
 /** @deprecated Prefer resolveKitchenStation — kept for uploadParse callers. */
