@@ -23,7 +23,7 @@ const { sendWhatsAppMessage, sendWhatsAppCatalogMessage } = require('../../helpe
 const { applySlotAvailability, getCurrentSlotIST } = require('../catalog');
 const { notifyOrderReady }        = require('../../helpers/whatsapp');
 const { notifyPackingTicketAlert } = require('../../helpers/packingAlerts');
-const { queueForStation } = require('../../helpers/kdsQueue');
+const { queueForStation, resolveKitchenStation } = require('../../helpers/kdsQueue');
 const { queueFeedbackForTable }   = require('../../helpers/feedback');
 const {
   resolvePickupLocation,
@@ -266,6 +266,7 @@ module.exports = {
   notifyOrderReady,
   notifyPackingTicketAlert,
   queueForStation,
+  resolveKitchenStation,
   queueFeedbackForTable,
   resolvePickupLocation,
   parseGoogleMapsCoords,

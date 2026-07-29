@@ -32,7 +32,7 @@ const { supabaseAdmin }       = require('../config/supabase');
 const { broadcastToRestaurant } = require('../websocket');
 const { printKotEscPos, buildKotLines } = require('../helpers/kotEscPos');
 const { notifyPackingTicketAlert } = require('../helpers/packingAlerts');
-const { queueForStation } = require('../helpers/kdsQueue');
+const { queueForStation, resolveKitchenStation } = require('../helpers/kdsQueue');
 
 const { isValidKdsSecret, extractInternalSecret } = require('../config/internalSecret');
 
@@ -206,10 +206,13 @@ router.post('/notify', async (req, res) => {
         const oiIds = existingOrderLines.map((r) => r.id);
         const { data: oiDetail } = await supabaseAdmin
           .from('order_items')
-          .select('id, quantity, menu_item:menu_item_id(name, kitchen_station)')
+          .select('id, quantity, menu_item:menu_item_id(name, kitchen_station, category)')
           .in('id', oiIds);
         const repairInserts = (oiDetail ?? []).map((oi) => {
-          const station = String(oi.menu_item?.kitchen_station || 'assembly').toLowerCase();
+          const station = resolveKitchenStation(oi.menu_item?.kitchen_station, {
+            category: oi.menu_item?.category,
+            lobType: tenantLobType,
+          });
           return {
             restaurant_id,
             order_item_id:        oi.id,
@@ -231,11 +234,13 @@ router.post('/notify', async (req, res) => {
               `[kds-notify] 🔧 repaired ${repairInserts.length} KDS line(s) for ${orderNumber}`
             );
             const packingRepair = repairInserts.filter((r) => r.queue === 'packing');
+            const hasCookingRepair = repairInserts.some((r) => r.queue === 'cooking');
             if (packingRepair.length) {
               try {
                 await notifyPackingTicketAlert(restaurant_id, {
                   tokenNumber: token_number,
                   items: packingRepair.map((r) => ({ name: r.item_name, qty: 1 })),
+                  hasCookingLines: hasCookingRepair,
                 });
               } catch (_) { /* non-fatal */ }
             }
@@ -344,31 +349,43 @@ router.post('/notify', async (req, res) => {
       }
       // 3a: Resolve by retailer_id
       let menuItemId = null;
-      let kitchenStation = 'assembly';
+      let kitchenStation = null;
+      let menuCategory = item.category || null;
 
       if (item.retailer_id && item.retailer_id !== 'manual') {
         const { data: byRetailer } = await supabaseAdmin
-          .from('menu_items').select('id, kitchen_station')
+          .from('menu_items').select('id, kitchen_station, category')
           .eq('restaurant_id', restaurant_id)
           .eq('retailer_id', item.retailer_id)
           .maybeSingle();
         menuItemId = byRetailer?.id ?? null;
-        if (byRetailer?.kitchen_station) kitchenStation = byRetailer.kitchen_station;
+        if (byRetailer) {
+          kitchenStation = byRetailer.kitchen_station;
+          menuCategory = byRetailer.category || menuCategory;
+        }
       }
 
       // 3b: Resolve by name (case-insensitive fallback)
       if (!menuItemId && item.name) {
         const { data: byName } = await supabaseAdmin
-          .from('menu_items').select('id, kitchen_station')
+          .from('menu_items').select('id, kitchen_station, category')
           .eq('restaurant_id', restaurant_id)
           .ilike('name', item.name.trim())
           .maybeSingle();
         menuItemId = byName?.id ?? null;
-        if (byName?.kitchen_station) kitchenStation = byName.kitchen_station;
+        if (byName) {
+          kitchenStation = byName.kitchen_station;
+          menuCategory = byName.category || menuCategory;
+        }
       }
 
       // 3c: Ghost item — satisfies FK, keeps KDS accurate, never shown in menu
       if (!menuItemId) {
+        const ghostStation = resolveKitchenStation(
+          item.kitchen_station,
+          { category: menuCategory || item.category, lobType: tenantLobType },
+        );
+        const ghostCategory = String(menuCategory || item.category || 'Manual').trim() || 'Manual';
         const ghostRetailerId = (item.retailer_id && item.retailer_id !== 'manual')
           ? item.retailer_id
           : `ghost-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -383,10 +400,10 @@ router.post('/notify', async (req, res) => {
             is_available: false,
             is_stocked:   false,
             time_slot:    'all',
-            category:     'Manual',
-            kitchen_station: 'assembly',
+            category:     ghostCategory,
+            kitchen_station: ghostStation,
           })
-          .select('id, kitchen_station')
+          .select('id, kitchen_station, category')
           .single();
 
         if (ghostErr) {
@@ -394,8 +411,14 @@ router.post('/notify', async (req, res) => {
           continue;
         }
         menuItemId = ghost.id;
-        kitchenStation = ghost.kitchen_station || 'assembly';
+        kitchenStation = ghost.kitchen_station;
+        menuCategory = ghost.category || menuCategory;
       }
+
+      kitchenStation = resolveKitchenStation(kitchenStation, {
+        category: menuCategory || item.category,
+        lobType: tenantLobType,
+      });
 
       // 3d: order_items row
       const qty       = parseInt(item.qty || item.quantity || 1, 10);
@@ -420,7 +443,7 @@ router.post('/notify', async (req, res) => {
         continue;
       }
 
-      const station = String(kitchenStation || 'assembly').toLowerCase();
+      const station = kitchenStation;
       const queue = queueForStation(station, tenantLobType);
 
       // 3e: Stage kds_item for bulk insert (queue splits cooking vs packing screens)
@@ -573,9 +596,11 @@ router.post('/notify', async (req, res) => {
     // Packing WhatsApp nudge (non-fatal) — cooking board unchanged
     if (packingForAlert.length > 0) {
       try {
+        const hasCookingLines = kdsInserts.some((r) => r.queue === 'cooking');
         await notifyPackingTicketAlert(restaurant_id, {
           tokenNumber: token_number,
           items: packingForAlert,
+          hasCookingLines,
         });
       } catch (packAlertErr) {
         console.warn('[kds-notify] packing alert failed (non-fatal):', packAlertErr.message);

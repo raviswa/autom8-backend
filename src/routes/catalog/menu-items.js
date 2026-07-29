@@ -13,7 +13,7 @@ const {
   exportCategoryLabel,
   exportTimeSlotLabel,
   parseBoolCell,
-  parseKitchenStation,
+  resolveKitchenStation,
 } = require('./shared/uploadParse');
 const { recordActivationEvent } = require('../../helpers/tenantActivation');
 // ── POST /api/menu/upload (and /api/catalog/menu-upload) — Bulk menu upload ──
@@ -155,10 +155,10 @@ async function handleMenuUpload(req, res) {
         prep_time_fixed:     Math.max(0, parseInt(item.prep_time_fixed, 10) || 5),
         batch_size:          Math.max(1, parseInt(item.batch_size, 10) || 1),
         time_per_batch:      Math.max(1, parseInt(item.time_per_batch, 10) || 10),
-        kitchen_station:     (() => {
-          if (item.kitchen_station) return parseKitchenStation(item.kitchen_station);
-          return packagedLob ? 'sweets_counter' : 'assembly';
-        })(),
+        kitchen_station:     resolveKitchenStation(item.kitchen_station, {
+          category: item.category,
+          packagedLob,
+        }),
         packing_time:        Math.max(0, parseFloat(item.packing_time) || 1),
         holds_well:          parseBoolCell(item.holds_well, false),
         fulfillment_section: String(item.fulfillment_section || 'main').trim() || 'main',

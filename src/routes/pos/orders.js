@@ -22,6 +22,7 @@ const {
   notifyOrderReady,
   notifyPackingTicketAlert,
   queueForStation,
+  resolveKitchenStation,
   queueFeedbackForTable,
   resolvePickupLocation,
   parseGoogleMapsCoords,
@@ -84,9 +85,10 @@ router.post('/orders', authenticateToken, getRestaurantId, async (req, res) => {
       .select().single();
     if (orderError) throw orderError;
 
-    let subtotal   = 0;
+    let subtotal = 0;
     const orderItems = [];
-    const packingAlertItems = [];
+    let packingAlertItems = [];
+    let hasCookingLines = false;
     let tenantLobType = null;
     try {
       const { data: tenantRow } = await supabaseAdmin
@@ -99,7 +101,7 @@ router.post('/orders', authenticateToken, getRestaurantId, async (req, res) => {
 
     for (const item of items) {
       const { data: menuItem } = await supabaseAdmin.from('menu_items')
-        .select('price, name, kitchen_station').eq('id', item.menu_item_id).single();
+        .select('price, name, kitchen_station, category').eq('id', item.menu_item_id).single();
       subtotal += menuItem.price * item.quantity;
       const { data: itemData, error: itemError } = await supabaseAdmin.from('order_items')
         .insert({ order_id: orderData.id, menu_item_id: item.menu_item_id, quantity: item.quantity,
@@ -107,7 +109,10 @@ router.post('/orders', authenticateToken, getRestaurantId, async (req, res) => {
         .select().single();
       if (itemError) throw itemError;
       orderItems.push(itemData);
-      const station = String(menuItem.kitchen_station || 'assembly').toLowerCase();
+      const station = resolveKitchenStation(menuItem.kitchen_station, {
+        category: menuItem.category,
+        lobType: tenantLobType,
+      });
       const queue = queueForStation(station, tenantLobType);
       await supabaseAdmin.from('kds_items').insert({
         restaurant_id: req.restaurant_id,
@@ -119,6 +124,8 @@ router.post('/orders', authenticateToken, getRestaurantId, async (req, res) => {
       });
       if (queue === 'packing') {
         packingAlertItems.push({ name: menuItem.name || 'Item', qty: item.quantity });
+      } else if (queue === 'cooking') {
+        hasCookingLines = true;
       }
     }
 
@@ -127,6 +134,7 @@ router.post('/orders', authenticateToken, getRestaurantId, async (req, res) => {
         await notifyPackingTicketAlert(req.restaurant_id, {
           tokenNumber: orderNumber,
           items: packingAlertItems,
+          hasCookingLines,
         });
       } catch (packErr) {
         console.warn('[pos/orders] packing alert failed (non-fatal):', packErr.message);

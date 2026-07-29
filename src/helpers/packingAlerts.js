@@ -39,7 +39,7 @@ async function getPackingAlertPhone(restaurantId) {
 /**
  * Short actionable nudge when packing kds_items are created.
  * @param {string} restaurantId
- * @param {{ tokenNumber?: string|null, items?: Array<{ name?: string, qty?: number }> }} opts
+ * @param {{ tokenNumber?: string|null, items?: Array<{ name?: string, qty?: number }>, hasCookingLines?: boolean }} opts
  */
 async function notifyPackingTicketAlert(restaurantId, opts = {}) {
   const phone = await getPackingAlertPhone(restaurantId);
@@ -60,8 +60,12 @@ async function notifyPackingTicketAlert(restaurantId, opts = {}) {
       .join(', ')
     : 'items';
 
+  const mixedNote = opts.hasCookingLines
+    ? ` Token #${token} also has kitchen items — pack these when ready.`
+    : '';
+
   const body =
-    `🍬 New packing order: Token #${token} — ${summary}. Ready on the packing screen.`;
+    `🍬 New packing order: Token #${token} — ${summary}. Ready on the packing screen.${mixedNote}`;
 
   try {
     await sendWhatsAppMessage(phone, body, restaurantId);
