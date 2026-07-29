@@ -32,7 +32,7 @@ const {
   menuItemDiscountMiddleware,
 } = require('./src/routes/catalog');
 const { logKdsSecretStatus } = require('./src/config/internalSecret');
-const { verifyScheduledDeliveryTokenType, verifyMigrationColumns } = require('./src/helpers/schemaChecks');
+const { verifyScheduledDeliveryTokenType, verifyMigrationColumns, verifyWhatsAppCredentials } = require('./src/helpers/schemaChecks');
 const { supabaseAdmin } = require('./src/config/supabase');
 
 if (process.env.NODE_ENV === 'production' && !process.env.AUTOM8_KDS_SECRET) {
@@ -185,4 +185,11 @@ server.listen(PORT, () => {
     .catch((err) => {
       console.error('[boot] migration column check error:', err.message);
     });
+
+  // Detect placeholder/demo tokens in active WhatsApp integrations at deploy
+  // time — surfaces credential data issues before the first customer message
+  // hits a Meta 401 (the exact failure mode that silenced Hotel Munafe).
+  verifyWhatsAppCredentials().catch((err) => {
+    console.error('[boot] WA credential check error:', err.message);
+  });
 });

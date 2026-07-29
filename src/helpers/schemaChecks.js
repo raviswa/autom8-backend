@@ -152,4 +152,62 @@ async function verifyScheduledDeliveryTokenType() {
   return true;
 }
 
-module.exports = { verifyScheduledDeliveryTokenType, verifyMigrationColumns };
+// Tokens that are clearly placeholders and will always cause Meta 401s.
+const PLACEHOLDER_TOKEN_PATTERNS = [
+  /^demo\d*/i,
+  /^your_access_token/i,
+  /^placeholder/i,
+  /^changeme/i,
+  /^test\d*/i,
+  /^fake_token/i,
+  /^demotoken/i,
+];
+
+function isPlaceholderToken(token) {
+  if (!token || typeof token !== 'string') return true;
+  const t = token.trim();
+  // Real Meta system-user tokens are > 50 chars; short strings are always bad.
+  if (t.length < 20) return true;
+  return PLACEHOLDER_TOKEN_PATTERNS.some((re) => re.test(t));
+}
+
+/**
+ * Boot-time check: scan all active tenant_integrations rows and warn loudly
+ * if any has a placeholder/demo access_token.  This surfaces credential data
+ * issues at deploy time rather than silently on the first customer message.
+ *
+ * Never throws — logs and returns { ok, bad } so callers can decide severity.
+ */
+async function verifyWhatsAppCredentials() {
+  const { data, error } = await supabaseAdmin
+    .from('tenant_integrations')
+    .select('id, restaurant_id, provider, phone_number_id, access_token, is_active')
+    .eq('provider', 'meta')
+    .eq('channel', 'whatsapp')
+    .eq('is_active', true);
+
+  if (error) {
+    console.warn('[boot] ⚠️  WA credential check skipped (DB error):', error.message);
+    return { ok: true, bad: [] };
+  }
+
+  const bad = (data || []).filter((row) => isPlaceholderToken(row.access_token));
+
+  if (bad.length) {
+    console.error('[boot] ❌ WA credential check: placeholder tokens found — these tenants will get Meta 401s:');
+    for (const row of bad) {
+      console.error(
+        `[boot]    restaurant_id=${row.restaurant_id}  phone_number_id=${row.phone_number_id}` +
+        `  token_prefix="${String(row.access_token || '').slice(0, 12)}"`,
+      );
+    }
+    console.error('[boot]    Fix: UPDATE tenant_integrations SET access_token = \'<real-token>\' WHERE restaurant_id = \'...\';');
+  } else {
+    const count = (data || []).length;
+    console.log(`[boot] ✅ WA credential check passed — ${count} active integration(s) have non-placeholder tokens`);
+  }
+
+  return { ok: bad.length === 0, bad };
+}
+
+module.exports = { verifyScheduledDeliveryTokenType, verifyMigrationColumns, verifyWhatsAppCredentials };

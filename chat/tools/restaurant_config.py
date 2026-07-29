@@ -78,8 +78,28 @@ async def get_manager_phone(restaurant_id: str | None) -> str | None:
     return None
 
 
+# Tokens that are clearly placeholders — never valid for Meta Graph API calls.
+# Extend this set if new placeholder patterns are discovered.
+_PLACEHOLDER_TOKENS: frozenset[str] = frozenset({
+    "demo1234", "your_access_token_here", "placeholder", "changeme",
+    "test1234", "demotoken", "demo_token", "fake_token",
+})
+
+
+def _is_placeholder_token(token: str | None) -> bool:
+    """Return True when a token is a known-bad placeholder rather than a real credential."""
+    if not token:
+        return True
+    t = token.strip().lower()
+    return t in _PLACEHOLDER_TOKENS or len(t) < 20  # real Meta tokens are 100-250 chars
+
+
 async def get_whatsapp_credentials(restaurant_id: str | None) -> dict[str, str] | None:
-    """Resolve outbound WhatsApp credentials. DB integration is canonical."""
+    """Resolve outbound WhatsApp credentials. DB integration is canonical.
+
+    Placeholder tokens (e.g. 'demo1234') are rejected and logged so the error
+    surface is explicit rather than a silent Meta 401 on the first customer message.
+    """
     if not restaurant_id:
         return _env_whatsapp_fallback("no restaurant_id")
 
@@ -96,6 +116,16 @@ async def get_whatsapp_credentials(restaurant_id: str | None) -> dict[str, str] 
             phone_number_id = integration.get("phone_number_id")
             access_token = integration.get("access_token")
             if phone_number_id and access_token:
+                if _is_placeholder_token(access_token):
+                    logger.error(
+                        "[restaurant_config] ❌ PLACEHOLDER token detected for %s "
+                        "(provider=%s phone_number_id=%s token_prefix=%s) — "
+                        "update tenant_integrations.access_token with a real Meta token; "
+                        "falling through to env fallback",
+                        restaurant_id, provider, phone_number_id,
+                        str(access_token)[:12],
+                    )
+                    continue
                 creds = {
                     "api_endpoint": (
                         integration.get("api_endpoint")

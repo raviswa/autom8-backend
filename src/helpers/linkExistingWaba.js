@@ -184,8 +184,23 @@ async function linkExistingWabaToRestaurant(restaurantId, opts = {}) {
 }
 
 /**
- * If this is a demo outlet with no active WA, try to attach DEMO_WHATSAPP_NUMBER.
- * Never throws — logs and returns null on failure.
+ * True when a stored access_token is clearly a placeholder that will never
+ * pass Meta auth.  Mirrors the Python-side _is_placeholder_token check.
+ */
+function _isPlaceholderToken(token) {
+  if (!token || typeof token !== 'string') return true;
+  const t = token.trim();
+  if (t.length < 20) return true;
+  return /^(demo\d*|your_access_token|placeholder|changeme|test\d*|fake_token|demotoken)/i.test(t);
+}
+
+/**
+ * If this is a demo outlet with no active WA (or with a placeholder token),
+ * try to attach DEMO_WHATSAPP_NUMBER.  Never throws — logs and returns null on failure.
+ *
+ * Previously the function would skip re-linking when `active.phone_number_id`
+ * was set, even if the stored token was a placeholder (e.g. 'demo1234').
+ * That caused silent Meta 401s on every outbound message for those outlets.
  */
 async function autoLinkDemoWhatsAppIfNeeded(restaurantId, tenantRow = null) {
   try {
@@ -205,7 +220,18 @@ async function autoLinkDemoWhatsAppIfNeeded(restaurantId, tenantRow = null) {
       (tenant?.waba_id && String(tenant.waba_id).trim())
       && (tenant?.whatsapp_number && String(tenant.whatsapp_number).replace(/\D/g, '').length >= 10),
     );
-    if (active?.phone_number_id && hasFields) return null;
+
+    // Skip re-linking ONLY when the existing row has a real (non-placeholder) token.
+    const hasRealToken = active?.phone_number_id && !_isPlaceholderToken(active?.access_token);
+    if (hasRealToken && hasFields) return null;
+
+    if (active?.phone_number_id && _isPlaceholderToken(active?.access_token)) {
+      console.warn('[demo-waba] placeholder token detected — forcing re-link', {
+        restaurantId,
+        phone_number_id: active.phone_number_id,
+        token_prefix: String(active.access_token || '').slice(0, 12),
+      });
+    }
 
     const demoDigits = getDemoWhatsAppNumber();
     if (!demoDigits) return null;
