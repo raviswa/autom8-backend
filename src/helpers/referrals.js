@@ -46,15 +46,21 @@ async function getCumulativeCustomerCount() {
   ]);
 
   if (tenantsRes.error) {
-    logReferralError('getCumulativeCustomerCount.tenants', tenantsRes.error);
-    throw new Error(tenantsRes.error.message);
+    // Column may be missing if 20260718_referral_program migration was only partly applied.
+    if (/first_message_at|column .* does not exist/i.test(tenantsRes.error.message || '')) {
+      console.warn('[referrals] first_message_at missing — cumulative tenant count treated as 0');
+    } else {
+      logReferralError('getCumulativeCustomerCount.tenants', tenantsRes.error);
+      throw new Error(tenantsRes.error.message);
+    }
   }
   if (suppliersRes.error) {
     logReferralError('getCumulativeCustomerCount.suppliers', suppliersRes.error);
     throw new Error(suppliersRes.error.message);
   }
 
-  return (tenantsRes.count || 0) + (suppliersRes.count || 0);
+  const tenantCount = tenantsRes.error ? 0 : (tenantsRes.count || 0);
+  return tenantCount + (suppliersRes.count || 0);
 }
 
 async function listTiers() {
@@ -64,6 +70,12 @@ async function listTiers() {
     .order('tier_order', { ascending: true });
 
   if (error) {
+    // Empty / missing table must not 500 the owner console.
+    if (/relation .* does not exist|could not find the table/i.test(error.message || '')
+      || error.code === '42P01') {
+      console.warn('[referrals] referral_program_tiers missing — returning empty tiers');
+      return [];
+    }
     logReferralError('listTiers', error);
     throw new Error(error.message);
   }
@@ -552,6 +564,11 @@ async function listReferrals() {
     .order('created_at', { ascending: false });
 
   if (error) {
+    if (/relation .* does not exist|could not find the table/i.test(error.message || '')
+      || error.code === '42P01') {
+      console.warn('[referrals] tenant_referrals missing — returning empty list');
+      return [];
+    }
     logReferralError('listReferrals', error);
     throw new Error(error.message);
   }
@@ -600,17 +617,31 @@ async function listReferrals() {
 }
 
 async function getTierStatus() {
-  const { bonusDays, tier, cumulativeCount, tiers } = await getCurrentBonusDays();
-  const sorted = [...tiers].sort((a, b) => a.min_cumulative_count - b.min_cumulative_count);
-  const next = sorted.find((t) => t.min_cumulative_count > cumulativeCount) || null;
-  return {
-    cumulative_count: cumulativeCount,
-    active_tier: tier,
-    active_bonus_days: bonusDays,
-    next_tier: next,
-    signups_until_next: next ? next.min_cumulative_count - cumulativeCount : null,
-    tiers: sorted,
-  };
+  try {
+    const { bonusDays, tier, cumulativeCount, tiers } = await getCurrentBonusDays();
+    const sorted = [...tiers].sort((a, b) => a.min_cumulative_count - b.min_cumulative_count);
+    const next = sorted.find((t) => t.min_cumulative_count > cumulativeCount) || null;
+    return {
+      cumulative_count: cumulativeCount,
+      active_tier: tier,
+      active_bonus_days: bonusDays,
+      next_tier: next,
+      signups_until_next: next ? next.min_cumulative_count - cumulativeCount : null,
+      tiers: sorted,
+    };
+  } catch (err) {
+    console.warn('[referrals] getTierStatus degraded:', err.message);
+    return {
+      cumulative_count: 0,
+      active_tier: null,
+      active_bonus_days: 30,
+      next_tier: null,
+      signups_until_next: null,
+      tiers: [],
+      degraded: true,
+      error: err.message,
+    };
+  }
 }
 
 module.exports = {

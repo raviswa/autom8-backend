@@ -67,7 +67,11 @@ function riskFlags({ idleDays, threshold, isActive, lifetimeOrders }) {
 }
 
 async function loadIdleThresholdMap() {
-  const { data } = await supabaseAdmin.from('churn_idle_thresholds').select('lob_type, idle_days');
+  const { data, error } = await supabaseAdmin.from('churn_idle_thresholds').select('lob_type, idle_days');
+  if (error) {
+    console.warn('[admin] churn_idle_thresholds unavailable:', error.message);
+    return { map: {}, defaultDays: 30 };
+  }
   const map = Object.fromEntries((data || []).map((r) => [r.lob_type, r.idle_days]));
   return { map, defaultDays: map.default || 30 };
 }
@@ -146,7 +150,27 @@ router.get('/tenants', async (req, res) => {
     if (source) query = query.eq('referral_source', source);
     if (statusFilter === 'suspended') query = query.eq('is_active', false);
 
-    const { data: tenants, error, count } = await query;
+    let { data: tenants, error, count } = await query;
+    if (error && /referral_source|signup_source_detail|utm_/i.test(error.message || '')) {
+      // Attribution columns not migrated yet — fall back to core roster fields.
+      console.warn('[admin/tenants] attribution columns missing — core select:', error.message);
+      let fallback = supabaseAdmin
+        .from('tenants')
+        .select(
+          'id, name, display_name, email, contact_email, whatsapp_number, waba_id, lob_type, is_active, created_at, brand_id',
+          { count: 'exact' },
+        )
+        .order('created_at', { ascending: false })
+        .range(offset, offset + limit - 1);
+      if (q) {
+        fallback = fallback.or(
+          `name.ilike.%${q}%,display_name.ilike.%${q}%,email.ilike.%${q}%,contact_email.ilike.%${q}%,whatsapp_number.ilike.%${q}%`,
+        );
+      }
+      if (lob) fallback = fallback.eq('lob_type', lob);
+      if (statusFilter === 'suspended') fallback = fallback.eq('is_active', false);
+      ({ data: tenants, error, count } = await fallback);
+    }
     if (error) return res.status(500).json({ error: error.message });
 
     const rows = tenants || [];
@@ -173,7 +197,7 @@ router.get('/tenants', async (req, res) => {
           .in('restaurant_id', ids),
         supabaseAdmin
           .from('tenant_subscriptions')
-          .select('restaurant_id, status, trial_ends_at, renews_at, features, final_price, base_price')
+          .select('restaurant_id, status, trial_ends_at, renews_at, final_price, base_price')
           .in('restaurant_id', ids),
         supabaseAdmin
           .from('tenant_activity')
@@ -181,9 +205,16 @@ router.get('/tenants', async (req, res) => {
           .in('tenant_id', ids),
       ]);
 
+      if (subRes.error) {
+        console.warn('[admin/tenants] subscriptions query:', subRes.error.message);
+      }
+      if (actRes.error) {
+        console.warn('[admin/tenants] tenant_activity unavailable:', actRes.error.message);
+      }
+
       integrations = intRes.data || [];
       subscriptions = subRes.data || [];
-      activityRows = actRes.data || [];
+      activityRows = actRes.error ? [] : (actRes.data || []);
       for (const row of menuRes.data || []) {
         menuCounts[row.restaurant_id] = (menuCounts[row.restaurant_id] || 0) + 1;
       }
@@ -238,7 +269,7 @@ router.get('/tenants', async (req, res) => {
               status: sub.status || null,
               trial_ends_at: sub.trial_ends_at || null,
               renews_at: sub.renews_at || null,
-              paid_features: Array.isArray(sub.features) ? sub.features : [],
+              paid_features: [],
               final_price: sub.final_price ?? null,
             }
           : null,
@@ -380,7 +411,15 @@ router.get('/churn/queue', async (req, res) => {
     const { data: activity, error } = await supabaseAdmin
       .from('tenant_activity')
       .select('tenant_id, lob_type, is_active, last_order_at, lifetime_orders, idle_interval');
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) {
+      console.warn('[admin/churn/queue] tenant_activity unavailable:', error.message);
+      return res.json({
+        success: true,
+        items: [],
+        degraded: true,
+        error: 'Run migrations/20260729_super_admin_churn_activation.sql to enable churn queue',
+      });
+    }
 
     const candidates = (activity || []).filter((row) => {
       if (row.is_active === false) return false;
@@ -461,7 +500,10 @@ router.get('/churn/feedback/summary', async (req, res) => {
     const { data, error } = await supabaseAdmin
       .from('churn_feedback')
       .select('reason');
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) {
+      console.warn('[admin/churn/feedback/summary]', error.message);
+      return res.json({ success: true, counts: {}, total: 0, degraded: true });
+    }
     const counts = {};
     for (const row of data || []) {
       const r = row.reason || 'other';
