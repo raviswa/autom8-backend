@@ -1976,7 +1976,12 @@ async def get_booking_by_id(restaurant_id: str, booking_id: str) -> Dict[str, An
 
 
 async def get_booking_with_customer(booking_id: str) -> Dict[str, Any] | None:
-    """Load booking with customer phone/name — used by Razorpay webhook fulfillment."""
+    """Load booking with customer phone/name — used by Razorpay webhook fulfillment.
+
+    Never SELECT optional columns like ``meta`` inside this session without a
+    rollback: a missing column aborts the Postgres transaction and the next
+    statement raises InFailedSQLTransactionError (breaks /pay checkout).
+    """
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(Booking)
@@ -1987,28 +1992,16 @@ async def get_booking_with_customer(booking_id: str) -> Dict[str, Any] | None:
         if not booking:
             return None
         customer = booking.customer
-        try:
-            schedule_row = await session.execute(
-                text("""
-                    SELECT kitchen_start_at, scheduled_slot_at, booking_datetime,
-                           schedule_meta, kds_sent_at, meta
-                    FROM bookings WHERE id = CAST(:bid AS uuid)
-                """),
-                {"bid": booking_id},
-            )
-            sched = dict(schedule_row.mappings().first() or {})
-        except Exception:
-            schedule_row = await session.execute(
-                text("""
-                    SELECT kitchen_start_at, scheduled_slot_at, booking_datetime,
-                           schedule_meta, kds_sent_at
-                    FROM bookings WHERE id = CAST(:bid AS uuid)
-                """),
-                {"bid": booking_id},
-            )
-            sched = dict(schedule_row.mappings().first() or {})
-            sched["meta"] = {}
-        return {
+        schedule_row = await session.execute(
+            text("""
+                SELECT kitchen_start_at, scheduled_slot_at, booking_datetime,
+                       schedule_meta, kds_sent_at
+                FROM bookings WHERE id = CAST(:bid AS uuid)
+            """),
+            {"bid": booking_id},
+        )
+        sched = dict(schedule_row.mappings().first() or {})
+        out = {
             "id": str(booking.id),
             "restaurant_id": str(booking.restaurant_id),
             "customer_id": str(booking.customer_id),
@@ -2027,10 +2020,29 @@ async def get_booking_with_customer(booking_id: str) -> Dict[str, Any] | None:
             "scheduled_slot_at": sched.get("scheduled_slot_at"),
             "booking_datetime": sched.get("booking_datetime"),
             "schedule_meta": sched.get("schedule_meta") or {},
-            "meta": sched.get("meta") or {},
+            "meta": {},
             "created_at": getattr(booking, "created_at", None).isoformat() if getattr(booking, "created_at", None) else None,
             "updated_at": getattr(booking, "updated_at", None).isoformat() if getattr(booking, "updated_at", None) else None,
         }
+
+    # Optional enrichment outside the SQLAlchemy session (REST — never aborts pay path).
+    try:
+        base = _a8_base()
+        if base:
+            async with _httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(
+                    f"{base}/rest/v1/bookings",
+                    headers=_a8_headers(),
+                    params={"id": f"eq.{booking_id}", "select": "meta", "limit": "1"},
+                )
+                if resp.status_code < 400:
+                    rows = resp.json() or []
+                    if rows and isinstance(rows[0].get("meta"), dict):
+                        out["meta"] = rows[0]["meta"]
+    except Exception:
+        pass
+
+    return out
 
 
 async def _fetch_booking_kds_sent_at(booking_id: str):
