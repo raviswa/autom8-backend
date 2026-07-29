@@ -47,7 +47,22 @@ function buildDispatchItems(orderOrMeta = {}) {
     || '',
   ).trim();
   if (!orderText) return [];
-  return [{ retailer_id: 'manual', name: orderText, qty: 1, unit_price: 0 }];
+
+  const meta = orderOrMeta.schedule_meta || {};
+  const knownTotal = Number(
+    meta.total
+    ?? meta.totals?.total
+    ?? meta.totals?.grand_total
+    ?? meta.payable_total
+    ?? orderOrMeta.total
+    ?? 0,
+  );
+  return [{
+    retailer_id: 'manual',
+    name: orderText,
+    qty: 1,
+    unit_price: knownTotal > 0 ? knownTotal : 0,
+  }];
 }
 
 function resolvePortalToken(tokens, booking) {

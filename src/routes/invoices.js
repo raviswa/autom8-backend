@@ -47,7 +47,15 @@ function calculateGST(subtotal, ratePercent = 5) {
 // ── buildInvoicePayload ────────────────────────────────────────────────────────
 
 function buildInvoicePayload(order, restaurant, gstRate = 5, invoiceNumber = null) {
-  const subtotal       = parseFloat(order.subtotal ?? 0);
+  const lineSubtotal = (order.order_items ?? []).reduce((sum, oi) => {
+    const qty = Number(oi.quantity ?? 1) || 1;
+    const price = Number(oi.unit_price ?? 0) || 0;
+    return sum + qty * price;
+  }, 0);
+  let subtotal = parseFloat(order.subtotal ?? 0);
+  if (!(subtotal > 0)) subtotal = parseFloat(order.total_amount ?? 0);
+  if (!(subtotal > 0)) subtotal = lineSubtotal;
+  subtotal = parseFloat(Number(subtotal || 0).toFixed(2));
   const deliveryCharge = parseFloat(order.delivery_charge ?? 0);
   const { cgst, sgst, grandTotal, roundOff } = calculateGST(subtotal, gstRate);
   const finalTotal = parseFloat((grandTotal + deliveryCharge).toFixed(2));
@@ -408,4 +416,5 @@ module.exports = router;
 module.exports.buildInvoicePayload     = buildInvoicePayload;
 module.exports.calculateGST            = calculateGST;
 module.exports.pushInvoiceToAccounting = pushInvoiceToAccounting;
+module.exports.ensureInvoiceForOrder   = ensureInvoiceForOrder;
 module.exports.GST_RATES               = GST_RATES;

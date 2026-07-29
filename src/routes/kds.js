@@ -454,10 +454,39 @@ router.post('/notify', async (req, res) => {
       if (totalsErr) {
         console.warn(`[kds-notify] total_amount recompute failed for ${orderRow.order_number}:`, totalsErr.message);
       } else {
-        const orderSubtotal = (allItemRows ?? []).reduce(
+        let orderSubtotal = (allItemRows ?? []).reduce(
           (sum, r) => sum + (Number(r.quantity) || 0) * (Number(r.unit_price) || 0),
           0
         );
+
+        // When line prices are missing (manual / zero cart), prefer paid booking total
+        // so invoices generated later carry a real grand_total.
+        if (!(orderSubtotal > 0) && booking_id) {
+          try {
+            const { data: bookingRow } = await supabaseAdmin
+              .from('bookings')
+              .select('schedule_meta, meta, payment_status')
+              .eq('id', booking_id)
+              .maybeSingle();
+            const meta = bookingRow?.schedule_meta || {};
+            const bmeta = bookingRow?.meta || {};
+            const known = Number(
+              meta.total
+              ?? meta.totals?.total
+              ?? meta.totals?.grand_total
+              ?? meta.payable_total
+              ?? bmeta.total
+              ?? bmeta.grand_total
+              ?? bmeta.amount_paid
+              ?? bmeta.razorpay_amount
+              ?? 0,
+            );
+            if (known > 0) orderSubtotal = known;
+          } catch (bookingTotalErr) {
+            console.warn(`[kds-notify] booking total lookup failed:`, bookingTotalErr.message);
+          }
+        }
+
         const { error: updateTotalErr } = await supabaseAdmin
           .from('orders')
           .update({ subtotal: orderSubtotal, total_amount: orderSubtotal })
@@ -465,6 +494,30 @@ router.post('/notify', async (req, res) => {
           .eq('restaurant_id', restaurant_id);
         if (updateTotalErr) {
           console.warn(`[kds-notify] total_amount write failed for ${orderRow.order_number}:`, updateTotalErr.message);
+        } else if (orderSubtotal > 0) {
+          // Ensure an invoice exists so owner dashboard / Zoho SoT sees this collection.
+          try {
+            const { ensureInvoiceForOrder } = require('./invoices');
+            const { data: tenantRow } = await supabaseAdmin
+              .from('tenants')
+              .select('id, name, display_name, legal_name, gstin, fssai_license, sac_code, brand_id, address_line1, address_line2, city, state, postal_code')
+              .eq('id', restaurant_id)
+              .maybeSingle();
+            const { data: freshOrder } = await supabaseAdmin
+              .from('orders')
+              .select('*, order_items(quantity, unit_price, menu_item:menu_item_id(name, category, pack_size_label, made_on_date))')
+              .eq('id', orderRow.id)
+              .single();
+            if (freshOrder) {
+              await ensureInvoiceForOrder(restaurant_id, {
+                ...freshOrder,
+                subtotal: orderSubtotal,
+                total_amount: orderSubtotal,
+              }, tenantRow || {});
+            }
+          } catch (invErr) {
+            console.warn(`[kds-notify] invoice ensure failed (non-fatal):`, invErr.message);
+          }
         }
       }
     } catch (totalsEx) {

@@ -9,7 +9,8 @@
 const express = require('express');
 const router  = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
-const { computeDashboardInsights, fetchOrderRevenueById, nearestTokenForOrder } = require('../helpers/dashboardAnalytics');
+const { computeDashboardInsights } = require('../helpers/dashboardAnalytics');
+const { fetchInvoicedOrders } = require('../helpers/invoicedRevenue');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { getKdsSecret } = require('../config/internalSecret');
 const { autoLinkDemoWhatsAppIfNeeded } = require('../helpers/linkExistingWaba');
@@ -131,122 +132,51 @@ router.get('/waba', authenticateToken, getRestaurantId, requireOutlet, async (re
 });
 
 // ── GET /api/dashboard/wa-orders ─────────────────────────────────────────────
-// Source: walk_in_tokens (merged DB — no bookings/customers table)
+// Source of truth: invoices only (receipt generated). Stale / unpaid tokens excluded.
 router.get('/wa-orders', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
   try {
     const { start, end } = req.query;
     if (!start || !end) return res.status(400).json({ error: 'start and end required' });
 
-    const { data, error } = await supabaseAdmin
-      .from('walk_in_tokens')
-      .select('id, arrived_at, status, type, pax, name, phone, table_number')
-      .eq('restaurant_id', req.restaurant_id)
-      .gte('arrived_at', start)
-      .lte('arrived_at', end)
-      .order('arrived_at', { ascending: false })
-      .limit(500);
+    const invoiced = await fetchInvoicedOrders(supabaseAdmin, req.restaurant_id, start, end);
+    const orders = (invoiced.rows || []).map((r) => ({
+      id: r.id,
+      invoice_id: r.invoice_id,
+      invoice_number: r.invoice_number,
+      order_id: r.order_id,
+      created_at: r.created_at,
+      service_type: r.service_type,
+      status: r.status,
+      party_size: r.party_size,
+      token_number: r.token_number,
+      total_amount: r.total_amount,
+      amount_match_mode: 'invoice',
+      customers: r.customers,
+    }));
 
-    if (error) {
-      console.error('[dashboard/wa-orders]', error.message);
-      return res.status(500).json({ error: error.message });
-    }
-
-    const tokens = data ?? [];
-
-    let orderRows = [];
-    const primaryOrders = await supabaseAdmin
-      .from('orders')
-      .select('id, created_at, status, total_amount, customer_phone, token_id')
-      .eq('restaurant_id', req.restaurant_id)
-      .gte('created_at', start)
-      .lte('created_at', end)
-      .neq('status', 'cancelled');
-
-    if (!primaryOrders.error) {
-      orderRows = primaryOrders.data ?? [];
-    } else {
-      const fallbackOrders = await supabaseAdmin
-        .from('orders')
-        .select('id, created_at, status, total_amount, customer_phone')
+    // Ops-only context: how many walk-in tokens in range never produced an invoice.
+    let incompleteTokens = 0;
+    try {
+      const { count } = await supabaseAdmin
+        .from('walk_in_tokens')
+        .select('id', { count: 'exact', head: true })
         .eq('restaurant_id', req.restaurant_id)
-        .gte('created_at', start)
-        .lte('created_at', end)
-        .neq('status', 'cancelled');
+        .gte('arrived_at', start)
+        .lte('arrived_at', end);
+      incompleteTokens = Math.max(0, (count || 0) - orders.length);
+    } catch (_) { /* non-fatal */ }
 
-      if (fallbackOrders.error) {
-        console.error('[dashboard/wa-orders] orders query failed:', fallbackOrders.error.message);
-        return res.status(500).json({ error: fallbackOrders.error.message });
-      }
-
-      orderRows = (fallbackOrders.data ?? []).map(r => ({ ...r, token_id: null }));
-    }
-
-    // Backfill sparse/zero totals from order_items (incl. menu price fallback).
-    const zeroAmountIds = orderRows.filter(r => !(Number(r.total_amount) > 0)).map(r => r.id).filter(Boolean);
-    if (zeroAmountIds.length) {
-      const { orderRevenueById } = await fetchOrderRevenueById(
-        supabaseAdmin,
-        zeroAmountIds,
-        { restaurantId: req.restaurant_id, start, end },
-      );
-      orderRows = orderRows.map(r => {
-        if (Number(r.total_amount) > 0) return r;
-        const fromItems = orderRevenueById[r.id];
-        return fromItems > 0 ? { ...r, total_amount: fromItems } : r;
-      });
-    }
-
-    // Prefer exact token_id links. Phone fallback assigns each unmatched order to
-    // at most ONE nearest token for that phone — never broadcast a period total
-    // onto every visit for the same guest (that produced duplicate ₹ amounts).
-    const amountByToken = {};
-    const unmatchedOrders = [];
-
-    for (const row of orderRows) {
-      const amount = Number(row.total_amount) || 0;
-      if (amount <= 0) continue;
-
-      if (row.token_id) {
-        amountByToken[row.token_id] = (amountByToken[row.token_id] || 0) + amount;
-      } else {
-        unmatchedOrders.push(row);
-      }
-    }
-
-    const phoneAssignedAmount = {};
-    for (const row of unmatchedOrders) {
-      const amount = Number(row.total_amount) || 0;
-      if (amount <= 0) continue;
-      const phoneKey = normPhone(row.customer_phone);
-      const best = nearestTokenForOrder(row, tokens, { phoneKey: phoneKey || null });
-      if (!best) continue;
-      phoneAssignedAmount[best.id] = (phoneAssignedAmount[best.id] || 0) + amount;
-    }
-
-    const orders = tokens.map(t => {
-      const tokenAmount = amountByToken[t.id];
-      const phoneAmount = phoneAssignedAmount[t.id];
-      const resolvedAmount = tokenAmount != null
-        ? tokenAmount
-        : (phoneAmount != null ? phoneAmount : 0);
-
-      return {
-        id:           t.id,
-        created_at:   t.arrived_at,
-        service_type: t.type,
-        status:       t.status,
-        party_size:   t.pax,
-        token_number: t.id,
-        total_amount: Math.round(resolvedAmount * 100) / 100,
-        amount_match_mode: tokenAmount != null
-          ? 'token_id_exact'
-          : (phoneAmount != null ? 'phone_nearest_token' : 'none'),
-        customers:    { name: t.name, phone: t.phone },
-      };
+    console.log(`[dashboard/wa-orders] ${orders.length} invoiced orders`);
+    res.json({
+      success: true,
+      orders,
+      meta: {
+        source: 'invoices',
+        invoicedCount: orders.length,
+        totalRevenue: invoiced.totalRevenue,
+        incompleteTokens,
+      },
     });
-
-    console.log(`[dashboard/wa-orders] ${orders.length} tokens`);
-    res.json({ success: true, orders });
   } catch (err) {
     console.error('[dashboard/wa-orders]', err.message);
     res.status(500).json({ error: err.message });
