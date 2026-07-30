@@ -22,6 +22,7 @@ const {
   getRestaurantId,
   canManageRestaurantSettings,
 } = require('../middleware/auth');
+const { requireStepUp } = require('../helpers/stepUpAuth');
 
 function requireSettingsAccess(req, res, next) {
   if (!canManageRestaurantSettings(req.user_role))
@@ -62,7 +63,7 @@ router.get('/templates', authenticateToken, getRestaurantId, requireSettingsAcce
   }
 });
 
-router.post('/complete', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
+router.post('/complete', authenticateToken, getRestaurantId, requireSettingsAccess, requireStepUp('whatsapp_bind'), async (req, res) => {
   try {
     const {
       code,
@@ -103,7 +104,7 @@ router.post('/complete', authenticateToken, getRestaurantId, requireSettingsAcce
   }
 });
 
-router.post('/register-pin', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
+router.post('/register-pin', authenticateToken, getRestaurantId, requireSettingsAccess, requireStepUp('whatsapp_bind'), async (req, res) => {
   try {
     const pin = req.body?.pin || req.body?.existing_pin;
     const result = await registerPhoneWithExistingPin(req.restaurant_id, pin, req.user?.sub || null);

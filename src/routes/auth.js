@@ -13,6 +13,8 @@ const router   = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const { requestPasswordReset } = require('../helpers/passwordReset');
 const { requestLoginOtp, verifyLoginOtp } = require('../helpers/loginOtp');
+const { requestStepUpOtp, verifyStepUpOtp } = require('../helpers/stepUpAuth');
+const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { recordActivationEvent } = require('../helpers/tenantActivation');
 
 const BRAND_ROLES = ['brand_owner', 'brand_manager'];
@@ -240,6 +242,48 @@ router.post('/otp/verify', async (req, res) => {
   } catch (err) {
     const status = err.status || 500;
     console.error('[auth/otp/verify]', err.message);
+    res.status(status).json({
+      error: err.message || 'Could not verify code. Please try again.',
+    });
+  }
+});
+
+// ── POST /api/auth/step-up/request ───────────────────────────────────────────
+// Authenticated WhatsApp OTP for sensitive actions (not password-reset).
+router.post('/step-up/request', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { purpose, phone } = req.body || {};
+    const result = await requestStepUpOtp({
+      userId: req.user.sub,
+      tenantId: req.restaurant_id,
+      purpose,
+      destPhoneOverride: phone || null,
+    });
+    res.json(result);
+  } catch (err) {
+    const status = err.status || 500;
+    console.error('[auth/step-up/request]', err.message);
+    res.status(status).json({
+      error: err.message || 'Could not send verification code. Please try again later.',
+    });
+  }
+});
+
+// ── POST /api/auth/step-up/verify ────────────────────────────────────────────
+router.post('/step-up/verify', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { purpose, code, phone } = req.body || {};
+    const result = await verifyStepUpOtp({
+      userId: req.user.sub,
+      tenantId: req.restaurant_id,
+      purpose,
+      code,
+      destPhoneOverride: phone || null,
+    });
+    res.json(result);
+  } catch (err) {
+    const status = err.status || 500;
+    console.error('[auth/step-up/verify]', err.message);
     res.status(status).json({
       error: err.message || 'Could not verify code. Please try again.',
     });

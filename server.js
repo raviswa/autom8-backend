@@ -23,6 +23,8 @@ const { startAllSchedulers } = require('./src/schedulers/index');
 const { attachWebSocketServer } = require('./src/websocket');
 const {
   handleInternalMenuItems,
+  handleInternalDeductStock,
+  handleInternalValidateCart,
   menuUploadMiddleware,
   menuItemAvailabilityMiddleware,
   menuItemRestockMiddleware,
@@ -30,6 +32,7 @@ const {
   menuItemLaunchMiddleware,
   menuItemSpecialTodayMiddleware,
   menuItemDiscountMiddleware,
+  menuItemStockAlertsMiddleware,
 } = require('./src/routes/catalog');
 const { logKdsSecretStatus } = require('./src/config/internalSecret');
 const { verifyScheduledDeliveryTokenType, verifyMigrationColumns, verifyWhatsAppCredentials } = require('./src/helpers/schemaChecks');
@@ -95,7 +98,10 @@ app.post('/api/menu-items/:id/restock', ...menuItemRestockMiddleware);
 app.post('/api/menu-items/:id/launch', ...menuItemLaunchMiddleware);
 app.put('/api/menu-items/:id/special-today', ...menuItemSpecialTodayMiddleware);
 app.put('/api/menu-items/:id/discount', ...menuItemDiscountMiddleware);
+app.get('/api/menu-items/stock-alerts', ...menuItemStockAlertsMiddleware);
 app.get('/api/internal/menu-items', handleInternalMenuItems);
+app.post('/api/internal/deduct-stock', handleInternalDeductStock);
+app.post('/api/internal/validate-cart', handleInternalValidateCart);
 app.use('/api/tokens',      require('./src/routes/tokens'));
 app.use('/api/feedback',    require('./src/routes/feedback'));
 app.use('/api/referrals',   require('./src/routes/referrals'));
@@ -103,6 +109,7 @@ app.use('/api/delivery',    require('./src/routes/delivery'));
 app.use('/api/enterprise',  require('./src/routes/enterprise'));
 app.use('/api/invoices',    require('./src/routes/invoices'));
 app.use('/api/subscription',require('./src/routes/subscription'));
+app.use('/api/account',     require('./src/routes/account'));
 app.use('/api/promotions',  require('./src/routes/promotions'));
 app.use('/api/portal-access', require('./src/routes/portalAccess'));
 app.use('/api/audit-log',     require('./src/routes/auditLog'));

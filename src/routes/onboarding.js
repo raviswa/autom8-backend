@@ -42,6 +42,7 @@ const {
   getLatestWhatsAppIntegration,
 } = require('../helpers/tenantIntegrations');
 const { recordActivationEvent } = require('../helpers/tenantActivation');
+const { requireStepUp } = require('../helpers/stepUpAuth');
 const DEFAULT_FEATURES = DEFAULT_SERVICES;
 
 const { parseRegistrationLobType, REGISTER_LOB_TYPES } = require('../config/catalogSchemas');
@@ -649,7 +650,7 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
  * Attach an already-live Autom8 WABA onto the current restaurant (demo recovery).
  * Copies tenant_integrations credentials from the source tenant that owns the digits.
  */
-router.post('/link-existing-waba', authenticateToken, getRestaurantId, async (req, res) => {
+router.post('/link-existing-waba', authenticateToken, getRestaurantId, requireStepUp('whatsapp_bind'), async (req, res) => {
   try {
     const restaurantId = req.restaurant_id;
     if (!restaurantId) {

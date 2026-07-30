@@ -47,6 +47,7 @@ const {
   normalizeInceptionDate,
   normalizeSocialLinks,
 } = require('../../helpers/aboutUs');
+const { requireStepUpInHandler, normalizePhoneKey } = require('../../helpers/stepUpAuth');
 
 router.post('/restaurants/resolve-pickup', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
   try {
@@ -279,6 +280,35 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
 
     if (!isOwnerLike) {
       for (const key of OWNER_ONLY_FIELDS) delete updates[key];
+    }
+
+    // Step-up OTP when manager phone or WA binding fields change
+    const needsWaBindStepUp = ['whatsapp_number', 'waba_id'].some((k) => updates[k] !== undefined);
+    const needsManagerPhoneStepUp = updates.manager_phone !== undefined;
+    if (needsWaBindStepUp || needsManagerPhoneStepUp) {
+      const { data: current } = await supabaseAdmin
+        .from('tenants')
+        .select('manager_phone, whatsapp_number, waba_id')
+        .eq('id', req.restaurant_id)
+        .maybeSingle();
+
+      const managerChanged = needsManagerPhoneStepUp
+        && normalizePhoneKey(updates.manager_phone) !== normalizePhoneKey(current?.manager_phone);
+      const waChanged = needsWaBindStepUp && (
+        (updates.whatsapp_number !== undefined
+          && normalizePhoneKey(updates.whatsapp_number) !== normalizePhoneKey(current?.whatsapp_number))
+        || (updates.waba_id !== undefined
+          && String(updates.waba_id || '') !== String(current?.waba_id || ''))
+      );
+
+      try {
+        if (waChanged) await requireStepUpInHandler(req, 'whatsapp_bind');
+        else if (managerChanged) await requireStepUpInHandler(req, 'change_manager_phone');
+      } catch (stepErr) {
+        return res.status(stepErr.status || 403).json({
+          error: stepErr.message || 'WhatsApp verification required for this change.',
+        });
+      }
     }
 
     // ── Validate service toggles against paid plan ───────────────────────────
@@ -523,6 +553,13 @@ router.get('/restaurants/integration', authenticateToken, getRestaurantId, async
 
 router.put('/restaurants/integration', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
   try {
+    try {
+      await requireStepUpInHandler(req, 'whatsapp_bind');
+    } catch (stepErr) {
+      return res.status(stepErr.status || 403).json({
+        error: stepErr.message || 'WhatsApp verification required before updating integration credentials.',
+      });
+    }
 
     const { provider = 'meta', channel = 'whatsapp', phone_number_id, access_token, webhook_secret, webhook_verify_token } = req.body;
     const updates = { updated_at: new Date().toISOString() };

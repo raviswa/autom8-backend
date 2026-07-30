@@ -27,6 +27,11 @@ const {
 const { writeAuditLog } = require('../helpers/auditLog');
 const { requestPasswordReset } = require('../helpers/passwordReset');
 const { invalidateRestaurantConfigCache } = require('../helpers/restaurantConfig');
+const {
+  requireStepUpInHandler,
+  consumeDualOwnerPhoneTokens,
+  normalizePhoneKey,
+} = require('../helpers/stepUpAuth');
 
 // Roles a manager is allowed to manage (cannot touch own level or above)
 const RESTAURANT_MANAGER_ROLES = ['kitchen_staff', 'captain', 'waiter', 'marketing'];
@@ -265,7 +270,7 @@ router.put('/:id', authenticateToken, getRestaurantId, async (req, res) => {
     // Fetch target employee
     const { data: target } = await supabaseAdmin
       .from('employees')
-      .select('id, role, is_active, whatsapp_number')
+      .select('id, role, is_active, whatsapp_number, phone, email')
       .eq('id', req.params.id)
       .eq('restaurant_id', req.restaurant_id)
       .single();
@@ -276,12 +281,44 @@ router.put('/:id', authenticateToken, getRestaurantId, async (req, res) => {
     if (isManager && !MANAGER_CAN_MANAGE.includes(target.role))
       return res.status(403).json({ error: 'You cannot edit this employee' });
 
-    const { full_name, phone, whatsapp_number, role } = req.body;
+    const { full_name, phone, whatsapp_number, role, email } = req.body;
     const effectiveRole = role || target.role;
     const updates = { updated_at: new Date().toISOString() };
 
     if (full_name)       updates.full_name       = full_name.trim();
     if (phone !== undefined) updates.phone        = phone || null;
+
+    if (email !== undefined) {
+      const nextEmail = String(email || '').trim().toLowerCase();
+      if (!nextEmail) return res.status(400).json({ error: 'Email cannot be empty' });
+      if (nextEmail !== String(target.email || '').toLowerCase()) {
+        if (target.role !== 'owner') {
+          return res.status(400).json({ error: 'Only the outlet owner login email can be changed here.' });
+        }
+        try {
+          await requireStepUpInHandler(req, 'change_owner_email');
+        } catch (stepErr) {
+          return res.status(stepErr.status || 403).json({
+            error: stepErr.message || 'WhatsApp verification required to change owner email.',
+          });
+        }
+        updates.email = nextEmail;
+      }
+    }
+
+    if (phone !== undefined) {
+      const phoneChanged = normalizePhoneKey(phone) !== normalizePhoneKey(target.phone);
+      if (phoneChanged && target.role === 'owner') {
+        try {
+          await consumeDualOwnerPhoneTokens(req, phone);
+        } catch (stepErr) {
+          return res.status(stepErr.status || 403).json({
+            error: stepErr.message
+              || 'Verify WhatsApp OTP on your current phone, then on the new number, before changing owner phone.',
+          });
+        }
+      }
+    }
 
     if (whatsapp_number !== undefined || role) {
       const rawWa = whatsapp_number !== undefined
@@ -305,6 +342,17 @@ router.put('/:id', authenticateToken, getRestaurantId, async (req, res) => {
         return res.status(400).json({ error: `Role ${role} is not available for this business type` });
       if (isManager && !rolesForLob(lobType, false).includes(role) && role !== target.role)
         return res.status(403).json({ error: `Managers cannot assign ${role} role` });
+
+      const elevating = role !== target.role && ['manager', 'owner'].includes(role);
+      if (elevating) {
+        try {
+          await requireStepUpInHandler(req, 'staff_elevate');
+        } catch (stepErr) {
+          return res.status(stepErr.status || 403).json({
+            error: stepErr.message || 'WhatsApp verification required to elevate staff role.',
+          });
+        }
+      }
       updates.role = role;
     }
 
@@ -317,6 +365,15 @@ router.put('/:id', authenticateToken, getRestaurantId, async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    // Keep Supabase Auth email in sync when owner email changes
+    if (updates.email) {
+      try {
+        await supabaseAdmin.auth.admin.updateUserById(req.params.id, { email: updates.email });
+      } catch (authErr) {
+        console.warn('[staff/update] auth email sync:', authErr.message);
+      }
+    }
 
     await writeAuditLog({
       user_id: req.user.sub, restaurant_id: req.restaurant_id,
@@ -356,6 +413,14 @@ router.post('/:id/send-password-reset', authenticateToken, getRestaurantId, asyn
 
     if (isManager && !MANAGER_CAN_MANAGE.includes(target.role)) {
       return res.status(403).json({ error: 'You cannot reset this employee\'s password' });
+    }
+
+    try {
+      await requireStepUpInHandler(req, 'staff_password_reset');
+    } catch (stepErr) {
+      return res.status(stepErr.status || 403).json({
+        error: stepErr.message || 'WhatsApp verification required before sending a password reset.',
+      });
     }
 
     const result = await requestPasswordReset({
@@ -425,6 +490,14 @@ router.put('/:id/terminate', authenticateToken, getRestaurantId, async (req, res
     // Prevent self-termination
     if (req.params.id === req.user.sub)
       return res.status(400).json({ error: 'You cannot terminate your own account' });
+
+    try {
+      await requireStepUpInHandler(req, 'staff_terminate');
+    } catch (stepErr) {
+      return res.status(stepErr.status || 403).json({
+        error: stepErr.message || 'WhatsApp verification required before terminating staff.',
+      });
+    }
 
     const { data: restaurant } = await supabaseAdmin
       .from('tenants')
