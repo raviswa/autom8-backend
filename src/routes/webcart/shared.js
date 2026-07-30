@@ -20,6 +20,7 @@ const {
   joinStockWaitlist,
 } = require('../../helpers/inventory');
 const { deriveMenuDiscount } = require('../../helpers/menuDiscount');
+const { hasShiprocketCreds } = require('../../helpers/fulfillmentChannels');
 
 const ACTIVE_TOKEN_STATUSES = new Set(['waiting', 'pending_approval', 'seated', 'takeaway', 'delivery']);
 const DEFAULT_THEME = {
@@ -310,12 +311,37 @@ async function calculateDelivery(restaurant, customerPincode, cartTotal, options
     weightKg = 0.5;
   }
   const courierName = String(restaurant?.courier_name || '').trim() || null;
-  const shipCreds = !!(restaurant?.shiprocket_api_key || restaurant?.shiprocket_email);
+  const shipCreds = hasShiprocketCreds(restaurant);
 
-  const finish = (payload) => ({
-    ...payload,
-    charge: Math.round((Number(payload.charge) || 0) * 100) / 100,
-    weight_kg: weightKg,
+  const finish = (payload) => {
+    const unavailable = payload.unavailable === true
+      || payload.source === 'shiprocket_unavailable'
+      || payload.source === 'delivery_unavailable'
+      || payload.charge == null;
+    return {
+      ...payload,
+      // Keep null for unavailable quotes so callers do not treat missing rates as ₹0.
+      charge: unavailable
+        ? null
+        : Math.round((Number(payload.charge) || 0) * 100) / 100,
+      weight_kg: weightKg,
+      unavailable: unavailable || undefined,
+    };
+  };
+
+  const unavailableQuote = (error, extras = {}) => finish({
+    zone,
+    courier_zone: courierZone,
+    courier_name: null,
+    charge: null,
+    free_delivery_applied: false,
+    cod_enabled: false,
+    source: 'delivery_unavailable',
+    unavailable: true,
+    error,
+    shipping_provider: provider,
+    channel_options: [],
+    ...extras,
   });
 
   if (freeAbove > 0 && subtotal >= freeAbove) {
@@ -348,6 +374,14 @@ async function calculateDelivery(restaurant, customerPincode, cartTotal, options
         ? Number(restaurant?.intra_city_charge ?? restaurant?.delivery_charge_default ?? 0) || 0
         : Number(restaurant?.outstation_charge || 0) || 0;
       source = intraCity ? 'intra_city_flat' : 'outstation_flat';
+    }
+    if (!(Number(charge) > 0)) {
+      return unavailableQuote(
+        intraCity
+          ? 'Local delivery charge is not configured. Set Intra-city charge (or a rate card) in Settings, or set Free delivery above.'
+          : 'Courier shipping is not configured. Set a rate card or Outstation charge in Settings, or set Free delivery above.',
+        { delivery_channel: 'own_team', courier_name: courierName },
+      );
     }
     return finish({
       zone,
@@ -389,74 +423,128 @@ async function calculateDelivery(restaurant, customerPincode, cartTotal, options
   // Same-city: dual options — own team (flat) + Shiprocket (manager gate)
   if (intraCity) {
     const ownCharge = Number(restaurant?.intra_city_charge ?? restaurant?.delivery_charge_default ?? 0) || 0;
-    const channelOptions = [{
-      delivery_channel: 'own_team',
-      label: 'Store delivery team',
-      charge: ownCharge,
-      source: 'intra_city_flat',
-      requires_manager_approval: false,
-    }];
-
-    let shipCharge = null;
-    if (shipCreds) {
-      shipCharge = await quoteShiprocket();
-      if (shipCharge == null) {
-        shipCharge = Number(restaurant?.outstation_charge || ownCharge) || ownCharge;
-      }
+    const channelOptions = [];
+    if (ownCharge > 0) {
       channelOptions.push({
-        delivery_channel: 'shiprocket',
-        label: 'Courier (Shiprocket)',
-        charge: shipCharge,
-        source: 'shiprocket',
-        requires_manager_approval: true,
-        note: 'Store may confirm courier for same-city orders',
+        delivery_channel: 'own_team',
+        label: 'Store delivery team',
+        charge: ownCharge,
+        source: 'intra_city_flat',
+        requires_manager_approval: false,
       });
     }
 
-    const chosen = preferChannel === 'shiprocket' && shipCreds
-      ? channelOptions.find((o) => o.delivery_channel === 'shiprocket')
-      : channelOptions.find((o) => o.delivery_channel === 'own_team');
+    if (shipCreds) {
+      let shipCharge = await quoteShiprocket();
+      if (shipCharge == null) {
+        const flatFallback = Number(restaurant?.outstation_charge || 0) || 0;
+        shipCharge = flatFallback > 0 ? flatFallback : null;
+      }
+      if (shipCharge != null && Number(shipCharge) > 0) {
+        channelOptions.push({
+          delivery_channel: 'shiprocket',
+          label: 'Courier (Shiprocket)',
+          charge: shipCharge,
+          source: 'shiprocket',
+          requires_manager_approval: true,
+          note: 'Store may confirm courier for same-city orders',
+        });
+      }
+    }
+
+    const chosen = preferChannel === 'shiprocket'
+      ? (channelOptions.find((o) => o.delivery_channel === 'shiprocket')
+        || channelOptions.find((o) => o.delivery_channel === 'own_team'))
+      : (channelOptions.find((o) => o.delivery_channel === 'own_team')
+        || channelOptions.find((o) => o.delivery_channel === 'shiprocket'));
+
+    if (!chosen || !(Number(chosen.charge) > 0)) {
+      return unavailableQuote(
+        'Local delivery charge is not configured. Set Intra-city charge in Settings, configure Shiprocket, or set Free delivery above.',
+        { delivery_channel: 'own_team' },
+      );
+    }
 
     return finish({
       zone,
       courier_zone: courierZone,
-      courier_name: chosen?.delivery_channel === 'shiprocket' ? 'Shiprocket' : null,
-      charge: chosen?.charge ?? ownCharge,
+      courier_name: chosen.delivery_channel === 'shiprocket' ? 'Shiprocket' : null,
+      charge: chosen.charge,
       free_delivery_applied: false,
       cod_enabled: !!restaurant?.cod_enabled_city,
-      source: chosen?.source || 'intra_city_flat',
+      source: chosen.source || 'intra_city_flat',
       shipping_provider: provider,
-      delivery_channel: chosen?.delivery_channel || 'own_team',
+      delivery_channel: chosen.delivery_channel || 'own_team',
       channel_options: channelOptions,
     });
   }
 
-  // Outstation: Shiprocket only
-  let charge = Number(restaurant?.outstation_charge || 0) || 0;
-  let source = 'outstation_flat';
+  // Outstation: Shiprocket only (flat outstation_charge is fallback when configured)
+  const flatOutstation = Number(restaurant?.outstation_charge || 0) || 0;
   const shiprocketRate = await quoteShiprocket();
   if (shiprocketRate != null) {
-    charge = shiprocketRate;
-    source = 'shiprocket';
+    return finish({
+      zone,
+      courier_zone: courierZone,
+      courier_name: 'Shiprocket',
+      charge: shiprocketRate,
+      free_delivery_applied: false,
+      cod_enabled: !!restaurant?.cod_enabled_outstation,
+      source: 'shiprocket',
+      shipping_provider: provider,
+      delivery_channel: 'shiprocket',
+      channel_options: [{
+        delivery_channel: 'shiprocket',
+        label: 'Courier (Shiprocket)',
+        charge: shiprocketRate,
+        source: 'shiprocket',
+        requires_manager_approval: false,
+      }],
+    });
+  }
+
+  if (flatOutstation > 0) {
+    return finish({
+      zone,
+      courier_zone: courierZone,
+      courier_name: null,
+      charge: flatOutstation,
+      free_delivery_applied: false,
+      cod_enabled: !!restaurant?.cod_enabled_outstation,
+      source: 'outstation_flat',
+      shipping_provider: provider,
+      delivery_channel: 'shiprocket',
+      channel_options: [{
+        delivery_channel: 'shiprocket',
+        label: 'Courier shipping',
+        charge: flatOutstation,
+        source: 'outstation_flat',
+        requires_manager_approval: false,
+      }],
+    });
+  }
+
+  // Do not return charge: 0 — that looks like free shipping in the cart.
+  let unavailableError = 'Could not get a courier rate for this pincode right now. Please try again or choose store pickup if offered.';
+  if (!tenantPincode) {
+    unavailableError = 'Store pickup pincode is not configured, so courier shipping cannot be calculated. Please choose store pickup if offered, or contact the store.';
+  } else if (!shipCreds) {
+    unavailableError = 'Courier shipping is not configured for this store. Please choose store pickup if offered, or contact the store.';
   }
 
   return finish({
     zone,
     courier_zone: courierZone,
-    courier_name: source === 'shiprocket' ? 'Shiprocket' : null,
-    charge,
+    courier_name: null,
+    charge: null,
     free_delivery_applied: false,
-    cod_enabled: !!restaurant?.cod_enabled_outstation,
-    source,
+    cod_enabled: false,
+    source: 'shiprocket_unavailable',
+    unavailable: true,
+    error: unavailableError,
     shipping_provider: provider,
     delivery_channel: 'shiprocket',
-    channel_options: [{
-      delivery_channel: 'shiprocket',
-      label: 'Courier (Shiprocket)',
-      charge,
-      source,
-      requires_manager_approval: false,
-    }],
+    channel_options: [],
   });
 }
 

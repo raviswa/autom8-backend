@@ -426,6 +426,18 @@ router.post('/api/webcart/submit', async (req, res) => {
         items: normalizedItems,
         delivery_channel: bodyDeliveryChannel,
       });
+      if (
+        deliveryQuote?.unavailable
+        || deliveryQuote?.source === 'shiprocket_unavailable'
+        || deliveryQuote?.source === 'delivery_unavailable'
+        || deliveryQuote?.charge == null
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error: deliveryQuote?.error
+            || 'Delivery is not available right now. Please choose store pickup if offered.',
+        });
+      }
       fulfillmentMeta = buildFulfillmentMeta({
         fulfillmentType: 'delivery',
         deliveryChannel: bodyDeliveryChannel || deliveryQuote.delivery_channel,
@@ -433,17 +445,12 @@ router.post('/api/webcart/submit', async (req, res) => {
         restaurant,
       });
       deliveryCharge = chargeForChannel(deliveryQuote, fulfillmentMeta.delivery_channel);
-      // Outstation without Shiprocket when provider expects it
-      if (
-        deliveryQuote.courier_zone !== 'local'
-        && fulfillmentMeta.delivery_channel === 'shiprocket'
-        && !deliveryQuote.channel_options?.length
-        && Number(deliveryQuote.charge) <= 0
-        && !restaurant.shiprocket_email
-      ) {
+      // Shared unavailable payload should already block ₹0; keep a final checkout safety net.
+      if (Number(deliveryCharge) <= 0 && !deliveryQuote.free_delivery_applied) {
         return res.status(400).json({
           ok: false,
-          error: 'Outstation delivery is not available right now. Please choose store pickup if offered.',
+          error: deliveryQuote?.error
+            || 'Delivery is not available right now. Please choose store pickup if offered.',
         });
       }
     } else if (!shippedLob && serviceType === 'delivery') {

@@ -1580,7 +1580,7 @@
           }),
         });
         const data = await res.json();
-        if (!res.ok || !data.ok) {
+        if (!res.ok || !data.ok || data.unavailable || data.charge == null) {
           state.deliveryQuote = null;
           if (hint) {
             hint.classList.add('err');

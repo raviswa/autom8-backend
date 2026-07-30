@@ -153,6 +153,19 @@ router.post('/api/webcart/delivery-quote', async (req, res) => {
       items: weighedItems,
       delivery_channel,
     });
+    if (
+      quote?.unavailable
+      || quote?.source === 'shiprocket_unavailable'
+      || quote?.source === 'delivery_unavailable'
+      || quote?.charge == null
+    ) {
+      return res.status(400).json({
+        ...quote,
+        ok: false,
+        error: quote?.error
+          || 'Delivery is unavailable for this pincode right now. Please try again or choose store pickup if offered.',
+      });
+    }
     return res.json({ ok: true, ...quote });
   } catch (err) {
     console.error('[webcart/delivery-quote]', err.message);
