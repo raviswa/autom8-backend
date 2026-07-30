@@ -371,11 +371,28 @@ async function handleMenuUpload(req, res) {
             patch.retailer_id = existing.retailer_id;
           }
           if (stockPolicy === 'leave') {
-            delete patch.current_stock;
-            delete patch.is_stocked;
-            delete patch.is_available;
-            delete patch.availability_status;
             delete patch.made_on_date;
+            if (packagedLob) {
+              // Packaged: Excel is for product metadata; batch qty stays via Record batch / stock_policy.
+              delete patch.current_stock;
+              delete patch.is_stocked;
+              delete patch.is_available;
+              delete patch.availability_status;
+            } else {
+              // Restaurant: is_available in Excel drives the on/off toggle (no is_stocked column).
+              // Clear zeroed batch qty so prepared dishes are unlimited when marked available.
+              if (row.is_stocked) {
+                patch.is_stocked = true;
+                patch.is_available = true;
+                patch.current_stock = null;
+                patch.availability_status = 'in_stock';
+              } else {
+                patch.is_stocked = false;
+                patch.is_available = false;
+                delete patch.current_stock;
+                patch.availability_status = 'sold_out';
+              }
+            }
           } else if (row.current_stock == null) {
             // Blank Excel stock cell = leave existing qty (schema: blank = unlimited / unchanged).
             // Never coerce null → 0 — that zeroed entire restaurant catalogs on "replace".
