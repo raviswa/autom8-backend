@@ -5,6 +5,7 @@
  */
 
 const PDFDocument = require('pdfkit');
+const { formatKitchenOrderNo } = require('./orderDisplay');
 
 function collectPdfBuffer(doc) {
   return new Promise((resolve, reject) => {
@@ -62,7 +63,8 @@ async function buildInvoicePdf(opts) {
   doc.moveDown(0.5);
   doc.fontSize(10).text(`Invoice #: ${meta.invoice_number || meta.order_number || meta.order_id || '—'}`);
   if (meta.order_number && meta.invoice_number && meta.invoice_number !== meta.order_number) {
-    doc.fontSize(9).fillColor('#666').text(`Order: ${meta.order_number}`);
+    const kitchenNo = formatKitchenOrderNo(meta.order_number, meta.token_number);
+    doc.fontSize(9).fillColor('#666').text(`Order: ${kitchenNo}`);
     doc.fillColor('#000').fontSize(10);
   }
   doc.text(`Date: ${(meta.invoice_date || new Date().toISOString()).slice(0, 10)}`);

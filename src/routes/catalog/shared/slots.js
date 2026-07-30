@@ -116,10 +116,28 @@ async function applySlotAvailability(restaurantId, slotDbValue) {
 
 async function applySlotForAllRestaurants() {
   const slot = getCurrentSlotIST();
-  const { data: restaurants } = await supabaseAdmin.from('tenants').select('id').eq('is_active', true);
-  for (const r of restaurants ?? []) {
-    if (!slot && MANUAL_KITCHEN_OPEN_OVERRIDES.has(r.id)) {
-      console.log(`[slot] Keeping manual-open override for restaurant ${r.id} while slot is CLOSED`);
+  // Prefer durable kitchen_force_open; fall back if column not migrated yet.
+  let restaurants;
+  {
+    const withFlag = await supabaseAdmin
+      .from('tenants')
+      .select('id, kitchen_force_open')
+      .eq('is_active', true);
+    if (withFlag.error && /kitchen_force_open|column/i.test(withFlag.error.message || '')) {
+      const bare = await supabaseAdmin.from('tenants').select('id').eq('is_active', true);
+      restaurants = (bare.data ?? []).map((r) => ({ ...r, kitchen_force_open: false }));
+    } else if (withFlag.error) {
+      console.error('[slot] tenant load failed:', withFlag.error.message);
+      return;
+    } else {
+      restaurants = withFlag.data ?? [];
+    }
+  }
+
+  for (const r of restaurants) {
+    if (r.kitchen_force_open || MANUAL_KITCHEN_OPEN_OVERRIDES.has(r.id)) {
+      MANUAL_KITCHEN_OPEN_OVERRIDES.add(r.id);
+      console.log(`[slot] Keeping force/manual open for restaurant ${r.id} (slot=${slot ?? 'CLOSED'})`);
       continue;
     }
     await applySlotAvailability(r.id, slot).catch(e => console.error(`[slot] Failed for ${r.id}:`, e.message));

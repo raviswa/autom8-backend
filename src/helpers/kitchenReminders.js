@@ -12,7 +12,8 @@ async function countAvailableMenuItems(restaurantId) {
     .select('id', { count: 'exact', head: true })
     .eq('restaurant_id', restaurantId)
     .eq('is_available', true)
-    .eq('is_stocked', true);
+    .eq('is_stocked', true)
+    .is('archived_at', null);
   if (error) throw error;
   return count ?? 0;
 }

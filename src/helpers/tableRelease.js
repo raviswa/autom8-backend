@@ -5,7 +5,9 @@
 
 const { queueFeedbackForTable } = require('./feedback');
 
-const ACTIVE_ORDER_STATUSES = ['pending', 'confirmed', 'in_progress'];
+// MUST stay in sync with autom8-frontend-main/src/helpers/orderStatuses.js
+// Include `ready` so Manager floor occupancy and 45-min auto-release agree.
+const ACTIVE_ORDER_STATUSES = ['pending', 'confirmed', 'in_progress', 'ready'];
 
 /**
  * All table UUIDs for a token: primary table_id + meta.table_ids + meta.combo lookup.

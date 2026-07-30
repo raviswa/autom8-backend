@@ -75,82 +75,98 @@ function startSlotScheduler() {
     return (Date.now() - atMs) >= (minutes * 60 * 1000);
   };
 
-  // Auto-release stale seated tokens using each restaurant's dining_duration_minutes
+  async function autoReleaseRestaurant(restaurant, { source = 'auto-release' } = {}) {
+    const minutes = normalizeDiningDurationMinutes(restaurant.dining_duration_minutes);
+    const cutoff = new Date(Date.now() - minutes * 60 * 1000).toISOString();
+
+    const { data: seatedTokens, error: seatedErr } = await supabaseAdmin
+      .from('walk_in_tokens')
+      .select('*')
+      .eq('status', 'seated')
+      .eq('restaurant_id', restaurant.id)
+      .or(`seated_at.lt.${cutoff},and(seated_at.is.null,arrived_at.lt.${cutoff})`);
+    if (seatedErr) {
+      console.error(`[${source}] Seated token fetch failed (${restaurant.id}):`, seatedErr.message);
+      return;
+    }
+
+    const staleTokens = (seatedTokens ?? []).filter((token) => isTokenStale(token, minutes));
+    if (staleTokens.length) {
+      const staleIds = staleTokens.map((token) => token.id);
+      const { data: completedTokens, error: completeErr } = await supabaseAdmin
+        .from('walk_in_tokens')
+        .update({ status: 'completed', completed_at: new Date().toISOString() })
+        .in('id', staleIds)
+        .eq('status', 'seated')
+        .select('*');
+
+      if (completeErr) {
+        console.error(`[${source}] Token completion failed (${restaurant.id}):`, completeErr.message);
+        return;
+      }
+
+      for (const token of completedTokens ?? []) {
+        const freed = await releaseTablesForToken(supabaseAdmin, token, restaurant.id, {
+          queueFeedback: true,
+          feedbackSource: source,
+        });
+        console.log(
+          `[${source}] Token ${token.id} freed ${freed.length} table(s) ` +
+          `(duration=${minutes}m)`,
+        );
+      }
+    }
+
+    const orphans = await releaseOrphanedOccupiedTables(supabaseAdmin, restaurant.id);
+    if (orphans.length) {
+      console.log(
+        `[${source}] Freed orphaned occupied table(s): ${orphans.join(', ')} ` +
+        `(restaurant ${restaurant.id})`,
+      );
+    }
+
+    const { data: staleOrders } = await supabaseAdmin
+      .from('orders')
+      .update({ status: 'completed' })
+      .eq('restaurant_id', restaurant.id)
+      .in('status', ACTIVE_ORDER_STATUSES)
+      .lt('created_at', cutoff)
+      .select('table_id, id, order_number');
+
+    let freedFromOrders = 0;
+    for (const order of staleOrders ?? []) {
+      if (!order.table_id) continue;
+      const { data: remaining } = await supabaseAdmin
+        .from('orders').select('id').eq('table_id', order.table_id)
+        .in('status', ACTIVE_ORDER_STATUSES);
+      if (!remaining || remaining.length === 0) {
+        await supabaseAdmin.from('tables').update({ status: 'available' }).eq('id', order.table_id);
+        freedFromOrders += 1;
+      }
+    }
+    if (freedFromOrders) {
+      console.log(
+        `[${source}] Completed ${(staleOrders ?? []).length} stale order(s), ` +
+        `freed ${freedFromOrders} table(s) (restaurant ${restaurant.id}, duration=${minutes}m)`,
+      );
+    }
+  }
+
+  async function runAutoReleaseAll({ source = 'auto-release' } = {}) {
+    const { data: restaurants } = await supabaseAdmin
+      .from('tenants')
+      .select('id, dining_duration_minutes')
+      .eq('is_active', true);
+
+    for (const restaurant of restaurants ?? []) {
+      await autoReleaseRestaurant(restaurant, { source });
+    }
+  }
+
+  // Auto-release stale seated tokens / orders using each restaurant's dining_duration_minutes
   setInterval(async () => {
     try {
-      const { data: restaurants } = await supabaseAdmin
-        .from('tenants')
-        .select('id, dining_duration_minutes')
-        .eq('is_active', true);
-
-      for (const restaurant of restaurants ?? []) {
-        const minutes = normalizeDiningDurationMinutes(restaurant.dining_duration_minutes);
-        const cutoff = new Date(Date.now() - minutes * 60 * 1000).toISOString();
-
-        const { data: seatedTokens, error: seatedErr } = await supabaseAdmin
-          .from('walk_in_tokens')
-          .select('*')
-          .eq('status', 'seated')
-          .eq('restaurant_id', restaurant.id)
-          .or(`seated_at.lt.${cutoff},and(seated_at.is.null,arrived_at.lt.${cutoff})`);
-        if (seatedErr) {
-          console.error(`[auto-release] Seated token fetch failed (${restaurant.id}):`, seatedErr.message);
-          continue;
-        }
-
-        const staleTokens = (seatedTokens ?? []).filter((token) => isTokenStale(token, minutes));
-        if (staleTokens.length) {
-          const staleIds = staleTokens.map((token) => token.id);
-          const { data: completedTokens, error: completeErr } = await supabaseAdmin
-            .from('walk_in_tokens')
-            .update({ status: 'completed', completed_at: new Date().toISOString() })
-            .in('id', staleIds)
-            .eq('status', 'seated')
-            .select('*');
-
-          if (completeErr) {
-            console.error(`[auto-release] Token completion failed (${restaurant.id}):`, completeErr.message);
-            continue;
-          }
-
-          for (const token of completedTokens ?? []) {
-            const freed = await releaseTablesForToken(supabaseAdmin, token, restaurant.id, {
-              queueFeedback: true,
-              feedbackSource: 'auto-release',
-            });
-            console.log(
-              `[auto-release] Token ${token.id} freed ${freed.length} table(s) ` +
-              `(duration=${minutes}m)`,
-            );
-          }
-        }
-
-        const orphans = await releaseOrphanedOccupiedTables(supabaseAdmin, restaurant.id);
-        if (orphans.length) {
-          console.log(
-            `[auto-release] Freed orphaned occupied table(s): ${orphans.join(', ')} ` +
-            `(restaurant ${restaurant.id})`,
-          );
-        }
-
-        const { data: staleOrders } = await supabaseAdmin
-          .from('orders')
-          .update({ status: 'completed' })
-          .eq('restaurant_id', restaurant.id)
-          .in('status', ACTIVE_ORDER_STATUSES)
-          .lt('created_at', cutoff)
-          .select('table_id, id, order_number');
-
-        for (const order of staleOrders ?? []) {
-          if (!order.table_id) continue;
-          const { data: remaining } = await supabaseAdmin
-            .from('orders').select('id').eq('table_id', order.table_id)
-            .in('status', ACTIVE_ORDER_STATUSES);
-          if (!remaining || remaining.length === 0) {
-            await supabaseAdmin.from('tables').update({ status: 'available' }).eq('id', order.table_id);
-          }
-        }
-      }
+      await runAutoReleaseAll({ source: 'auto-release' });
     } catch (err) {
       console.error('[auto-release] Error:', err.message);
     }
@@ -159,6 +175,7 @@ function startSlotScheduler() {
   // Slot rotation — runs every minute, applies on change
   let lastAppliedSlot = Symbol('init');
   let lastSpecialResetDate = null;
+  let lastFloorSweepDate = null;
   applySlotForAllRestaurants().catch(e => console.error('[slot] Initial apply failed:', e.message));
   setInterval(async () => {
     try {
@@ -186,12 +203,20 @@ function startSlotScheduler() {
         lastSpecialResetDate = todayKey;
         await resetDailySpecialDishes();
       }
+
+      // End-of-day floor sweep: once per IST calendar day after midnight.
+      // Same dining_duration release as the 5-min job (includes ready orders).
+      if (istHour === 0 && istMin < 5 && lastFloorSweepDate !== todayKey) {
+        lastFloorSweepDate = todayKey;
+        console.log(`[floor-sweep] Starting IST end-of-day occupied floor sweep (${todayKey})`);
+        await runAutoReleaseAll({ source: 'floor-sweep' });
+      }
     } catch (err) {
       console.error('[slot-rotation] Error:', err.message);
     }
   }, 60 * 1000); // Every minute
 
-  console.log('⏰ Slot scheduler started (auto-release every 5min, slot rotation every 1min)');
+  console.log('⏰ Slot scheduler started (auto-release every 5min, EOD floor sweep, slot rotation every 1min)');
 }
 
 // ── startSpecialNotesTimeoutMonitor ──────────────────────────────────────────

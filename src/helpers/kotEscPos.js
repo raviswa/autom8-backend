@@ -6,6 +6,7 @@
 'use strict';
 
 const net = require('net');
+const { formatKitchenOrderNo } = require('./orderDisplay');
 
 function escPosText(lines) {
   const chunks = [Buffer.from([0x1b, 0x40])]; // ESC @ init
@@ -52,7 +53,7 @@ function buildKotLines(order) {
   const lines = [
     '*** KITCHEN ORDER ***',
     order.restaurant_name || 'AUTOM8',
-    `Order: ${order.order_number || '-'}`,
+    `Order: ${formatKitchenOrderNo(order.order_number, order.token_number)}`,
     order.token_number ? `Token: ${order.token_number}` : '',
     order.table_number ? `Table: ${order.table_number}` : '',
     order.service_type ? `Type: ${order.service_type}` : '',

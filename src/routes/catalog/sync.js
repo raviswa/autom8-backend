@@ -110,21 +110,33 @@ router.get('/kitchen-status', authenticateToken, getRestaurantId, async (req, re
         .select('id', { count: 'exact', head: true })
         .eq('restaurant_id', req.restaurant_id)
         .eq('is_available', true)
-        .eq('is_stocked', true),
+        .eq('is_stocked', true)
+        .is('archived_at', null),
       supabaseAdmin.from('tenants')
-        .select('kitchen_busy, takeaway_ready_range, delivery_ready_range')
+        .select('kitchen_busy, takeaway_ready_range, delivery_ready_range, kitchen_force_open')
         .eq('id', req.restaurant_id)
         .maybeSingle(),
     ]);
+    let rest = restResult.data;
+    if (restResult.error && /kitchen_force_open|column/i.test(restResult.error.message || '')) {
+      const fallback = await supabaseAdmin.from('tenants')
+        .select('kitchen_busy, takeaway_ready_range, delivery_ready_range')
+        .eq('id', req.restaurant_id)
+        .maybeSingle();
+      if (fallback.error) throw fallback.error;
+      rest = { ...fallback.data, kitchen_force_open: MANUAL_KITCHEN_OPEN_OVERRIDES.has(req.restaurant_id) };
+    } else {
+      if (itemsResult.error) throw itemsResult.error;
+      if (restResult.error) throw restResult.error;
+    }
     if (itemsResult.error) throw itemsResult.error;
-    if (restResult.error) throw restResult.error;
-    const rest = restResult.data;
     const count = itemsResult.count;
 
     res.json({
       success: true,
       is_open: (count ?? 0) > 0,
       available_items: count ?? 0,
+      force_open: !!rest?.kitchen_force_open,
       kitchen_busy: !!rest?.kitchen_busy,
       takeaway_ready_range: rest?.takeaway_ready_range ?? null,
       delivery_ready_range: rest?.delivery_ready_range ?? null,
@@ -149,28 +161,77 @@ router.post('/kitchen-toggle', authenticateToken, getRestaurantId, async (req, r
     if (typeof open !== 'boolean')
       return res.status(400).json({ error: 'open (boolean) required' });
 
-    const { onKitchenOpened, countAvailableMenuItems } = require('../../helpers/kitchenReminders');
+    let onKitchenOpened = async () => {};
+    let countAvailableMenuItems = async (restaurantId) => {
+      const { count, error } = await supabaseAdmin.from('menu_items')
+        .select('id', { count: 'exact', head: true })
+        .eq('restaurant_id', restaurantId)
+        .eq('is_available', true)
+        .eq('is_stocked', true)
+        .is('archived_at', null);
+      if (error) throw error;
+      return count ?? 0;
+    };
+    try {
+      const reminders = require('../../helpers/kitchenReminders');
+      if (typeof reminders.onKitchenOpened === 'function') {
+        onKitchenOpened = reminders.onKitchenOpened;
+      }
+      if (typeof reminders.countAvailableMenuItems === 'function') {
+        countAvailableMenuItems = reminders.countAvailableMenuItems;
+      }
+    } catch (_) { /* optional helper */ }
+
     const wasOpen = (await countAvailableMenuItems(req.restaurant_id)) > 0;
+    const nowIso = new Date().toISOString();
 
     let result;
     if (open) {
-      const slot = getCurrentSlotIST();
-      if (slot) {
-        MANUAL_KITCHEN_OPEN_OVERRIDES.delete(req.restaurant_id);
-        result = await applySlotAvailability(req.restaurant_id, slot);
-      } else {
-        const { data, error } = await supabaseAdmin.from('menu_items')
-          .update({ is_available: true, updated_at: new Date().toISOString() })
-          .eq('restaurant_id', req.restaurant_id)
-          .eq('is_stocked', true)
-          .select('id');
-        if (error) throw error;
-        MANUAL_KITCHEN_OPEN_OVERRIDES.add(req.restaurant_id);
-        result = { slot: 'manual', available: data?.length ?? 0 };
+      // Force open: all stocked items live, durable override for scheduler.
+      const { error: forceErr } = await supabaseAdmin.from('tenants')
+        .update({ kitchen_force_open: true, updated_at: nowIso })
+        .eq('id', req.restaurant_id);
+      if (forceErr && !/kitchen_force_open|column/i.test(forceErr.message || '')) {
+        throw forceErr;
       }
+      MANUAL_KITCHEN_OPEN_OVERRIDES.add(req.restaurant_id);
+
+      const { data, error } = await supabaseAdmin.from('menu_items')
+        .update({ is_available: true, updated_at: nowIso })
+        .eq('restaurant_id', req.restaurant_id)
+        .eq('is_stocked', true)
+        .is('archived_at', null)
+        .select('id');
+      if (error) throw error;
+      result = { slot: 'manual_force', available: data?.length ?? 0 };
     } else {
+      const { error: clearErr } = await supabaseAdmin.from('tenants')
+        .update({ kitchen_force_open: false, updated_at: nowIso })
+        .eq('id', req.restaurant_id);
+      if (clearErr && !/kitchen_force_open|column/i.test(clearErr.message || '')) {
+        throw clearErr;
+      }
       MANUAL_KITCHEN_OPEN_OVERRIDES.delete(req.restaurant_id);
       result = await applySlotAvailability(req.restaurant_id, null);
+    }
+
+    const availableItems = await countAvailableMenuItems(req.restaurant_id);
+    const actualOpen = availableItems > 0;
+
+    if (open && !actualOpen) {
+      // Roll back force-open so UI/scheduler stay consistent
+      await supabaseAdmin.from('tenants')
+        .update({ kitchen_force_open: false, updated_at: nowIso })
+        .eq('id', req.restaurant_id);
+      MANUAL_KITCHEN_OPEN_OVERRIDES.delete(req.restaurant_id);
+      return res.status(409).json({
+        success: false,
+        is_open: false,
+        available_items: 0,
+        force_open: false,
+        error: 'Kitchen could not open — no stocked menu items. Mark items in stock on the Menu tab, then try again.',
+        ...result,
+      });
     }
 
     if (open && !wasOpen) {
@@ -179,7 +240,13 @@ router.post('/kitchen-toggle', authenticateToken, getRestaurantId, async (req, r
       );
     }
 
-    res.json({ success: true, is_open: open, ...result });
+    res.json({
+      success: true,
+      is_open: actualOpen,
+      available_items: availableItems,
+      force_open: open && actualOpen,
+      ...result,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -230,6 +297,10 @@ router.post('/slot-sync', authenticateToken, getRestaurantId, async (req, res) =
     const { onKitchenOpened, countAvailableMenuItems } = require('../../helpers/kitchenReminders');
     const wasOpen = (await countAvailableMenuItems(req.restaurant_id)) > 0;
     const result = await applySlotAvailability(req.restaurant_id, slot);
+    // Slot sync exits force-open so meal rotation owns availability again.
+    await supabaseAdmin.from('tenants')
+      .update({ kitchen_force_open: false, updated_at: new Date().toISOString() })
+      .eq('id', req.restaurant_id);
     MANUAL_KITCHEN_OPEN_OVERRIDES.delete(req.restaurant_id);
     if (slot && !wasOpen) {
       onKitchenOpened(req.restaurant_id, { source: 'slot-sync' }).catch(err =>
