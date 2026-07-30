@@ -652,6 +652,12 @@ async def _complete_scheduled_delivery_after_approval(
     if RECEIPT_AVAILABLE and booking_id:
         try:
             r_info = await fetch_restaurant_info(restaurant_id)
+            from tools.db_tools import receipt_token_fields
+            token_str, bill_no = receipt_token_fields(
+                session_state.get("token_number"),
+                session_state.get("display_token"),
+                token,
+            )
             receipt_data = _ReceiptData(
                 restaurant_name=r_info.get("name", ""),
                 restaurant_address=r_info.get("address", ""),
@@ -659,8 +665,9 @@ async def _complete_scheduled_delivery_after_approval(
                 restaurant_gstin=r_info.get("gstin", ""),
                 restaurant_wa_number=r_info.get("whatsapp_number", ""),
                 restaurant_website=r_info.get("website", ""),
-                receipt_url=receipt_qr_url(str(token)),
-                token_number=str(token),
+                receipt_url=receipt_qr_url(token_str),
+                token_number=token_str,
+                bill_number=bill_no,
                 service_type="delivery",
                 customer_name=customer_name,
                 customer_phone=customer_phone,
@@ -673,7 +680,7 @@ async def _complete_scheduled_delivery_after_approval(
                 payment_mode=session_state.get("payment_mode", "Cash"),
             )
             receipt_path = _generate_receipt(receipt_data)
-            await upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, str(token))
+            await upload_and_send_receipt(receipt_path, customer_phone, restaurant_id, token_str)
         except Exception as _re:
             logger.warning(f"[receipt] scheduled delivery receipt failed (non-fatal): {_re}")
 
@@ -1394,7 +1401,13 @@ async def handle_delivery_flow(
             if RECEIPT_AVAILABLE:
                 try:
                     from locales.customer import session_lang as _session_lang
+                    from tools.db_tools import receipt_token_fields
                     r_info = await fetch_restaurant_info(restaurant_id)
+                    token_str, bill_no = receipt_token_fields(
+                        session_state.get("token_number"),
+                        session_state.get("display_token"),
+                        token,
+                    )
                     receipt_data = _ReceiptData(
                         restaurant_name=r_info.get("name", ""),
                         restaurant_address=r_info.get("address", ""),
@@ -1402,8 +1415,9 @@ async def handle_delivery_flow(
                         restaurant_gstin=r_info.get("gstin", ""),
                         restaurant_wa_number=r_info.get("whatsapp_number", ""),
                         restaurant_website=r_info.get("website", ""),
-                        receipt_url=receipt_qr_url(token),
-                        token_number=token,
+                        receipt_url=receipt_qr_url(token_str),
+                        token_number=token_str,
+                        bill_number=bill_no,
                         service_type="delivery",
                         customer_name=customer_name,
                         customer_phone=customer_phone,
@@ -1418,7 +1432,7 @@ async def handle_delivery_flow(
                     receipt_path = _generate_receipt(receipt_data)
                     logger.info(f"[receipt] Delivery receipt saved: {receipt_path}")
                     await upload_and_send_receipt(
-                        receipt_path, customer_phone, restaurant_id, token,
+                        receipt_path, customer_phone, restaurant_id, token_str,
                         lang=_session_lang(session_state),
                     )
                     await update_booking_status(booking_id, "confirmed")

@@ -961,16 +961,21 @@ async def handle_takeaway_flow(
                         booking_id=booking_id,
                     )
                     r_info = await fetch_restaurant_info(restaurant_id)
-                    token_clean = str(display_token).lstrip("#").replace("T-", "")
+                    from tools.db_tools import receipt_token_fields
+                    token_str, bill_no = receipt_token_fields(
+                        session_state.get("token_number"),
+                        session_state.get("display_token"),
+                        display_token,
+                    )
                     receipt_data = _ReceiptData(
                         **(_restaurant_receipt_fields(r_info) if _restaurant_receipt_fields else {}),
                         receipt_url=(
                             receipt_verify_url(captain_order_id)
                             if captain_order_id
-                            else receipt_qr_url(display_token)
+                            else receipt_qr_url(token_str)
                         ),
-                        token_number=display_token,
-                        bill_number=token_clean[-6:] if token_clean else "",
+                        token_number=token_str,
+                        bill_number=bill_no,
                         service_type="takeaway",
                         customer_name=customer_name,
                         customer_phone=customer_phone,
@@ -985,7 +990,7 @@ async def handle_takeaway_flow(
                     logger.info(f"[receipt] Takeaway receipt saved: {receipt_path}")
                     from locales.customer import session_lang as _session_lang
                     await upload_and_send_receipt(
-                        receipt_path, customer_phone, restaurant_id, display_token,
+                        receipt_path, customer_phone, restaurant_id, token_str,
                         lang=_session_lang(session_state),
                     )
                     await update_booking_status(booking_id, "confirmed")

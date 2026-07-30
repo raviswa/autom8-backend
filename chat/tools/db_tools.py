@@ -802,6 +802,47 @@ async def get_next_token_number(restaurant_id: str) -> str:
         return "#001"
 
 
+def is_customer_facing_token(value: str | None) -> bool:
+    """True for #NNN, T-YYMM-NNN, or short pure digits — not nanoid / UUID tails."""
+    s = str(value or "").strip()
+    if not s or len(s) > 16:
+        return False
+    if re.fullmatch(r"#\d{1,6}", s):
+        return True
+    if re.fullmatch(r"T-\d{4}-\d{3}", s, flags=re.IGNORECASE):
+        return True
+    if re.fullmatch(r"\d{1,8}", s):
+        return True
+    return False
+
+
+def customer_facing_token(*candidates: str | None, fallback: str = "—") -> str:
+    """First customer-safe token among candidates (skips OC… session ids / UUID fragments)."""
+    for raw in candidates:
+        s = str(raw or "").strip()
+        if is_customer_facing_token(s):
+            return s
+    return fallback
+
+
+def receipt_token_fields(*candidates: str | None) -> tuple[str, str]:
+    """
+    (token_number, bill_number) for printed receipts.
+    Bill number is the numeric portion only (#042 → 042, T-2507-042 → 042).
+    """
+    display = customer_facing_token(*candidates)
+    if display == "—":
+        return "—", ""
+    m = re.fullmatch(r"#(\d{1,6})", display)
+    if m:
+        return display, m.group(1)
+    m = re.fullmatch(r"T-\d{4}-(\d{3})", display, flags=re.IGNORECASE)
+    if m:
+        return display, m.group(1)
+    digits = re.sub(r"\D", "", display)
+    return display, (digits[-6:] if digits else "")
+
+
 # ─── Table availability tools ─────────────────────────────────────────────────
 
 async def get_available_tables(restaurant_id: str) -> List[Dict[str, Any]]:

@@ -29,6 +29,7 @@ from tools.db_tools import (
     create_customer,
     create_booking,
     get_next_token_number,
+    customer_facing_token,
     update_booking_status,
     get_session_state,
     save_session_state,
@@ -1106,10 +1107,20 @@ async def internal_webcart_confirm_pay(request: Request):
             session_state["scheduled_at"] = body.get("scheduled_at")
 
     # Prefer walk-in token meta when the menu row knows the schedule.
-    from tools.db_tools import get_walk_in_token_by_id, get_active_walk_in_token, parse_walk_in_meta
+    from tools.db_tools import (
+        get_walk_in_token_by_id,
+        get_active_walk_in_token,
+        parse_walk_in_meta,
+        is_customer_facing_token,
+    )
     portal_token = None
-    if token_label:
-        portal_token = await get_walk_in_token_by_id(restaurant_id, token_label)
+    walk_in_token_id = str(body.get("walk_in_token_id") or "").strip()
+    # Opaque session ids are for portal lookup only — never customer-facing.
+    lookup_token = walk_in_token_id or (
+        token_label if token_label and not is_customer_facing_token(token_label) else ""
+    ) or (token_label if is_customer_facing_token(token_label) else "")
+    if lookup_token:
+        portal_token = await get_walk_in_token_by_id(restaurant_id, lookup_token)
     if not portal_token:
         portal_token = await get_active_walk_in_token(restaurant_id, canonical_phone)
     portal_meta = parse_walk_in_meta((portal_token or {}).get("meta")) if portal_token else {}
@@ -1169,6 +1180,8 @@ async def internal_webcart_confirm_pay(request: Request):
     order_text_display = ", ".join(order_text_lines)
 
     token_number = await get_next_token_number(restaurant_id)
+    # Customer-facing order/queue id — never the opaque webcart session / walk-in nanoid.
+    display_token = customer_facing_token(token_number)
     booking = await create_booking(
         restaurant_id,
         customer_id,
@@ -1183,6 +1196,7 @@ async def internal_webcart_confirm_pay(request: Request):
 
     session_state["booking_id"] = booking_id
     session_state["token_number"] = token_number
+    session_state["display_token"] = display_token
     session_state["cart"] = cart_snapshot
 
     from tools.order_pricing import compute_order_totals, resolve_delivery_charge
@@ -1244,7 +1258,7 @@ async def internal_webcart_confirm_pay(request: Request):
                 totals=totals,
                 total=float(totals.get("grand_total") or total),
                 delivery_fee=delivery_fee,
-                token=str(token_label or token_number),
+                token=display_token,
                 booking_id=booking_id,
             )
         except Exception as exc:
@@ -1268,6 +1282,8 @@ async def internal_webcart_confirm_pay(request: Request):
                 "awaiting_approval": True,
                 "status": result.get("status"),
                 "customer_phone": canonical_phone,
+                "token_number": token_number,
+                "order_ref": display_token,
             },
         )
 
@@ -1292,7 +1308,7 @@ async def internal_webcart_confirm_pay(request: Request):
                 cart_snapshot=cart_snapshot,
                 totals=totals,
                 total=float(totals.get("grand_total") or total),
-                token=str(token_label or token_number),
+                token=display_token,
                 booking_id=booking_id,
                 booking_time=datetime.utcnow().isoformat(),
             )
@@ -1313,6 +1329,8 @@ async def internal_webcart_confirm_pay(request: Request):
                 "awaiting_approval": True,
                 "status": result.get("status"),
                 "customer_phone": canonical_phone,
+                "token_number": token_number,
+                "order_ref": display_token,
             },
         )
 
@@ -1339,7 +1357,7 @@ async def internal_webcart_confirm_pay(request: Request):
         customer_name=session_state.get("customer_name") or customer_name,
         customer_phone=canonical_phone,
         booking_id=booking_id,
-        token=str(token_label or token_number),
+        token=display_token,
         total=float(totals.get("grand_total") or total),
         booking_time=datetime.utcnow().isoformat(),
         order_text_display=order_text_display,
@@ -1369,8 +1387,9 @@ async def internal_webcart_confirm_pay(request: Request):
         )
 
     gateway_label = "Razorpay" if settings.payment_gateway == "razorpay" else "PhonePe"
-    order_ref_display = order_ref or booking_id[-8:]
-    token_display = token_label or token_number
+    # Both fields use the monthly booking counter — never Node session.id / OC… order_ref.
+    order_ref_display = display_token
+    token_display = display_token
     total_display = float(totals.get("grand_total") or total)
     body_text = reply(
         lang,
@@ -1415,6 +1434,8 @@ async def internal_webcart_confirm_pay(request: Request):
             "booking_id": booking_id,
             "payment_link": payment_link,
             "customer_phone": canonical_phone,
+            "token_number": token_number,
+            "order_ref": order_ref_display,
         },
     )
 

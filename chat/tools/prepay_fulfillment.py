@@ -34,6 +34,9 @@ from tools.db_tools import (
     load_prepay_fulfillment_payload,
     clear_prepay_fulfillment_payload,
     enqueue_scheduled_jobs,
+    customer_facing_token,
+    is_customer_facing_token,
+    receipt_token_fields,
 )
 from tools.scheduled_kds import (
     is_deferred_scheduled_order,
@@ -1029,8 +1032,18 @@ async def _send_receipt(
 
         r_info = await fetch_restaurant_info(restaurant_id)
         r_info = r_info or {}
-        token_str = str(token or "—")
-        token_clean = token_str.lstrip("#").replace("T-", "")
+        booking_token = None
+        if booking_id:
+            try:
+                booking_row = await get_booking_with_customer(str(booking_id))
+                booking_token = (booking_row or {}).get("token_number")
+            except Exception:
+                booking_token = None
+        token_str, bill_no = receipt_token_fields(booking_token, token)
+        if token_str == "—" and token:
+            # Last resort: keep prior behaviour only when nothing customer-facing exists.
+            token_str = str(token)
+            bill_no = "".join(ch for ch in token_str if ch.isdigit())[-6:]
         items = _LineItem.from_cart(cart_snapshot) if cart_snapshot else []
         if not items and order_text:
             items = _LineItem.from_order_text(order_text)
@@ -1039,7 +1052,7 @@ async def _send_receipt(
             **(_restaurant_receipt_fields(r_info) if _restaurant_receipt_fields else {}),
             receipt_url=qr_url,
             token_number=token_str,
-            bill_number=token_clean[-6:] if token_clean else "",
+            bill_number=bill_no,
             table_number=table_number,
             service_type=service_type,
             customer_name=customer_name,
@@ -1257,8 +1270,13 @@ async def _fulfill_takeaway(payload: dict[str, Any]) -> bool:
             pax=1,
             restaurant_id=restaurant_id,
         )
-    display_token = portal_token_id or token
-    kds_token = str(token or display_token)
+    # Prefer booking/payload #NNN over opaque walk-in session ids (OC…).
+    display_token = customer_facing_token(token, portal_token_id)
+    if display_token == "—":
+        display_token = str(token or portal_token_id or "—")
+    kds_token = customer_facing_token(token, portal_token_id)
+    if kds_token == "—":
+        kds_token = str(token or display_token)
 
     jobs_enqueued = await _enqueue_scheduled_takeaway_jobs(payload) if scheduled_flow else False
     defer, defer_note = await _should_defer_kds_for_scheduled(
@@ -1975,8 +1993,13 @@ def _hydrate_schedule_hints_from_booking(
     payload["session_hints"] = hints
     if service_type and not payload.get("service_type"):
         payload["service_type"] = service_type
-    if booking.get("token_number") and not payload.get("token"):
-        payload["token"] = str(booking.get("token_number"))
+    booking_tok = str(booking.get("token_number") or "").strip()
+    if booking_tok and is_customer_facing_token(booking_tok):
+        # Always prefer durable booking counter over opaque walk-in/session ids.
+        payload["token"] = booking_tok
+        payload["display_token"] = booking_tok
+    elif booking_tok and not payload.get("token"):
+        payload["token"] = booking_tok
     return payload
 
 
@@ -2005,6 +2028,11 @@ async def fulfill_from_webhook(booking_id: str) -> bool:
             f"(customer {booking.get('customer_phone')})"
         )
         return False
+
+    booking_tok = str(booking.get("token_number") or "").strip()
+    if booking_tok and is_customer_facing_token(booking_tok):
+        payload["token"] = booking_tok
+        payload["display_token"] = booking_tok
 
     # Rehydrate scheduling hints from durable booking fields.
     # This prevents scheduled takeaway/delivery from being pushed to live KDS
@@ -2058,6 +2086,61 @@ async def fulfill_from_webhook(booking_id: str) -> bool:
     )
     success = await fulfill_after_payment(payload)
     if success:
+        try:
+            # REPEAT (and any path that opted in): deduct after pay — not at link mint.
+            # Webcart already deducts at checkout submit, so skip unless flagged.
+            if payload.get("deduct_stock_on_pay"):
+                cart_snap = payload.get("cart_snapshot") or {}
+                deduct_lines = []
+                if isinstance(cart_snap, dict):
+                    for item_id, row in cart_snap.items():
+                        if not isinstance(row, dict):
+                            continue
+                        qty = int(row.get("qty") or 0)
+                        if qty <= 0:
+                            continue
+                        deduct_lines.append({
+                            "id": str(item_id),
+                            "menu_item_id": str(item_id),
+                            "qty": qty,
+                            "name": row.get("title") or row.get("name"),
+                        })
+                if deduct_lines:
+                    from tools.stock_bridge import deduct_stock_for_cart
+                    stock_result = await deduct_stock_for_cart(
+                        str(booking["restaurant_id"]),
+                        deduct_lines,
+                        booking_id=str(booking_id),
+                    )
+                    if not stock_result.get("ok") and not stock_result.get("skipped"):
+                        logger.error(
+                            "[prepay-fulfill] stock deduct failed booking=%s result=%s",
+                            booking_id,
+                            stock_result,
+                        )
+                        try:
+                            from tools.restaurant_config import get_manager_phone
+                            from tools.whatsapp_tools import send_whatsapp_message
+                            mgr = (await get_manager_phone(str(booking["restaurant_id"])) or "").strip()
+                            if mgr:
+                                await send_whatsapp_message(
+                                    mgr,
+                                    f"⚠ Stock deduct failed after payment for order "
+                                    f"{str(booking_id)[-8:]}. Check inventory manually. "
+                                    f"{stock_result.get('error') or stock_result.get('shortages')}",
+                                    str(booking["restaurant_id"]),
+                                )
+                        except Exception as alert_err:
+                            logger.warning(
+                                "[prepay-fulfill] stock-fail ops alert skipped: %s",
+                                alert_err,
+                            )
+        except Exception as stock_err:
+            logger.error(
+                "[prepay-fulfill] stock deduct exception for %s: %s",
+                booking_id,
+                stock_err,
+            )
         try:
             await _award_loyalty_points(
                 restaurant_id=str(booking["restaurant_id"]),

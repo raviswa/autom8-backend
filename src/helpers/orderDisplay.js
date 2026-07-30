@@ -7,6 +7,16 @@
  * Keep in sync with autom8-frontend-main/src/helpers/orderDisplay.js
  */
 
+/** Customer WhatsApp / webcart — #NNN, T-YYMM-NNN, or short digits (not nanoid). */
+function isCustomerFacingToken(value) {
+  const s = String(value || '').trim();
+  if (!s || s.length > 16) return false;
+  if (/^#\d{1,6}$/.test(s)) return true;
+  if (/^T-\d{4}-\d{3}$/i.test(s)) return true;
+  if (/^\d{1,8}$/.test(s)) return true;
+  return false;
+}
+
 function formatKitchenOrderNo(orderNumber, tokenNumber) {
   const raw = String(orderNumber || '').trim();
   const tokenDigits = String(tokenNumber || '').replace(/^T-/i, '').replace(/\D/g, '');
@@ -44,4 +54,4 @@ function formatKitchenOrderNo(orderNumber, tokenNumber) {
   return '—';
 }
 
-module.exports = { formatKitchenOrderNo };
+module.exports = { formatKitchenOrderNo, isCustomerFacingToken };

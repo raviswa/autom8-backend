@@ -368,6 +368,15 @@ router.post('/api/webcart/submit', async (req, res) => {
       });
     }
 
+    try {
+      const { maybeSendStockAlerts } = require('../../helpers/stockAlerts');
+      maybeSendStockAlerts(supabaseAdmin, restaurant.id, stockResult.updates || []).catch((err) =>
+        console.warn('[webcart/submit] stock alerts:', err.message),
+      );
+    } catch (alertLoadErr) {
+      console.warn('[webcart/submit] stockAlerts load:', alertLoadErr.message);
+    }
+
     const subtotal = normalizedItems.reduce((sum, line) => sum + Number(line.line_total || 0), 0);
 
     let promoDiscount = 0;
@@ -495,7 +504,12 @@ router.post('/api/webcart/submit', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Total amount is too low to process payment.' });
     }
 
-    const orderRef = `${(session?.id || safeToken)}-${Date.now().toString().slice(-6)}`;
+    const { isCustomerFacingToken } = require('../../helpers/orderDisplay');
+    const sessionTokenRaw = String(session?.id || safeToken || '').trim();
+    const customerFacingSessionToken = isCustomerFacingToken(sessionTokenRaw) ? sessionTokenRaw : null;
+    // Opaque session ids (OC…) stay on walk_in_token_id for portal lookup only.
+    // Customer order/queue numbers are allocated by chat (monthly #NNN).
+    let orderRef = customerFacingSessionToken || null;
     const formattedAddress = isDeliveryShip
       ? formatDeliveryAddress(safeAddress, safePincode)
       : '';
@@ -521,7 +535,8 @@ router.post('/api/webcart/submit', async (req, res) => {
     if (prevIsFresh && isSameSubmission && alreadySent) {
       return res.json({
         ok: true,
-        order_ref: prevSubmission.order_ref || orderRef,
+        order_ref: prevSubmission.order_ref || orderRef || null,
+        token_number: prevSubmission.token_number || null,
         message: 'Confirm & Pay was already sent to your WhatsApp. Please complete payment there.',
         deduped: true,
       });
@@ -605,8 +620,9 @@ router.post('/api/webcart/submit', async (req, res) => {
         : (String(sessionMeta?.customer_name || sessionMeta?.name || '').trim() || 'Guest'),
       delivery_address: isDeliveryShip ? formattedAddress : undefined,
       pincode: isDeliveryShip ? safePincode : undefined,
-      token: String(session?.id || safeToken),
-      order_ref: orderRef,
+      walk_in_token_id: sessionTokenRaw || undefined,
+      token: customerFacingSessionToken || undefined,
+      order_ref: orderRef || undefined,
       // Send the walk-in type when scheduled so chat can gate approval;
       // otherwise send normalized booking service_type.
       service_type: orderMode === 'scheduled' || rawType.startsWith('scheduled_')
@@ -626,6 +642,16 @@ router.post('/api/webcart/submit', async (req, res) => {
       delivery_channel_status: fulfillmentMeta.delivery_channel_status || undefined,
       courier_zone: fulfillmentMeta.courier_zone || undefined,
     });
+
+    const numericOrderRef = confirmResult?.order_ref
+      || confirmResult?.token_number
+      || orderRef
+      || null;
+    if (numericOrderRef) {
+      orderRef = numericOrderRef;
+      nextMeta.web_cart_submission.order_ref = numericOrderRef;
+      nextMeta.web_cart_submission.token_number = confirmResult?.token_number || numericOrderRef;
+    }
 
     if (promoApplied && promoDiscount > 0) {
       try {
@@ -682,6 +708,8 @@ router.post('/api/webcart/submit', async (req, res) => {
           payment_cta_sent: true,
           booking_id: confirmResult?.booking_id || null,
           payment_link: confirmResult?.payment_link || null,
+          order_ref: orderRef,
+          token_number: confirmResult?.token_number || orderRef || null,
         },
       };
 
@@ -732,6 +760,7 @@ router.post('/api/webcart/submit', async (req, res) => {
     return res.json({
       ok: true,
       order_ref: orderRef,
+      token_number: confirmResult?.token_number || orderRef || null,
       booking_id: confirmResult?.booking_id || null,
       payment_link: confirmResult?.payment_link || null,
       gift_url: giftUrl,

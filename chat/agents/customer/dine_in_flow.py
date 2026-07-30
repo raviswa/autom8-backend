@@ -507,6 +507,12 @@ async def _fire_kitchen_and_receipt(
     try:
         r_info = await fetch_restaurant_info(restaurant_id)
         table_label = str(table_number) if table_number else ""
+        from tools.db_tools import receipt_token_fields
+        token_str, bill_no = receipt_token_fields(
+            session_state.get("token_number"),
+            session_state.get("display_token"),
+            token,
+        )
         receipt_data = _ReceiptData(
             restaurant_name=r_info.get("name", ""),
             restaurant_address=r_info.get("address", ""),
@@ -514,8 +520,9 @@ async def _fire_kitchen_and_receipt(
             restaurant_gstin=r_info.get("gstin", ""),
             restaurant_wa_number=r_info.get("whatsapp_number", ""),
             restaurant_website=r_info.get("website", ""),
-            receipt_url=receipt_verify_url(order_id) if order_id else receipt_qr_url(token),
-            token_number=token,
+            receipt_url=receipt_verify_url(order_id) if order_id else receipt_qr_url(token_str),
+            token_number=token_str,
+            bill_number=bill_no,
             table_number=table_label,
             service_type="dine_in",
             customer_name=customer_name,
@@ -531,7 +538,7 @@ async def _fire_kitchen_and_receipt(
         session_state["_receipt_sent"] = True
         from locales.customer import session_lang as _session_lang
         await upload_and_send_receipt(
-            receipt_path, customer_phone, restaurant_id, token,
+            receipt_path, customer_phone, restaurant_id, token_str,
             lang=_session_lang(session_state),
         )
         booking_id = session_state.get("booking_id")
