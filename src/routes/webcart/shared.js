@@ -123,6 +123,15 @@ function pickSupportPhone(restaurant) {
   );
 }
 
+const {
+  ABOUT_NOTE_MAX,
+  yearsInBusiness,
+  buildAboutPayload,
+  normalizeSocialLinks,
+  normalizeAboutNote,
+  normalizeInceptionDate,
+} = require('../../helpers/aboutUs');
+
 function requiresShipping(lobType) {
   return SHIPPED_LOBS.has(String(lobType || '').toLowerCase());
 }
@@ -211,6 +220,9 @@ async function resolveRestaurantBySlug(req) {
       'shipping_provider', 'courier_name', 'courier_rate_card',
       'gstin', 'fssai_license', 'sac_code', 'receipt_tagline',
       'subscribed_features', 'enabled_services',
+      'address_line1', 'address_line2', 'city', 'state', 'google_maps_url',
+      'website_url', 'instagram_handle',
+      'about_enabled', 'about_note', 'inception_date', 'social_links',
     ].join(', ');
 
     const { data, error } = await selectDroppingMissingColumns(
@@ -799,18 +811,27 @@ const RESTAURANT_MENU_ITEM_SELECT =
   'id, retailer_id, name, price, category, description, image_url, image_url_2, image_url_3, image_url_4, image_url_5, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked, is_available, discount_percent, discount_ends_at';
 
 const CATALOG_MENU_ITEM_SELECT =
-  `${RESTAURANT_MENU_ITEM_SELECT}, variant_group_id, size_label, item_type, flavour_group, scoop_count, crust_options, toppings_allowed, topping_extra_price, pack_size_label, weight_grams, shelf_life_days, made_on_date, ingredients, allergens, condition, original_mrp, warranty_days, colour, meta, current_stock, availability_status, launch_at, deposit_amount`;
+  `${RESTAURANT_MENU_ITEM_SELECT}, variant_group_id, size_label, item_type, flavour_group, scoop_count, crust_options, toppings_allowed, topping_extra_price, pack_size_label, weight_grams, shelf_life_days, made_on_date, ingredients, allergens, condition, original_mrp, warranty_days, colour, meta, current_stock, availability_status, launch_at, deposit_amount, bundle_components, low_stock_alert_units`;
 
 // Single source of truth for "can this item actually be bought right now" —
 // used both when rendering the storefront AND when validating checkout server-side,
 // so a coming-soon / preorder / sold-out item can never slip through the API
 // even if the client sends a stale cart.
-function deriveStockStatus(item) {
+function deriveStockStatus(item, componentsByRetailerId = null) {
   const qtyOk = item.current_stock == null || Number(item.current_stock) > 0;
   const status = String(item.availability_status || '').toLowerCase().trim();
   const comingSoon = status === 'coming_soon' || status === 'preorder';
   const soldOutStatus = status === 'sold_out';
-  const stocked = comingSoon ? false : (!!item.is_stocked && qtyOk && !soldOutStatus);
+  let stocked = comingSoon ? false : (!!item.is_stocked && qtyOk && !soldOutStatus);
+
+  const itemType = String(item.item_type || '').toUpperCase();
+  if (stocked && (itemType === 'BUNDLE' || itemType === 'HAMPER') && componentsByRetailerId) {
+    try {
+      const { bundleComponentsCovered } = require('../../helpers/inventory');
+      if (!bundleComponentsCovered(item, componentsByRetailerId, 1)) stocked = false;
+    } catch (_) { /* inventory helper always present */ }
+  }
+
   return { stocked, comingSoon, status: status || (stocked ? 'in_stock' : 'sold_out') };
 }
 
@@ -857,8 +878,22 @@ async function fetchMenuItems(restaurantId, { catalogLob = false } = {}) {
     categoryRows.map(row => [row.name, normalizeSlots(row.applicable_slots)])
   );
 
+  let componentsByRetailerId = null;
+  if (catalogLob) {
+    componentsByRetailerId = new Map();
+    for (const item of itemsRes.data || []) {
+      const key = String(item.retailer_id || '').trim().toUpperCase();
+      if (key) {
+        componentsByRetailerId.set(key, {
+          current_stock: item.current_stock,
+          is_stocked: item.is_stocked,
+        });
+      }
+    }
+  }
+
   const items = (itemsRes.data || []).map(item => {
-    const { stocked, comingSoon, status } = deriveStockStatus(item);
+    const { stocked, comingSoon, status } = deriveStockStatus(item, componentsByRetailerId);
     const discount = deriveMenuDiscount(item);
     return {
       ...item,
@@ -977,6 +1012,12 @@ module.exports = {
   slugify,
   readHostSlug,
   pickSupportPhone,
+  ABOUT_NOTE_MAX,
+  yearsInBusiness,
+  buildAboutPayload,
+  normalizeSocialLinks,
+  normalizeAboutNote,
+  normalizeInceptionDate,
   requiresShipping,
   parsePincodeFromAddress,
   formatDeliveryAddress,

@@ -42,6 +42,11 @@ const {
   enrichScheduledOrdersFromPortal,
 } = require('./shared');
 const { resolveBusinessTaxonomy } = require('../../config/lobTaxonomy');
+const {
+  normalizeAboutNote,
+  normalizeInceptionDate,
+  normalizeSocialLinks,
+} = require('../../helpers/aboutUs');
 
 router.post('/restaurants/resolve-pickup', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
   try {
@@ -230,6 +235,7 @@ router.put(
   'lob_type', 'allow_manager_menu_upload',
   'business_family', 'business_vertical', 'business_vertical_other',
   'order_ops_mode',
+  'about_enabled', 'about_note', 'inception_date', 'social_links',
     ];
 
     // These two fields are owner-governed only — a manager may have general
@@ -247,6 +253,26 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
     );
     if (req.body.maps_url !== undefined) {
       updates.google_maps_url = req.body.maps_url || null;
+    }
+    if (updates.about_enabled !== undefined) {
+      updates.about_enabled = !!updates.about_enabled;
+    }
+    if (updates.about_note !== undefined) {
+      updates.about_note = normalizeAboutNote(updates.about_note);
+    }
+    if (updates.inception_date !== undefined) {
+      const inception = normalizeInceptionDate(updates.inception_date);
+      if (updates.inception_date && !inception) {
+        return res.status(400).json({ error: 'inception_date must be YYYY-MM or YYYY-MM-DD.' });
+      }
+      updates.inception_date = inception;
+    }
+    if (updates.social_links !== undefined) {
+      const links = normalizeSocialLinks(updates.social_links);
+      if (links == null) {
+        return res.status(400).json({ error: 'social_links must be an array of { platform, url }.' });
+      }
+      updates.social_links = links;
     }
     if (Object.keys(updates).length === 0)
       return res.status(400).json({ error: 'No valid fields provided' });

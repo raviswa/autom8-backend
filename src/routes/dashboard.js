@@ -53,6 +53,9 @@ const RESTAURANT_SELECT_FULL = [
   'gstin', 'fssai_license', 'sac_code', 'receipt_tagline',
   'packaging_weight_grams',
   'daily_settlement_enabled', 'weekly_promo_drafts_enabled', 'instagram_handle', 'instagram_user_id',
+  'legal_name', 'address_line1', 'address_line2', 'city', 'state', 'postal_code', 'country',
+  'contact_phone', 'contact_email', 'website_url', 'cuisine_type',
+  'about_enabled', 'about_note', 'inception_date', 'social_links',
 ].join(', ');
 
 const RESTAURANT_SELECT_BASE = [

@@ -26,6 +26,7 @@ const {
   slugify,
   readHostSlug,
   pickSupportPhone,
+  buildAboutPayload,
   requiresShipping,
   parsePincodeFromAddress,
   formatDeliveryAddress,
@@ -224,6 +225,7 @@ router.get('/api/webcart/session', async (req, res) => {
         fssai_license: restaurant.fssai_license || null,
         sac_code: restaurant.sac_code || null,
         receipt_tagline: restaurant.receipt_tagline || null,
+        about: buildAboutPayload(restaurant),
       },
       pricing_config: {
         parcel_charge_per_item: restaurant.parcel_charge_per_item || 0,
