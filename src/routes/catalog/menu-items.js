@@ -52,7 +52,7 @@ async function handleMenuUpload(req, res) {
     const missingPolicy = ['keep', 'sold_out', 'archive'].includes(req.body.missing_policy)
       ? req.body.missing_policy
       : (mode === 'replace' ? 'archive' : 'keep');
-    const stockPolicy = ['leave', 'add', 'replace'].includes(req.body.stock_policy)
+    let stockPolicy = ['leave', 'add', 'replace'].includes(req.body.stock_policy)
       ? req.body.stock_policy
       : 'leave';
     let created = 0, updated = 0, skipped = 0, archived = 0, markedSoldOut = 0;
@@ -74,6 +74,12 @@ async function handleMenuUpload(req, res) {
       blockNoFssai = String(tenantRow?.lob_type || '').toLowerCase() === 'food_products'
         && !String(tenantRow?.fssai_license || '').trim();
     } catch (_) { /* non-fatal */ }
+
+    // Restaurant / dine-in templates have no stock qty column — never rewrite batch stock from Excel.
+    // Cooked items use the in-stock toggle (current_stock NULL = unlimited). Packaged LOBs use Record batch.
+    if (!packagedLob && stockPolicy !== 'leave') {
+      stockPolicy = 'leave';
+    }
 
     const { data: existingRows, error: existingErr } = await supabaseAdmin
       .from('menu_items')
@@ -370,8 +376,16 @@ async function handleMenuUpload(req, res) {
             delete patch.is_available;
             delete patch.availability_status;
             delete patch.made_on_date;
+          } else if (row.current_stock == null) {
+            // Blank Excel stock cell = leave existing qty (schema: blank = unlimited / unchanged).
+            // Never coerce null → 0 — that zeroed entire restaurant catalogs on "replace".
+            delete patch.current_stock;
+            delete patch.is_stocked;
+            delete patch.is_available;
+            delete patch.availability_status;
+            delete patch.made_on_date;
           } else {
-            const uploaded = row.current_stock == null ? 0 : Number(row.current_stock);
+            const uploaded = Number(row.current_stock);
             const nextStock = stockPolicy === 'add'
               ? Math.max(0, Number(existing.current_stock || 0) + uploaded)
               : Math.max(0, uploaded);
@@ -532,10 +546,21 @@ async function handleMenuItemAvailability(req, res) {
       is_available: is_available,
       updated_at:   new Date().toISOString(),
     };
-    // Coming back in stock with qty tracking but zero left → bump to at least 1 unless client sends stock
+    // Coming back in stock with qty tracking but zero left:
+    // - restaurant (toggle model): clear qty → NULL = unlimited prepared food
+    // - packaged: bump to at least 1 unless client sends an explicit qty
     if (is_available && item.current_stock != null && Number(item.current_stock) <= 0) {
-      if (req.body.current_stock != null) {
+      if (req.body.current_stock != null && req.body.current_stock !== '') {
         patch.current_stock = Math.max(0, parseInt(req.body.current_stock, 10) || 0);
+      } else {
+        const { data: tenantRow2 } = await supabaseAdmin
+          .from('tenants').select('lob_type')
+          .eq('id', req.restaurant_id).maybeSingle();
+        const packaged = ['food_products', 'retail', 'b2b', 'psl'].includes(
+          String(tenantRow2?.lob_type || '').toLowerCase(),
+        );
+        patch.current_stock = packaged ? 1 : null;
+        patch.availability_status = 'in_stock';
       }
     }
     if (req.body.current_stock != null && req.body.current_stock !== '') {
@@ -597,6 +622,60 @@ async function handleMenuItemAvailability(req, res) {
 
 const menuItemAvailabilityMiddleware = [authenticateToken, getRestaurantId, handleMenuItemAvailability];
 router.put('/menu-items/:id/availability', ...menuItemAvailabilityMiddleware);
+
+// ── POST /api/menu-items/mark-all-stocked — Restaurant recovery after bad stock replace ──
+// Sets active items to toggle-style in-stock (current_stock NULL = unlimited prepared food).
+// Packaged LOBs should use Record batch instead.
+
+async function handleMarkAllStocked(req, res) {
+  try {
+    if (!['owner', 'manager', 'brand_owner'].includes(req.user_role))
+      return res.status(403).json({ error: 'Unauthorized' });
+
+    const { data: tenantRow } = await supabaseAdmin
+      .from('tenants').select('lob_type')
+      .eq('id', req.restaurant_id).maybeSingle();
+    const packaged = ['food_products', 'retail', 'b2b', 'psl'].includes(
+      String(tenantRow?.lob_type || '').toLowerCase(),
+    );
+    if (packaged) {
+      return res.status(400).json({
+        error: 'Packaged catalogs use Record batch for stock. Mark all stocked is for restaurant / prepared-food menus.',
+      });
+    }
+
+    const now = new Date().toISOString();
+    const { data, error } = await supabaseAdmin
+      .from('menu_items')
+      .update({
+        is_stocked: true,
+        is_available: true,
+        current_stock: null,
+        availability_status: 'in_stock',
+        updated_at: now,
+      })
+      .eq('restaurant_id', req.restaurant_id)
+      .is('archived_at', null)
+      .select('id');
+
+    if (error) throw error;
+
+    await writeAuditLog({
+      user_id: req.user.sub,
+      restaurant_id: req.restaurant_id,
+      action: 'Marked all active menu items in stock (unlimited)',
+      details: { count: data?.length ?? 0 },
+    });
+
+    res.json({ success: true, marked: data?.length ?? 0 });
+  } catch (err) {
+    console.error('[menu-items-mark-all-stocked]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+const menuItemMarkAllStockedMiddleware = [authenticateToken, getRestaurantId, handleMarkAllStocked];
+router.post('/menu-items/mark-all-stocked', ...menuItemMarkAllStockedMiddleware);
 
 // ── POST /api/menu-items/:id/restock — Add/set batch qty + waitlist notify ───
 
@@ -1023,6 +1102,7 @@ module.exports = router;
 module.exports.handleMenuUpload = handleMenuUpload;
 module.exports.menuUploadMiddleware = menuUploadMiddleware;
 module.exports.menuItemAvailabilityMiddleware = menuItemAvailabilityMiddleware;
+module.exports.menuItemMarkAllStockedMiddleware = menuItemMarkAllStockedMiddleware;
 module.exports.menuItemRestockMiddleware = menuItemRestockMiddleware;
 module.exports.menuItemBulkRestockMiddleware = menuItemBulkRestockMiddleware;
 module.exports.menuItemLaunchMiddleware = menuItemLaunchMiddleware;
