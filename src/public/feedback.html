@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
+  <title>Rate your visit</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --header: #000000;
+      --header-ink: #ffffff;
+      --brand: #E36D26;
+      --brand-ink: #ffffff;
+      --bg: #fff9ef;
+      --panel: #ffffff;
+      --ink: #1f2937;
+      --muted: #6b7280;
+      --line: #f1d9bf;
+      --ok: #166534;
+      --danger: #b91c1c;
+      --star: #F5A524;
+      --star-empty: #e5d5c0;
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100%; margin: 0; }
+    html { -webkit-overflow-scrolling: touch; }
+    body {
+      font-family: "Poppins", "Segoe UI", system-ui, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+      min-height: 100%;
+      padding-bottom: env(safe-area-inset-bottom, 16px);
+    }
+    button { font-family: inherit; cursor: pointer; }
+    .header {
+      background: var(--header);
+      color: var(--header-ink);
+      padding: 14px 16px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .logo-fallback {
+      width: 40px; height: 40px; border-radius: 50%;
+      background: #fff; color: var(--header);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 800; font-size: 16px; flex-shrink: 0;
+    }
+    .brand-text { min-width: 0; }
+    #brandName {
+      font-weight: 700; font-size: 16px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    #sessionMeta { color: rgba(255,255,255,0.75); font-size: 11px; margin-top: 2px; }
+
+    .wrap { max-width: 440px; margin: 0 auto; padding: 20px 16px 32px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 20px 18px;
+      box-shadow: 0 1px 0 rgba(0,0,0,0.02);
+    }
+    .hidden { display: none !important; }
+    .center { text-align: center; }
+    .muted { color: var(--muted); font-size: 13px; line-height: 1.5; }
+    h1 { font-size: 20px; font-weight: 700; margin: 0 0 6px; letter-spacing: -0.01em; }
+    h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; }
+    .thanks { font-size: 14px; color: var(--ink); margin: 0 0 4px; line-height: 1.45; }
+    .context { font-size: 12px; color: var(--muted); margin: 0 0 18px; }
+
+    .spinner {
+      width: 28px; height: 28px; margin: 24px auto;
+      border: 3px solid var(--line); border-top-color: var(--brand);
+      border-radius: 50%; animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .stars {
+      display: flex; justify-content: center; gap: 6px;
+      margin: 8px 0 6px; flex-wrap: nowrap;
+    }
+    .star-btn {
+      appearance: none; border: none; background: transparent;
+      padding: 8px 4px; font-size: 36px; line-height: 1;
+      color: var(--star-empty); transition: color .12s, transform .12s;
+    }
+    .star-btn.on { color: var(--star); }
+    .star-btn:active { transform: scale(0.92); }
+    .rating-label {
+      text-align: center; font-size: 13px; font-weight: 600;
+      color: var(--brand); min-height: 20px; margin-bottom: 8px;
+    }
+
+    .aspects-wrap { margin-top: 18px; }
+    .chips {
+      display: flex; flex-wrap: wrap; gap: 8px;
+    }
+    .chip {
+      appearance: none; border: 1px solid var(--line);
+      background: #fffaf3; color: var(--ink);
+      border-radius: 999px; padding: 9px 12px;
+      font-size: 12px; font-weight: 500; line-height: 1.2;
+      transition: background .12s, border-color .12s, color .12s;
+    }
+    .chip.on {
+      background: #fff0e4; border-color: var(--brand); color: #9a3d0a;
+    }
+
+    .comment-wrap { margin-top: 18px; }
+    textarea {
+      width: 100%; min-height: 88px; resize: vertical;
+      border: 1px solid var(--line); border-radius: 12px;
+      padding: 12px 14px; font: inherit; font-size: 14px;
+      color: var(--ink); background: #fffaf3;
+      outline: none;
+    }
+    textarea:focus { border-color: var(--brand); }
+    .char-count { text-align: right; font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+    .submit {
+      display: block; width: 100%; margin-top: 20px;
+      background: var(--brand); color: var(--brand-ink);
+      border: none; border-radius: 12px;
+      padding: 14px 16px; font-size: 15px; font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+    .submit:disabled {
+      opacity: 0.45; cursor: not-allowed;
+    }
+    .submit.busy { opacity: 0.7; }
+
+    .state-icon { font-size: 42px; margin: 8px 0 12px; }
+    .error-box {
+      background: #fef2f2; border: 1px solid #fecaca; color: var(--danger);
+      border-radius: 12px; padding: 12px 14px; font-size: 13px; margin-top: 12px;
+    }
+    .ok-box {
+      background: #f0fdf4; border: 1px solid #bbf7d0; color: var(--ok);
+      border-radius: 12px; padding: 12px 14px; font-size: 13px; margin-top: 12px;
+    }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <div class="brand">
+      <div class="logo-fallback" id="logoLetter">R</div>
+      <div class="brand-text">
+        <div id="brandName">Rate your visit</div>
+        <div id="sessionMeta">Feedback</div>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section id="stateLoading" class="card center">
+      <div class="spinner" aria-hidden="true"></div>
+      <p class="muted">Loading your feedback form…</p>
+    </section>
+
+    <section id="stateError" class="card center hidden">
+      <div class="state-icon">🔗</div>
+      <h1>Link unavailable</h1>
+      <p class="muted" id="errorMessage">This feedback link is invalid.</p>
+    </section>
+
+    <section id="stateDone" class="card center hidden">
+      <div class="state-icon">🙏</div>
+      <h1 id="doneTitle">Thank you!</h1>
+      <p class="muted" id="doneMessage">We've already received your feedback.</p>
+      <div class="ok-box">You can close this tab.</div>
+    </section>
+
+    <section id="stateForm" class="card hidden">
+      <p class="thanks" id="thanksLine">Thank you for visiting us today</p>
+      <p class="context" id="contextLine"></p>
+      <h1>How was your experience?</h1>
+      <p class="muted">Tap a star rating — takes about 10 seconds.</p>
+
+      <div class="stars" id="stars" role="radiogroup" aria-label="Rating"></div>
+      <div class="rating-label" id="ratingLabel"></div>
+
+      <div class="aspects-wrap hidden" id="aspectsBlock">
+        <h2 id="aspectsPrompt">What stood out?</h2>
+        <div class="chips" id="aspectChips"></div>
+      </div>
+
+      <div class="comment-wrap hidden" id="commentBlock">
+        <h2>Anything else? <span class="muted" style="font-weight:500">(optional)</span></h2>
+        <textarea id="comment" maxlength="500" placeholder="Tell us more…"></textarea>
+        <div class="char-count"><span id="charCount">0</span>/500</div>
+      </div>
+
+      <div id="formError" class="error-box hidden"></div>
+
+      <button type="button" class="submit" id="submitBtn" disabled>Submit feedback</button>
+    </section>
+  </main>
+
+  <script>
+(function () {
+  const RATING_LABELS = {
+    1: 'Poor',
+    2: 'Below average',
+    3: 'Average',
+    4: 'Good',
+    5: 'Excellent',
+  };
+  const ASPECT_PROMPTS = {
+    positive: '🌟 What did you love about your visit?',
+    improvement: '💡 What could we do better next time?',
+    negative: "😔 We're sorry to hear that. What went wrong?",
+  };
+
+  const params = new URLSearchParams(window.location.search);
+  const token = (params.get('token') || '').trim();
+  const phone = String(params.get('phone') || '').replace(/\D/g, '');
+  const slug = (params.get('slug') || '').trim();
+
+  const els = {
+    loading: document.getElementById('stateLoading'),
+    error: document.getElementById('stateError'),
+    done: document.getElementById('stateDone'),
+    form: document.getElementById('stateForm'),
+    errorMessage: document.getElementById('errorMessage'),
+    doneTitle: document.getElementById('doneTitle'),
+    doneMessage: document.getElementById('doneMessage'),
+    brandName: document.getElementById('brandName'),
+    logoLetter: document.getElementById('logoLetter'),
+    sessionMeta: document.getElementById('sessionMeta'),
+    thanksLine: document.getElementById('thanksLine'),
+    contextLine: document.getElementById('contextLine'),
+    stars: document.getElementById('stars'),
+    ratingLabel: document.getElementById('ratingLabel'),
+    aspectsBlock: document.getElementById('aspectsBlock'),
+    aspectsPrompt: document.getElementById('aspectsPrompt'),
+    aspectChips: document.getElementById('aspectChips'),
+    commentBlock: document.getElementById('commentBlock'),
+    comment: document.getElementById('comment'),
+    charCount: document.getElementById('charCount'),
+    submitBtn: document.getElementById('submitBtn'),
+    formError: document.getElementById('formError'),
+  };
+
+  let rating = 0;
+  let selectedAspects = new Set();
+  let aspectBuckets = { positive: [], improvement: [], negative: [] };
+  let submitting = false;
+
+  function show(id) {
+    ['loading', 'error', 'done', 'form'].forEach((k) => {
+      els[k].classList.toggle('hidden', k !== id);
+    });
+  }
+
+  function stripMd(s) {
+    return String(s || '').replace(/\*/g, '');
+  }
+
+  function setBrand(name) {
+    const n = (name || 'Rate your visit').trim() || 'Rate your visit';
+    els.brandName.textContent = n;
+    els.logoLetter.textContent = (n.replace(/[^A-Za-z0-9]/g, '')[0] || 'R').toUpperCase();
+    document.title = 'Rate your visit · ' + n;
+  }
+
+  function currentAspectList() {
+    if (rating >= 4) return { key: 'positive', list: aspectBuckets.positive || [] };
+    if (rating === 3) return { key: 'improvement', list: aspectBuckets.improvement || [] };
+    return { key: 'negative', list: aspectBuckets.negative || [] };
+  }
+
+  function renderStars() {
+    els.stars.innerHTML = '';
+    for (let i = 1; i <= 5; i++) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'star-btn' + (i <= rating ? ' on' : '');
+      btn.setAttribute('aria-label', i + ' star' + (i > 1 ? 's' : ''));
+      btn.setAttribute('role', 'radio');
+      btn.setAttribute('aria-checked', i === rating ? 'true' : 'false');
+      btn.textContent = '★';
+      btn.addEventListener('click', () => setRating(i));
+      els.stars.appendChild(btn);
+    }
+  }
+
+  function renderAspects() {
+    const { key, list } = currentAspectList();
+    els.aspectsPrompt.textContent = ASPECT_PROMPTS[key] || 'What stood out?';
+    els.aspectChips.innerHTML = '';
+    selectedAspects = new Set();
+    (list || []).forEach((row) => {
+      const id = Array.isArray(row) ? row[0] : row.id;
+      const label = Array.isArray(row) ? row[1] : (row.label || id);
+      if (!id) return;
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'chip';
+      chip.dataset.id = id;
+      chip.textContent = label;
+      chip.addEventListener('click', () => {
+        if (selectedAspects.has(id)) selectedAspects.delete(id);
+        else selectedAspects.add(id);
+        chip.classList.toggle('on', selectedAspects.has(id));
+      });
+      els.aspectChips.appendChild(chip);
+    });
+  }
+
+  function setRating(n) {
+    rating = n;
+    els.ratingLabel.textContent = RATING_LABELS[n] || '';
+    els.aspectsBlock.classList.remove('hidden');
+    els.commentBlock.classList.remove('hidden');
+    els.submitBtn.disabled = false;
+    renderStars();
+    renderAspects();
+  }
+
+  function syncSubmitEnabled() {
+    els.submitBtn.disabled = !rating || submitting;
+  }
+
+  async function loadSession() {
+    if (!token || !phone) {
+      els.errorMessage.textContent = 'This feedback link is missing information.';
+      show('error');
+      return;
+    }
+
+    try {
+      const q = new URLSearchParams({ token, phone });
+      const res = await fetch('/api/feedback/form-session?' + q.toString());
+      const data = await res.json().catch(() => ({}));
+
+      if (res.status === 410) {
+        els.errorMessage.textContent = data.error || 'This feedback link has expired.';
+        show('error');
+        return;
+      }
+      if (!res.ok || !data.ok) {
+        els.errorMessage.textContent = data.error || 'This feedback link is invalid.';
+        show('error');
+        return;
+      }
+
+      const restaurantName = data.restaurant_name || data.display_name || (slug ? slug.replace(/-/g, ' ') : '');
+      if (restaurantName) setBrand(restaurantName);
+      if (data.customer_name) {
+        els.sessionMeta.textContent = 'Hi ' + data.customer_name;
+      }
+
+      if (data.already_submitted) {
+        els.doneTitle.textContent = 'Thank you!';
+        els.doneMessage.textContent = "We've already received your feedback" +
+          (data.customer_name ? ', ' + data.customer_name : '') + '.';
+        show('done');
+        return;
+      }
+
+      els.thanksLine.textContent = data.thanks_line || 'Thank you for visiting us today';
+      const ctx = stripMd(data.context_line || '');
+      els.contextLine.textContent = ctx;
+      els.contextLine.classList.toggle('hidden', !ctx);
+
+      aspectBuckets = data.aspects || aspectBuckets;
+      renderStars();
+      show('form');
+    } catch (err) {
+      els.errorMessage.textContent = 'Could not load the feedback form. Please try again.';
+      show('error');
+    }
+  }
+
+  async function submit() {
+    if (!rating || submitting) return;
+    submitting = true;
+    els.formError.classList.add('hidden');
+    els.submitBtn.classList.add('busy');
+    els.submitBtn.textContent = 'Sending…';
+    syncSubmitEnabled();
+
+    try {
+      const res = await fetch('/api/feedback/submit-form', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token,
+          phone,
+          rating,
+          aspects: Array.from(selectedAspects),
+          comment: (els.comment.value || '').trim() || null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (res.status === 410) {
+        els.errorMessage.textContent = data.error || 'This feedback link has expired.';
+        show('error');
+        return;
+      }
+      if (!res.ok || !data.ok) {
+        els.formError.textContent = data.error || 'Could not submit feedback. Please try again.';
+        els.formError.classList.remove('hidden');
+        return;
+      }
+
+      els.doneTitle.textContent = 'Thank you!';
+      els.doneMessage.textContent = data.already_submitted
+        ? "We've already received your feedback."
+        : (els.thanksLine.textContent || 'Thanks for sharing your experience.');
+      show('done');
+    } catch (err) {
+      els.formError.textContent = 'Network error — please try again.';
+      els.formError.classList.remove('hidden');
+    } finally {
+      submitting = false;
+      els.submitBtn.classList.remove('busy');
+      els.submitBtn.textContent = 'Submit feedback';
+      syncSubmitEnabled();
+    }
+  }
+
+  els.comment.addEventListener('input', () => {
+    els.charCount.textContent = String((els.comment.value || '').length);
+  });
+  els.submitBtn.addEventListener('click', submit);
+
+  if (slug) setBrand(slug.replace(/-/g, ' '));
+  loadSession();
+})();
+  </script>
+</body>
+</html>

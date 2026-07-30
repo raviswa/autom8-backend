@@ -91,7 +91,20 @@ h1{font-size:22px} .btn{display:inline-block;margin-top:16px;background:#128c7e;
 
 router.get('/feedback', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store, max-age=0, must-revalidate');
-  res.sendFile(path.join(__dirname, '..', '..', 'public', 'feedback.html'));
+  const filePath = path.join(__dirname, '..', '..', 'public', 'feedback.html');
+  res.sendFile(filePath, (err) => {
+    if (!err) return;
+    console.error('[webcart/feedback] missing feedback.html:', err.message);
+    res
+      .status(404)
+      .type('html')
+      .send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Feedback unavailable</title>
+<style>body{font-family:system-ui,sans-serif;max-width:420px;margin:48px auto;padding:0 16px;color:#1f2937;background:#fff9ef}
+h1{font-size:22px}p{color:#6b7280;line-height:1.5}</style></head>
+<body><h1>Feedback page unavailable</h1>
+<p>We couldn't open the rating form right now. Please reply to the WhatsApp message instead, or try again later.</p>
+</body></html>`);
+  });
 });
 
 

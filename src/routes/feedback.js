@@ -156,14 +156,32 @@ router.get('/form-session', async (req, res) => {
     if (!record) {
       return res.status(404).json({ ok: false, error: 'This feedback link is invalid.' });
     }
+
+    let restaurantName = null;
+    if (record.restaurant_id) {
+      const { data: tenant } = await supabaseAdmin
+        .from('tenants')
+        .select('display_name, name')
+        .eq('id', record.restaurant_id)
+        .maybeSingle();
+      restaurantName = (tenant?.display_name || tenant?.name || '').trim() || null;
+    }
+
     if (record.web_token_expires_at && new Date(record.web_token_expires_at) < new Date()) {
-      return res.status(410).json({ ok: false, error: 'This feedback link has expired.' });
+      return res.status(410).json({
+        ok: false,
+        error: 'This feedback link has expired.',
+        restaurant_name: restaurantName,
+        display_name: restaurantName,
+      });
     }
     if (record.feedback_received_at || record.web_submitted_at) {
       return res.json({
         ok: true,
         already_submitted: true,
         customer_name: record.customer_name || 'Guest',
+        restaurant_name: restaurantName,
+        display_name: restaurantName,
       });
     }
 
@@ -173,6 +191,8 @@ router.get('/form-session', async (req, res) => {
       ok: true,
       already_submitted: false,
       customer_name: record.customer_name || 'Guest',
+      restaurant_name: restaurantName,
+      display_name: restaurantName,
       context_line: contextLine,
       thanks_line: thanksLine,
       aspects: {
