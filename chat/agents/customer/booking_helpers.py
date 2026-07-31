@@ -1105,7 +1105,10 @@ async def send_service_menu(
                 break
             # Unique titles per card — identical "Select" labels can make Meta
             # echo only the label (தேர்வு) with no usable service id.
-            btn_title = service_card_button_title(row["id"], row.get("title"))
+            btn_title = service_card_button_title(
+                row["id"],
+                row.get("button_title") or row.get("title"),
+            )
             if not btn_title:
                 btn_title = select_cta
             cards.append({

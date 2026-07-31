@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from datetime import datetime, timezone, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -188,24 +189,29 @@ SERVICE_ROW_CONFIG: dict[str, dict[str, str]] = {
         "description": "Order food at your table",
         "title_key": "svc_card_dine_in_now_title",
         "desc_key": "svc_card_dine_in_now_desc",
+        # Short WA carousel button (max 20) — do NOT use the long card title.
+        "button_key": "svc_dine_in",
     },
     "door_delivery_now": {
         "title": "🛵 Home Delivery",
         "description": "Fresh food delivered to your door",
         "title_key": "svc_card_door_delivery_now_title",
         "desc_key": "svc_card_door_delivery_now_desc",
+        "button_key": "svc_home_delivery",
     },
     "takeaway_now": {
         "title": "🛍️ Take Away",
         "description": "Skip the line, pick up now",
         "title_key": "svc_card_takeaway_now_title",
         "desc_key": "svc_card_takeaway_now_desc",
+        "button_key": "svc_takeaway",
     },
     "table_reservation": {
         "title": "🗓️ Future Reservation",
         "description": "Book your preferred table in advance",
         "title_key": "svc_card_table_reservation_title",
         "desc_key": "svc_card_table_reservation_desc",
+        "button_key": "svc_table_reservation",
     },
     "scheduled_delivery": {
         "title": "🕒 Scheduled Delivery",
@@ -213,6 +219,7 @@ SERVICE_ROW_CONFIG: dict[str, dict[str, str]] = {
         "title_key": "svc_card_scheduled_delivery_title",
         "desc_key": "svc_card_scheduled_delivery_desc",
         "footnote": "scheduled",
+        "button_key": "svc_scheduled_delivery",
     },
     "scheduled_pickup": {
         "title": "🚗 Scheduled Take Away",
@@ -220,6 +227,7 @@ SERVICE_ROW_CONFIG: dict[str, dict[str, str]] = {
         "title_key": "svc_card_scheduled_pickup_title",
         "desc_key": "svc_card_scheduled_pickup_desc",
         "footnote": "scheduled",
+        "button_key": "svc_scheduled_takeaway",
     },
 }
 
@@ -368,6 +376,7 @@ def _service_row(row_id: str, lang: str | None = None) -> dict[str, str]:
     cfg = SERVICE_ROW_CONFIG[row_id]
     title = cfg["title"]
     description = cfg["description"]
+    button_title = title
     code = lang or "en"
     if lang:
         try:
@@ -376,8 +385,14 @@ def _service_row(row_id: str, lang: str | None = None) -> dict[str, str]:
                 title = reply(lang, cfg["title_key"])
             if cfg.get("desc_key"):
                 description = reply(lang, cfg["desc_key"])
+            if cfg.get("button_key"):
+                button_title = reply(lang, cfg["button_key"])
+            else:
+                button_title = title
         except Exception:
-            pass
+            button_title = title
+    else:
+        button_title = title
     if cfg.get("footnote") == "scheduled":
         try:
             from locales.customer import get_scheduled_order_footnote, normalize_lang
@@ -390,6 +405,7 @@ def _service_row(row_id: str, lang: str | None = None) -> dict[str, str]:
         "id": row_id,
         "title": title,
         "description": description,
+        "button_title": button_title,
     }
 
 
@@ -407,11 +423,54 @@ def _parse_row_id(row_id: str) -> tuple[str | None, str | None]:
     return mapping.get(row_id, (None, None))
 
 
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"  # symbols & pictographs / extended
+    "\U0001F600-\U0001F64F"  # emoticons
+    "\U0001F680-\U0001F6FF"  # transport
+    "\U0001F900-\U0001F9FF"  # supplemental
+    "\U00002600-\U000026FF"  # misc symbols
+    "\U00002700-\U000027BF"  # dingbats
+    "\uFE0F"                 # variation selector
+    "\u200D"                 # ZWJ (emoji sequences)
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _truncate_wa_button(text: str, limit: int = 20) -> str:
+    """Truncate to WhatsApp's 20-char button limit without mid-word cuts when possible."""
+    s = (text or "").strip()
+    if len(s) <= limit:
+        return s
+    cut = s[:limit].rstrip()
+    sp = cut.rfind(" ")
+    if sp >= 6:
+        cut = cut[:sp].rstrip()
+    return cut or s[:limit]
+
+
 def _strip_emoji_title(title: str) -> str:
-    """ASCII-ish short label for carousel button titles (max 20)."""
-    cleaned = re.sub(r"[^\w\s/&+-]", " ", title or "", flags=re.UNICODE)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned[:20] or "Select"
+    """Short label for carousel button titles (max 20).
+
+    IMPORTANT: do NOT use ``[^\\w]`` — Python ``\\w`` drops Indic vowel signs /
+    viramas (Mn/Mc), which garbles Tamil/Malayalam/Hindi into broken spellings
+    like ``உணவகத் தல`` instead of ``உணவகத்தில்``.
+    """
+    cleaned = _EMOJI_RE.sub(" ", title or "")
+    kept: list[str] = []
+    for ch in cleaned:
+        cat = unicodedata.category(ch)
+        if ch.isalnum() or ch.isspace() or ch in "/&+-":
+            kept.append(ch)
+        elif cat in ("Mn", "Mc", "Me", "Lm"):  # combining marks / modifiers
+            kept.append(ch)
+        elif cat.startswith("L"):  # any letter
+            kept.append(ch)
+        else:
+            kept.append(" ")
+    cleaned = re.sub(r"\s+", " ", "".join(kept)).strip()
+    return _truncate_wa_button(cleaned) or "Select"
 
 
 def service_card_button_title(row_id: str, title: str | None = None) -> str:
@@ -450,8 +509,12 @@ def match_service_row_choice(
         title = str(row.get("title") or "")
         if title and (raw == title or lower == title.lower() or norm_raw == _norm(title)):
             return rid
-        btn = service_card_button_title(rid, title)
+        btn = service_card_button_title(rid, row.get("button_title") or title)
         if btn and (raw == btn or lower == btn.lower() or norm_raw == _norm(btn)):
+            return rid
+        # Also accept the untruncated localized short label
+        raw_btn = str(row.get("button_title") or "").strip()
+        if raw_btn and (raw == raw_btn or lower == raw_btn.lower() or norm_raw == _norm(raw_btn)):
             return rid
         body = service_card_body_text(rid, title=title, description=row.get("description"))
         first = body.split("\n", 1)[0].strip().strip("*")

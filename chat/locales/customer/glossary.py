@@ -157,8 +157,8 @@ PREFERRED_TRANSLATION = {
         "bn": "রেস্টুরেন্টে খাওয়া",
         "mr": "रेस्टॉरंटमध्ये जेवण",
         "te": "రెస్టారెంట్‌లో తినడం",
-        "kn": "ರೆಸ್ಟೋರೆಂಟ್‌ನಲ್ಲಿ ತಿನ್ನುವುದು",
-        "ml": "റെസ്റ്റോറന്റിൽ കഴിക്കൽ",
+        "kn": "ರೆಸ್ಟೋರೆಂಟ್ ಊಟ",
+        "ml": "റെസ്റ്റോറന്റ് ഭക്ഷണം",
         "gu": "રેસ્ટોરન્ટમાં જમવું",
     },
     "Delivery": {
@@ -207,7 +207,7 @@ PREFERRED_TRANSLATION = {
         # shipping, especially since this replaces the earlier Latin-only
         # fallback.
         "hi": "शेड्यूल्ड डिलीवरी",
-        "ta": "திட்டமிடப்பட்ட டெலிவரி",
+        "ta": "பின்னர் டெலிவரி",  # short WA-safe; card title keeps திட்டமிடப்பட்ட
         "bn": "শিডিউলড ডেলিভারি",
         "mr": "शेड्यूल्ड डिलिव्हरी",
         "te": "షెడ్యూల్డ్ డెలివరీ",
@@ -221,7 +221,7 @@ PREFERRED_TRANSLATION = {
         # inconsistency vs. other locales here, kept per user decision).
         # Other locales use "Scheduled" as transliterated loanword +
         # native "parcel", mirroring the Scheduled delivery pattern.
-        "ta": "திட்டமிடப்பட்ட பார்சல்",  # user-specified
+        "ta": "பின்னர் பார்சல்",  # short WA-safe; card title keeps திட்டமிடப்பட்ட
         "hi": "शेड्यूल्ड पार्सल",
         "bn": "শিডিউলড পার্সেল",
         "mr": "शेड्यूल्ड पार्सल",
