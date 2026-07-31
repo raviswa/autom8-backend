@@ -10,7 +10,8 @@
 #   2. BALANCE      → "what's my balance / outstanding / kitna baaki hai"
 #   3. PAYMENT      → "paid ₹5000 upi ref 12345 / sent 2000 gpay"
 #   4. ORDER_STATUS → text/keyword only (not on the 3-button menu)
-#   5. FALLBACK     → main menu buttons
+#   5. NLP_ORDER    → free-text order parse (feature-flagged per supplier)
+#   6. FALLBACK     → main menu buttons
 #
 # Language: preferred_language on supply_clients (en/hi/bn/mr/te/ta). Detected
 # from Unicode script on free-text; replies/buttons come from locales/supply.
@@ -33,6 +34,7 @@
 
 import logging
 import re
+import uuid
 from typing import Optional
 
 from db.queries import (
@@ -55,6 +57,7 @@ from tools.supply_whatsapp import send_supply_text, send_supply_buttons
 logger = logging.getLogger(__name__)
 
 _MENU_ACTIONS = frozenset({'PLACE_ORDER', 'CHECK_BALANCE', 'ORDER_STATUS', 'RECORD_PAYMENT'})
+_NLP_EDIT_CANCEL = frozenset({'EDIT_ORDER', 'CANCEL_ORDER'})
 
 # ── Intent patterns (English / transliteration + native scripts) ──────────────
 
@@ -268,6 +271,18 @@ async def handle_supply_message(
             )
             await save_supply_session(supplier_id, phone, client_id, session)
             return
+        if reply_id.startswith('CONFIRM_NLP_ORDER:'):
+            await _handle_nlp_order_confirmation(
+                phone, supplier_id, client_id, session, reply_id
+            )
+            await save_supply_session(supplier_id, phone, client_id, session)
+            return
+        if reply_id in _NLP_EDIT_CANCEL:
+            await _handle_nlp_order_edit_or_cancel(
+                phone, supplier_id, client_id, session, reply_id
+            )
+            await save_supply_session(supplier_id, phone, client_id, session)
+            return
         if reply_id in _MENU_ACTIONS:
             await _dispatch_supply_action(
                 reply_id, phone, supplier_id, client_id, session
@@ -296,6 +311,9 @@ async def handle_supply_message(
 
     elif _ORDER_STATUS_RE.search(text):
         await _handle_order_status(phone, supplier_id, client_id, session)
+
+    elif await _try_handle_nlp_order(phone, supplier_id, client_id, session, text):
+        pass  # handled
 
     else:
         await _handle_fallback(phone, supplier_id, client_id, session)
@@ -523,4 +541,298 @@ async def _handle_fallback(
         supplier_id = supplier_id,
         client_id   = client_id,
         footer      = reply(lang, 'menu_footer'),
+    )
+
+
+# ── Free-text NLP order (feature-flagged, B2B Supply only) ────────────────────
+
+async def _try_handle_nlp_order(
+    phone: str,
+    supplier_id: str,
+    client_id: str,
+    session: dict,
+    text: str,
+) -> bool:
+    """
+    Attempt free-text order parse. Returns True if this path handled the
+    message (including partial/no-match replies). Returns False so the
+    caller can fall through to _handle_fallback when the feature is off
+    or the message does not look like an order.
+    """
+    from agents.supply.nlp_order_parser import (
+        is_nlp_order_enabled,
+        looks_like_order,
+        parse_supply_order_text,
+    )
+    from agents.supply.nlp_api import log_nlp_parse, preview_nlp_prices
+
+    if not await is_nlp_order_enabled(supplier_id):
+        return False
+    if not looks_like_order(text):
+        return False
+
+    lang = _lang(session)
+    parse_result = await parse_supply_order_text(text, supplier_id, client_id)
+    draft_id = uuid.uuid4().hex[:12]
+
+    await log_nlp_parse(
+        supplier_id,
+        client_id,
+        raw_text=text,
+        parsed_output=parse_result.to_dict(),
+        unmatched=parse_result.unmatched,
+        confidence_avg=parse_result.avg_confidence,
+        outcome='parsed' if parse_result.all_high_confidence else (
+            'partial' if parse_result.matched else 'no_match'
+        ),
+        draft_id=draft_id,
+        phone=phone,
+    )
+    try:
+        await log_supply_notification(
+            supplier_id=supplier_id,
+            client_id=client_id,
+            phone=phone,
+            template_name='nlp_order_parse',
+            status='logged',
+            payload={
+                'draft_id': draft_id,
+                'raw_text': text,
+                'parsed': parse_result.to_dict(),
+                'avg_confidence': parse_result.avg_confidence,
+            },
+        )
+    except Exception as exc:
+        logger.warning('[supply-agent] nlp parse notification log failed: %s', exc)
+
+    # Partial / unmatched → explain + webcart fallback (do not force broken order)
+    if not parse_result.all_high_confidence:
+        understood_lines = []
+        for m in parse_result.matched:
+            understood_lines.append(
+                f"• {m.quantity:g} {m.unit or ''} {m.matched_name or m.raw_segment}".strip()
+            )
+        unclear = list(parse_result.unmatched)
+        for amb in parse_result.ambiguous:
+            names = ', '.join(
+                c.get('name') or c.get('id') for c in (amb.get('candidates') or [])[:3]
+            )
+            unclear.append(f"{amb.get('segment')} → {names}")
+
+        understood_block = (
+            '\n'.join(understood_lines)
+            if understood_lines
+            else reply(lang, 'nlp_none_understood')
+        )
+        unclear_block = (
+            '\n'.join(f"• {u}" for u in unclear)
+            if unclear
+            else reply(lang, 'nlp_none_unclear')
+        )
+
+        try:
+            order_url = await build_order_form_url(supplier_id, client_id)
+        except Exception as exc:
+            logger.error('[supply-agent] nlp partial webcart link failed: %s', exc)
+            order_url = ''
+
+        body = reply(
+            lang,
+            'nlp_partial_body',
+            understood=understood_block,
+            unclear=unclear_block,
+            order_url=order_url or '—',
+        )
+        await send_supply_text(phone, body, supplier_id, client_id)
+        session['_state'] = 'idle'
+        return True
+
+    # High-confidence full match → price via resolvePrice (Node) + confirm buttons
+    price_items = [
+        {'item_id': m.catalog_item_id, 'qty': m.quantity}
+        for m in parse_result.matched
+    ]
+    priced = await preview_nlp_prices(supplier_id, client_id, price_items)
+    if not priced or not priced.get('lines'):
+        await send_supply_text(
+            phone, reply(lang, 'nlp_price_error'), supplier_id, client_id
+        )
+        session['_state'] = 'idle'
+        return True
+
+    bad = [ln for ln in priced['lines'] if ln.get('error')]
+    good = [ln for ln in priced['lines'] if not ln.get('error')]
+    if bad or not good:
+        await send_supply_text(
+            phone, reply(lang, 'nlp_price_error'), supplier_id, client_id
+        )
+        session['_state'] = 'idle'
+        return True
+
+    line_text = '\n'.join(
+        f"• {ln['qty']:g} {ln['unit']} {ln['name']} — ₹{_fmt_money(ln['line_total'])}"
+        for ln in good
+    )
+    confirm_body = reply(
+        lang,
+        'nlp_confirm_body',
+        lines=line_text,
+        total=_fmt_money(float(priced.get('total_amount') or 0)),
+    )
+
+    session['_pending_nlp_order'] = {
+        'draft_id': draft_id,
+        'raw_text': text,
+        'items': [
+            {'item_id': ln['item_id'], 'qty': ln['qty']}
+            for ln in good
+        ],
+        'total_amount': float(priced.get('total_amount') or 0),
+        'lines': good,
+    }
+    session['_state'] = 'awaiting_nlp_order_confirm'
+
+    await send_supply_buttons(
+        phone=phone,
+        body=confirm_body,
+        buttons=[
+            {
+                'id': f'CONFIRM_NLP_ORDER:{draft_id}',
+                'title': reply(lang, 'btn_nlp_confirm'),
+            },
+            {'id': 'EDIT_ORDER', 'title': reply(lang, 'btn_nlp_edit')},
+            {'id': 'CANCEL_ORDER', 'title': reply(lang, 'btn_nlp_cancel')},
+        ],
+        supplier_id=supplier_id,
+        client_id=client_id,
+    )
+    return True
+
+
+async def _handle_nlp_order_confirmation(
+    phone: str,
+    supplier_id: str,
+    client_id: str,
+    session: dict,
+    reply_id: str,
+) -> None:
+    """Commit pending NLP draft after explicit CONFIRM_NLP_ORDER:<draft_id>."""
+    from agents.supply.nlp_api import confirm_nlp_order, log_nlp_parse
+
+    lang = _lang(session)
+    pending = session.pop('_pending_nlp_order', None)
+    session['_state'] = 'idle'
+
+    draft_from_btn = reply_id.split(':', 1)[1] if ':' in reply_id else ''
+    if not pending or (draft_from_btn and pending.get('draft_id') != draft_from_btn):
+        await send_supply_text(
+            phone, reply(lang, 'nlp_no_pending'), supplier_id, client_id
+        )
+        return
+
+    result = await confirm_nlp_order(
+        supplier_id,
+        client_id,
+        pending['items'],
+        draft_id=pending.get('draft_id'),
+        notes='whatsapp_nlp',
+    )
+
+    if not result or result.get('_error'):
+        await log_nlp_parse(
+            supplier_id,
+            client_id,
+            raw_text=pending.get('raw_text') or '',
+            parsed_output={'items': pending.get('items')},
+            unmatched=[],
+            confidence_avg=1.0,
+            outcome='confirm_failed',
+            draft_id=pending.get('draft_id'),
+            phone=phone,
+        )
+        err = (result or {}).get('error') or reply(lang, 'nlp_confirm_failed')
+        if (result or {}).get('code') == 'CREDIT_LIMIT_EXCEEDED':
+            err = reply(lang, 'nlp_credit_blocked')
+        await send_supply_text(phone, err, supplier_id, client_id)
+        return
+
+    order = result.get('order') or {}
+    await log_nlp_parse(
+        supplier_id,
+        client_id,
+        raw_text=pending.get('raw_text') or '',
+        parsed_output={'items': pending.get('items'), 'order': order},
+        unmatched=[],
+        confidence_avg=1.0,
+        outcome='confirmed',
+        draft_id=pending.get('draft_id'),
+        phone=phone,
+        order_id=order.get('id'),
+    )
+    try:
+        await log_supply_notification(
+            supplier_id=supplier_id,
+            client_id=client_id,
+            phone=phone,
+            template_name='nlp_order_confirmed',
+            status='sent',
+            payload={
+                'draft_id': pending.get('draft_id'),
+                'order_id': order.get('id'),
+                'order_number': order.get('order_number'),
+            },
+        )
+    except Exception as exc:
+        logger.warning('[supply-agent] nlp confirm notification log failed: %s', exc)
+
+    await send_supply_text(
+        phone,
+        reply(
+            lang,
+            'nlp_order_placed',
+            order_number=order.get('order_number') or '—',
+            delivery_date=order.get('delivery_date') or '—',
+            total=_fmt_money(float(order.get('total_amount') or pending.get('total_amount') or 0)),
+        ),
+        supplier_id,
+        client_id,
+    )
+
+
+async def _handle_nlp_order_edit_or_cancel(
+    phone: str,
+    supplier_id: str,
+    client_id: str,
+    session: dict,
+    reply_id: str,
+) -> None:
+    from agents.supply.nlp_api import log_nlp_parse
+
+    lang = _lang(session)
+    pending = session.pop('_pending_nlp_order', None)
+    session['_state'] = 'idle'
+    outcome = 'edited' if reply_id == 'EDIT_ORDER' else 'cancelled'
+
+    if pending:
+        await log_nlp_parse(
+            supplier_id,
+            client_id,
+            raw_text=pending.get('raw_text') or '',
+            parsed_output={'items': pending.get('items')},
+            unmatched=[],
+            confidence_avg=1.0,
+            outcome=outcome,
+            draft_id=pending.get('draft_id'),
+            phone=phone,
+        )
+
+    if reply_id == 'EDIT_ORDER':
+        await send_supply_text(
+            phone, reply(lang, 'nlp_edit_hint'), supplier_id, client_id
+        )
+        await _handle_place_order(phone, supplier_id, client_id, session)
+        return
+
+    await send_supply_text(
+        phone, reply(lang, 'nlp_cancelled'), supplier_id, client_id
     )

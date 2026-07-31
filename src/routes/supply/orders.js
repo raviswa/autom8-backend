@@ -28,6 +28,9 @@ const { notifyClient }           = require('./notify');
 const { sendSupplyWhatsAppMessage } = require('./supplyWhatsapp');
 const { generateInvoiceForOrder } = require('./invoices');
 
+// WhatsApp NLP order preview / confirm / eval log (B2B free-text parsing)
+router.use(require('./nlpOrders'));
+
 const VALID_STATUSES = [
   'requested',
   'confirmed',

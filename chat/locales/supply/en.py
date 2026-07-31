@@ -64,4 +64,44 @@ REPLIES = {
     'status_out_for_delivery': '🚚 Out for delivery',
     'status_delivered': '✅ Delivered',
     'status_partially_delivered': '⚠️ Partially delivered',
+    # NLP free-text order
+    'nlp_confirm_body': (
+        "Please confirm your order:\n\n"
+        "{lines}\n\n"
+        "*Total: ₹{total}*\n\n"
+        "Tap Confirm to place this reservation, Edit for the order form, or Cancel."
+    ),
+    'nlp_partial_body': (
+        "I understood some of your order, but not everything.\n\n"
+        "*Understood:*\n{understood}\n\n"
+        "*Needs clarification:*\n{unclear}\n\n"
+        "Please use the full order form so nothing is missed:\n{order_url}"
+    ),
+    'nlp_none_understood': '(nothing matched yet)',
+    'nlp_none_unclear': '(see message above)',
+    'nlp_price_error': (
+        "Sorry, I could not price those items right now. "
+        "Please use the order form or try again in a moment."
+    ),
+    'nlp_no_pending': "No pending order to confirm. Please send your order again.",
+    'nlp_confirm_failed': (
+        "Sorry, we could not place that order right now. Please try again "
+        "or use the order form."
+    ),
+    'nlp_credit_blocked': (
+        "Order blocked — your credit limit would be exceeded. "
+        "Please contact your supplier or record a payment first."
+    ),
+    'nlp_order_placed': (
+        "✅ Reservation submitted!\n\n"
+        "Order *{order_number}*\n"
+        "Delivery: {delivery_date}\n"
+        "Total: ₹{total}\n\n"
+        "Your supplier will confirm shortly."
+    ),
+    'nlp_edit_hint': "Opening your order form so you can edit quantities.",
+    'nlp_cancelled': "Order cancelled. Send a new message whenever you are ready.",
+    'btn_nlp_confirm': '✅ Confirm',
+    'btn_nlp_edit': '✏️ Edit form',
+    'btn_nlp_cancel': '❌ Cancel',
 }
