@@ -176,6 +176,7 @@ const LOB_SCHEMAS = {
       'bundle_components',
       'image_url_2', 'image_url_3', 'image_url_4', 'image_url_5',
       'discount_percent', 'discount_days',
+      'low_stock_alert_units',
     ],
     templateColWidths: [
       { wch: 10 }, { wch: 28 }, { wch: 40 }, { wch: 8 }, { wch: 14 }, { wch: 48 }, { wch: 12 },
@@ -185,14 +186,15 @@ const LOB_SCHEMAS = {
       { wch: 28 },
       { wch: 40 }, { wch: 40 }, { wch: 40 }, { wch: 40 },
       { wch: 14 }, { wch: 12 },
+      { wch: 14 },
     ],
     templateExamples: [
-      ['MP-250', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 150, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '250g', 250, 50, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', '', 20, 7],
-      ['MP-500', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 280, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '500g', 500, 40, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', '', '', ''],
-      ['MP-1KG', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 520, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '1kg', 1000, 20, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', '', '', ''],
-      ['MP-100', 'Mango Pickle', '100g jar for samplers', 70, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '100g', 100, 100, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', '', '', ''],
-      ['NEW-GINGER', 'Ginger Pickle (launch)', 'Batch cooking next week', 180, 'Pickles', '', 'TRUE', 'PRODUCT', '', '250g', 250, '', 'coming_soon', '2026-08-01', 50, 90, '', 'Ginger, chilli, mustard oil', 'Mustard', '', '', '', '', '', '', ''],
-      ['HAMPER-PICKLE-3', 'Pickle Sampler (3×100g)', 'Three favourite pickles in travel jars', 249, 'Hampers', '', 'TRUE', 'BUNDLE', '', '3×100g', 300, 15, '', '', '', 90, '2026-07-15', '', '', 'MP-100:3', '', '', '', '', '', ''],
+      ['MP-250', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 150, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '250g', 250, 50, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', '', 20, 7, 5],
+      ['MP-500', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 280, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '500g', 500, 40, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', '', '', '', 5],
+      ['MP-1KG', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 520, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '1kg', 1000, 20, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', '', '', '', 5],
+      ['MP-100', 'Mango Pickle', '100g jar for samplers', 70, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '100g', 100, 100, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', '', '', '', '', '', '', 10],
+      ['NEW-GINGER', 'Ginger Pickle (launch)', 'Batch cooking next week', 180, 'Pickles', '', 'TRUE', 'PRODUCT', '', '250g', 250, '', 'coming_soon', '2026-08-01', 50, 90, '', 'Ginger, chilli, mustard oil', 'Mustard', '', '', '', '', '', '', '', 5],
+      ['HAMPER-PICKLE-3', 'Pickle Sampler (3×100g)', 'Three favourite pickles in travel jars', 249, 'Hampers', '', 'TRUE', 'BUNDLE', '', '3×100g', 300, 15, '', '', '', 90, '2026-07-15', '', '', 'MP-100:3', '', '', '', '', '', '', 5],
     ],
     columnHelp: [
       ['Column guide - PACKAGED FOOD / Home Baker (NOT restaurant)'],
@@ -207,6 +209,7 @@ const LOB_SCHEMAS = {
       ['pack_size_label - 250g, 500g, 1kg (pack pills when variant_group_id is set)'],
       ['weight_grams - courier / Shiprocket parcel weight'],
       ['current_stock - batch jars on hand (blank = leave unchanged on merge). 0 = sold out + waitlist. Prefer Record batch for production receipts.'],
+      ['low_stock_alert_units - WhatsApp/manager alert when remaining units <= this (blank = 5).'],
       ['availability_status - blank/in_stock | sold_out | coming_soon | preorder'],
       ['launch_at - ISO date for coming_soon (e.g. 2026-08-01)'],
       ['deposit_amount - optional preorder deposit (INR)'],
@@ -274,6 +277,12 @@ const LOB_SCHEMAS = {
         discount_days: discountDaysRaw != null && discountDaysRaw !== ''
           ? parseInt(String(discountDaysRaw).replace(/\D/g, ''), 10) || null
           : null,
+        low_stock_alert_units: (() => {
+          const raw = row['low_stock_alert_units'] ?? row['Low Stock Alert Units'] ?? row['low_stock_alert'];
+          if (raw == null || raw === '') return null;
+          const n = parseInt(String(raw).replace(/\D/g, ''), 10);
+          return Number.isFinite(n) && n >= 0 ? n : null;
+        })(),
       };
     },
     validateRow(item, rowNum) {

@@ -244,6 +244,11 @@ async function handleMenuUpload(req, res) {
         pack_size_label:     item.pack_size_label ? String(item.pack_size_label).trim() : null,
         weight_grams:        item.weight_grams != null && item.weight_grams !== '' ? parseInt(item.weight_grams, 10) || null : null,
         current_stock:       stockQty,
+        low_stock_alert_units: (() => {
+          if (item.low_stock_alert_units == null || item.low_stock_alert_units === '') return packagedLob ? 5 : null;
+          const n = parseInt(item.low_stock_alert_units, 10);
+          return Number.isFinite(n) && n >= 0 ? n : (packagedLob ? 5 : null);
+        })(),
         shelf_life_days:     item.shelf_life_days != null && item.shelf_life_days !== '' ? parseInt(item.shelf_life_days, 10) || null : null,
         made_on_date:        item.made_on_date ? String(item.made_on_date).trim().slice(0, 10) : null,
         ingredients:         item.ingredients ? String(item.ingredients).trim() : null,
@@ -411,6 +416,7 @@ async function handleMenuUpload(req, res) {
             patch.is_available = patch.is_stocked;
             patch.availability_status = nextStock > 0 ? 'in_stock' : 'sold_out';
           }
+          if (row.low_stock_alert_units == null) delete patch.low_stock_alert_units;
           dbErr = await writeRow('update', existing.id, patch);
           if (!dbErr) updated++;
         } else {
@@ -693,6 +699,25 @@ async function handleMarkAllStocked(req, res) {
 
 const menuItemMarkAllStockedMiddleware = [authenticateToken, getRestaurantId, handleMarkAllStocked];
 router.post('/menu-items/mark-all-stocked', ...menuItemMarkAllStockedMiddleware);
+
+// ── GET /api/menu-items/stock-alerts — Today's low-stock / sold-out alerts ───
+
+async function handleListStockAlerts(req, res) {
+  try {
+    if (!['owner', 'manager', 'brand_owner'].includes(req.user_role))
+      return res.status(403).json({ error: 'Unauthorized' });
+    const { listStockAlertsForDay, istDayKey } = require('../../helpers/stockAlerts');
+    const day = req.query.day || istDayKey();
+    const alerts = await listStockAlertsForDay(supabaseAdmin, req.restaurant_id, day);
+    res.json({ success: true, day, alerts });
+  } catch (err) {
+    console.error('[menu-items-stock-alerts]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+const menuItemStockAlertsMiddleware = [authenticateToken, getRestaurantId, handleListStockAlerts];
+router.get('/menu-items/stock-alerts', ...menuItemStockAlertsMiddleware);
 
 // ── POST /api/menu-items/:id/restock — Add/set batch qty + waitlist notify ───
 
@@ -1125,4 +1150,5 @@ module.exports.menuItemBulkRestockMiddleware = menuItemBulkRestockMiddleware;
 module.exports.menuItemLaunchMiddleware = menuItemLaunchMiddleware;
 module.exports.menuItemSpecialTodayMiddleware = menuItemSpecialTodayMiddleware;
 module.exports.menuItemDiscountMiddleware = menuItemDiscountMiddleware;
+module.exports.menuItemStockAlertsMiddleware = menuItemStockAlertsMiddleware;
 module.exports.resetDailySpecialDishes = resetDailySpecialDishes;

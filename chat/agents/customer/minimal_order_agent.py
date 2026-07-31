@@ -409,9 +409,48 @@ async def _handle_repeat_order(
     if service_type not in ("takeaway", "delivery", "dine_in"):
         service_type = "takeaway"
 
-    total = float(payload.get("totals", {}).get("total") or payload.get("order_total") or 0)
-    if total < 1:
-        total = sum(float(r["price"]) * int(r["qty"]) for r in items)
+    previous_total = float(payload.get("totals", {}).get("total") or payload.get("order_total") or 0)
+    if previous_total < 1:
+        previous_total = sum(float(r["price"]) * int(r["qty"]) for r in items)
+
+    # Live stock + reprice before minting payment link
+    from tools.stock_bridge import validate_and_price_cart
+
+    live = await validate_and_price_cart(restaurant_id, items)
+    if not live.get("ok"):
+        shortages = live.get("shortages") or []
+        if shortages:
+            lines_txt = "\n".join(
+                f"• {s.get('name') or 'Item'} — only {s.get('available', 0)} left "
+                f"(you need {s.get('asked', '?')})"
+                for s in shortages[:8]
+            )
+            await send_whatsapp_message(
+                phone,
+                f"Sorry — some items from your last order aren't available right now:\n\n"
+                f"{lines_txt}\n\nPlease open the menu link to pick alternatives. 🙏",
+                restaurant_id,
+            )
+        else:
+            await send_whatsapp_message(
+                phone,
+                "Sorry — we couldn't verify stock for your last order right now. "
+                "Please try the menu link instead. 🙏",
+                restaurant_id,
+            )
+        return
+
+    priced_lines = live.get("lines") or []
+    total = float(live.get("total") or 0)
+    if total < 1 or not priced_lines:
+        await send_whatsapp_message(
+            phone,
+            build_repeat_unavailable_message(store_name, lang=lang),
+            restaurant_id,
+        )
+        return
+
+    price_changed = abs(total - previous_total) >= 0.5
 
     token_number = await get_next_token_number(restaurant_id)
     booking = await create_booking(
@@ -431,14 +470,18 @@ async def _handle_repeat_order(
 
     cart_snapshot = {}
     order_text_lines = []
-    for row in items:
-        cart_snapshot[row["id"]] = {
-            "title": row["name"],
-            "name": row["name"],
-            "qty": row["qty"],
-            "unit_price": row["price"],
+    for row in priced_lines:
+        item_id = str(row.get("id") or row.get("menu_item_id"))
+        name = str(row.get("name") or "Item")
+        qty = int(row.get("qty") or 0)
+        unit_price = float(row.get("unit_price") or row.get("price") or 0)
+        cart_snapshot[item_id] = {
+            "title": name,
+            "name": name,
+            "qty": qty,
+            "unit_price": unit_price,
         }
-        order_text_lines.append(f"{row['qty']}x {row['name']}")
+        order_text_lines.append(f"{qty}x {name}")
     order_text_display = ", ".join(order_text_lines)
 
     pay_session: dict[str, Any] = {
@@ -478,24 +521,34 @@ async def _handle_repeat_order(
         cart_snapshot=cart_snapshot,
         totals={"total": total},
     )
+    # Stock is validated now; deduct only after payment succeeds (not at link mint).
+    prepay_payload["deduct_stock_on_pay"] = True
     await persist_prepay_payload(booking_id, prepay_payload)
     session_state.update(pay_session)
     session_state["minimal_step"] = "awaiting_repeat_payment"
     session_state["last_order_summary"] = order_text_display
 
-    preview_lines = [f"- {r['qty']}x {r['name']}" for r in items[:6]]
-    if len(items) > 6:
-        preview_lines.append(f"- +{len(items) - 6} more item(s)")
+    preview_lines = [f"- {int(r.get('qty') or 0)}x {r.get('name')}" for r in priced_lines[:6]]
+    if len(priced_lines) > 6:
+        preview_lines.append(f"- +{len(priced_lines) - 6} more item(s)")
 
     gateway_label = checkout_gateway_label(pay_session.get("payment_gateway") or "phonepe")
+    from tools.db_tools import customer_facing_token
+    display_ref = customer_facing_token(token_number)
     body_text = build_repeat_confirm_body(
-        order_ref=booking_id[-8:],
-        token_label=str(token_number),
+        order_ref=display_ref,
+        token_label=display_ref,
         total=total,
         preview_lines=preview_lines,
         gateway_label=gateway_label,
         lang=lang,
     )
+    if price_changed:
+        body_text = (
+            f"{body_text}\n\n"
+            f"Prices updated — new total ₹{total:.0f} "
+            f"(was ₹{previous_total:.0f})."
+        )
 
     sent = await send_whatsapp_cta_url(
         phone,
@@ -510,7 +563,7 @@ async def _handle_repeat_order(
         fallback = reply(
             lang,
             "webcart_confirm_fallback",
-            order_ref=booking_id[-8:],
+            order_ref=display_ref,
             total=total,
             payment_link=payment_link,
         )
