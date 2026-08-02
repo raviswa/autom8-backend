@@ -971,25 +971,36 @@ async function registerStandalone(req, res, opts) {
       console.warn('[onboarding] Catalog seed failed (non-fatal):', e.message);
     }
 
-    // FR-9: B2B Supply → create suppliers row linked to same auth user
+    // FR-9: B2B / Supply → create suppliers row linked to same auth user
+    // (catalog alias may store tenants.lob_type as supply|b2b_supply|b2b)
     let supplier = null;
-    if (lob_type === 'b2b') {
+    const supplyPortalLobs = new Set(['b2b', 'supply', 'b2b_supply']);
+    if (supplyPortalLobs.has(String(lob_type || '').toLowerCase())) {
       try {
-        const { data: sup, error: supErr } = await supabaseAdmin.from('suppliers').insert({
-          auth_user_id:  authUserId,
-          name:          owner_name.trim(),
-          business_name: (display_name || name).trim(),
-          email:         email.trim().toLowerCase(),
-          phone:         (whatsapp_number || phone || manager_phone || '').toString().replace(/\D/g, '') || '0000000000',
-          city:          city || null,
-          address:       address_line1 || null,
-          lob_type:      'food_service',
-          waba_phone:    whatsapp_number || null,
-          waba_phone_number_id: embeddedSignup?.phone_number_id || phone_number_id || null,
-          is_active:     true,
-        }).select().single();
-        if (supErr) throw supErr;
-        supplier = sup;
+        const { data: existingSup } = await supabaseAdmin
+          .from('suppliers')
+          .select('id')
+          .or(`auth_user_id.eq.${authUserId},email.eq.${email.trim().toLowerCase()}`)
+          .maybeSingle();
+        if (existingSup) {
+          supplier = existingSup;
+        } else {
+          const { data: sup, error: supErr } = await supabaseAdmin.from('suppliers').insert({
+            auth_user_id:  authUserId,
+            name:          owner_name.trim(),
+            business_name: (display_name || name).trim(),
+            email:         email.trim().toLowerCase(),
+            phone:         (whatsapp_number || phone || manager_phone || '').toString().replace(/\D/g, '') || '0000000000',
+            city:          city || null,
+            address:       address_line1 || null,
+            lob_type:      'food_service',
+            waba_phone:    whatsapp_number || null,
+            waba_phone_number_id: embeddedSignup?.phone_number_id || phone_number_id || null,
+            is_active:     true,
+          }).select().single();
+          if (supErr) throw supErr;
+          supplier = sup;
+        }
       } catch (supCreateErr) {
         console.error('[onboarding] supplier create failed (non-fatal):', supCreateErr.message);
         await recordRegistrationFailure({
