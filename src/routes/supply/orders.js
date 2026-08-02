@@ -32,6 +32,7 @@ const supplyLedger               = require('./ledger');
 const { notifyClient }           = require('./notify');
 const { sendSupplyWhatsAppMessage } = require('./supplyWhatsapp');
 const { generateInvoiceForOrder } = require('./invoices');
+const { istTodayYmd, nextSupplyDeliveryDate } = require('../../helpers/istDate');
 
 // WhatsApp NLP order preview / confirm / eval log (B2B free-text parsing)
 router.use(require('./nlpOrders'));
@@ -250,7 +251,7 @@ router.post('/', async (req, res) => {
     }
 
     // ── Generate order number ─────────────────────────────────────────────
-    const delivDate   = delivery_date || _nextDay();
+    const delivDate   = delivery_date || _nextDay(client.delivery_days);
     const orderNumber = await _generateOrderNumber(supplier_id, delivDate);
 
     // Form / client submit = reservation (requested). Manual supplier create = confirmed.
@@ -908,10 +909,9 @@ function _isValidDate(str) {
   return /^\d{4}-\d{2}-\d{2}$/.test(str) && !isNaN(Date.parse(str));
 }
 
-function _nextDay() {
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  return d.toISOString().split('T')[0];
+function _nextDay(deliveryDays) {
+  // IST calendar; includes today when it is a delivery day (avoids UTC +24h skew).
+  return nextSupplyDeliveryDate(deliveryDays || [], 'Asia/Kolkata');
 }
 
 module.exports = router;

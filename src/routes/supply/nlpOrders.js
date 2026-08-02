@@ -21,6 +21,7 @@ const { validateFormToken } = require('./supplyFormToken');
 const { resolvePrice }      = require('./ratecards');
 const supplyLedger          = require('./ledger');
 const { sendSupplyWhatsAppMessage } = require('./supplyWhatsapp');
+const { nextSupplyDeliveryDate } = require('../../helpers/istDate');
 
 function _authFromFormToken(form_token) {
   const decoded = validateFormToken(form_token);
@@ -32,10 +33,8 @@ function _authFromFormToken(form_token) {
   };
 }
 
-function _nextDay() {
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  return d.toISOString().split('T')[0];
+function _nextDay(deliveryDays) {
+  return nextSupplyDeliveryDate(deliveryDays || [], 'Asia/Kolkata');
 }
 
 async function _generateOrderNumber(supplier_id, date) {
@@ -167,7 +166,7 @@ router.post('/nlp-confirm', async (req, res) => {
 
     const { data: client, error: clientErr } = await supabaseAdmin
       .from('supply_clients')
-      .select('id, name, phone, credit_limit, credit_auto_block, is_active')
+      .select('id, name, phone, credit_limit, credit_auto_block, is_active, delivery_days')
       .eq('id', client_id)
       .eq('supplier_id', supplier_id)
       .maybeSingle();
@@ -265,7 +264,7 @@ router.post('/nlp-confirm', async (req, res) => {
       });
     }
 
-    const delivDate = delivery_date || _nextDay();
+    const delivDate = delivery_date || _nextDay(client.delivery_days);
     const orderNumber = await _generateOrderNumber(supplier_id, delivDate);
     // Client-originated NLP order → same reservation status as webcart form
     const initialStatus = 'requested';

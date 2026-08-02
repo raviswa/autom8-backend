@@ -24,6 +24,7 @@ const opsRoles = requireSupplyRole('owner', 'manager');
 const { createFormToken, validateFormToken, renewPermanentToken }
                                                = require('./supplyFormToken');
 const supplyLedger                              = require('./ledger');
+const { nextSupplyDeliveryDate }                = require('../../helpers/istDate');
 
 const BASE_URL = process.env.SUPPLY_FORM_BASE_URL || 'https://order.autom8.works';
 
@@ -248,7 +249,7 @@ router.get('/:token', async (req, res) => {
       }
     }
 
-    // 9. Next delivery date based on client delivery days
+    // 9. Next delivery date based on client delivery days (IST calendar)
     const nextDeliveryDate = _nextDeliveryDate(client.delivery_days);
 
     // 10. Renew permanent token if close to expiry
@@ -286,25 +287,8 @@ router.get('/:token', async (req, res) => {
   }
 });
 
-const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
 function _nextDeliveryDate(deliveryDays = []) {
-  if (!deliveryDays || deliveryDays.length === 0) {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    return d.toISOString().split('T')[0];
-  }
-  const today = new Date();
-  for (let i = 1; i <= 7; i++) {
-    const d = new Date(today);
-    d.setDate(today.getDate() + i);
-    if (deliveryDays.includes(DAY_NAMES[d.getDay()])) {
-      return d.toISOString().split('T')[0];
-    }
-  }
-  const fallback = new Date();
-  fallback.setDate(fallback.getDate() + 1);
-  return fallback.toISOString().split('T')[0];
+  return nextSupplyDeliveryDate(deliveryDays, 'Asia/Kolkata');
 }
 
 module.exports = router;
