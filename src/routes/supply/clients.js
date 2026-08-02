@@ -284,6 +284,8 @@ router.post('/:id/send-form-link', authenticateToken, getSupplierContext, opsRol
       client_id: id,
       supplier_id: req.supplier_id,
       role: req.staff_role,
+      waba_phone: req.supplier?.waba_phone || null,
+      waba_phone_number_id: req.supplier?.waba_phone_number_id || null,
     });
 
     const { data: client, error } = await supabaseAdmin
@@ -304,14 +306,22 @@ router.post('/:id/send-form-link', authenticateToken, getSupplierContext, opsRol
     const token = createFormToken(req.supplier_id, client.id, validUntil, false);
     const orderFormUrl = `${SUPPLY_FORM_BASE_URL.replace(/\/$/, '')}/s/${token}`;
 
-    let notification = await notifyClient(req.supplier_id, client.phone, 'supply_order_link', {
+    const notification = await notifyClient(req.supplier_id, client.phone, 'supply_order_link', {
       client_name: client.name,
       order_form_url: orderFormUrl,
     }, client.id);
 
-    // If the approved template send fails (missing WABA / template / Meta reject),
-    // fall back to a plain-text session message with the full URL.
-    if (!notification?.ok && sendSupplyWhatsAppMessage) {
+    const templateOk = !!notification?.ok;
+    if (!templateOk) {
+      console.warn('[supply/clients/send-form-link] template failed:', notification?.error || 'unknown');
+    }
+
+    // Plain-text Cloud API send is best-effort only: Meta often accepts it outside
+    // the 24h window without delivering. Still attempt it, but tell the portal to
+    // open wa.me so the owner can guarantee delivery from their WhatsApp.
+    let textAttempted = false;
+    let textOk = false;
+    if (!templateOk && sendSupplyWhatsAppMessage) {
       const business = req.supplier?.business_name || req.supplier?.name || 'Munafe Supply';
       const text = [
         `Hi ${client.name || 'there'},`,
@@ -321,22 +331,38 @@ router.post('/:id/send-form-link', authenticateToken, getSupplierContext, opsRol
         '',
         `— ${business}`,
       ].join('\n');
-      const textOk = await sendSupplyWhatsAppMessage(client.phone, text, req.supplier_id);
-      if (textOk) {
-        notification = {
-          ok: true,
-          fallback: 'text',
-          previous_error: notification?.error || null,
-        };
-      }
+      textAttempted = true;
+      textOk = !!(await sendSupplyWhatsAppMessage(client.phone, text, req.supplier_id));
     }
+
+    const deliveryMode = templateOk ? 'template' : (textOk ? 'text_unreliable' : 'none');
+    // Only template counts as reliably delivered to the client phone.
+    const whatsappSent = templateOk;
+    const openWhatsappShare = !templateOk;
+
+    console.log('[supply/clients/send-form-link] result', {
+      client_phone: client.phone,
+      delivery_mode: deliveryMode,
+      template_ok: templateOk,
+      text_attempted: textAttempted,
+      text_ok: textOk,
+      from_waba_phone: req.supplier?.waba_phone || null,
+    });
 
     res.json({
       success: true,
       order_form_url: orderFormUrl,
       valid_until: validUntil.toISOString(),
-      whatsapp_sent: !!notification?.ok,
-      notification,
+      whatsapp_sent: whatsappSent,
+      open_whatsapp_share: openWhatsappShare,
+      delivery_mode: deliveryMode,
+      from_waba_phone: req.supplier?.waba_phone || null,
+      notification: {
+        ...(notification || {}),
+        ok: templateOk,
+        text_fallback_ok: textOk,
+        text_fallback_attempted: textAttempted,
+      },
     });
   } catch (err) {
     console.error('[supply/clients/send-form-link]', err.message);
