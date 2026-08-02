@@ -316,9 +316,8 @@ router.post('/:id/send-form-link', authenticateToken, getSupplierContext, opsRol
       console.warn('[supply/clients/send-form-link] template failed:', notification?.error || 'unknown');
     }
 
-    // Plain-text Cloud API send is best-effort only: Meta often accepts it outside
-    // the 24h window without delivering. Still attempt it, but tell the portal to
-    // open wa.me so the owner can guarantee delivery from their WhatsApp.
+    // Plain-text Cloud API via the same supply WABA (+91… business line).
+    // Only open wa.me if BOTH template and business-line Cloud API fail.
     let textAttempted = false;
     let textOk = false;
     if (!templateOk && sendSupplyWhatsAppMessage) {
@@ -335,10 +334,12 @@ router.post('/:id/send-form-link', authenticateToken, getSupplierContext, opsRol
       textOk = !!(await sendSupplyWhatsAppMessage(client.phone, text, req.supplier_id));
     }
 
-    const deliveryMode = templateOk ? 'template' : (textOk ? 'text_unreliable' : 'none');
-    // Only template counts as reliably delivered to the client phone.
-    const whatsappSent = templateOk;
-    const openWhatsappShare = !templateOk;
+    const cloudOk = templateOk || textOk;
+    const deliveryMode = templateOk ? 'template' : (textOk ? 'text' : 'none');
+    const fromWabaPhone = notification?.from_waba_phone
+      || req.supplier?.waba_phone
+      || process.env.SUPPLY_WHATSAPP_DISPLAY_PHONE
+      || null;
 
     console.log('[supply/clients/send-form-link] result', {
       client_phone: client.phone,
@@ -346,20 +347,21 @@ router.post('/:id/send-form-link', authenticateToken, getSupplierContext, opsRol
       template_ok: templateOk,
       text_attempted: textAttempted,
       text_ok: textOk,
-      from_waba_phone: req.supplier?.waba_phone || null,
+      from_waba_phone: fromWabaPhone,
     });
 
     res.json({
       success: true,
       order_form_url: orderFormUrl,
       valid_until: validUntil.toISOString(),
-      whatsapp_sent: whatsappSent,
-      open_whatsapp_share: openWhatsappShare,
+      whatsapp_sent: cloudOk,
+      open_whatsapp_share: !cloudOk,
       delivery_mode: deliveryMode,
-      from_waba_phone: req.supplier?.waba_phone || null,
+      from_waba_phone: fromWabaPhone,
       notification: {
         ...(notification || {}),
-        ok: templateOk,
+        ok: cloudOk,
+        template_ok: templateOk,
         text_fallback_ok: textOk,
         text_fallback_attempted: textAttempted,
       },

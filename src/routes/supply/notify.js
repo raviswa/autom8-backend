@@ -453,30 +453,44 @@ async function notifyClient(supplierId, clientPhone, templateKey, params = {}, c
     return { ok: false, error: `Unknown template: ${templateKey}` };
   }
 
-  // Fetch supplier WABA credentials
-  const { data: supplier, error: supErr } = await supabaseAdmin
-    .from('suppliers')
-    .select('waba_phone_number_id')
-    .eq('id', supplierId)
-    .maybeSingle();
-
-  if (supErr || !supplier?.waba_phone_number_id) {
-    const msg = 'Supplier WABA credentials not configured';
-    await logNotification({ supplierId, clientId, templateKey, clientPhone, status: 'failed', error: msg });
-    return { ok: false, error: msg };
-  }
-
   if (!clientPhone || typeof clientPhone !== 'string' || !clientPhone.trim()) {
     const errMsg = 'Client phone number is missing';
     await logNotification({ supplierId, clientId, templateKey, clientPhone, status: 'failed', error: errMsg });
     return { ok: false, error: errMsg };
   }
 
-  // Use Munafe's shared WABA token (per supplier phone_number_id)
-  // In production, suppliers may have their own tokens stored separately.
-  const wabaToken = process.env.META_WABA_TOKEN;
+  // Resolve WABA like supplyWhatsapp:
+  // 1) suppliers.waba_phone_number_id
+  // 2) SUPPLY_WHATSAPP_PHONE_NUMBER_ID (shared Autom8/Munafe supply line)
+  let phoneNumberId = process.env.SUPPLY_WHATSAPP_PHONE_NUMBER_ID || null;
+  let fromPhone = process.env.SUPPLY_WHATSAPP_DISPLAY_PHONE || null;
+  try {
+    const { data: supplier, error: supErr } = await supabaseAdmin
+      .from('suppliers')
+      .select('waba_phone_number_id, waba_phone')
+      .eq('id', supplierId)
+      .maybeSingle();
+    if (!supErr && supplier?.waba_phone_number_id) {
+      phoneNumberId = supplier.waba_phone_number_id;
+    }
+    if (!supErr && supplier?.waba_phone) {
+      fromPhone = supplier.waba_phone;
+    }
+  } catch (lookupErr) {
+    console.warn('[notify] supplier WABA lookup failed:', lookupErr.message);
+  }
+
+  if (!phoneNumberId) {
+    const msg = 'Supplier WABA credentials not configured';
+    await logNotification({ supplierId, clientId, templateKey, clientPhone, status: 'failed', error: msg });
+    return { ok: false, error: msg };
+  }
+
+  const wabaToken = process.env.META_WABA_TOKEN
+    || process.env.SUPPLY_WHATSAPP_ACCESS_TOKEN
+    || null;
   if (!wabaToken) {
-    return { ok: false, error: 'META_WABA_TOKEN not configured' };
+    return { ok: false, error: 'META_WABA_TOKEN / SUPPLY_WHATSAPP_ACCESS_TOKEN not configured' };
   }
 
   const phone = clientPhone.startsWith('+') ? clientPhone.slice(1) : clientPhone;
@@ -494,7 +508,7 @@ async function notifyClient(supplierId, clientPhone, templateKey, params = {}, c
 
   try {
     const res = await fetch(
-      `${META_API}/${supplier.waba_phone_number_id}/messages`,
+      `${META_API}/${phoneNumberId}/messages`,
       {
         method: 'POST',
         headers: {
@@ -510,16 +524,16 @@ async function notifyClient(supplierId, clientPhone, templateKey, params = {}, c
     if (!res.ok || data.error) {
       const errMsg = data.error?.message || `HTTP ${res.status}`;
       await logNotification({ supplierId, clientId, templateKey, clientPhone, status: 'failed', error: errMsg, payload: body });
-      return { ok: false, error: errMsg };
+      return { ok: false, error: errMsg, from_waba_phone: fromPhone };
     }
 
     const waMessageId = data.messages?.[0]?.id;
     await logNotification({ supplierId, clientId, templateKey, clientPhone, status: 'sent', waMessageId, payload: body });
-    return { ok: true, wa_message_id: waMessageId };
+    return { ok: true, wa_message_id: waMessageId, from_waba_phone: fromPhone, phone_number_id: phoneNumberId };
 
   } catch (err) {
     await logNotification({ supplierId, clientId, templateKey, clientPhone, status: 'failed', error: err.message, payload: body });
-    return { ok: false, error: err.message };
+    return { ok: false, error: err.message, from_waba_phone: fromPhone };
   }
 }
 
