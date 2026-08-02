@@ -103,7 +103,7 @@ function resolveSupplyResetRedirect(req) {
   if (process.env.SUPPLY_PORTAL_URL) {
     return `${String(process.env.SUPPLY_PORTAL_URL).replace(/\/$/, '')}/supply/reset-password`;
   }
-  return 'https://supply.munafe.in/supply/reset-password';
+  return 'https://app.autom8.works/supply/reset-password';
 }
 // ── POST /api/supply/auth/register ────────────────────────────────────────────
 // Creates a Supabase auth user + suppliers row in one transaction.

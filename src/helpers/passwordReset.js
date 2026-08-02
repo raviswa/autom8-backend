@@ -9,8 +9,6 @@ const ALLOWED_RESET_ORIGINS = new Set([
   'https://autom8.works',
   'https://www.autom8.works',
   'https://owner.autom8.works',
-  'https://supply.munafe.in',
-  'https://www.supply.munafe.in',
   'http://localhost:3000',
   'http://localhost:5173',
   'http://127.0.0.1:3000',

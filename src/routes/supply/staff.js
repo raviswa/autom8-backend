@@ -44,7 +44,7 @@ function resolveInviteRedirect(req) {
   if (process.env.FRONTEND_URL) {
     return `${String(process.env.FRONTEND_URL).replace(/\/$/, '')}/supply/reset-password`;
   }
-  return 'https://supply.munafe.in/supply/reset-password';
+  return 'https://app.autom8.works/supply/reset-password';
 }
 
 // ── GET /api/supply/staff ─────────────────────────────────────────────────
