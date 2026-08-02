@@ -144,7 +144,7 @@ async function getSupplierContext(req, res, next) {
  */
 function supplyAuthMiddleware(req, res, next) {
   authenticateToken(req, res, (err) => {
-    if (err) return;
+    if (err) return next(err);
     // authenticateToken already responded on failure; only continues on success
     if (res.headersSent) return;
     getSupplierContext(req, res, next);

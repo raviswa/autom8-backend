@@ -18,13 +18,75 @@ const express = require('express');
 const router  = express.Router();
 
 const { supabaseAdmin }                        = require('../../config/supabase');
-const { supplyAuthMiddleware, requireSupplyRole } = require('../../middleware/supplyAuth');
+const { authenticateToken }                    = require('../../middleware/auth');
+const { getSupplierContext, requireSupplyRole } = require('../../middleware/supplyAuth');
 const opsRoles = requireSupplyRole('owner', 'manager');
 const { createFormToken, validateFormToken, renewPermanentToken }
                                                = require('./supplyFormToken');
 const supplyLedger                              = require('./ledger');
 
 const BASE_URL = process.env.SUPPLY_FORM_BASE_URL || 'https://order.autom8.works';
+
+// ── POST /api/supply/form/generate-link ──────────────────────────────────────
+// Must be registered BEFORE /:token so "generate-link" is never treated as a token.
+// Body: { client_id, type: 'daily' | 'permanent' }
+
+router.post('/generate-link', authenticateToken, getSupplierContext, opsRoles, async (req, res) => {
+  const { client_id, type = 'daily' } = req.body;
+  const supplier_id = req.supplier_id;
+
+  if (!client_id) return res.status(400).json({ error: 'client_id is required' });
+  if (!['daily', 'permanent'].includes(type)) {
+    return res.status(400).json({ error: "type must be 'daily' or 'permanent'" });
+  }
+
+  try {
+    const { data: client, error: clientErr } = await supabaseAdmin
+      .from('supply_clients')
+      .select('id, name, is_active')
+      .eq('id', client_id)
+      .eq('supplier_id', supplier_id)
+      .maybeSingle();
+
+    if (clientErr) return res.status(500).json({ error: clientErr.message });
+    if (!client)   return res.status(404).json({ error: 'Client not found' });
+    if (!client.is_active) return res.status(400).json({ error: 'Client is inactive' });
+
+    let valid_until = null;
+    let permanent   = false;
+
+    if (type === 'permanent') {
+      permanent = true;
+    } else {
+      const { data: supplier } = await supabaseAdmin
+        .from('suppliers')
+        .select('ordering_cutoff_time, timezone')
+        .eq('id', supplier_id)
+        .maybeSingle();
+
+      const tz      = supplier?.timezone || 'Asia/Kolkata';
+      const [cutH, cutM] = (supplier?.ordering_cutoff_time || '22:00').split(':').map(Number);
+      const nowIST  = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
+      nowIST.setHours(cutH, cutM, 0, 0);
+      valid_until = nowIST;
+    }
+
+    const token    = createFormToken(supplier_id, client_id, valid_until, permanent);
+    const pathBase = permanent ? '/s/b' : '/s';
+    const url      = `${BASE_URL}${pathBase}/${token}`;
+
+    return res.json({
+      url,
+      token,
+      client_id,
+      client_name: client.name,
+      type,
+    });
+  } catch (err) {
+    console.error('[form] generate-link error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 // ── GET /api/supply/form/:token ───────────────────────────────────────────────
 // Public. Called by OrderForm.jsx on mount.
@@ -221,74 +283,6 @@ router.get('/:token', async (req, res) => {
   } catch (err) {
     console.error('[form] Unexpected error in GET /:token:', err.message);
     return res.status(500).json({ error: `Order form failed to load: ${err.message}` });
-  }
-});
-
-// ── POST /api/supply/form/generate-link ──────────────────────────────────────
-// Supplier generates a signed form link for a specific client.
-// Protected: requires supplyAuthMiddleware.
-// Also called internally by Module 13 (scheduler) at 18:00 daily.
-//
-// Body: { client_id, type: 'daily' | 'permanent' }
-// Returns: { url, token, client_id, client_name }
-
-router.post('/generate-link', supplyAuthMiddleware, opsRoles, async (req, res) => {
-  const { client_id, type = 'daily' } = req.body;
-  const supplier_id = req.supplier_id;
-
-  if (!client_id) return res.status(400).json({ error: 'client_id is required' });
-  if (!['daily', 'permanent'].includes(type)) {
-    return res.status(400).json({ error: "type must be 'daily' or 'permanent'" });
-  }
-
-  try {
-    // Verify client belongs to this supplier
-    const { data: client, error: clientErr } = await supabaseAdmin
-      .from('supply_clients')
-      .select('id, name, is_active')
-      .eq('id', client_id)
-      .eq('supplier_id', supplier_id)
-      .maybeSingle();
-
-    if (clientErr) return res.status(500).json({ error: clientErr.message });
-    if (!client)   return res.status(404).json({ error: 'Client not found' });
-    if (!client.is_active) return res.status(400).json({ error: 'Client is inactive' });
-
-    let valid_until = null;
-    let permanent   = false;
-
-    if (type === 'permanent') {
-      permanent = true;
-    } else {
-      // Daily: valid until tonight's cutoff time in supplier's timezone
-      const { data: supplier } = await supabaseAdmin
-        .from('suppliers')
-        .select('ordering_cutoff_time, timezone')
-        .eq('id', supplier_id)
-        .maybeSingle();
-
-      const tz      = supplier?.timezone || 'Asia/Kolkata';
-      const [cutH, cutM] = (supplier?.ordering_cutoff_time || '22:00').split(':').map(Number);
-      const nowIST  = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
-      nowIST.setHours(cutH, cutM, 0, 0);
-      valid_until = nowIST;
-    }
-
-    const token    = createFormToken(supplier_id, client_id, valid_until, permanent);
-    const pathBase = permanent ? '/s/b' : '/s';
-    const url      = `${BASE_URL}${pathBase}/${token}`;
-
-    return res.json({
-      url,
-      token,
-      client_id,
-      client_name: client.name,
-      type,
-    });
-
-  } catch (err) {
-    console.error('[form] generate-link error:', err.message);
-    return res.status(500).json({ error: err.message });
   }
 });
 

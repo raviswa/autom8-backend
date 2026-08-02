@@ -280,6 +280,11 @@ router.post('/', authenticateToken, getSupplierContext, opsRoles, async (req, re
 router.post('/:id/send-form-link', authenticateToken, getSupplierContext, opsRoles, async (req, res) => {
   try {
     const { id } = req.params;
+    console.log('[supply/clients/send-form-link]', {
+      client_id: id,
+      supplier_id: req.supplier_id,
+      role: req.staff_role,
+    });
 
     const { data: client, error } = await supabaseAdmin
       .from('supply_clients')
