@@ -17,7 +17,7 @@
 const express = require('express');
 const router  = express.Router();
 const { supabaseAdmin } = require('../../config/supabase');
-const { supplyAuthMiddleware: authenticateSupplyToken } = require('../../middleware/supplyAuth');
+const { supplyAuthMiddleware: authenticateSupplyToken, requireMoneyAccess } = require('../../middleware/supplyAuth');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -266,7 +266,7 @@ async function reverseDebit(orderId, clientId, supplierId, amount, note = 'Order
 // Paginated ledger entries for a client.
 // Query params: page (default 1), per_page (default 20), type (debit|credit),
 //               from (YYYY-MM-DD), to (YYYY-MM-DD)
-router.get('/:client_id', authenticateSupplyToken, async (req, res) => {
+router.get('/:client_id', authenticateSupplyToken, requireMoneyAccess, async (req, res) => {
   try {
     const { client_id } = req.params;
     const supplierId    = req.supplier.id;
@@ -331,7 +331,7 @@ router.get('/:client_id', authenticateSupplyToken, async (req, res) => {
 
 // ── GET /api/supply/ledger/:client_id/balance ────────────────────────────────
 // Returns current balance + credit summary for a client.
-router.get('/:client_id/balance', authenticateSupplyToken, async (req, res) => {
+router.get('/:client_id/balance', authenticateSupplyToken, requireMoneyAccess, async (req, res) => {
   try {
     const { client_id } = req.params;
     const supplierId    = req.supplier.id;
@@ -372,7 +372,7 @@ router.get('/:client_id/balance', authenticateSupplyToken, async (req, res) => {
 // Internal: called by Module 6 (order confirmed) to record a debit entry.
 // Body: { order_id, amount, note? }
 // Returns: { entry, alerts_fired, new_balance }
-router.post('/:client_id/debit', authenticateSupplyToken, async (req, res) => {
+router.post('/:client_id/debit', authenticateSupplyToken, requireMoneyAccess, async (req, res) => {
   try {
     const { client_id } = req.params;
     const supplierId    = req.supplier.id;
@@ -435,7 +435,7 @@ router.post('/:client_id/debit', authenticateSupplyToken, async (req, res) => {
 // ── POST /api/supply/ledger/:client_id/credit ────────────────────────────────
 // Internal: called by Module 8 (payment confirmed) to record a credit entry.
 // Body: { payment_claim_id, amount, note? }
-router.post('/:client_id/credit', authenticateSupplyToken, async (req, res) => {
+router.post('/:client_id/credit', authenticateSupplyToken, requireMoneyAccess, async (req, res) => {
   try {
     const { client_id } = req.params;
     const supplierId    = req.supplier.id;
@@ -481,7 +481,7 @@ router.post('/:client_id/credit', authenticateSupplyToken, async (req, res) => {
 // ── GET /api/supply/ledger/:client_id/export ─────────────────────────────────
 // Returns CSV of all ledger entries for a client.
 // Query params: from, to (date range)
-router.get('/:client_id/export', authenticateSupplyToken, async (req, res) => {
+router.get('/:client_id/export', authenticateSupplyToken, requireMoneyAccess, async (req, res) => {
   try {
     const { client_id } = req.params;
     const supplierId    = req.supplier.id;

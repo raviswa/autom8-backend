@@ -31,7 +31,8 @@ const router  = express.Router();
 
 const { supabaseAdmin }         = require('../../config/supabase');
 const { authenticateToken }     = require('../../middleware/auth');
-const { getSupplierContext }    = require('../../middleware/supplyAuth');
+const { getSupplierContext, requireSupplyRole } = require('../../middleware/supplyAuth');
+const opsRoles = requireSupplyRole('owner', 'manager');
 const { createFormToken }       = require('./supplyFormToken');
 const { notifyClient }          = require('./notify');
 
@@ -78,7 +79,7 @@ function getTodayCutoffDate(supplier) {
 // Includes outstanding_balance from supply_credit_ledger (if that table exists).
 // Supports ?active=true|false and ?search=name_or_phone
 
-router.get('/', authenticateToken, getSupplierContext, async (req, res) => {
+router.get('/', authenticateToken, getSupplierContext, opsRoles, async (req, res) => {
   try {
     const { active, search } = req.query;
 
@@ -152,7 +153,7 @@ router.get('/', authenticateToken, getSupplierContext, async (req, res) => {
 // Add a new buyer/client (any LOB — restaurant, retail, etc.).
 // Sends a WhatsApp welcome message if Module 12 is deployed.
 
-router.post('/', authenticateToken, getSupplierContext, async (req, res) => {
+router.post('/', authenticateToken, getSupplierContext, opsRoles, async (req, res) => {
   try {
     const {
       name,
@@ -276,7 +277,7 @@ router.post('/', authenticateToken, getSupplierContext, async (req, res) => {
 // ── GET /api/supply/clients/:id ───────────────────────────────────────────────
 // Get a single client. Verifies it belongs to the authenticated supplier.
 
-router.post('/:id/send-form-link', authenticateToken, getSupplierContext, async (req, res) => {
+router.post('/:id/send-form-link', authenticateToken, getSupplierContext, opsRoles, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -312,7 +313,7 @@ router.post('/:id/send-form-link', authenticateToken, getSupplierContext, async 
   }
 });
 
-router.get('/:id', authenticateToken, getSupplierContext, async (req, res) => {
+router.get('/:id', authenticateToken, getSupplierContext, opsRoles, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -359,7 +360,7 @@ router.get('/:id', authenticateToken, getSupplierContext, async (req, res) => {
 // Update client details. All fields optional — only provided fields are updated.
 // Phone cannot be changed (it's the identity key for the WhatsApp bot).
 
-router.put('/:id', authenticateToken, getSupplierContext, async (req, res) => {
+router.put('/:id', authenticateToken, getSupplierContext, opsRoles, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -433,7 +434,7 @@ router.put('/:id', authenticateToken, getSupplierContext, async (req, res) => {
 // Soft delete only — sets is_active = false.
 // Historical orders, ledger entries, and invoices are preserved.
 
-router.delete('/:id', authenticateToken, getSupplierContext, async (req, res) => {
+router.delete('/:id', authenticateToken, getSupplierContext, opsRoles, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -467,7 +468,7 @@ router.delete('/:id', authenticateToken, getSupplierContext, async (req, res) =>
 // entries + pending orders count.
 // Used by the supplier dashboard client account page.
 
-router.get('/:id/summary', authenticateToken, getSupplierContext, async (req, res) => {
+router.get('/:id/summary', authenticateToken, getSupplierContext, opsRoles, async (req, res) => {
   try {
     const { id } = req.params;
 

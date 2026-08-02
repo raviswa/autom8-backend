@@ -9,6 +9,8 @@ const ALLOWED_RESET_ORIGINS = new Set([
   'https://autom8.works',
   'https://www.autom8.works',
   'https://owner.autom8.works',
+  'https://supply.munafe.in',
+  'https://www.supply.munafe.in',
   'http://localhost:3000',
   'http://localhost:5173',
   'http://127.0.0.1:3000',
@@ -57,6 +59,7 @@ function resolvePasswordResetRedirectUrl(redirectTo) {
     }
     url.hash = '';
     url.search = '';
+    // Allow /reset-password and /supply/reset-password
     if (!url.pathname.endsWith('/reset-password')) {
       url.pathname = '/reset-password';
     }

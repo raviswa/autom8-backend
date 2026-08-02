@@ -16,7 +16,7 @@
 const express = require('express');
 const router  = express.Router();
 const { supabaseAdmin } = require('../../config/supabase');
-const { authenticateSupplyToken } = require('../../middleware/supplyAuth');
+const { authenticateSupplyToken, requireMoneyAccess } = require('../../middleware/supplyAuth');
 const { notifyClient } = require('./notify');
 
 // ── Helper: post a credit entry to the ledger ─────────────────────────────────
@@ -57,7 +57,7 @@ async function postLedgerCredit(supplierId, clientId, paymentClaimId, amount, no
 // Called by WhatsApp bot (Module 11) when client says "I've paid".
 // Uses supplier JWT (bot authenticates as supplier) OR an internal token.
 // Body: { client_id, claimed_amount, method, reference?, raw_message? }
-router.post('/', authenticateSupplyToken, async (req, res) => {
+router.post('/', authenticateSupplyToken, requireMoneyAccess, async (req, res) => {
   try {
     const supplierId = req.supplier.id;
     const { client_id, claimed_amount, method, reference, raw_message } = req.body;
@@ -116,7 +116,7 @@ router.post('/', authenticateSupplyToken, async (req, res) => {
 // ── GET /api/supply/payment-claims ───────────────────────────────────────────
 // Supplier views all claims, optionally filtered by status.
 // Query: status (pending|confirmed|rejected), client_id, page, per_page
-router.get('/', authenticateSupplyToken, async (req, res) => {
+router.get('/', authenticateSupplyToken, requireMoneyAccess, async (req, res) => {
   try {
     const supplierId = req.supplier.id;
     const { status, client_id, page = 1, per_page = 25 } = req.query;
@@ -166,7 +166,7 @@ router.get('/', authenticateSupplyToken, async (req, res) => {
 // ── PUT /api/supply/payment-claims/:id/confirm ───────────────────────────────
 // Supplier confirms claim → creates ledger credit → notifies client.
 // Body: { supplier_note? }
-router.put('/:id/confirm', authenticateSupplyToken, async (req, res) => {
+router.put('/:id/confirm', authenticateSupplyToken, requireMoneyAccess, async (req, res) => {
   try {
     const supplierId    = req.supplier.id;
     const { id }        = req.params;
@@ -222,7 +222,7 @@ router.put('/:id/confirm', authenticateSupplyToken, async (req, res) => {
 // ── PUT /api/supply/payment-claims/:id/reject ────────────────────────────────
 // Supplier rejects claim. No ledger entry. Notifies client.
 // Body: { supplier_note? }
-router.put('/:id/reject', authenticateSupplyToken, async (req, res) => {
+router.put('/:id/reject', authenticateSupplyToken, requireMoneyAccess, async (req, res) => {
   try {
     const supplierId    = req.supplier.id;
     const { id }        = req.params;
@@ -267,7 +267,7 @@ router.put('/:id/reject', authenticateSupplyToken, async (req, res) => {
 // Supplier records a payment directly (no client claim).
 // Creates a confirmed claim + ledger credit in one step.
 // Body: { client_id, amount, method, reference?, note?, notify_client? }
-router.post('/manual', authenticateSupplyToken, async (req, res) => {
+router.post('/manual', authenticateSupplyToken, requireMoneyAccess, async (req, res) => {
   try {
     const supplierId = req.supplier.id;
     const { client_id, amount, method, reference, note, notify_client = true } = req.body;

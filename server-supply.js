@@ -52,6 +52,7 @@ app.use(require('./src/middleware/region'));
 
 // ── Supply routes ─────────────────────────────────────────────────────────────
 app.use('/api/supply/auth',           require('./src/routes/supply/auth'));
+app.use('/api/supply/staff',          require('./src/routes/supply/staff'));
 app.use('/api/supply/clients',        require('./src/routes/supply/clients'));
 app.use('/api/supply/catalog',        require('./src/routes/supply/catalog'));
 app.use('/api/supply/ratecards',      require('./src/routes/supply/ratecards'));

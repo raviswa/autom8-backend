@@ -24,7 +24,8 @@ const express = require('express');
 const router  = express.Router();
 
 const { supabaseAdmin }        = require('../../config/supabase');
-const { supplyAuthMiddleware } = require('../../middleware/supplyAuth');
+const { supplyAuthMiddleware, requireSupplyRole } = require('../../middleware/supplyAuth');
+const opsRoles = requireSupplyRole('owner', 'manager');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -45,7 +46,7 @@ async function resolveClient(supplierId, clientId) {
 //   - client_price   (from supply_client_prices, null if no override)
 //   - has_override   (boolean)
 //   - effective_price (resolved price the client will see on the order form)
-router.get('/:client_id', supplyAuthMiddleware, async (req, res) => {
+router.get('/:client_id', supplyAuthMiddleware, opsRoles, async (req, res) => {
   try {
     const { client_id } = req.params;
 
@@ -98,7 +99,7 @@ router.get('/:client_id', supplyAuthMiddleware, async (req, res) => {
 // Bulk upsert price overrides. Saves all changes in one API call.
 // Body: { items: [{ item_id, price }] }
 // Send price: null to remove a specific override (reverts to default).
-router.put('/:client_id', supplyAuthMiddleware, async (req, res) => {
+router.put('/:client_id', supplyAuthMiddleware, opsRoles, async (req, res) => {
   try {
     const { client_id } = req.params;
     const { items } = req.body;
@@ -173,7 +174,7 @@ router.put('/:client_id', supplyAuthMiddleware, async (req, res) => {
 
 // ── DELETE /api/supply/ratecards/:client_id/:item_id ─────────────────────────
 // Remove a single price override → client reverts to default_price for that item.
-router.delete('/:client_id/:item_id', supplyAuthMiddleware, async (req, res) => {
+router.delete('/:client_id/:item_id', supplyAuthMiddleware, opsRoles, async (req, res) => {
   try {
     const { client_id, item_id } = req.params;
 
@@ -203,7 +204,7 @@ router.delete('/:client_id/:item_id', supplyAuthMiddleware, async (req, res) => 
 // Copy all price overrides from one client to another as a starting point.
 // Existing overrides on to_client_id are replaced.
 // Body: { from_client_id, to_client_id }
-router.post('/copy', supplyAuthMiddleware, async (req, res) => {
+router.post('/copy', supplyAuthMiddleware, opsRoles, async (req, res) => {
   try {
     const { from_client_id, to_client_id } = req.body;
 

@@ -21,7 +21,10 @@ const express = require('express');
 const router  = express.Router();
 
 const { supabaseAdmin } = require('../../config/supabase');
-const { supplyAuthMiddleware } = require('../../middleware/supplyAuth');
+const { supplyAuthMiddleware, requireSupplyRole } = require('../../middleware/supplyAuth');
+const catalogReadRoles = requireSupplyRole('owner', 'manager');
+const catalogWriteRoles = requireSupplyRole('owner', 'manager');
+const catalogAvailabilityRoles = requireSupplyRole('owner', 'manager');
 const { estimateDaysOfStock } = require('../../helpers/supplyConsumption');
 const {
   DEFAULT_LOB,
@@ -46,7 +49,7 @@ function parseAvailability(raw, defaultVal = true) {
 }
 
 // ── GET /api/supply/catalog ───────────────────────────────────────────────────
-router.get('/', supplyAuthMiddleware, async (req, res) => {
+router.get('/', supplyAuthMiddleware, catalogReadRoles, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('supply_catalog_items')
@@ -67,7 +70,7 @@ router.get('/', supplyAuthMiddleware, async (req, res) => {
 
 // ── GET /api/supply/catalog/meta ──────────────────────────────────────────────
 // Dashboard / upload UI: valid categories, units, GST defaults for this supplier.
-router.get('/meta', supplyAuthMiddleware, async (req, res) => {
+router.get('/meta', supplyAuthMiddleware, catalogReadRoles, async (req, res) => {
   try {
     const schema = schemaForReq(req);
     res.json(schemaMeta(schema));
@@ -79,7 +82,7 @@ router.get('/meta', supplyAuthMiddleware, async (req, res) => {
 
 // ── GET /api/supply/catalog/stock-estimates ───────────────────────────────────
 // Read-only days-of-stock estimates from opt-in POS consumption bridge.
-router.get('/stock-estimates', supplyAuthMiddleware, async (req, res) => {
+router.get('/stock-estimates', supplyAuthMiddleware, catalogReadRoles, async (req, res) => {
   try {
     const estimates = await estimateDaysOfStock(req.supplier_id);
     res.json({ estimates });
@@ -91,7 +94,7 @@ router.get('/stock-estimates', supplyAuthMiddleware, async (req, res) => {
 
 // ── GET /api/supply/catalog/available-today ───────────────────────────────────
 // Items visible on the buyer order form today.
-router.get('/available-today', supplyAuthMiddleware, async (req, res) => {
+router.get('/available-today', supplyAuthMiddleware, catalogReadRoles, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('supply_catalog_items')
@@ -112,7 +115,7 @@ router.get('/available-today', supplyAuthMiddleware, async (req, res) => {
 });
 
 // ── POST /api/supply/catalog ──────────────────────────────────────────────────
-router.post('/', supplyAuthMiddleware, async (req, res) => {
+router.post('/', supplyAuthMiddleware, catalogWriteRoles, async (req, res) => {
   try {
     const schema = schemaForReq(req);
     const {
@@ -158,7 +161,7 @@ router.post('/', supplyAuthMiddleware, async (req, res) => {
 // ── PUT /api/supply/catalog/bulk-availability ─────────────────────────────────
 // Body: { items: [{ id, is_available }] }
 // Morning stock confirm — toggles availability only, not product details.
-router.put('/bulk-availability', supplyAuthMiddleware, async (req, res) => {
+router.put('/bulk-availability', supplyAuthMiddleware, catalogAvailabilityRoles, async (req, res) => {
   try {
     const { items } = req.body;
     if (!Array.isArray(items) || items.length === 0)
@@ -324,10 +327,10 @@ async function handleCatalogBulkUpload(req, res) {
   }
 }
 
-router.post('/bulk-upload', supplyAuthMiddleware, handleCatalogBulkUpload);
+router.post('/bulk-upload', supplyAuthMiddleware, catalogWriteRoles, handleCatalogBulkUpload);
 
 // ── PUT /api/supply/catalog/:id ───────────────────────────────────────────────
-router.put('/:id', supplyAuthMiddleware, async (req, res) => {
+router.put('/:id', supplyAuthMiddleware, catalogWriteRoles, async (req, res) => {
   try {
     const schema = schemaForReq(req);
     const { id } = req.params;
@@ -400,7 +403,7 @@ router.put('/:id', supplyAuthMiddleware, async (req, res) => {
 
 // ── DELETE /api/supply/catalog/:id ───────────────────────────────────────────
 // Soft delete only — is_active = false (order line items may reference the row).
-router.delete('/:id', supplyAuthMiddleware, async (req, res) => {
+router.delete('/:id', supplyAuthMiddleware, catalogWriteRoles, async (req, res) => {
   try {
     const { id } = req.params;
 

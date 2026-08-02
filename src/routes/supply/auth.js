@@ -26,9 +26,85 @@ const router  = express.Router();
 
 const { supabase, supabaseAdmin }  = require('../../config/supabase');
 const { authenticateToken }        = require('../../middleware/auth');
-const { getSupplierContext }       = require('../../middleware/supplyAuth');
+const { getSupplierContext, requireSupplyRole } = require('../../middleware/supplyAuth');
 const { listSupplyLobTypes }       = require('../../config/supplyCatalogSchemas');
+const { sendPasswordResetEmail }   = require('../../helpers/passwordReset');
 
+const SUPPLIER_LOGIN_SELECT = [
+  'id', 'name', 'business_name', 'email', 'phone',
+  'waba_phone', 'waba_phone_number_id',
+  'gstin', 'city', 'state', 'logo_url',
+  'ordering_open_time', 'ordering_cutoff_time',
+  'always_open', 'timezone', 'is_active', 'lob_type',
+  'manager_money_access',
+].join(', ');
+
+function buildLoginUser(supplier, { role = 'owner', staffId = null, staffName = null } = {}) {
+  return {
+    ...supplier,
+    role,
+    staff_role: role,
+    staff_id: staffId,
+    staff_name: staffName,
+  };
+}
+
+async function resolveSupplierForAuthUser(authUserId) {
+  // 1. Multi-staff
+  const { data: staff, error: staffError } = await supabaseAdmin
+    .from('supply_staff')
+    .select(`
+      id, supplier_id, name, email, role, is_active,
+      suppliers ( ${SUPPLIER_LOGIN_SELECT} )
+    `)
+    .eq('auth_user_id', authUserId)
+    .maybeSingle();
+
+  if (staffError) {
+    const missing = /relation .* does not exist|Could not find the table/i.test(staffError.message || '');
+    if (!missing) throw staffError;
+  }
+
+  if (staff) {
+    if (!staff.is_active) {
+      return { errorStatus: 403, error: 'Your account has been deactivated. Contact your supplier admin.' };
+    }
+    if (!staff.suppliers?.is_active) {
+      return { errorStatus: 403, error: 'This supplier account has been deactivated. Contact support.' };
+    }
+    return {
+      supplier: staff.suppliers,
+      role: staff.role,
+      staffId: staff.id,
+      staffName: staff.name,
+    };
+  }
+
+  // 2. Legacy owner
+  const { data: supplier, error: supplierError } = await supabaseAdmin
+    .from('suppliers')
+    .select(SUPPLIER_LOGIN_SELECT)
+    .eq('auth_user_id', authUserId)
+    .maybeSingle();
+
+  if (supplierError) throw supplierError;
+  if (!supplier) {
+    return { errorStatus: 401, error: 'Supplier account not set up. No profile found. Contact support.' };
+  }
+  if (!supplier.is_active) {
+    return { errorStatus: 403, error: 'Your account has been deactivated. Contact support.' };
+  }
+  return { supplier, role: 'owner', staffId: null, staffName: null };
+}
+
+function resolveSupplyResetRedirect(req) {
+  const origin = (req.headers.origin || '').replace(/\/$/, '');
+  if (origin) return `${origin}/supply/reset-password`;
+  if (process.env.SUPPLY_PORTAL_URL) {
+    return `${String(process.env.SUPPLY_PORTAL_URL).replace(/\/$/, '')}/supply/reset-password`;
+  }
+  return 'https://supply.munafe.in/supply/reset-password';
+}
 // ── POST /api/supply/auth/register ────────────────────────────────────────────
 // Creates a Supabase auth user + suppliers row in one transaction.
 // On auth-user creation success but suppliers insert failure: rolls back by
@@ -176,48 +252,41 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
-    // ── Supabase auth ─────────────────────────────────────────────────────────
     const { data: sessionData, error: authError } = await supabase.auth.signInWithPassword({
       email:    email.trim().toLowerCase(),
       password,
     });
 
     if (authError) {
-      // Supabase returns 'Invalid login credentials' for wrong email/password
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
-    // ── Fetch supplier profile ────────────────────────────────────────────────
-    const { data: supplier, error: supplierError } = await supabaseAdmin
-      .from('suppliers')
-      .select([
-        'id', 'name', 'business_name', 'email', 'phone',
-        'waba_phone', 'waba_phone_number_id',
-        'gstin', 'city', 'state', 'logo_url',
-        'ordering_open_time', 'ordering_cutoff_time',
-        'always_open', 'timezone', 'is_active', 'lob_type',
-      ].join(', '))
-      .eq('auth_user_id', sessionData.user.id)
-      .maybeSingle();
-
-    if (supplierError || !supplier) {
-      console.error('[supply/login] Supplier profile not found for auth user:', sessionData.user.id);
-      return res.status(401).json({
-        error: 'Supplier account not set up. No profile found. Contact support.',
-      });
+    const resolved = await resolveSupplierForAuthUser(sessionData.user.id);
+    if (resolved.error) {
+      console.error('[supply/login] Resolve failed for auth user:', sessionData.user.id, resolved.error);
+      return res.status(resolved.errorStatus || 401).json({ error: resolved.error });
     }
 
-    if (!supplier.is_active) {
-      return res.status(403).json({ error: 'Your account has been deactivated. Contact support.' });
+    if (resolved.staffId) {
+      try {
+        await supabaseAdmin
+          .from('supply_staff')
+          .update({ last_login: new Date().toISOString() })
+          .eq('id', resolved.staffId);
+      } catch (_) { /* non-fatal */ }
     }
 
-    console.log(`[supply/login] ✅ ${supplier.business_name} logged in`);
+    console.log(`[supply/login] ✅ ${resolved.supplier.business_name} logged in (${resolved.role})`);
 
     res.json({
       success:      true,
       token:        sessionData.session.access_token,
       refreshToken: sessionData.session.refresh_token,
-      user:         supplier,
+      user:         buildLoginUser(resolved.supplier, {
+        role: resolved.role,
+        staffId: resolved.staffId,
+        staffName: resolved.staffName,
+      }),
     });
 
   } catch (err) {
@@ -258,26 +327,25 @@ router.post('/forgot-password', async (req, res) => {
     if (!email?.trim()) return res.status(400).json({ error: 'Email is required' });
 
     const normalized = email.trim().toLowerCase();
+    const redirectTo = resolveSupplyResetRedirect(req);
 
-    // Only send if supplier account exists and is active
+    const { data: staff } = await supabaseAdmin
+      .from('supply_staff')
+      .select('id, is_active')
+      .eq('email', normalized)
+      .maybeSingle();
+
     const { data: supplier } = await supabaseAdmin
       .from('suppliers')
       .select('id, is_active')
       .eq('email', normalized)
       .maybeSingle();
 
-    if (supplier?.is_active) {
-      const redirectTo = req.headers.origin
-        ? `${req.headers.origin}/supply/reset-password`
-        : process.env.SUPPLY_FORM_BASE_URL
-          ? `${process.env.SUPPLY_FORM_BASE_URL}/reset-password`
-          : undefined;
-
-      await supabaseAdmin.auth.admin.generateLink({
-        type:        'recovery',
-        email:       normalized,
-        options:     { redirectTo },
-      });
+    const eligible = (staff?.is_active === true) || (supplier?.is_active === true);
+    if (eligible) {
+      await sendPasswordResetEmail(normalized, redirectTo, { isOwner: true }).catch(err =>
+        console.error('[supply/forgot-password] send failed:', err.message)
+      );
     }
 
     res.json({
@@ -295,18 +363,22 @@ router.post('/forgot-password', async (req, res) => {
 
 router.get('/me', authenticateToken, getSupplierContext, async (req, res) => {
   try {
-    res.json({ success: true, supplier: req.supplier });
+    res.json({
+      success: true,
+      supplier: req.supplier,
+      role: req.staff_role,
+      staff_role: req.staff_role,
+      staff: req.staff,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // ── PUT /api/supply/auth/profile ──────────────────────────────────────────────
-// Update supplier business profile.
-// Registered in server.js as app.use('/api/supply/auth', router) — so this
-// is accessible at PUT /api/supply/auth/profile
+// Update supplier business profile — owner only.
 
-router.put('/profile', authenticateToken, getSupplierContext, async (req, res) => {
+router.put('/profile', authenticateToken, getSupplierContext, requireSupplyRole('owner'), async (req, res) => {
   try {
     const {
       name,
@@ -323,6 +395,7 @@ router.put('/profile', authenticateToken, getSupplierContext, async (req, res) =
       ordering_cutoff_time,
       always_open,
       lob_type,
+      manager_money_access,
     } = req.body;
 
     // Build update object — only include defined fields
@@ -340,6 +413,7 @@ router.put('/profile', authenticateToken, getSupplierContext, async (req, res) =
     if (ordering_open_time !== undefined) updates.ordering_open_time = ordering_open_time;
     if (ordering_cutoff_time !== undefined) updates.ordering_cutoff_time = ordering_cutoff_time;
     if (always_open        !== undefined) updates.always_open        = Boolean(always_open);
+    if (manager_money_access !== undefined) updates.manager_money_access = Boolean(manager_money_access);
     if (lob_type !== undefined) {
       const nextLob = String(lob_type || '').trim().toLowerCase();
       if (!listSupplyLobTypes().includes(nextLob)) {

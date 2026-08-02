@@ -22,7 +22,7 @@ const express  = require('express');
 const router   = express.Router();
 const PDFDocument = require('pdfkit');
 const { supabaseAdmin } = require('../../config/supabase');
-const { supplyAuthMiddleware: auth } = require('../../middleware/supplyAuth');
+const { supplyAuthMiddleware: auth, requireMoneyAccess } = require('../../middleware/supplyAuth');
 const { notifyClient } = require('./notify');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -351,7 +351,7 @@ async function generateStatement(supplierId, clientId, month) {
  * On-demand generation for a specific client + month.
  * Defaults to previous calendar month if ?month is omitted.
  */
-router.post('/generate/:client_id', auth, async (req, res) => {
+router.post('/generate/:client_id', auth, requireMoneyAccess, async (req, res) => {
   try {
     const { client_id } = req.params;
     const supplierId    = req.supplier_id;
@@ -380,7 +380,7 @@ router.post('/generate/:client_id', auth, async (req, res) => {
  * Full credit book: all active clients with outstanding balance, days overdue, etc.
  * Supports sort=balance|overdue and filter=overdue.
  */
-router.get('/credit-book', auth, async (req, res) => {
+router.get('/credit-book', auth, requireMoneyAccess, async (req, res) => {
   try {
     const supplierId = req.supplier_id;
     const { filter, sort = 'balance' } = req.query;
@@ -474,7 +474,7 @@ router.get('/credit-book', auth, async (req, res) => {
  * GET /api/supply/statements/:client_id
  * List all statements for a specific client (most recent first).
  */
-router.get('/:client_id', auth, async (req, res) => {
+router.get('/:client_id', auth, requireMoneyAccess, async (req, res) => {
   try {
     const { client_id } = req.params;
     const supplierId    = req.supplier_id;
@@ -499,7 +499,7 @@ router.get('/:client_id', auth, async (req, res) => {
  * Returns a short-lived signed URL for the statement PDF.
  * Frontend should redirect to this URL or open in new tab.
  */
-router.get('/:id/pdf', auth, async (req, res) => {
+router.get('/:id/pdf', auth, requireMoneyAccess, async (req, res) => {
   try {
     const { id }     = req.params;
     const supplierId = req.supplier_id;
@@ -534,7 +534,7 @@ router.get('/:id/pdf', auth, async (req, res) => {
  * Module 12 (notify.js) must be wired before this fully works;
  * for now it marks sent_at and returns the signed URL so the caller can send.
  */
-router.post('/:id/resend', auth, async (req, res) => {
+router.post('/:id/resend', auth, requireMoneyAccess, async (req, res) => {
   try {
     const { id }     = req.params;
     const supplierId = req.supplier_id;

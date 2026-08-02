@@ -18,7 +18,8 @@ const express = require('express');
 const router  = express.Router();
 
 const { supabaseAdmin }                        = require('../../config/supabase');
-const { supplyAuthMiddleware }                 = require('../../middleware/supplyAuth');
+const { supplyAuthMiddleware, requireSupplyRole } = require('../../middleware/supplyAuth');
+const opsRoles = requireSupplyRole('owner', 'manager');
 const { createFormToken, validateFormToken, renewPermanentToken }
                                                = require('./supplyFormToken');
 const supplyLedger                              = require('./ledger');
@@ -231,7 +232,7 @@ router.get('/:token', async (req, res) => {
 // Body: { client_id, type: 'daily' | 'permanent' }
 // Returns: { url, token, client_id, client_name }
 
-router.post('/generate-link', supplyAuthMiddleware, async (req, res) => {
+router.post('/generate-link', supplyAuthMiddleware, opsRoles, async (req, res) => {
   const { client_id, type = 'daily' } = req.body;
   const supplier_id = req.supplier_id;
 

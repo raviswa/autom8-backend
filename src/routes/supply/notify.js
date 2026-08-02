@@ -32,7 +32,8 @@
 const express = require('express');
 const router  = express.Router();
 const { supabaseAdmin } = require('../../config/supabase');
-const { getSupplierContext: auth } = require('../../middleware/supplyAuth');
+const { supplyAuthMiddleware: auth, requireSupplyRole } = require('../../middleware/supplyAuth');
+const opsRoles = requireSupplyRole('owner', 'manager');
 
 const META_API = 'https://graph.facebook.com/v19.0';
 
@@ -540,7 +541,7 @@ async function logNotification({ supplierId, clientId, templateKey, clientPhone,
  * Ad-hoc manual send for testing / support.
  * Body: { client_id, template, params }
  */
-router.post('/send', auth, async (req, res) => {
+router.post('/send', auth, opsRoles, async (req, res) => {
   try {
     const { client_id, template: templateKey, params = {} } = req.body;
     const supplierId = req.supplier_id;
@@ -570,7 +571,7 @@ router.post('/send', auth, async (req, res) => {
  * GET /api/supply/notify/log?limit=50&client_id=&status=
  * Recent notification history for this supplier.
  */
-router.get('/log', auth, async (req, res) => {
+router.get('/log', auth, opsRoles, async (req, res) => {
   try {
     const supplierId = req.supplier_id;
     const { limit = 50, client_id, status } = req.query;

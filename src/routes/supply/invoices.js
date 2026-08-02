@@ -23,7 +23,7 @@ const express = require('express');
 const router  = express.Router();
 const path    = require('path');
 const { supabaseAdmin } = require('../../config/supabase');
-const { supplyAuthMiddleware: authenticateSupplyToken } = require('../../middleware/supplyAuth');
+const { supplyAuthMiddleware: authenticateSupplyToken, requireMoneyAccess } = require('../../middleware/supplyAuth');
 const { notifyClient } = require('./notify');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -377,7 +377,7 @@ async function generateInvoiceForOrder(supplierId, orderId, deliveredItems = nul
 // Called internally when order → delivered or partially_delivered.
 // Body: { delivered_items?: [{item_id, delivered_qty}] }
 // Returns the new invoice row.
-router.post('/generate/:order_id', authenticateSupplyToken, async (req, res) => {
+router.post('/generate/:order_id', authenticateSupplyToken, requireMoneyAccess, async (req, res) => {
   try {
     const supplierId = req.supplier.id;
     const { order_id } = req.params;
@@ -398,7 +398,7 @@ router.post('/generate/:order_id', authenticateSupplyToken, async (req, res) => 
 // ── GET /api/supply/invoices ──────────────────────────────────────────────────
 // List invoices with filters.
 // Query: client_id, from (date), to (date), page, per_page
-router.get('/', authenticateSupplyToken, async (req, res) => {
+router.get('/', authenticateSupplyToken, requireMoneyAccess, async (req, res) => {
   try {
     const supplierId = req.supplier.id;
     const { client_id, from, to, page = 1, per_page = 25 } = req.query;
@@ -439,7 +439,7 @@ router.get('/', authenticateSupplyToken, async (req, res) => {
 });
 
 // ── GET /api/supply/invoices/:id ─────────────────────────────────────────────
-router.get('/:id', authenticateSupplyToken, async (req, res) => {
+router.get('/:id', authenticateSupplyToken, requireMoneyAccess, async (req, res) => {
   try {
     const { id }     = req.params;
     const supplierId = req.supplier.id;
@@ -471,7 +471,7 @@ router.get('/:id', authenticateSupplyToken, async (req, res) => {
 
 // ── GET /api/supply/invoices/:id/pdf ─────────────────────────────────────────
 // Returns a fresh 48-hour signed URL for the invoice PDF.
-router.get('/:id/pdf', authenticateSupplyToken, async (req, res) => {
+router.get('/:id/pdf', authenticateSupplyToken, requireMoneyAccess, async (req, res) => {
   try {
     const { id }     = req.params;
     const supplierId = req.supplier.id;
@@ -504,7 +504,7 @@ router.get('/:id/pdf', authenticateSupplyToken, async (req, res) => {
 
 // ── POST /api/supply/invoices/:id/resend ─────────────────────────────────────
 // Re-send invoice PDF to client's WhatsApp.
-router.post('/:id/resend', authenticateSupplyToken, async (req, res) => {
+router.post('/:id/resend', authenticateSupplyToken, requireMoneyAccess, async (req, res) => {
   try {
     const { id }     = req.params;
     const supplierId = req.supplier.id;

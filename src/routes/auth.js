@@ -146,6 +146,18 @@ router.post('/login', async (req, res) => {
       });
     } catch (_) {}
 
+    let lobType = null;
+    let restaurantName = null;
+    if (effectiveRestaurantId) {
+      const { data: tenant } = await supabaseAdmin
+        .from('tenants')
+        .select('lob_type, display_name, name')
+        .eq('id', effectiveRestaurantId)
+        .maybeSingle();
+      lobType = tenant?.lob_type || null;
+      restaurantName = tenant?.display_name || tenant?.name || null;
+    }
+
     res.json({
       success: true,
       token:        data.session.access_token,
@@ -153,6 +165,8 @@ router.post('/login', async (req, res) => {
       user: {
         ...emp,
         restaurant_id: effectiveRestaurantId,
+        restaurant_name: restaurantName,
+        lob_type: lobType,
         scope:     isBrandEmployee ? 'brand' : 'outlet',
         brand:     brandInfo,
         outlets,   // populated only for brand employees; undefined for outlet employees

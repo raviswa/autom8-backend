@@ -11,7 +11,8 @@
 const express = require('express');
 const router  = express.Router();
 const { supabaseAdmin } = require('../../config/supabase');
-const { supplyAuthMiddleware: auth } = require('../../middleware/supplyAuth');
+const { supplyAuthMiddleware: auth, requireSupplyRole } = require('../../middleware/supplyAuth');
+const opsRoles = requireSupplyRole('owner', 'manager');
 const { notifyClient } = require('./notify');
 const { generateStatement } = require('./statements');
 const { isSubscriptionSoftLocked } = require('../../helpers/subscriptionAccess');
@@ -298,7 +299,7 @@ async function runSchedulerJob(jobName, supplierId, month) {
   }
 }
 
-router.post('/trigger/:job_name', auth, async (req, res) => {
+router.post('/trigger/:job_name', auth, opsRoles, async (req, res) => {
   try {
     const supplierId = req.supplier_id;
     const jobName = req.params.job_name;
@@ -327,7 +328,7 @@ router.post('/trigger/:job_name', auth, async (req, res) => {
   }
 });
 
-router.get('/log', auth, async (req, res) => {
+router.get('/log', auth, opsRoles, async (req, res) => {
   try {
     const { limit = 50, job_name } = req.query;
     let q = supabaseAdmin

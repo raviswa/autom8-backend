@@ -21,7 +21,12 @@ const express = require('express');
 const router  = express.Router();
 
 const { supabaseAdmin }          = require('../../config/supabase');
-const { supplyAuthMiddleware }   = require('../../middleware/supplyAuth');
+const { supplyAuthMiddleware, requireSupplyRole } = require('../../middleware/supplyAuth');
+const orderViewRoles = requireSupplyRole('owner', 'manager', 'warehouse', 'delivery', 'accounts');
+const pickingRoles = requireSupplyRole('owner', 'manager', 'warehouse');
+const routeRoles = requireSupplyRole('owner', 'manager', 'delivery');
+const orderStatusRoles = requireSupplyRole('owner', 'manager', 'warehouse', 'delivery');
+const orderManageRoles = requireSupplyRole('owner', 'manager');
 const { validateFormToken }      = require('./supplyFormToken');
 const supplyLedger               = require('./ledger');
 const { notifyClient }           = require('./notify');
@@ -372,7 +377,7 @@ router.post('/', async (req, res) => {
 // Aggregated picking list: all confirmed+out_for_delivery orders for a date,
 // grouped by item — shows total qty needed and per-client breakdown.
 
-router.get('/picking-list/:date', supplyAuthMiddleware, async (req, res) => {
+router.get('/picking-list/:date', supplyAuthMiddleware, pickingRoles, async (req, res) => {
   const { date }    = req.params;
   const supplier_id = req.supplier_id;
 
@@ -444,7 +449,7 @@ router.get('/picking-list/:date', supplyAuthMiddleware, async (req, res) => {
 // Delivery route: orders grouped by pincode, sorted by client name
 // ============================================================================
 
-router.get('/route-sheet/:date', supplyAuthMiddleware, async (req, res) => {
+router.get('/route-sheet/:date', supplyAuthMiddleware, routeRoles, async (req, res) => {
   const { date }    = req.params;
   const supplier_id = req.supplier_id;
 
@@ -519,7 +524,7 @@ router.get('/route-sheet/:date', supplyAuthMiddleware, async (req, res) => {
 // GET /api/supply/orders  — list orders with filters
 // ============================================================================
 
-router.get('/', supplyAuthMiddleware, async (req, res) => {
+router.get('/', supplyAuthMiddleware, orderViewRoles, async (req, res) => {
   const supplier_id = req.supplier_id;
   const {
     date,
@@ -565,7 +570,7 @@ router.get('/', supplyAuthMiddleware, async (req, res) => {
 // GET /api/supply/orders/:id  — single order detail
 // ============================================================================
 
-router.get('/:id', supplyAuthMiddleware, async (req, res) => {
+router.get('/:id', supplyAuthMiddleware, orderViewRoles, async (req, res) => {
   const { id }      = req.params;
   const supplier_id = req.supplier_id;
 
@@ -605,7 +610,7 @@ router.get('/:id', supplyAuthMiddleware, async (req, res) => {
 // Accept: requested → confirmed (creates ledger debit + confirms to client)
 // ============================================================================
 
-router.put('/:id/status', supplyAuthMiddleware, async (req, res) => {
+router.put('/:id/status', supplyAuthMiddleware, orderStatusRoles, async (req, res) => {
   const { id }      = req.params;
   const { status }  = req.body;
   const supplier_id = req.supplier_id;
@@ -615,6 +620,13 @@ router.put('/:id/status', supplyAuthMiddleware, async (req, res) => {
   }
   if (status === 'cancelled') {
     return res.status(400).json({ error: 'Use POST /:id/cancel to cancel an order.' });
+  }
+
+  // Delivery staff may only set delivery-stage statuses
+  if (req.staff_role === 'delivery' && !['out_for_delivery', 'delivered', 'partially_delivered'].includes(status)) {
+    return res.status(403).json({
+      error: 'Delivery staff can only set out_for_delivery, delivered, or partially_delivered.',
+    });
   }
 
   try {
@@ -706,7 +718,7 @@ router.put('/:id/status', supplyAuthMiddleware, async (req, res) => {
 // Records actual delivered quantities; calculates final totals.
 // ============================================================================
 
-router.put('/:id/partial-delivery', supplyAuthMiddleware, async (req, res) => {
+router.put('/:id/partial-delivery', supplyAuthMiddleware, orderStatusRoles, async (req, res) => {
   const { id }      = req.params;
   const { items }   = req.body;
   const supplier_id = req.supplier_id;
@@ -819,7 +831,7 @@ router.put('/:id/partial-delivery', supplyAuthMiddleware, async (req, res) => {
 // POST /api/supply/orders/:id/cancel
 // ============================================================================
 
-router.post('/:id/cancel', supplyAuthMiddleware, async (req, res) => {
+router.post('/:id/cancel', supplyAuthMiddleware, orderManageRoles, async (req, res) => {
   const { id }      = req.params;
   const { reason }  = req.body;
   const supplier_id = req.supplier_id;
