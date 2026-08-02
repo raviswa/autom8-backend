@@ -291,20 +291,46 @@ router.post('/:id/send-form-link', authenticateToken, getSupplierContext, opsRol
     if (error) throw error;
     if (!client) return res.status(404).json({ error: 'Client not found' });
     if (!client.is_active) return res.status(400).json({ error: 'Client is inactive' });
+    if (!client.phone?.trim()) {
+      return res.status(400).json({ error: 'Client has no WhatsApp phone number' });
+    }
 
     const validUntil = getTodayCutoffDate(req.supplier);
     const token = createFormToken(req.supplier_id, client.id, validUntil, false);
     const orderFormUrl = `${SUPPLY_FORM_BASE_URL.replace(/\/$/, '')}/s/${token}`;
 
-    const notification = await notifyClient(req.supplier_id, client.phone, 'supply_order_link', {
+    let notification = await notifyClient(req.supplier_id, client.phone, 'supply_order_link', {
       client_name: client.name,
       order_form_url: orderFormUrl,
     }, client.id);
+
+    // If the approved template send fails (missing WABA / template / Meta reject),
+    // fall back to a plain-text session message with the full URL.
+    if (!notification?.ok && sendSupplyWhatsAppMessage) {
+      const business = req.supplier?.business_name || req.supplier?.name || 'Munafe Supply';
+      const text = [
+        `Hi ${client.name || 'there'},`,
+        '',
+        'Here is your order form link:',
+        orderFormUrl,
+        '',
+        `— ${business}`,
+      ].join('\n');
+      const textOk = await sendSupplyWhatsAppMessage(client.phone, text, req.supplier_id);
+      if (textOk) {
+        notification = {
+          ok: true,
+          fallback: 'text',
+          previous_error: notification?.error || null,
+        };
+      }
+    }
 
     res.json({
       success: true,
       order_form_url: orderFormUrl,
       valid_until: validUntil.toISOString(),
+      whatsapp_sent: !!notification?.ok,
       notification,
     });
   } catch (err) {

@@ -75,20 +75,32 @@ const TEMPLATES = {
   supply_order_link: {
     name: 'supply_order_link',
     language: 'en',
-    components: ({ client_name, order_form_url }) => [
-      {
-        type: 'body',
-        parameters: [
-          { type: 'text', text: client_name || 'Client' },
-        ],
-      },
-      ...(order_form_url ? [{
-        type: 'button',
-        sub_type: 'url',
-        index: '0',
-        parameters: [{ type: 'text', text: order_form_url }],
-      }] : []),
-    ],
+    components: ({ client_name, order_form_url }) => {
+      // Meta URL buttons take only the dynamic path suffix, not a full URL.
+      // Template is typically registered as https://order.autom8.works/{{1}}
+      // so pass "s/<token>" (or whatever path follows the host).
+      let buttonParam = order_form_url || '';
+      if (buttonParam.includes('://')) {
+        try {
+          const u = new URL(buttonParam);
+          buttonParam = `${u.pathname.replace(/^\//, '')}${u.search}`;
+        } catch { /* keep as-is */ }
+      }
+      return [
+        {
+          type: 'body',
+          parameters: [
+            { type: 'text', text: client_name || 'Client' },
+          ],
+        },
+        ...(buttonParam ? [{
+          type: 'button',
+          sub_type: 'url',
+          index: '0',
+          parameters: [{ type: 'text', text: buttonParam }],
+        }] : []),
+      ];
+    },
   },
 
   supply_payment_claim_alert: {
