@@ -8,6 +8,61 @@
 
 const { sendWhatsAppMessage } = require('./whatsapp');
 
+const STOCK_ITEM_COLUMNS = [
+  'id',
+  'name',
+  'retailer_id',
+  'current_stock',
+  'is_stocked',
+  'item_type',
+  'bundle_components',
+  'meta',
+  'low_stock_alert_units',
+  'price',
+  'discount_percent',
+  'discount_ends_at',
+  'archived_at',
+];
+
+const PRICE_STOCK_COLUMNS = [
+  'id',
+  'name',
+  'retailer_id',
+  'price',
+  'discount_percent',
+  'discount_ends_at',
+  'current_stock',
+  'is_stocked',
+  'item_type',
+  'bundle_components',
+  'meta',
+  'archived_at',
+  'low_stock_alert_units',
+];
+
+function isMissingBundleComponentsColumn(error) {
+  const msg = `${error?.code || ''} ${error?.message || ''}`.toLowerCase();
+  return msg.includes('bundle_components') && (
+    msg.includes('does not exist')
+    || msg.includes('could not find')
+    || msg.includes('42703')
+  );
+}
+
+/** Select menu_items for stock math; drop bundle_components if migration not applied yet. */
+async function selectStockItem(runSelect, columns = STOCK_ITEM_COLUMNS) {
+  let cols = columns.slice();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const result = await runSelect(cols.join(', '));
+    if (!result.error) return result;
+    if (!isMissingBundleComponentsColumn(result.error) || !cols.includes('bundle_components')) {
+      return result;
+    }
+    cols = cols.filter((c) => c !== 'bundle_components');
+  }
+  return { data: null, error: new Error('menu_items stock select failed') };
+}
+
 function parseBundleComponents(raw) {
   if (Array.isArray(raw)) {
     return raw
@@ -81,12 +136,14 @@ async function deductStockForLines(supabaseAdmin, restaurantId, lines, opts = {}
   const loadById = async (id) => {
     if (!id || !UUID_RE.test(String(id))) return null;
     if (rowCache.has(id)) return rowCache.get(id);
-    const { data: row, error } = await supabaseAdmin
-      .from('menu_items')
-      .select('id, name, retailer_id, current_stock, is_stocked, item_type, bundle_components, meta, low_stock_alert_units, price, discount_percent, discount_ends_at, archived_at')
-      .eq('id', id)
-      .eq('restaurant_id', restaurantId)
-      .maybeSingle();
+    const { data: row, error } = await selectStockItem(
+      (select) => supabaseAdmin
+        .from('menu_items')
+        .select(select)
+        .eq('id', id)
+        .eq('restaurant_id', restaurantId)
+        .maybeSingle(),
+    );
     if (error) throw error;
     rowCache.set(id, row || null);
     return row || null;
@@ -98,13 +155,15 @@ async function deductStockForLines(supabaseAdmin, restaurantId, lines, opts = {}
     for (const row of rowCache.values()) {
       if (row && String(row.retailer_id || '').toUpperCase() === key) return row;
     }
-    const { data: row, error } = await supabaseAdmin
-      .from('menu_items')
-      .select('id, name, retailer_id, current_stock, is_stocked, item_type, bundle_components, meta, low_stock_alert_units, price, discount_percent, discount_ends_at, archived_at')
-      .eq('restaurant_id', restaurantId)
-      .ilike('retailer_id', key)
-      .is('archived_at', null)
-      .maybeSingle();
+    const { data: row, error } = await selectStockItem(
+      (select) => supabaseAdmin
+        .from('menu_items')
+        .select(select)
+        .eq('restaurant_id', restaurantId)
+        .ilike('retailer_id', key)
+        .is('archived_at', null)
+        .maybeSingle(),
+    );
     if (error) throw error;
     if (row) rowCache.set(row.id, row);
     return row || null;
@@ -245,24 +304,30 @@ async function validateAndPriceLines(supabaseAdmin, restaurantId, lines) {
 
     let row = null;
     if (UUID_RE.test(String(itemId))) {
-      const { data, error } = await supabaseAdmin
-        .from('menu_items')
-        .select('id, name, retailer_id, price, discount_percent, discount_ends_at, current_stock, is_stocked, item_type, bundle_components, meta, archived_at, low_stock_alert_units')
-        .eq('id', itemId)
-        .eq('restaurant_id', restaurantId)
-        .maybeSingle();
+      const { data, error } = await selectStockItem(
+        (select) => supabaseAdmin
+          .from('menu_items')
+          .select(select)
+          .eq('id', itemId)
+          .eq('restaurant_id', restaurantId)
+          .maybeSingle(),
+        PRICE_STOCK_COLUMNS,
+      );
       if (error) throw error;
       row = data;
     }
     if (!row) {
       const key = String(itemId).trim().toUpperCase();
-      const { data, error } = await supabaseAdmin
-        .from('menu_items')
-        .select('id, name, retailer_id, price, discount_percent, discount_ends_at, current_stock, is_stocked, item_type, bundle_components, meta, archived_at, low_stock_alert_units')
-        .eq('restaurant_id', restaurantId)
-        .ilike('retailer_id', key)
-        .is('archived_at', null)
-        .maybeSingle();
+      const { data, error } = await selectStockItem(
+        (select) => supabaseAdmin
+          .from('menu_items')
+          .select(select)
+          .eq('restaurant_id', restaurantId)
+          .ilike('retailer_id', key)
+          .is('archived_at', null)
+          .maybeSingle(),
+        PRICE_STOCK_COLUMNS,
+      );
       if (error) throw error;
       row = data;
     }
