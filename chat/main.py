@@ -1173,11 +1173,20 @@ async def internal_webcart_confirm_pay(request: Request):
         session_state["delivery_address"] = formatted_address
         if body_pincode:
             session_state["delivery_pincode"] = body_pincode
+    explicit_delivery = None
     if body.get("delivery_charge") is not None:
         try:
-            session_state["delivery_charge"] = float(body.get("delivery_charge") or 0)
+            explicit_delivery = float(body.get("delivery_charge") or 0)
+            session_state["delivery_charge"] = explicit_delivery
+            session_state["delivery_charge_source"] = "webcart"
         except Exception:
-            pass
+            explicit_delivery = None
+    explicit_parcel = None
+    if body.get("parcel_charge") is not None:
+        try:
+            explicit_parcel = float(body.get("parcel_charge") or 0)
+        except Exception:
+            explicit_parcel = None
     if body.get("delivery_zone"):
         session_state["delivery_zone"] = str(body.get("delivery_zone"))
     session_state["order_total"] = total
@@ -1225,16 +1234,52 @@ async def internal_webcart_confirm_pay(request: Request):
 
     await cache_restaurant_pricing(session_state, restaurant_id)
     parcel_rate = float(session_state.get("parcel_charge_per_item") or 0)
-    delivery_fee = resolve_delivery_charge(session_state) if service_type == "delivery" else 0.0
+    # Prefer webcart courier / rate-card fee; do not overwrite with restaurant distance tiers.
+    if service_type == "delivery":
+        if explicit_delivery is not None:
+            delivery_fee = explicit_delivery
+        else:
+            delivery_fee = resolve_delivery_charge(session_state)
+    else:
+        delivery_fee = 0.0
+    session_state["delivery_charge"] = delivery_fee
+
     totals = compute_order_totals(
         cart_snapshot,
         service_type if service_type in ("takeaway", "delivery") else "takeaway",
-        parcel_per_item=parcel_rate,
+        parcel_per_item=0.0 if explicit_parcel is not None else parcel_rate,
         delivery_charge=delivery_fee,
     )
-    # Prefer webcart-calculated total when present (includes the same fee rules).
+    if explicit_parcel is not None:
+        items_sub = float(totals.get("items_subtotal") or 0)
+        gst_rate = float(totals.get("gst_rate") or 5.0)
+        pre_gst = round(items_sub + explicit_parcel + delivery_fee, 2)
+        gst_amount = round(pre_gst * gst_rate / 100, 2)
+        totals = {
+            **totals,
+            "parcel_charge": round(explicit_parcel, 2),
+            "delivery_charge": round(delivery_fee, 2),
+            "pre_gst_total": pre_gst,
+            "gst_amount": gst_amount,
+            "grand_total": round(pre_gst + gst_amount, 2),
+        }
+
+    # Align with webcart rounding when line items already match; never overwrite
+    # grand_total alone (that produced Items+Delivery+GST ≠ Total on WhatsApp).
     if total > 0:
-        totals = {**totals, "grand_total": total, "total": total}
+        recomputed = float(totals.get("grand_total") or 0)
+        if abs(recomputed - float(total)) <= 1.0:
+            totals = {**totals, "grand_total": float(total), "total": float(total)}
+        else:
+            logger.warning(
+                "[webcart-confirm-pay] total mismatch webcart=%.2f recomputed=%.2f "
+                "delivery=%.2f parcel=%.2f — keeping recomputed breakdown",
+                float(total),
+                recomputed,
+                delivery_fee,
+                float(totals.get("parcel_charge") or 0),
+            )
+            totals = {**totals, "total": recomputed}
     session_state["order_totals"] = totals
     session_state["order_total"] = float(totals.get("grand_total") or total)
 

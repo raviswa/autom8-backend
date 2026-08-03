@@ -81,8 +81,18 @@ def delivery_charge_from_tiers(
 def resolve_delivery_charge(
     session_state: dict[str, Any] | None,
 ) -> float:
-    """Compute delivery fee from session (uses pre-computed distance when set)."""
+    """Compute delivery fee from session (uses pre-computed distance when set).
+
+    If webcart already set an explicit fee (courier / rate-card quote), honor it
+    instead of re-deriving from restaurant distance tiers.
+    """
     state = session_state or {}
+    if state.get("delivery_charge_source") == "webcart" and state.get("delivery_charge") is not None:
+        try:
+            return round(float(state.get("delivery_charge") or 0), 2)
+        except (TypeError, ValueError):
+            pass
+
     default = float(state.get("delivery_charge_default") or DEFAULT_DELIVERY_CHARGE)
     tiers = state.get("delivery_charge_tiers") or DEFAULT_DELIVERY_TIERS
 
