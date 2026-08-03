@@ -33,6 +33,10 @@ const { notifyClient }           = require('./notify');
 const { sendSupplyWhatsAppMessage } = require('./supplyWhatsapp');
 const { generateInvoiceForOrder } = require('./invoices');
 const { istTodayYmd, nextSupplyDeliveryDate } = require('../../helpers/istDate');
+const {
+  nextSupplyOrderNumber,
+  isOrderNumberUniqueViolation,
+} = require('../../helpers/supplyOrderNumber');
 
 // WhatsApp NLP order preview / confirm / eval log (B2B free-text parsing)
 router.use(require('./nlpOrders'));
@@ -250,30 +254,39 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // ── Generate order number ─────────────────────────────────────────────
+    // ── Generate order number + insert (retry on order_number race) ───────
     const delivDate   = delivery_date || _nextDay(client.delivery_days);
-    const orderNumber = await _generateOrderNumber(supplier_id, delivDate);
 
     // Form / client submit = reservation (requested). Manual supplier create = confirmed.
     const initialStatus = source === 'form' ? 'requested' : 'confirmed';
     const changedBy     = source === 'manual' ? 'supplier' : 'client';
 
-    // ── Insert supply_orders ──────────────────────────────────────────────
-    const { data: newOrder, error: orderErr } = await supabaseAdmin
-      .from('supply_orders')
-      .insert({
-        supplier_id,
-        client_id,
-        order_number:   orderNumber,
-        delivery_date:  delivDate,
-        status:         initialStatus,
-        total_amount:   orderTotal,
-        gst_amount:     gstTotal,
-        delivery_notes: notes || null,
-        source,
-      })
-      .select('id, order_number, status, total_amount, gst_amount, delivery_date, created_at')
-      .single();
+    let newOrder = null;
+    let orderErr = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const orderNumber = await nextSupplyOrderNumber(supabaseAdmin, supplier_id, delivDate);
+      const result = await supabaseAdmin
+        .from('supply_orders')
+        .insert({
+          supplier_id,
+          client_id,
+          order_number:   orderNumber,
+          delivery_date:  delivDate,
+          status:         initialStatus,
+          total_amount:   orderTotal,
+          gst_amount:     gstTotal,
+          delivery_notes: notes || null,
+          source,
+        })
+        .select('id, order_number, status, total_amount, gst_amount, delivery_date, created_at')
+        .single();
+
+      newOrder = result.data;
+      orderErr = result.error;
+      if (!orderErr) break;
+      if (!isOrderNumberUniqueViolation(orderErr)) break;
+      console.warn('[orders] order_number conflict, retrying', { attempt, orderNumber });
+    }
 
     if (orderErr) {
       console.error('[orders] Insert order error:', orderErr.message);
@@ -892,18 +905,6 @@ router.post('/:id/cancel', supplyAuthMiddleware, orderManageRoles, async (req, r
 // ============================================================================
 // Internal helpers
 // ============================================================================
-
-async function _generateOrderNumber(supplier_id, date) {
-  const dateStr = date.replace(/-/g, '');
-  const { count } = await supabaseAdmin
-    .from('supply_orders')
-    .select('id', { count: 'exact', head: true })
-    .eq('supplier_id', supplier_id)
-    .gte('created_at', `${date}T00:00:00+00:00`)
-    .lte('created_at', `${date}T23:59:59+00:00`);
-  const seq = String((count || 0) + 1).padStart(3, '0');
-  return `ORD-B2B-${dateStr}-${seq}`;
-}
 
 function _isValidDate(str) {
   return /^\d{4}-\d{2}-\d{2}$/.test(str) && !isNaN(Date.parse(str));

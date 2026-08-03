@@ -22,6 +22,10 @@ const { resolvePrice }      = require('./ratecards');
 const supplyLedger          = require('./ledger');
 const { sendSupplyWhatsAppMessage } = require('./supplyWhatsapp');
 const { nextSupplyDeliveryDate } = require('../../helpers/istDate');
+const {
+  nextSupplyOrderNumber,
+  isOrderNumberUniqueViolation,
+} = require('../../helpers/supplyOrderNumber');
 
 function _authFromFormToken(form_token) {
   const decoded = validateFormToken(form_token);
@@ -35,18 +39,6 @@ function _authFromFormToken(form_token) {
 
 function _nextDay(deliveryDays) {
   return nextSupplyDeliveryDate(deliveryDays || [], 'Asia/Kolkata');
-}
-
-async function _generateOrderNumber(supplier_id, date) {
-  const dateStr = date.replace(/-/g, '');
-  const { count } = await supabaseAdmin
-    .from('supply_orders')
-    .select('id', { count: 'exact', head: true })
-    .eq('supplier_id', supplier_id)
-    .gte('created_at', `${date}T00:00:00+00:00`)
-    .lte('created_at', `${date}T23:59:59+00:00`);
-  const seq = String((count || 0) + 1).padStart(3, '0');
-  return `ORD-B2B-${dateStr}-${seq}`;
 }
 
 // ── POST /nlp-preview ─────────────────────────────────────────────────────────
@@ -265,25 +257,35 @@ router.post('/nlp-confirm', async (req, res) => {
     }
 
     const delivDate = delivery_date || _nextDay(client.delivery_days);
-    const orderNumber = await _generateOrderNumber(supplier_id, delivDate);
     // Client-originated NLP order → same reservation status as webcart form
     const initialStatus = 'requested';
 
-    const { data: newOrder, error: orderErr } = await supabaseAdmin
-      .from('supply_orders')
-      .insert({
-        supplier_id,
-        client_id,
-        order_number: orderNumber,
-        delivery_date: delivDate,
-        status: initialStatus,
-        total_amount: orderTotal,
-        gst_amount: gstTotal,
-        delivery_notes: notes || (draft_id ? `nlp_draft:${draft_id}` : null),
-        source,
-      })
-      .select('id, order_number, status, total_amount, gst_amount, delivery_date, created_at')
-      .single();
+    let newOrder = null;
+    let orderErr = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const orderNumber = await nextSupplyOrderNumber(supabaseAdmin, supplier_id, delivDate);
+      const result = await supabaseAdmin
+        .from('supply_orders')
+        .insert({
+          supplier_id,
+          client_id,
+          order_number: orderNumber,
+          delivery_date: delivDate,
+          status: initialStatus,
+          total_amount: orderTotal,
+          gst_amount: gstTotal,
+          delivery_notes: notes || (draft_id ? `nlp_draft:${draft_id}` : null),
+          source,
+        })
+        .select('id, order_number, status, total_amount, gst_amount, delivery_date, created_at')
+        .single();
+
+      newOrder = result.data;
+      orderErr = result.error;
+      if (!orderErr) break;
+      if (!isOrderNumberUniqueViolation(orderErr)) break;
+      console.warn('[supply/nlp-orders] order_number conflict, retrying', { attempt, orderNumber });
+    }
 
     if (orderErr) {
       console.error('[supply/nlp-orders] Insert order error:', orderErr.message);
