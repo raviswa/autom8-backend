@@ -1311,9 +1311,10 @@ function normalizeMenuItemBody(item, { packagedLob, existingMeta, lobType }) {
       ? Math.max(1, parseInt(item.scoop_count, 10) || 1)
       : null,
     crust_options: item.crust_options ? String(item.crust_options).trim() : null,
+    // NOT NULL in DB — never send null (food_products / retail omit this field)
     toppings_allowed: item.toppings_allowed != null
       ? parseBoolCell(item.toppings_allowed, false)
-      : null,
+      : false,
     topping_extra_price: item.topping_extra_price != null && item.topping_extra_price !== ''
       ? parseFloat(item.topping_extra_price) || null
       : null,
@@ -1351,6 +1352,9 @@ function normalizeMenuItemBody(item, { packagedLob, existingMeta, lobType }) {
 }
 
 async function writeMenuItemRow(kind, targetId, restaurantId, row) {
+  // Harden NOT NULL bools — callers may omit LOB-specific fields.
+  if (row && row.toppings_allowed == null) row.toppings_allowed = false;
+
   async function run(payload) {
     if (kind === 'update') {
       return supabaseAdmin.from('menu_items').update(payload)
