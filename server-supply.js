@@ -39,7 +39,7 @@ app.use(cors({
     process.env.SUPPLY_FRONTEND_URL,
   ].filter(Boolean),
   methods:        ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-restaurant-id', 'x-internal-secret'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-restaurant-id', 'x-internal-secret', 'x-supply-form-signing-secret'],
   credentials:    true,
 }));
 app.options('*', cors());
@@ -75,7 +75,7 @@ const SUPPLY_ORDER_SPA_URL = (
 ).replace(/\/$/, '');
 app.get(['/s/:token', '/s/b/:token'], (req, res) => {
   const permanent = req.path.startsWith('/s/b/');
-  const dest = `${SUPPLY_ORDER_SPA_URL}${permanent ? '/s/b/' : '/s/'}${encodeURIComponent(req.params.token)}`;
+  const dest = `${SUPPLY_ORDER_SPA_URL}${permanent ? '/s/b/' : '/s/'}${String(req.params.token || '')}`;
   return res.redirect(302, dest);
 });
 

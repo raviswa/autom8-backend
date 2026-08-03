@@ -33,12 +33,20 @@ const BASE_URL = process.env.SUPPLY_FORM_BASE_URL || 'https://app.autom8.works';
 function assertInternalSecret(req, res) {
   const internalSecret = req.headers['x-internal-secret']
     || req.headers['authorization']?.replace(/^Bearer\s+/i, '');
-  const validSecret = process.env.AUTOM8_KDS_SECRET || process.env.SUPPLY_INTERNAL_SECRET;
-  if (!validSecret || internalSecret !== validSecret) {
-    res.status(403).json({ error: 'Forbidden' });
-    return false;
+  const formSigningHeader = req.headers['x-supply-form-signing-secret'];
+  const validInternal = process.env.AUTOM8_KDS_SECRET || process.env.SUPPLY_INTERNAL_SECRET;
+  const validFormSecret = process.env.SUPPLY_FORM_SIGNING_SECRET;
+
+  if (validInternal && internalSecret && internalSecret === validInternal) {
+    return true;
   }
-  return true;
+  // Allow chat to mint with the same HMAC secret used to validate /:token
+  // (so autom8-chat only needs SUPPLY_FORM_SIGNING_SECRET matching supply-api).
+  if (validFormSecret && formSigningHeader && formSigningHeader === validFormSecret) {
+    return true;
+  }
+  res.status(403).json({ error: 'Forbidden' });
+  return false;
 }
 
 function getTodayCutoffDate(supplier) {
@@ -171,8 +179,13 @@ router.post('/generate-link', authenticateToken, getSupplierContext, opsRoles, a
 // Returns: supplier header, buyer profile + credit balance, today's catalog grouped by category.
 
 router.get('/:token', async (req, res) => {
-  const { token }  = req.params;
+  let { token } = req.params;
   const { prefill } = req.query;  // 'last' → pre-fill last order quantities
+  try {
+    token = decodeURIComponent(String(token || ''));
+  } catch {
+    token = String(token || '');
+  }
 
   // 1. Validate token
   const decoded = validateFormToken(token);

@@ -4,13 +4,11 @@
 #
 # Prefer POST supply-api /api/supply/form/mint-link so HMAC uses the same
 # SUPPLY_FORM_SIGNING_SECRET as GET /api/supply/form/:token validation.
-# Local HMAC is a last-resort fallback only (often causes "Invalid order link"
-# when chat and supply-api secrets diverge).
 #
-# Railway env on autom8-chat:
+# Railway env on autom8-chat (required for working WhatsApp Order links):
 #   SUPPLY_API_BASE_URL=https://supply-api.autom8.works
-#   AUTOM8_KDS_SECRET or SUPPLY_INTERNAL_SECRET  (same as supply-api)
-#   SUPPLY_FORM_SIGNING_SECRET                   (same as supply-api; fallback)
+#   SUPPLY_FORM_SIGNING_SECRET   (MUST match autom8-backend supply)
+#   AUTOM8_KDS_SECRET            (optional; same as supply-api — preferred mint auth)
 #   SUPPLY_FORM_BASE_URL=https://app.autom8.works
 # ============================================================================
 
@@ -84,9 +82,8 @@ def create_form_token(
 ) -> str:
     """
     Create a signed order form token matching Node createFormToken().
-
-    Token format: base64url(payload).base64url(HMAC-SHA256 signature)
-    Prefer mint-link via supply-api; use this only as fallback.
+    Prefer mint-link via supply-api; use this only when SUPPLY_FORM_SIGNING_SECRET
+    matches supply-api exactly.
     """
     if valid_until is not None:
         expires = int(valid_until.timestamp())
@@ -110,10 +107,7 @@ def create_form_token(
 
 
 def get_today_cutoff_date(ordering_cutoff_time: Optional[str] = None) -> datetime:
-    """
-    Next daily ordering cutoff in IST (same behaviour as clients.js getTodayCutoffDate).
-    If cutoff has already passed today, rolls to tomorrow.
-    """
+    """Next daily ordering cutoff in IST."""
     cutoff = ordering_cutoff_time or '22:00:00'
     parts = str(cutoff).split(':')
     hours = int(parts[0]) if parts else 22
@@ -159,6 +153,20 @@ async def get_supplier_ordering_cutoff(supplier_id: str) -> Optional[str]:
     return rows[0].get('ordering_cutoff_time')
 
 
+def _mint_auth_headers() -> Optional[dict]:
+    """Headers for mint-link: KDS secret preferred, else form signing secret."""
+    headers = {'Content-Type': 'application/json'}
+    internal = _internal_secret()
+    if internal:
+        headers['x-internal-secret'] = internal
+        return headers
+    form_secret = _signing_secret()
+    if form_secret and form_secret != _DEFAULT_SECRET:
+        headers['x-supply-form-signing-secret'] = form_secret
+        return headers
+    return None
+
+
 async def _mint_via_supply_api(
     supplier_id: str,
     client_id: str,
@@ -166,19 +174,15 @@ async def _mint_via_supply_api(
     permanent: bool = False,
 ) -> Optional[str]:
     """Ask supply-api to mint with its production HMAC secret."""
-    secret = _internal_secret()
-    if not secret:
+    headers = _mint_auth_headers()
+    if not headers:
         logger.error(
-            '[supply_form_token] AUTOM8_KDS_SECRET / SUPPLY_INTERNAL_SECRET unset — '
-            'cannot call mint-link'
+            '[supply_form_token] No AUTOM8_KDS_SECRET / SUPPLY_INTERNAL_SECRET / '
+            'SUPPLY_FORM_SIGNING_SECRET on autom8-chat — cannot mint-link'
         )
         return None
 
     url = f'{_supply_api_base_url()}/api/supply/form/mint-link'
-    headers = {
-        'Content-Type': 'application/json',
-        'x-internal-secret': secret,
-    }
     payload = {
         'supplier_id': supplier_id,
         'client_id': client_id,
@@ -207,25 +211,27 @@ async def _mint_via_supply_api(
 
 
 async def build_order_form_url(supplier_id: str, client_id: str) -> str:
-    """Mint a daily cutoff token and return the public /s/:token URL."""
+    """
+    Mint a daily cutoff token and return the public /s/:token URL.
+
+    Raises RuntimeError if minting would produce an Invalid order link
+    (missing/mismatched secrets). Callers should surface that to the customer.
+    """
     minted = await _mint_via_supply_api(supplier_id, client_id, permanent=False)
     if minted:
         return minted
 
     secret = _signing_secret()
+    # Never fall back to the shared dev secret in production — supply-api rejects it.
     if secret == _DEFAULT_SECRET:
-        logger.error(
-            '[supply_form_token] mint-link failed and SUPPLY_FORM_SIGNING_SECRET is unset — '
-            'local fallback uses dev_form_signing_secret; OrderForm will show '
-            '"Invalid order link". Set AUTOM8_KDS_SECRET + SUPPLY_API_BASE_URL on '
-            'autom8-chat, or set SUPPLY_FORM_SIGNING_SECRET to match supply-api.'
-        )
-    else:
-        logger.error(
-            '[supply_form_token] mint-link failed — falling back to local HMAC. '
-            'Ensure SUPPLY_FORM_SIGNING_SECRET on autom8-chat matches supply-api.'
+        raise RuntimeError(
+            'Order link unavailable: set SUPPLY_FORM_SIGNING_SECRET on autom8-chat '
+            'to match supply-api (and AUTOM8_KDS_SECRET for mint-link).'
         )
 
+    logger.warning(
+        '[supply_form_token] mint-link failed — local HMAC with SUPPLY_FORM_SIGNING_SECRET'
+    )
     cutoff_time = await get_supplier_ordering_cutoff(supplier_id)
     valid_until = get_today_cutoff_date(cutoff_time)
     token = create_form_token(supplier_id, client_id, valid_until, permanent=False)

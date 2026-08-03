@@ -142,7 +142,10 @@ const SUPPLY_ORDER_SPA_URL = (
 ).replace(/\/$/, '');
 app.get(['/s/:token', '/s/b/:token'], (req, res) => {
   const permanent = req.path.startsWith('/s/b/');
-  const dest = `${SUPPLY_ORDER_SPA_URL}${permanent ? '/s/b/' : '/s/'}${encodeURIComponent(req.params.token)}`;
+  // Token is already base64url (URL-safe); do not encodeURIComponent — that can
+  // confuse clients and break HMAC verification on the SPA fetch.
+  const raw = String(req.params.token || '');
+  const dest = `${SUPPLY_ORDER_SPA_URL}${permanent ? '/s/b/' : '/s/'}${raw}`;
   return res.redirect(302, dest);
 });
 
