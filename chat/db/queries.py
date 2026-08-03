@@ -250,19 +250,26 @@ async def get_supply_client_by_restaurant_id(restaurant_id: str) -> Optional[dic
     return None
 
 
+def _session_phone_key(phone: str) -> str:
+    """Canonical phone key for supply_conversation_states (digits only)."""
+    return ''.join(c for c in str(phone or '') if c.isdigit())
+
+
 async def get_supply_session(supplier_id: str, phone: str) -> dict:
     """
     Fetch the current conversation state for a supplier+phone pair.
     Returns an empty dict when no session exists yet.
     """
+    phone_key = _session_phone_key(phone) or str(phone or '')
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(
             _url("supply_conversation_states"),
             headers=_headers(),
             params={
                 "supplier_id": f"eq.{supplier_id}",
-                "phone":       f"eq.{phone}",
+                "phone":       f"eq.{phone_key}",
                 "select":      "state",
+                "order":       "updated_at.desc",
                 "limit":       "1",
             },
         )
@@ -281,20 +288,55 @@ async def save_supply_session(
 ) -> None:
     """
     Upsert the conversation state for a supplier+phone pair.
-    The table must have a UNIQUE constraint on (supplier_id, phone).
+
+    Prefer PATCH (update existing) then POST (insert). Avoids relying solely on
+    PostgREST merge-duplicates, which no-ops without a UNIQUE(supplier_id, phone)
+    and can leave GET reading a stale empty row.
     """
-    payload = {
-        "supplier_id": supplier_id,
-        "phone":       phone,
-        "client_id":   client_id,
-        "state":       session,
-        "updated_at":  datetime.now(timezone.utc).isoformat(),
+    phone_key = _session_phone_key(phone) or str(phone or '')
+    now = datetime.now(timezone.utc).isoformat()
+    update_payload = {
+        "client_id":  client_id,
+        "state":      session,
+        "updated_at": now,
     }
-    headers = _headers(prefer="resolution=merge-duplicates,return=minimal")
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(_url("supply_conversation_states"), headers=headers, json=payload)
-    if resp.status_code not in (200, 201):
-        logger.error(f"[queries] save_supply_session HTTP {resp.status_code}: {resp.text[:200]}")
+        patch = await client.patch(
+            _url("supply_conversation_states"),
+            headers=_headers(prefer="return=representation"),
+            params={
+                "supplier_id": f"eq.{supplier_id}",
+                "phone":       f"eq.{phone_key}",
+            },
+            json=update_payload,
+        )
+        if patch.status_code == 200 and patch.json():
+            return
+
+        insert_payload = {
+            "supplier_id": supplier_id,
+            "phone":       phone_key,
+            **update_payload,
+        }
+        # Try merge-duplicates when a unique constraint exists; still works as insert.
+        post = await client.post(
+            _url("supply_conversation_states"),
+            headers=_headers(prefer="resolution=merge-duplicates,return=minimal"),
+            params={"on_conflict": "supplier_id,phone"},
+            json=insert_payload,
+        )
+        if post.status_code not in (200, 201, 204):
+            # Retry plain insert without on_conflict (constraint may be absent).
+            post2 = await client.post(
+                _url("supply_conversation_states"),
+                headers=_headers(prefer="return=minimal"),
+                json=insert_payload,
+            )
+            if post2.status_code not in (200, 201, 204):
+                logger.error(
+                    f"[queries] save_supply_session HTTP {post2.status_code}: "
+                    f"{post2.text[:200]}"
+                )
 
 
 async def get_client_outstanding(supplier_id: str, client_id: str) -> float:

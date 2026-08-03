@@ -32,6 +32,8 @@
 # the same way CONFIRM_PAYMENT:*/CANCEL_PAYMENT already were.
 # ============================================================================
 
+import base64
+import json
 import logging
 import re
 import uuid
@@ -415,13 +417,15 @@ async def _handle_payment(
     ]
     reference = refs[0] if refs else None
 
-    # Store pending claim in session for confirmation
-    session['_pending_payment'] = {
+    # Store pending claim in session AND encode in the button id so confirm
+    # still works if supply_conversation_states upsert fails / returns a stale row.
+    pending = {
         'amount':    amount,
         'method':    method,
         'reference': reference,
         'raw':       text,
     }
+    session['_pending_payment'] = pending
     session['_state'] = 'awaiting_payment_confirm'
 
     method_label = _method_label(lang, method)
@@ -438,19 +442,60 @@ async def _handle_payment(
         phone       = phone,
         body        = confirm_msg,
         buttons     = [
-            {'id': 'CONFIRM_PAYMENT:yes', 'title': reply(lang, 'btn_confirm_yes')},
-            {'id': 'CANCEL_PAYMENT',      'title': reply(lang, 'btn_confirm_cancel')},
+            {
+                'id': _encode_payment_confirm_id(pending),
+                'title': reply(lang, 'btn_confirm_yes'),
+            },
+            {'id': 'CANCEL_PAYMENT', 'title': reply(lang, 'btn_confirm_cancel')},
         ],
         supplier_id = supplier_id,
         client_id   = client_id,
     )
 
 
+def _encode_payment_confirm_id(pending: dict) -> str:
+    """Pack claim fields into the WhatsApp button id (max 256 chars)."""
+    payload = {
+        'a': pending.get('amount'),
+        'm': pending.get('method') or 'upi',
+        'r': pending.get('reference'),
+        'raw': (pending.get('raw') or '')[:80],
+    }
+    token = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(',', ':')).encode('utf-8')
+    ).decode('ascii').rstrip('=')
+    return f'CONFIRM_PAYMENT:{token}'[:256]
+
+
+def _decode_payment_confirm_id(reply_id: str) -> Optional[dict]:
+    """Recover pending payment from CONFIRM_PAYMENT:* button id."""
+    if not reply_id or not reply_id.startswith('CONFIRM_PAYMENT:'):
+        return None
+    token = reply_id[len('CONFIRM_PAYMENT:'):].strip()
+    if not token or token.lower() == 'yes':
+        return None
+    try:
+        pad = '=' * (-len(token) % 4)
+        data = json.loads(base64.urlsafe_b64decode(token + pad).decode('utf-8'))
+        amount = float(data.get('a'))
+        if amount <= 0:
+            return None
+        return {
+            'amount':    amount,
+            'method':    (data.get('m') or 'upi'),
+            'reference': data.get('r') or None,
+            'raw':       data.get('raw') or f'confirmed:{amount}',
+        }
+    except Exception as exc:
+        logger.warning(f'[supply-agent] bad CONFIRM_PAYMENT token: {exc}')
+        return None
+
+
 async def _handle_payment_confirmation(
     phone: str, supplier_id: str, client_id: str, session: dict, reply_id: str
 ) -> None:
     """Commit the pending payment claim after client confirms."""
-    pending = session.pop('_pending_payment', None)
+    pending = session.pop('_pending_payment', None) or _decode_payment_confirm_id(reply_id)
     session['_state'] = 'idle'
     lang = _lang(session)
 
