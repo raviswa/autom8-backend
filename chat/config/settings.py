@@ -77,8 +77,14 @@ class Settings(BaseSettings):
     supply_webhook_secret:       str      = ''
 
     # Public order form (/s/:token) — must match Node SUPPLY_FORM_* env vars
+    # Railway (autom8-chat): set SUPPLY_FORM_SIGNING_SECRET to the same value as
+    # autom8-backend supply; SUPPLY_API_BASE_URL=https://supply-api.autom8.works;
+    # AUTOM8_KDS_SECRET (or SUPPLY_INTERNAL_SECRET) matching supply-api for mint-link.
     supply_form_signing_secret: str = ''
     supply_form_base_url: str = 'https://app.autom8.works'
+    supply_api_base_url: str = 'https://supply-api.autom8.works'
+    autom8_kds_secret: str = ''
+    supply_internal_secret: str = ''
 
 
 settings = Settings()

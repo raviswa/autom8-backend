@@ -1,8 +1,17 @@
 # chat/tools/supply_form_token.py
 # ============================================================================
-# Munafe Supply — Python port of Node supplyFormToken.js + cutoff helper.
-# Used by the WhatsApp agent to mint /s/:token order-form links without a
-# supplier JWT.
+# Munafe Supply — order-form URL minting for the WhatsApp agent.
+#
+# Prefer POST supply-api /api/supply/form/mint-link so HMAC uses the same
+# SUPPLY_FORM_SIGNING_SECRET as GET /api/supply/form/:token validation.
+# Local HMAC is a last-resort fallback only (often causes "Invalid order link"
+# when chat and supply-api secrets diverge).
+#
+# Railway env on autom8-chat:
+#   SUPPLY_API_BASE_URL=https://supply-api.autom8.works
+#   AUTOM8_KDS_SECRET or SUPPLY_INTERNAL_SECRET  (same as supply-api)
+#   SUPPLY_FORM_SIGNING_SECRET                   (same as supply-api; fallback)
+#   SUPPLY_FORM_BASE_URL=https://app.autom8.works
 # ============================================================================
 
 from __future__ import annotations
@@ -26,6 +35,7 @@ logger = logging.getLogger(__name__)
 _IST = ZoneInfo('Asia/Kolkata')
 _DEFAULT_SECRET = 'dev_form_signing_secret'
 _DEFAULT_BASE_URL = 'https://app.autom8.works'
+_DEFAULT_SUPPLY_API = 'https://supply-api.autom8.works'
 
 
 def _signing_secret() -> str:
@@ -44,6 +54,24 @@ def _form_base_url() -> str:
     ).rstrip('/')
 
 
+def _supply_api_base_url() -> str:
+    return (
+        getattr(settings, 'supply_api_base_url', None)
+        or os.environ.get('SUPPLY_API_BASE_URL')
+        or _DEFAULT_SUPPLY_API
+    ).rstrip('/')
+
+
+def _internal_secret() -> str:
+    return (
+        getattr(settings, 'autom8_kds_secret', None)
+        or os.environ.get('AUTOM8_KDS_SECRET')
+        or getattr(settings, 'supply_internal_secret', None)
+        or os.environ.get('SUPPLY_INTERNAL_SECRET')
+        or ''
+    )
+
+
 def _b64url_encode(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b'=').decode('ascii')
 
@@ -58,6 +86,7 @@ def create_form_token(
     Create a signed order form token matching Node createFormToken().
 
     Token format: base64url(payload).base64url(HMAC-SHA256 signature)
+    Prefer mint-link via supply-api; use this only as fallback.
     """
     if valid_until is not None:
         expires = int(valid_until.timestamp())
@@ -130,8 +159,73 @@ async def get_supplier_ordering_cutoff(supplier_id: str) -> Optional[str]:
     return rows[0].get('ordering_cutoff_time')
 
 
+async def _mint_via_supply_api(
+    supplier_id: str,
+    client_id: str,
+    *,
+    permanent: bool = False,
+) -> Optional[str]:
+    """Ask supply-api to mint with its production HMAC secret."""
+    secret = _internal_secret()
+    if not secret:
+        logger.error(
+            '[supply_form_token] AUTOM8_KDS_SECRET / SUPPLY_INTERNAL_SECRET unset — '
+            'cannot call mint-link'
+        )
+        return None
+
+    url = f'{_supply_api_base_url()}/api/supply/form/mint-link'
+    headers = {
+        'Content-Type': 'application/json',
+        'x-internal-secret': secret,
+    }
+    payload = {
+        'supplier_id': supplier_id,
+        'client_id': client_id,
+        'permanent': bool(permanent),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+        if resp.status_code in (200, 201):
+            data = resp.json() or {}
+            order_url = data.get('url')
+            if order_url:
+                logger.info('[supply_form_token] mint-link ok supplier=%s', supplier_id)
+                return order_url
+            logger.error('[supply_form_token] mint-link missing url: %s', resp.text[:200])
+            return None
+        logger.error(
+            '[supply_form_token] mint-link HTTP %s: %s',
+            resp.status_code,
+            resp.text[:300],
+        )
+        return None
+    except Exception as exc:
+        logger.error('[supply_form_token] mint-link request failed: %s', exc)
+        return None
+
+
 async def build_order_form_url(supplier_id: str, client_id: str) -> str:
     """Mint a daily cutoff token and return the public /s/:token URL."""
+    minted = await _mint_via_supply_api(supplier_id, client_id, permanent=False)
+    if minted:
+        return minted
+
+    secret = _signing_secret()
+    if secret == _DEFAULT_SECRET:
+        logger.error(
+            '[supply_form_token] mint-link failed and SUPPLY_FORM_SIGNING_SECRET is unset — '
+            'local fallback uses dev_form_signing_secret; OrderForm will show '
+            '"Invalid order link". Set AUTOM8_KDS_SECRET + SUPPLY_API_BASE_URL on '
+            'autom8-chat, or set SUPPLY_FORM_SIGNING_SECRET to match supply-api.'
+        )
+    else:
+        logger.error(
+            '[supply_form_token] mint-link failed — falling back to local HMAC. '
+            'Ensure SUPPLY_FORM_SIGNING_SECRET on autom8-chat matches supply-api.'
+        )
+
     cutoff_time = await get_supplier_ordering_cutoff(supplier_id)
     valid_until = get_today_cutoff_date(cutoff_time)
     token = create_form_token(supplier_id, client_id, valid_until, permanent=False)

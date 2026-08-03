@@ -6,6 +6,8 @@
 //   GET  /api/supply/form/:token          → validate token, return form payload
 //   POST /api/supply/form/generate-link   → supplier generates link for a client
 //                                           (requires supplyAuthMiddleware)
+//   POST /api/supply/form/mint-link       → internal mint for chat bot
+//                                           (AUTOM8_KDS_SECRET / SUPPLY_INTERNAL_SECRET)
 //
 // The order SUBMISSION (POST /api/supply/orders) is handled in orders.js.
 // This file is intentionally public — no JWT. Auth is via HMAC-signed token.
@@ -27,6 +29,81 @@ const supplyLedger                              = require('./ledger');
 const { nextSupplyDeliveryDate }                = require('../../helpers/istDate');
 
 const BASE_URL = process.env.SUPPLY_FORM_BASE_URL || 'https://app.autom8.works';
+
+function assertInternalSecret(req, res) {
+  const internalSecret = req.headers['x-internal-secret']
+    || req.headers['authorization']?.replace(/^Bearer\s+/i, '');
+  const validSecret = process.env.AUTOM8_KDS_SECRET || process.env.SUPPLY_INTERNAL_SECRET;
+  if (!validSecret || internalSecret !== validSecret) {
+    res.status(403).json({ error: 'Forbidden' });
+    return false;
+  }
+  return true;
+}
+
+function getTodayCutoffDate(supplier) {
+  const cutoff = supplier?.ordering_cutoff_time || '22:00:00';
+  const [hours = '22', minutes = '00'] = String(cutoff).split(':');
+  const validUntil = new Date();
+  validUntil.setHours(Number(hours), Number(minutes), 0, 0);
+  if (validUntil.getTime() <= Date.now()) {
+    validUntil.setDate(validUntil.getDate() + 1);
+  }
+  return validUntil;
+}
+
+// ── POST /api/supply/form/mint-link ───────────────────────────────────────────
+// Internal: chat WhatsApp agent mints a form URL with the same HMAC secret as
+// GET /:token validation. Must be registered BEFORE /:token.
+// Body: { supplier_id, client_id, permanent?: boolean }
+
+router.post('/mint-link', async (req, res) => {
+  if (!assertInternalSecret(req, res)) return;
+
+  const { supplier_id, client_id, permanent = false } = req.body || {};
+  if (!supplier_id || !client_id) {
+    return res.status(400).json({ error: 'supplier_id and client_id are required' });
+  }
+
+  try {
+    const { data: client, error: clientErr } = await supabaseAdmin
+      .from('supply_clients')
+      .select('id, name, is_active')
+      .eq('id', client_id)
+      .eq('supplier_id', supplier_id)
+      .maybeSingle();
+
+    if (clientErr) return res.status(500).json({ error: clientErr.message });
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    if (!client.is_active) return res.status(400).json({ error: 'Client is inactive' });
+
+    let valid_until = null;
+    if (!permanent) {
+      const { data: supplier } = await supabaseAdmin
+        .from('suppliers')
+        .select('ordering_cutoff_time')
+        .eq('id', supplier_id)
+        .maybeSingle();
+      valid_until = getTodayCutoffDate(supplier);
+    }
+
+    const token    = createFormToken(supplier_id, client_id, valid_until, !!permanent);
+    const pathBase = permanent ? '/s/b' : '/s';
+    const url      = `${BASE_URL.replace(/\/$/, '')}${pathBase}/${token}`;
+
+    return res.json({
+      url,
+      token,
+      supplier_id,
+      client_id,
+      client_name: client.name,
+      permanent: !!permanent,
+    });
+  } catch (err) {
+    console.error('[form] mint-link error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 // ── POST /api/supply/form/generate-link ──────────────────────────────────────
 // Must be registered BEFORE /:token so "generate-link" is never treated as a token.
