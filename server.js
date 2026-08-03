@@ -33,6 +33,9 @@ const {
   menuItemSpecialTodayMiddleware,
   menuItemDiscountMiddleware,
   menuItemStockAlertsMiddleware,
+  menuItemCreateMiddleware,
+  menuItemUpdateMiddleware,
+  menuItemDeleteMiddleware,
 } = require('./src/routes/catalog');
 const { logKdsSecretStatus } = require('./src/config/internalSecret');
 const { verifyScheduledDeliveryTokenType, verifyMigrationColumns, verifyWhatsAppCredentials } = require('./src/helpers/schemaChecks');
@@ -92,6 +95,9 @@ app.use('/api/catalog',     require('./src/routes/catalog'));
 app.use('/api/instagram',   require('./src/routes/instagram'));
 app.use('/api/loyalty',     require('./src/routes/loyalty').router);
 app.post('/api/menu/upload', ...menuUploadMiddleware);
+app.post('/api/menu-items', ...menuItemCreateMiddleware);
+app.put('/api/menu-items/:id', ...menuItemUpdateMiddleware);
+app.delete('/api/menu-items/:id', ...menuItemDeleteMiddleware);
 app.put('/api/menu-items/:id/availability', ...menuItemAvailabilityMiddleware);
 app.post('/api/menu-items/bulk-restock', ...menuItemBulkRestockMiddleware);
 app.post('/api/menu-items/:id/restock', ...menuItemRestockMiddleware);

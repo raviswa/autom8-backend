@@ -1140,6 +1140,476 @@ async function resetDailySpecialDishes() {
   return n;
 }
 
+// ── Single-item CRUD (food products UI editor; Excel remains for bulk) ───────
+
+async function assertMenuCatalogEditPermission(req) {
+  const OWNER_ROLES = ['owner', 'brand_owner'];
+  if (!OWNER_ROLES.includes(req.user_role) && req.user_role !== 'manager') {
+    return { status: 403, error: 'Unauthorized' };
+  }
+  if (req.user_role === 'manager') {
+    const { data: tenant, error: tenantErr } = await supabaseAdmin
+      .from('tenants')
+      .select('allow_manager_menu_upload')
+      .eq('id', req.restaurant_id)
+      .maybeSingle();
+    if (tenantErr) {
+      console.error('[menu-items/crud] permission lookup failed:', tenantErr.message);
+      return { status: 500, error: 'Could not verify edit permission' };
+    }
+    if (!tenant?.allow_manager_menu_upload) {
+      return {
+        status: 403,
+        error: 'Catalog editing is restricted to the owner for this outlet. Ask your owner to enable manager upload access in Settings.',
+      };
+    }
+  }
+  return null;
+}
+
+function parseBundleComponentsBody(raw) {
+  if (Array.isArray(raw)) {
+    const out = [];
+    for (const part of raw) {
+      if (!part || typeof part !== 'object') continue;
+      const rid = String(part.retailer_id || part.id || '').trim();
+      if (!rid) continue;
+      const qty = Math.max(1, parseInt(part.qty ?? part.quantity ?? 1, 10) || 1);
+      out.push({ retailer_id: rid, qty });
+    }
+    return out.length ? out : null;
+  }
+  const text = String(raw ?? '').trim();
+  if (!text) return null;
+  const parts = text.split(/[,;|]/).map((p) => p.trim()).filter(Boolean);
+  const out = [];
+  for (const part of parts) {
+    const m = part.match(/^([A-Za-z0-9_-]+)\s*[:=xX×*]?\s*(\d+)?$/);
+    if (!m) continue;
+    const qty = Math.max(1, parseInt(m[2] || '1', 10) || 1);
+    out.push({ retailer_id: m[1], qty });
+  }
+  return out.length ? out : null;
+}
+
+function validateHttpUrl(value, fieldLabel) {
+  if (value == null || value === '') return null;
+  const s = String(value).trim();
+  if (!s) return null;
+  if (!/^https?:\/\//i.test(s)) {
+    return `${fieldLabel} must start with http:// or https://`;
+  }
+  return null;
+}
+
+function normalizeMenuItemBody(item, { packagedLob, existingMeta }) {
+  const name = String(item.name || item.title || '').trim();
+  const price = parseFloat(item.price);
+  const pack = item.pack_size_label || item.size_label
+    ? String(item.pack_size_label || item.size_label).trim()
+    : null;
+  const itemTypeRaw = String(item.item_type || 'PRODUCT').trim().toUpperCase() || 'PRODUCT';
+  const item_type = (itemTypeRaw === 'BUNDLE' || itemTypeRaw === 'HAMPER') ? 'BUNDLE' : 'PRODUCT';
+  const components = parseBundleComponentsBody(
+    item.bundle_components != null ? item.bundle_components : item.bundle_components_text,
+  );
+  const availRaw = String(item.availability_status || '').toLowerCase().trim();
+  const availability_status = ['coming_soon', 'preorder', 'sold_out', 'in_stock'].includes(availRaw)
+    ? availRaw
+    : null;
+
+  const errors = [];
+  if (!name) errors.push('Name is required');
+  if (!Number.isFinite(price) || price <= 0) errors.push('Price must be greater than 0');
+  if (item.variant_group_id && !pack) {
+    errors.push('variant_group_id needs pack_size_label (e.g. 250g)');
+  }
+  if (item_type === 'BUNDLE' && (!components || !components.length)) {
+    errors.push('BUNDLE items need bundle_components (e.g. MP-100:3)');
+  }
+  for (const [key, label] of [
+    ['image_url', 'image_url'],
+    ['image_url_2', 'image_url_2'],
+    ['image_url_3', 'image_url_3'],
+    ['image_url_4', 'image_url_4'],
+    ['image_url_5', 'image_url_5'],
+  ]) {
+    const err = validateHttpUrl(item[key] || (key === 'image_url' ? item.image_link : null), label);
+    if (err) errors.push(err);
+  }
+
+  const category = String(item.category || '').trim() || 'General';
+  const metaBase = (existingMeta && typeof existingMeta === 'object' && !Array.isArray(existingMeta))
+    ? { ...existingMeta }
+    : ((item.meta && typeof item.meta === 'object' && !Array.isArray(item.meta)) ? { ...item.meta } : {});
+  if (components) metaBase.bundle_components = components;
+  else if (item_type !== 'BUNDLE') delete metaBase.bundle_components;
+
+  const row = {
+    name,
+    description: String(item.description || '').trim(),
+    price,
+    category,
+    image_url: item.image_url || item.image_link || null,
+    time_slot: mapTimeSlot(item.time_slot || 'all'),
+    item_type,
+    variant_group_id: item.variant_group_id ? String(item.variant_group_id).trim() : null,
+    size_label: pack,
+    pack_size_label: pack,
+    weight_grams: item.weight_grams != null && item.weight_grams !== ''
+      ? parseInt(item.weight_grams, 10) || null
+      : null,
+    availability_status,
+    launch_at: item.launch_at ? String(item.launch_at).trim() : null,
+    deposit_amount: item.deposit_amount != null && item.deposit_amount !== ''
+      ? parseFloat(item.deposit_amount) || null
+      : null,
+    shelf_life_days: item.shelf_life_days != null && item.shelf_life_days !== ''
+      ? parseInt(item.shelf_life_days, 10) || null
+      : null,
+    made_on_date: item.made_on_date ? String(item.made_on_date).trim().slice(0, 10) : null,
+    ingredients: item.ingredients ? String(item.ingredients).trim() : null,
+    allergens: item.allergens ? String(item.allergens).trim() : null,
+    bundle_components: components,
+    meta: Object.keys(metaBase).length ? metaBase : {},
+    image_url_2: item.image_url_2 || null,
+    image_url_3: item.image_url_3 || null,
+    image_url_4: item.image_url_4 || null,
+    image_url_5: item.image_url_5 || null,
+    low_stock_alert_units: (() => {
+      if (item.low_stock_alert_units == null || item.low_stock_alert_units === '') {
+        return packagedLob ? 5 : null;
+      }
+      const n = parseInt(item.low_stock_alert_units, 10);
+      return Number.isFinite(n) && n >= 0 ? n : (packagedLob ? 5 : null);
+    })(),
+  };
+
+  return { row, errors, name, price, pack, components };
+}
+
+async function writeMenuItemRow(kind, targetId, restaurantId, row) {
+  async function run(payload) {
+    if (kind === 'update') {
+      return supabaseAdmin.from('menu_items').update(payload)
+        .eq('id', targetId).eq('restaurant_id', restaurantId).select('*').single();
+    }
+    return supabaseAdmin.from('menu_items').insert(payload).select('*').single();
+  }
+
+  let { data, error } = await run(row);
+  if (error && /menu_items\.meta|['"]meta['"] column|column ['"]?meta/i.test(error.message || '')) {
+    const withoutMeta = { ...row };
+    delete withoutMeta.meta;
+    ({ data, error } = await run(withoutMeta));
+  }
+  if (error && /bundle_components/i.test(error.message || '')) {
+    const withoutBundle = { ...row };
+    delete withoutBundle.bundle_components;
+    if (withoutBundle.meta && typeof withoutBundle.meta === 'object') {
+      const meta = { ...withoutBundle.meta };
+      delete meta.bundle_components;
+      withoutBundle.meta = meta;
+    }
+    ({ data, error } = await run(withoutBundle));
+  }
+  return { data, error };
+}
+
+async function handleMenuItemCreate(req, res) {
+  try {
+    const denied = await assertMenuCatalogEditPermission(req);
+    if (denied) return res.status(denied.status).json({ error: denied.error });
+
+    const restaurantId = req.restaurant_id;
+    const { data: tenantRow } = await supabaseAdmin
+      .from('tenants')
+      .select('lob_type, fssai_license')
+      .eq('id', restaurantId)
+      .maybeSingle();
+    const lobType = String(tenantRow?.lob_type || '').toLowerCase();
+    const packagedLob = ['food_products', 'retail', 'b2b', 'psl'].includes(lobType);
+    const blockNoFssai = lobType === 'food_products'
+      && !String(tenantRow?.fssai_license || '').trim();
+
+    const { row, errors, pack } = normalizeMenuItemBody(req.body || {}, { packagedLob });
+    if (errors.length) return res.status(400).json({ error: errors[0], errors });
+
+    const { data: existingRows } = await supabaseAdmin
+      .from('menu_items')
+      .select('retailer_id')
+      .eq('restaurant_id', restaurantId);
+    const existingIds = (existingRows || []).map((r) => r.retailer_id).filter(Boolean);
+
+    let retailerId = String(req.body.retailer_id || req.body.id || '').trim();
+    if (retailerId) {
+      const clash = existingIds.some((id) => String(id).toUpperCase() === retailerId.toUpperCase());
+      if (clash) {
+        return res.status(400).json({ error: `SKU "${retailerId}" already exists` });
+      }
+    } else {
+      retailerId = deriveRetailerId({
+        name: row.name,
+        packSizeLabel: pack,
+        existingIds,
+      });
+    }
+
+    const wantAvailable = req.body.is_available === undefined
+      ? true
+      : parseBoolCell(req.body.is_available, true);
+    let stockQty = null;
+    if (req.body.current_stock != null && req.body.current_stock !== '') {
+      stockQty = Math.max(0, parseInt(req.body.current_stock, 10) || 0);
+    }
+    let isStocked = wantAvailable;
+    if (stockQty === 0) isStocked = false;
+    if (blockNoFssai) isStocked = false;
+    if (row.availability_status === 'sold_out' || row.availability_status === 'coming_soon') {
+      isStocked = false;
+    }
+
+    const now = new Date().toISOString();
+    const insertRow = {
+      ...row,
+      restaurant_id: restaurantId,
+      retailer_id: retailerId,
+      is_stocked: isStocked,
+      is_available: isStocked,
+      current_stock: stockQty,
+      kitchen_station: resolveKitchenStation(req.body.kitchen_station || '', {
+        category: row.category,
+        packagedLob,
+      }),
+      prep_time_fixed: Math.max(0, parseInt(req.body.prep_time_fixed, 10) || 5),
+      batch_size: Math.max(1, parseInt(req.body.batch_size, 10) || 1),
+      time_per_batch: Math.max(1, parseInt(req.body.time_per_batch, 10) || 10),
+      packing_time: Math.max(0, parseFloat(req.body.packing_time) || 1),
+      holds_well: parseBoolCell(req.body.holds_well, false),
+      fulfillment_section: String(req.body.fulfillment_section || 'main').trim() || 'main',
+      archived_at: null,
+      created_at: now,
+      updated_at: now,
+    };
+    if (!insertRow.availability_status) {
+      insertRow.availability_status = isStocked ? 'in_stock' : (stockQty === 0 ? 'sold_out' : null);
+    }
+
+    const { data, error } = await writeMenuItemRow('insert', null, restaurantId, insertRow);
+    if (error) throw error;
+
+    await writeAuditLog({
+      user_id: req.user.sub,
+      restaurant_id: restaurantId,
+      action: 'Menu item created',
+      details: { item_id: data.id, retailer_id: data.retailer_id, name: data.name },
+    });
+
+    const warnings = [];
+    if (blockNoFssai) {
+      warnings.push(
+        'No FSSAI license on file — item was saved as out-of-stock. Add FSSAI in Settings before publishing.',
+      );
+    }
+
+    res.json({ success: true, item: data, warnings: warnings.length ? warnings : undefined });
+
+    if (data.retailer_id) {
+      pushSingleItemToMetaCatalog({
+        retailerId: data.retailer_id,
+        isAvailable: !!data.is_available,
+        restaurantId,
+      }).catch((e) => console.error(`[menu-item-create-meta] ${data.name}:`, e.message));
+    }
+  } catch (err) {
+    console.error('[menu-item-create]', err.message);
+    res.status(400).json({ error: err.message });
+  }
+}
+
+async function handleMenuItemUpdate(req, res) {
+  try {
+    const denied = await assertMenuCatalogEditPermission(req);
+    if (denied) return res.status(denied.status).json({ error: denied.error });
+
+    const restaurantId = req.restaurant_id;
+    const { data: existing, error: fetchErr } = await supabaseAdmin
+      .from('menu_items')
+      .select('*')
+      .eq('id', req.params.id)
+      .eq('restaurant_id', restaurantId)
+      .is('archived_at', null)
+      .maybeSingle();
+    if (fetchErr) throw fetchErr;
+    if (!existing) return res.status(404).json({ error: 'Menu item not found' });
+
+    const { data: tenantRow } = await supabaseAdmin
+      .from('tenants')
+      .select('lob_type, fssai_license')
+      .eq('id', restaurantId)
+      .maybeSingle();
+    const lobType = String(tenantRow?.lob_type || '').toLowerCase();
+    const packagedLob = ['food_products', 'retail', 'b2b', 'psl'].includes(lobType);
+    const blockNoFssai = lobType === 'food_products'
+      && !String(tenantRow?.fssai_license || '').trim();
+
+    const { row, errors } = normalizeMenuItemBody(req.body || {}, {
+      packagedLob,
+      existingMeta: existing.meta,
+    });
+    if (errors.length) return res.status(400).json({ error: errors[0], errors });
+
+    // Keep retailer_id stable — never steal another SKU's id on update.
+    const requestedSku = String(req.body.retailer_id || req.body.id || '').trim();
+    if (requestedSku
+      && requestedSku.toUpperCase() !== String(existing.retailer_id || '').toUpperCase()) {
+      const { data: clash } = await supabaseAdmin
+        .from('menu_items')
+        .select('id')
+        .eq('restaurant_id', restaurantId)
+        .ilike('retailer_id', requestedSku)
+        .neq('id', existing.id)
+        .limit(1)
+        .maybeSingle();
+      if (clash) {
+        return res.status(400).json({ error: `SKU "${requestedSku}" is already used by another item` });
+      }
+    }
+
+    const patch = {
+      ...row,
+      updated_at: new Date().toISOString(),
+    };
+    // Do not overwrite stock on edit unless client opts in.
+    delete patch.current_stock;
+    if (req.body.update_stock === true && req.body.current_stock != null && req.body.current_stock !== '') {
+      patch.current_stock = Math.max(0, parseInt(req.body.current_stock, 10) || 0);
+    }
+
+    if (requestedSku) patch.retailer_id = requestedSku;
+    else patch.retailer_id = existing.retailer_id;
+
+    if (req.body.is_available !== undefined) {
+      let isStocked = parseBoolCell(req.body.is_available, true);
+      if (blockNoFssai && isStocked) isStocked = false;
+      const stockRef = patch.current_stock !== undefined
+        ? patch.current_stock
+        : existing.current_stock;
+      if (packagedLob && stockRef != null && Number(stockRef) <= 0) isStocked = false;
+      patch.is_stocked = isStocked;
+      patch.is_available = isStocked;
+      if (!patch.availability_status) {
+        patch.availability_status = isStocked ? 'in_stock' : 'sold_out';
+      }
+    } else if (blockNoFssai) {
+      // Don't force OOS on every edit if they weren't toggling availability —
+      // leave existing flags unless FSSAI missing and they're trying coming_soon→live via status.
+      if (patch.availability_status === 'in_stock') {
+        patch.is_stocked = false;
+        patch.is_available = false;
+        patch.availability_status = 'sold_out';
+      }
+    }
+
+    if (req.body.kitchen_station != null && String(req.body.kitchen_station).trim() !== '') {
+      patch.kitchen_station = resolveKitchenStation(req.body.kitchen_station, {
+        category: patch.category,
+        packagedLob,
+      });
+    }
+
+    const { data, error } = await writeMenuItemRow('update', existing.id, restaurantId, patch);
+    if (error) throw error;
+
+    await writeAuditLog({
+      user_id: req.user.sub,
+      restaurant_id: restaurantId,
+      action: 'Menu item updated',
+      details: { item_id: data.id, retailer_id: data.retailer_id, name: data.name },
+    });
+
+    const warnings = [];
+    if (blockNoFssai) {
+      warnings.push(
+        'No FSSAI license on file — stock publishing stays blocked until you add FSSAI in Settings.',
+      );
+    }
+
+    res.json({ success: true, item: data, warnings: warnings.length ? warnings : undefined });
+
+    if (data.retailer_id) {
+      pushSingleItemToMetaCatalog({
+        retailerId: data.retailer_id,
+        isAvailable: !!data.is_available,
+        restaurantId,
+      }).catch((e) => console.error(`[menu-item-update-meta] ${data.name}:`, e.message));
+    }
+  } catch (err) {
+    console.error('[menu-item-update]', err.message);
+    res.status(400).json({ error: err.message });
+  }
+}
+
+async function handleMenuItemDelete(req, res) {
+  try {
+    const denied = await assertMenuCatalogEditPermission(req);
+    if (denied) return res.status(denied.status).json({ error: denied.error });
+
+    const restaurantId = req.restaurant_id;
+    const { data: existing, error: fetchErr } = await supabaseAdmin
+      .from('menu_items')
+      .select('id, name, retailer_id, archived_at')
+      .eq('id', req.params.id)
+      .eq('restaurant_id', restaurantId)
+      .maybeSingle();
+    if (fetchErr) throw fetchErr;
+    if (!existing) return res.status(404).json({ error: 'Menu item not found' });
+    if (existing.archived_at) {
+      return res.json({ success: true, id: existing.id, already_archived: true });
+    }
+
+    const now = new Date().toISOString();
+    const { error } = await supabaseAdmin
+      .from('menu_items')
+      .update({
+        archived_at: now,
+        is_available: false,
+        is_stocked: false,
+        updated_at: now,
+      })
+      .eq('id', existing.id)
+      .eq('restaurant_id', restaurantId);
+    if (error) throw error;
+
+    await writeAuditLog({
+      user_id: req.user.sub,
+      restaurant_id: restaurantId,
+      action: 'Menu item archived',
+      details: { item_id: existing.id, retailer_id: existing.retailer_id, name: existing.name },
+    });
+
+    res.json({ success: true, id: existing.id, archived: true });
+
+    if (existing.retailer_id) {
+      pushSingleItemToMetaCatalog({
+        retailerId: existing.retailer_id,
+        isAvailable: false,
+        restaurantId,
+      }).catch((e) => console.error(`[menu-item-delete-meta] ${existing.name}:`, e.message));
+    }
+  } catch (err) {
+    console.error('[menu-item-delete]', err.message);
+    res.status(400).json({ error: err.message });
+  }
+}
+
+const menuItemCreateMiddleware = [authenticateToken, getRestaurantId, handleMenuItemCreate];
+const menuItemUpdateMiddleware = [authenticateToken, getRestaurantId, handleMenuItemUpdate];
+const menuItemDeleteMiddleware = [authenticateToken, getRestaurantId, handleMenuItemDelete];
+router.post('/menu-items', ...menuItemCreateMiddleware);
+router.put('/menu-items/:id', ...menuItemUpdateMiddleware);
+router.delete('/menu-items/:id', ...menuItemDeleteMiddleware);
+
 module.exports = router;
 module.exports.handleMenuUpload = handleMenuUpload;
 module.exports.menuUploadMiddleware = menuUploadMiddleware;
@@ -1151,4 +1621,7 @@ module.exports.menuItemLaunchMiddleware = menuItemLaunchMiddleware;
 module.exports.menuItemSpecialTodayMiddleware = menuItemSpecialTodayMiddleware;
 module.exports.menuItemDiscountMiddleware = menuItemDiscountMiddleware;
 module.exports.menuItemStockAlertsMiddleware = menuItemStockAlertsMiddleware;
+module.exports.menuItemCreateMiddleware = menuItemCreateMiddleware;
+module.exports.menuItemUpdateMiddleware = menuItemUpdateMiddleware;
+module.exports.menuItemDeleteMiddleware = menuItemDeleteMiddleware;
 module.exports.resetDailySpecialDishes = resetDailySpecialDishes;
