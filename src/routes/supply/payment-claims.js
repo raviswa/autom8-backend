@@ -18,6 +18,33 @@ const router  = express.Router();
 const { supabaseAdmin } = require('../../config/supabase');
 const { authenticateSupplyToken, requireMoneyAccess } = require('../../middleware/supplyAuth');
 const { notifyClient } = require('./notify');
+const { sendSupplyWhatsAppMessage } = require('./supplyWhatsapp');
+
+function _fmtMoney(n) {
+  return `₹${Number(n || 0).toFixed(2)}`;
+}
+
+async function _notifyPaymentOutcome({
+  supplierId,
+  phone,
+  clientId,
+  templateKey,
+  templateParams,
+  fallbackText,
+}) {
+  const result = await notifyClient(supplierId, phone, templateKey, templateParams, clientId);
+  if (result?.ok) return { ...result, channel: 'template' };
+
+  console.warn(
+    `[payment-claims] template ${templateKey} failed (${result?.error || 'unknown'}) — free-text fallback`,
+  );
+  const sent = await sendSupplyWhatsAppMessage(phone, fallbackText, supplierId);
+  return {
+    ok: !!sent,
+    channel: 'text_fallback',
+    error: sent ? null : (result?.error || 'text fallback failed'),
+  };
+}
 
 // ── Helper: post a credit entry to the ledger ─────────────────────────────────
 async function postLedgerCredit(supplierId, clientId, paymentClaimId, amount, note) {
@@ -205,14 +232,25 @@ router.put('/:id/confirm', authenticateSupplyToken, requireMoneyAccess, async (r
       .single();
     if (error) throw error;
 
-    // Notify client
-    await notifyClient(supplierId, claim.supply_clients.phone, 'supply_payment_confirmed', {
-      amount:       claim.claimed_amount,
-      method:       claim.method || 'manual',
-      balance_after: new_balance,
-    }, claim.client_id);
+    // Notify client (template, then free-text fallback for shared-WABA / missing templates)
+    const phone = claim.supply_clients?.phone;
+    const notification = await _notifyPaymentOutcome({
+      supplierId,
+      phone,
+      clientId: claim.client_id,
+      templateKey: 'supply_payment_confirmed',
+      templateParams: {
+        amount:        claim.claimed_amount,
+        method:        claim.method || 'manual',
+        balance_after: new_balance,
+      },
+      fallbackText: [
+        `✅ Payment of ${_fmtMoney(claim.claimed_amount)} via ${claim.method || 'manual'} confirmed.`,
+        `Your updated outstanding balance is ${_fmtMoney(new_balance)}.`,
+      ].join('\n'),
+    });
 
-    res.json({ claim: updated, new_balance });
+    res.json({ claim: updated, new_balance, notification });
   } catch (err) {
     console.error('[payment-claims] confirm error:', err);
     res.status(500).json({ error: err.message });
@@ -251,12 +289,23 @@ router.put('/:id/reject', authenticateSupplyToken, requireMoneyAccess, async (re
       .single();
     if (error) throw error;
 
-    await notifyClient(supplierId, claim.supply_clients.phone, 'supply_payment_rejected', {
-      amount: claim.claimed_amount,
-      reason: supplier_note || 'Please contact your supplier',
-    }, claim.client_id);
+    const phone = claim.supply_clients?.phone;
+    const notification = await _notifyPaymentOutcome({
+      supplierId,
+      phone,
+      clientId: claim.client_id,
+      templateKey: 'supply_payment_rejected',
+      templateParams: {
+        amount: claim.claimed_amount,
+        reason: supplier_note || 'Please contact your supplier',
+      },
+      fallbackText: [
+        `❌ Payment claim of ${_fmtMoney(claim.claimed_amount)} was not accepted.`,
+        supplier_note || 'Please contact your supplier for details.',
+      ].join('\n'),
+    });
 
-    res.json({ claim: updated });
+    res.json({ claim: updated, notification });
   } catch (err) {
     console.error('[payment-claims] reject error:', err);
     res.status(500).json({ error: err.message });
@@ -311,15 +360,26 @@ router.post('/manual', authenticateSupplyToken, requireMoneyAccess, async (req, 
       note || `Manual payment${reference ? ` (${reference})` : ''}`,
     );
 
+    let notification = null;
     if (notify_client) {
-      await notifyClient(supplierId, client.phone, 'supply_payment_confirmed', {
-        amount:        parseFloat(amount),
-        method:        method || 'manual',
-        balance_after: new_balance,
-      }, client_id);
+      notification = await _notifyPaymentOutcome({
+        supplierId,
+        phone: client.phone,
+        clientId: client_id,
+        templateKey: 'supply_payment_confirmed',
+        templateParams: {
+          amount:        parseFloat(amount),
+          method:        method || 'manual',
+          balance_after: new_balance,
+        },
+        fallbackText: [
+          `✅ Payment of ${_fmtMoney(amount)} via ${method || 'manual'} confirmed.`,
+          `Your updated outstanding balance is ${_fmtMoney(new_balance)}.`,
+        ].join('\n'),
+      });
     }
 
-    res.status(201).json({ claim, new_balance });
+    res.status(201).json({ claim, new_balance, notification });
   } catch (err) {
     console.error('[payment-claims] manual error:', err);
     res.status(500).json({ error: err.message });

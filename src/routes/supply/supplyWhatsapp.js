@@ -17,44 +17,20 @@
 
 'use strict';
 
-const { supabaseAdmin } = require('../../config/supabase');
+const { resolveSupplyWabaCredentials } = require('../../helpers/supplyWabaCredentials');
 
 const DEFAULT_API_URL = 'https://graph.facebook.com/v18.0';
 
 // ── Credential resolution ────────────────────────────────────────────────────
-// Priority:
-//   1. suppliers.waba_phone_number_id + SUPPLY_WHATSAPP_ACCESS_TOKEN (per-supplier)
-//   2. SUPPLY_WHATSAPP_PHONE_NUMBER_ID + SUPPLY_WHATSAPP_ACCESS_TOKEN (global fallback)
-//
-// This mirrors the restaurant WhatsApp credential pattern in
-// src/helpers/whatsapp.js / restaurantConfig.js.
 
 async function _resolveSupplyCredentials(supplierId) {
-  let phoneNumberId = process.env.SUPPLY_WHATSAPP_PHONE_NUMBER_ID;
-  const accessToken = process.env.SUPPLY_WHATSAPP_ACCESS_TOKEN;
-  const apiUrl      = process.env.SUPPLY_WHATSAPP_API_URL || DEFAULT_API_URL;
-
-  if (supplierId) {
-    try {
-      const { data: supplier } = await supabaseAdmin
-        .from('suppliers')
-        .select('waba_phone_number_id')
-        .eq('id', supplierId)
-        .maybeSingle();
-
-      if (supplier?.waba_phone_number_id) {
-        phoneNumberId = supplier.waba_phone_number_id;
-      }
-    } catch (err) {
-      console.warn('[supplyWhatsapp] Supplier credential lookup failed:', err.message);
-    }
-  }
-
-  if (!accessToken || !phoneNumberId) {
-    return null;
-  }
-
-  return { accessToken, phoneNumberId, apiUrl };
+  const creds = await resolveSupplyWabaCredentials(supplierId);
+  if (!creds) return null;
+  return {
+    accessToken: creds.accessToken,
+    phoneNumberId: creds.phoneNumberId,
+    apiUrl: creds.apiUrl || DEFAULT_API_URL,
+  };
 }
 
 // ── sendSupplyWhatsAppMessage ────────────────────────────────────────────────
