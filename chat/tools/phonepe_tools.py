@@ -153,11 +153,15 @@ async def create_phonepe_order(
             "type": "PG_CHECKOUT",
             "message": (description or f"Munafe order {str(booking_id)[:8]}")[:120],
             "merchantUrls": {"redirectUrl": _return_url(booking_id)},
-            # Suppress UPI QR (same-device scan friction); keep Intent/Collect + cards/NB.
+            # Allowlist only — never offer UPI QR (same-device scan friction).
+            # Prefer enabledPaymentModes over disabled QR so checkout does not
+            # briefly mount an empty/disabled QR slot then collapse.
             "paymentModeConfig": {
                 "version": "V2",
-                "disabledPaymentModes": [
-                    {"type": "UPI", "flows": ["QR"]},
+                "enabledPaymentModes": [
+                    {"type": "UPI", "flows": ["INTENT", "COLLECT"]},
+                    {"type": "CARD"},
+                    {"type": "NET_BANKING"},
                 ],
             },
         },
