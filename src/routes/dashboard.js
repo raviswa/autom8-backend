@@ -1032,47 +1032,83 @@ async function loadBookingPackPayload(restaurantId, bookingId) {
   const cust = resolveBookingCustomer(booking);
   const orderRef = resolveBookingOrderRef(booking);
   const customerPhone = cust.customer_phone;
-  const cart = meta.web_cart_submission?.items
-    || meta.cart
-    || meta.items
-    || [];
 
   let lines = [];
-  if (Array.isArray(cart) && cart.length) {
-    const { data: menuRows } = await supabaseAdmin
-      .from('menu_items')
-      .select('id, retailer_id, name, weight_grams, pack_size_label, size_label, item_type, meta, price')
+
+  // 1) Prefer packing KDS lines for this token (matches packing board).
+  const token = String(booking.token_number || '').trim();
+  if (token) {
+    const tokenVariants = [...new Set([
+      token,
+      token.toUpperCase(),
+      token.replace(/^T-/i, ''),
+      `T-${token.replace(/^T-/i, '')}`,
+    ].filter(Boolean))];
+    const { data: kdsLines } = await supabaseAdmin
+      .from('kds_items')
+      .select('item_name, name, quantity, queue')
       .eq('restaurant_id', restaurantId)
-      .is('archived_at', null);
-    const weighted = resolveCartLineWeights(cart, menuRows || []);
-    lines = weighted.map((l) => {
-      const src = (menuRows || []).find(
-        (m) => String(m.id) === String(l.id) || String(m.retailer_id) === String(l.id),
-      );
-      return {
-        name: l.name || src?.name || 'Item',
-        qty: l.qty,
-        pack: src?.pack_size_label || src?.size_label || '',
-        weight_grams: l.weight_grams,
-        price: l.price ?? src?.price,
-      };
-    });
-  } else if (customerPhone) {
-    // Fallback: recent order_items for this phone
-    const { data: orders } = await supabaseAdmin
-      .from('orders')
-      .select('id')
-      .eq('restaurant_id', restaurantId)
-      .eq('customer_phone', customerPhone)
-      .order('created_at', { ascending: false })
-      .limit(3);
-    const orderIds = (orders || []).map((o) => o.id);
-    if (orderIds.length) {
-      const { data: oi } = await supabaseAdmin
-        .from('order_items')
-        .select('quantity, unit_price, menu_item:menu_item_id(name, weight_grams, pack_size_label, size_label)')
-        .in('order_id', orderIds);
-      lines = (oi || []).map((r) => ({
+      .in('token_number', tokenVariants)
+      .in('queue', ['packing', 'cooking']);
+    const packingFirst = (kdsLines || []).filter((r) => String(r.queue || '') === 'packing');
+    const source = packingFirst.length ? packingFirst : (kdsLines || []);
+    if (source.length) {
+      const merged = new Map();
+      for (const r of source) {
+        const name = String(r.item_name || r.name || 'Item').trim() || 'Item';
+        const qty = Math.max(1, Number(r.quantity) || 1);
+        const prev = merged.get(name) || { name, qty: 0, pack: '', weight_grams: 0, price: null };
+        prev.qty += qty;
+        merged.set(name, prev);
+      }
+      lines = [...merged.values()];
+    }
+  }
+
+  // 2) Cart on THIS booking's meta only.
+  if (!lines.length) {
+    const cart = meta.web_cart_submission?.items
+      || meta.cart
+      || meta.items
+      || [];
+    if (Array.isArray(cart) && cart.length) {
+      const { data: menuRows } = await supabaseAdmin
+        .from('menu_items')
+        .select('id, retailer_id, name, weight_grams, pack_size_label, size_label, item_type, meta, price')
+        .eq('restaurant_id', restaurantId)
+        .is('archived_at', null);
+      const weighted = resolveCartLineWeights(cart, menuRows || []);
+      const merged = new Map();
+      for (const l of weighted) {
+        const src = (menuRows || []).find(
+          (m) => String(m.id) === String(l.id) || String(m.retailer_id) === String(l.id),
+        );
+        const name = l.name || src?.name || 'Item';
+        const pack = src?.pack_size_label || src?.size_label || '';
+        const key = `${name}||${pack}`;
+        const qty = Math.max(1, Number(l.qty) || 1);
+        const prev = merged.get(key) || {
+          name,
+          qty: 0,
+          pack,
+          weight_grams: l.weight_grams || 0,
+          price: l.price ?? src?.price,
+        };
+        prev.qty += qty;
+        merged.set(key, prev);
+      }
+      lines = [...merged.values()];
+    }
+  }
+
+  // 3) order_items for THIS booking only (never other phone orders).
+  if (!lines.length) {
+    const { data: oi } = await supabaseAdmin
+      .from('order_items')
+      .select('quantity, unit_price, menu_item:menu_item_id(name, weight_grams, pack_size_label, size_label)')
+      .eq('booking_id', bookingId);
+    if (oi?.length) {
+      lines = oi.map((r) => ({
         name: r.menu_item?.name || 'Item',
         qty: r.quantity,
         pack: r.menu_item?.pack_size_label || r.menu_item?.size_label || '',
@@ -1149,7 +1185,14 @@ router.get('/packing-slips/today', authenticateToken, getRestaurantId, requireOu
     const endIso = new Date(`${todayIst}T23:59:59.999+05:30`).toISOString();
     const bookingCols = 'id, token_number, created_at, kds_sent_at';
 
-    // Primary: bookings linked to packing KDS work today (matches packing board).
+    const normalizeTokenKey = (raw) => {
+      const s = String(raw || '').trim().toUpperCase();
+      if (!s) return '';
+      // Collapse T-2508-003 / T-003 / #003 / 003 → comparable key
+      return s.replace(/^T-/, '').replace(/^#/, '');
+    };
+
+    // Primary: distinct packing KDS tokens touched today (matches packing board).
     const [kdsCreated, kdsUpdated] = await Promise.all([
       supabaseAdmin
         .from('kds_items')
@@ -1171,17 +1214,18 @@ router.get('/packing-slips/today', authenticateToken, getRestaurantId, requireOu
     if (kdsCreated.error) throw kdsCreated.error;
     if (kdsUpdated.error) throw kdsUpdated.error;
 
-    const tokenIds = [...new Set(
+    const rawTokens = [...new Set(
       [...(kdsCreated.data || []), ...(kdsUpdated.data || [])]
-        .flatMap((i) => {
-          const raw = String(i.token_number || '').trim();
-          if (!raw) return [];
-          const upper = raw.toUpperCase();
-          const digits = upper.replace(/^T-/i, '');
-          return [raw, upper, `T-${digits}`, digits];
-        })
+        .map((i) => String(i.token_number || '').trim())
         .filter(Boolean),
     )];
+
+    // Exact KDS token strings only — do not expand to bare digits (over-matches other orders).
+    const tokenIds = [...new Set(rawTokens.flatMap((raw) => {
+      const upper = raw.toUpperCase();
+      const noPrefix = upper.replace(/^T-/i, '');
+      return [raw, upper, `T-${noPrefix}`];
+    }))];
 
     const byId = new Map();
 
@@ -1191,12 +1235,11 @@ router.get('/packing-slips/today', authenticateToken, getRestaurantId, requireOu
         .select(bookingCols)
         .eq('restaurant_id', req.restaurant_id)
         .in('token_number', tokenIds)
-        .order('created_at', { ascending: true })
+        .order('created_at', { ascending: false })
         .limit(120);
       if (tokenBookErr) throw tokenBookErr;
       for (const b of byToken || []) byId.set(String(b.id), b);
 
-      // Portal / walk-in tokens may store booking_id in meta instead of bookings.token_number.
       const { data: portalRows } = await supabaseAdmin
         .from('walk_in_tokens')
         .select('id, meta')
@@ -1221,33 +1264,48 @@ router.get('/packing-slips/today', authenticateToken, getRestaurantId, requireOu
       }
     }
 
-    // Fallback: bookings created today (webcart / pre-KDS edge cases).
-    const { data: byCreated, error: createdErr } = await supabaseAdmin
-      .from('bookings')
-      .select(bookingCols)
-      .eq('restaurant_id', req.restaurant_id)
-      .gte('created_at', startIso)
-      .lte('created_at', endIso)
-      .order('created_at', { ascending: true })
-      .limit(80);
-    if (createdErr) throw createdErr;
-    for (const b of byCreated || []) byId.set(String(b.id), b);
+    // Fallback only when packing board has no tickets today (webcart / pre-KDS).
+    if (!byId.size) {
+      const { data: byCreated, error: createdErr } = await supabaseAdmin
+        .from('bookings')
+        .select(bookingCols)
+        .eq('restaurant_id', req.restaurant_id)
+        .gte('created_at', startIso)
+        .lte('created_at', endIso)
+        .order('created_at', { ascending: true })
+        .limit(80);
+      if (createdErr) throw createdErr;
+      for (const b of byCreated || []) byId.set(String(b.id), b);
 
-    // Scheduled orders created earlier but sent to KDS today.
-    const { data: byKdsSent, error: kdsSentErr } = await supabaseAdmin
-      .from('bookings')
-      .select(bookingCols)
-      .eq('restaurant_id', req.restaurant_id)
-      .gte('kds_sent_at', startIso)
-      .lte('kds_sent_at', endIso)
-      .order('kds_sent_at', { ascending: true })
-      .limit(80);
-    if (kdsSentErr && !/kds_sent_at/i.test(kdsSentErr.message || '')) throw kdsSentErr;
-    if (!kdsSentErr) {
-      for (const b of byKdsSent || []) byId.set(String(b.id), b);
+      const { data: byKdsSent, error: kdsSentErr } = await supabaseAdmin
+        .from('bookings')
+        .select(bookingCols)
+        .eq('restaurant_id', req.restaurant_id)
+        .gte('kds_sent_at', startIso)
+        .lte('kds_sent_at', endIso)
+        .order('kds_sent_at', { ascending: true })
+        .limit(80);
+      if (kdsSentErr && !/kds_sent_at/i.test(kdsSentErr.message || '')) throw kdsSentErr;
+      if (!kdsSentErr) {
+        for (const b of byKdsSent || []) byId.set(String(b.id), b);
+      }
     }
 
-    const shipped = [...byId.values()].sort((a, b) => {
+    // One slip per token — keep the newest booking when several share a token key.
+    const byTokenKey = new Map();
+    for (const b of byId.values()) {
+      const key = normalizeTokenKey(b.token_number) || `id:${b.id}`;
+      const prev = byTokenKey.get(key);
+      if (!prev) {
+        byTokenKey.set(key, b);
+        continue;
+      }
+      const prevTs = new Date(prev.kds_sent_at || prev.created_at || 0).getTime();
+      const nextTs = new Date(b.kds_sent_at || b.created_at || 0).getTime();
+      if (nextTs >= prevTs) byTokenKey.set(key, b);
+    }
+
+    const shipped = [...byTokenKey.values()].sort((a, b) => {
       const ta = new Date(a.kds_sent_at || a.created_at || 0).getTime();
       const tb = new Date(b.kds_sent_at || b.created_at || 0).getTime();
       return ta - tb;
@@ -1258,9 +1316,18 @@ router.get('/packing-slips/today', authenticateToken, getRestaurantId, requireOu
     }
 
     const payloads = [];
+    const seenOrderKeys = new Set();
     for (const b of shipped) {
       const payload = await loadBookingPackPayload(req.restaurant_id, b.id);
-      if (payload) payloads.push({ bookingId: b.id, payload });
+      if (!payload) continue;
+      // Extra guard: same display order ref + phone → one page
+      const orderKey = [
+        String(payload.booking.order_ref || b.token_number || b.id).toUpperCase(),
+        String(payload.booking.customer_phone || ''),
+      ].join('|');
+      if (seenOrderKeys.has(orderKey)) continue;
+      seenOrderKeys.add(orderKey);
+      payloads.push({ bookingId: b.id, payload });
     }
     if (!payloads.length) {
       return res.status(404).json({ error: 'No shippable bookings today' });
