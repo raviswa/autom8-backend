@@ -153,13 +153,11 @@ async def create_phonepe_order(
             "type": "PG_CHECKOUT",
             "message": (description or f"Munafe order {str(booking_id)[:8]}")[:120],
             "merchantUrls": {"redirectUrl": _return_url(booking_id)},
-            # Allowlist only — never offer UPI QR (same-device scan friction).
-            # Prefer enabledPaymentModes over disabled QR so checkout does not
-            # briefly mount an empty/disabled QR slot then collapse.
+            # No UPI on hosted checkout for now: QR leaves empty space in WhatsApp
+            # webviews, and Intent often fails there. Card + netbanking only.
             "paymentModeConfig": {
                 "version": "V2",
                 "enabledPaymentModes": [
-                    {"type": "UPI", "flows": ["INTENT", "COLLECT"]},
                     {"type": "CARD"},
                     {"type": "NET_BANKING"},
                 ],
