@@ -2719,7 +2719,34 @@ $('subtotal').textContent = money(subtotal);
     }
 
     function itemGalleryUrls(item) {
-      return [item.image_url, item.image_url_2, item.image_url_3, item.image_url_4, item.image_url_5].filter(Boolean);
+      const normalize = (raw) => {
+        const s = String(raw || '').trim();
+        if (!s || !/^https?:\/\//i.test(s)) return null;
+        try {
+          const u = new URL(s);
+          const host = u.hostname.toLowerCase();
+          if (host === 'drive.google.com' || host === 'docs.google.com') {
+            const fileMatch = u.pathname.match(/\/file\/d\/([^/]+)/i);
+            const id = fileMatch?.[1] || u.searchParams.get('id');
+            if (id) return `https://drive.google.com/uc?export=view&id=${encodeURIComponent(id)}`;
+          }
+          if (host === 'www.dropbox.com' || host === 'dropbox.com') {
+            u.searchParams.set('raw', '1');
+            u.searchParams.delete('dl');
+            return u.toString();
+          }
+        } catch (_) { /* keep original */ }
+        return s;
+      };
+      return [item.image_url, item.image_url_2, item.image_url_3, item.image_url_4, item.image_url_5]
+        .map(normalize)
+        .filter(Boolean);
+    }
+
+    function imgTag(url, extraClass = '') {
+      if (!url) return `<div class="img-fallback${extraClass ? ` ${extraClass}` : ''}">No image</div>`;
+      const src = escapeHtml(url);
+      return `<img src="${src}" alt="" referrerpolicy="no-referrer" loading="lazy" onerror="this.outerHTML='<div class=\\'img-fallback\\'>No image</div>'" />`;
     }
 
     function bundleComponentsOf(item) {
@@ -2769,13 +2796,13 @@ $('subtotal').textContent = money(subtotal);
     function galleryHtml(urls, groupId) {
       if (!urls.length) return '';
       if (urls.length === 1) {
-        return `<img src="${urls[0]}" alt="" style="width:100%;border-radius:12px;max-height:220px;object-fit:cover" />`;
+        return `<img src="${escapeHtml(urls[0])}" alt="" referrerpolicy="no-referrer" loading="lazy" style="width:100%;border-radius:12px;max-height:220px;object-fit:cover" />`;
       }
       const idx = state.productGalleryIndex || 0;
       return `
         <div class="product-gallery" data-gallery="${groupId}">
           <div class="product-gallery-track" id="galleryTrack-${groupId}">
-            ${urls.map(u => `<img src="${u}" alt="" loading="lazy" />`).join('')}
+            ${urls.map(u => `<img src="${escapeHtml(u)}" alt="" referrerpolicy="no-referrer" loading="lazy" />`).join('')}
           </div>
           <div class="product-gallery-dots">${urls.map((_, i) => `<span class="${i === idx ? 'active' : ''}" data-dot="${i}"></span>`).join('')}</div>
         </div>`;
@@ -3079,9 +3106,12 @@ $('subtotal').textContent = money(subtotal);
     pslModalOverlay.addEventListener('click', (e) => { if (e.target === pslModalOverlay) closePslModal(); });
 
     function hCardHtml(item) {
+      const thumb = itemGalleryUrls(item)[0];
       return `
         <div class="hcard" data-id="${item.id}">
-          ${item.image_url ? `<img src="${item.image_url}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'img-fallback',style:'height:90px',textContent:'No image'}))" />` : `<div class="img-fallback" style="width:100%;height:90px;border-radius:0">No image</div>`}
+          ${thumb
+            ? `<img src="${escapeHtml(thumb)}" alt="" referrerpolicy="no-referrer" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'img-fallback',style:'height:90px',textContent:'No image'}))" />`
+            : `<div class="img-fallback" style="width:100%;height:90px;border-radius:0">No image</div>`}
           <div class="hc-body">
             <div class="hc-name">${item.name}</div>
             <div class="hc-price">${money(item.price)}</div>
@@ -3108,7 +3138,7 @@ $('subtotal').textContent = money(subtotal);
       const statusSuffix = comingSoon ? ' · Coming soon' : (soldOut ? ' · Sold out' : '');
       return `
         <div class="row-card${catalogProduct ? ' catalog-product' : ''}${(soldOut || comingSoon) ? ' sold-out' : ''}"${catalogProduct ? ` data-product-detail="${item.id}"` : ''} style="${(soldOut || comingSoon) ? 'opacity:.72' : ''}">
-          ${thumb ? `<img src="${thumb}" alt="" onerror="this.outerHTML='<div class=\\'img-fallback\\'>No image</div>'" />` : `<div class="img-fallback">No image</div>`}
+          ${imgTag(thumb)}
           <div class="row-info">
             <div class="row-cat">${item.category || 'General'}</div>
             <div class="row-name">${item.name}${statusSuffix}</div>
@@ -3161,7 +3191,7 @@ $('subtotal').textContent = money(subtotal);
         : `<button class="btn-add" data-ice="${item.id}">+</button>`;
       return `
         <div class="row-card ice-cream-card" data-ice-base="${item.id}">
-          ${item.image_url ? `<img src="${item.image_url}" alt="" onerror="this.outerHTML='<div class=\\'img-fallback\\'>No image</div>'" />` : `<div class="img-fallback">No image</div>`}
+          ${imgTag(itemGalleryUrls(item)[0])}
           <div class="row-info">
             <div class="row-cat">${item.category || 'General'}</div>
             <div class="row-name">${item.name}</div>
@@ -3178,6 +3208,10 @@ $('subtotal').textContent = money(subtotal);
       const current = selectedRowFor(groupId, rows);
       const qty = rowQty(current);
       const customized = needsPizzaCustomizer(current);
+      // Prefer image from any variant in the group (not only cheapest).
+      const thumb = rows.map((r) => itemGalleryUrls(r)[0]).find(Boolean)
+        || itemGalleryUrls(current)[0]
+        || itemGalleryUrls(base)[0];
 
       const sizePills = rows.map(r => `
         <button class="size-pill ${r.id === current.id ? 'active' : ''}" data-group="${groupId}" data-row="${r.id}">
@@ -3191,7 +3225,7 @@ $('subtotal').textContent = money(subtotal);
 
       return `
         <div class="row-card" data-variant-group="${groupId}">
-          ${base.image_url ? `<img src="${base.image_url}" alt="" onerror="this.outerHTML='<div class=\\'img-fallback\\'>No image</div>'" />` : `<div class="img-fallback">No image</div>`}
+          ${imgTag(thumb)}
           <div class="row-info">
             <div class="row-cat">${base.category || 'General'}</div>
             <div class="row-name">${base.name}</div>
