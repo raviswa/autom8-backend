@@ -94,7 +94,14 @@ def resolve_delivery_charge(
             pass
 
     default = float(state.get("delivery_charge_default") or DEFAULT_DELIVERY_CHARGE)
-    tiers = state.get("delivery_charge_tiers") or DEFAULT_DELIVERY_TIERS
+
+    # Opt-in: without distance tiers, always use the flat default.
+    if not state.get("delivery_distance_tiers_enabled"):
+        return round(default, 2)
+
+    tiers = state.get("delivery_charge_tiers") or []
+    if not tiers:
+        return round(default, 2)
 
     distance = state.get("delivery_distance_km")
     if distance is None:

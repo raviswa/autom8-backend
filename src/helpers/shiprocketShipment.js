@@ -36,6 +36,9 @@ function shipmentPayloadFromMeta(meta = {}) {
     shipment_status: meta.shipment_status || null,
     shiprocket_last_error: meta.shiprocket_last_error || null,
     shipment_mode: meta.shipment_mode || null,
+    tracking_url: meta.tracking_url || null,
+    shipping_provider: meta.shipping_provider || null,
+    delivery_channel: meta.delivery_channel || null,
   };
 }
 

@@ -222,7 +222,7 @@ router.put(
       'takeaway_ready_range','delivery_ready_range',
   'restaurant_type','pickup_address','pickup_latitude','pickup_longitude',
   'google_maps_url',
-  'delivery_charge_default','delivery_charge_tiers',
+  'delivery_charge_default','delivery_charge_tiers','delivery_distance_tiers_enabled',
   'min_delivery_order_amount','min_takeaway_order_amount',
   'scheduled_delivery_enabled','scheduled_takeaway_enabled','scheduled_kds_lead_minutes','max_delivery_radius_km',
   'scheduled_slot_max_orders','schedule_buffer_minutes','schedule_rounding_minutes','schedule_early_start_max_minutes',

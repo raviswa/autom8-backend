@@ -69,7 +69,9 @@ function buildFulfillmentMeta({
   const shipOk = provider !== 'custom' && hasShiprocketCreds(restaurant);
 
   let channel = String(deliveryChannel || '').toLowerCase();
-  if (!isLocal) {
+  if (provider === 'custom') {
+    channel = 'custom';
+  } else if (!isLocal) {
     channel = 'shiprocket';
   } else if (channel !== 'shiprocket' && channel !== 'own_team') {
     channel = 'own_team';
@@ -89,7 +91,8 @@ function buildFulfillmentMeta({
     courier_zone: courierZone,
     delivery_zone: zone,
     delivery_source: quote?.source
-      || (channel === 'own_team' ? 'intra_city_flat' : 'shiprocket'),
+      || (channel === 'own_team' ? 'intra_city_flat' : channel === 'custom' ? 'custom' : 'shiprocket'),
+    shipping_provider: provider,
     local_shiprocket_pending_at: needsManager ? new Date().toISOString() : null,
   };
 }
@@ -117,7 +120,7 @@ function shouldCreateShiprocketForMeta(meta = {}) {
     return false;
   }
   const channel = String(meta.delivery_channel || '').toLowerCase();
-  if (channel === 'own_team') return false;
+  if (channel === 'own_team' || channel === 'custom') return false;
   if (channel === 'shiprocket') {
     const status = String(meta.delivery_channel_status || 'confirmed');
     if (status === 'pending_manager') return false;

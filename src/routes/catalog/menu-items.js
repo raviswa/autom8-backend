@@ -252,6 +252,7 @@ async function handleMenuUpload(req, res) {
         shelf_life_days:     item.shelf_life_days != null && item.shelf_life_days !== '' ? parseInt(item.shelf_life_days, 10) || null : null,
         made_on_date:        item.made_on_date ? String(item.made_on_date).trim().slice(0, 10) : null,
         ingredients:         item.ingredients ? String(item.ingredients).trim() : null,
+        how_to_use:          item.how_to_use ? String(item.how_to_use).trim() : null,
         allergens:           item.allergens ? String(item.allergens).trim() : null,
         availability_status: (() => {
           const raw = String(item.availability_status || '').toLowerCase().trim();
@@ -1202,14 +1203,20 @@ function validateHttpUrl(value, fieldLabel) {
   return null;
 }
 
-function normalizeMenuItemBody(item, { packagedLob, existingMeta }) {
+function normalizeMenuItemBody(item, { packagedLob, existingMeta, lobType }) {
   const name = String(item.name || item.title || '').trim();
   const price = parseFloat(item.price);
   const pack = item.pack_size_label || item.size_label
     ? String(item.pack_size_label || item.size_label).trim()
     : null;
   const itemTypeRaw = String(item.item_type || 'PRODUCT').trim().toUpperCase() || 'PRODUCT';
-  const item_type = (itemTypeRaw === 'BUNDLE' || itemTypeRaw === 'HAMPER') ? 'BUNDLE' : 'PRODUCT';
+  // Preserve PSL types (PIZZA, CUP, FLAVOUR, …); map HAMPER → BUNDLE; default PRODUCT.
+  const PSL_TYPES = new Set(['PIZZA', 'CUP', 'CONE', 'SUNDAE', 'FLAVOUR', 'ADDON', 'PRODUCT', 'BUNDLE']);
+  let item_type = 'PRODUCT';
+  if (itemTypeRaw === 'HAMPER' || itemTypeRaw === 'BUNDLE') item_type = 'BUNDLE';
+  else if (PSL_TYPES.has(itemTypeRaw)) item_type = itemTypeRaw;
+  else if (itemTypeRaw) item_type = itemTypeRaw;
+
   const components = parseBundleComponentsBody(
     item.bundle_components != null ? item.bundle_components : item.bundle_components_text,
   );
@@ -1220,9 +1227,13 @@ function normalizeMenuItemBody(item, { packagedLob, existingMeta }) {
 
   const errors = [];
   if (!name) errors.push('Name is required');
-  if (!Number.isFinite(price) || price <= 0) errors.push('Price must be greater than 0');
+  const priceOptional = item_type === 'FLAVOUR';
+  if (!priceOptional && (!Number.isFinite(price) || price <= 0)) {
+    errors.push('Price must be greater than 0');
+  }
+  if (Number.isFinite(price) && price < 0) errors.push('Price cannot be negative');
   if (item.variant_group_id && !pack) {
-    errors.push('variant_group_id needs pack_size_label (e.g. 250g)');
+    errors.push('variant_group_id needs pack_size_label / size_label');
   }
   if (item_type === 'BUNDLE' && (!components || !components.length)) {
     errors.push('BUNDLE items need bundle_components (e.g. MP-100:3)');
@@ -1245,13 +1256,14 @@ function normalizeMenuItemBody(item, { packagedLob, existingMeta }) {
   if (components) metaBase.bundle_components = components;
   else if (item_type !== 'BUNDLE') delete metaBase.bundle_components;
 
+  const timeSlotRaw = item.time_slot ?? item.custom_label_0 ?? '';
   const row = {
     name,
     description: String(item.description || '').trim(),
-    price,
+    price: Number.isFinite(price) ? price : 0,
     category,
     image_url: item.image_url || item.image_link || null,
-    time_slot: mapTimeSlot(item.time_slot || 'all'),
+    time_slot: mapTimeSlot(timeSlotRaw || 'all'),
     item_type,
     variant_group_id: item.variant_group_id ? String(item.variant_group_id).trim() : null,
     size_label: pack,
@@ -1269,6 +1281,7 @@ function normalizeMenuItemBody(item, { packagedLob, existingMeta }) {
       : null,
     made_on_date: item.made_on_date ? String(item.made_on_date).trim().slice(0, 10) : null,
     ingredients: item.ingredients ? String(item.ingredients).trim() : null,
+    how_to_use: item.how_to_use ? String(item.how_to_use).trim() : null,
     allergens: item.allergens ? String(item.allergens).trim() : null,
     bundle_components: components,
     meta: Object.keys(metaBase).length ? metaBase : {},
@@ -1283,9 +1296,58 @@ function normalizeMenuItemBody(item, { packagedLob, existingMeta }) {
       const n = parseInt(item.low_stock_alert_units, 10);
       return Number.isFinite(n) && n >= 0 ? n : (packagedLob ? 5 : null);
     })(),
+    // Retail
+    condition: item.condition ? String(item.condition).trim() : null,
+    original_mrp: item.original_mrp != null && item.original_mrp !== ''
+      ? parseFloat(item.original_mrp) || null
+      : null,
+    warranty_days: item.warranty_days != null && item.warranty_days !== ''
+      ? parseInt(item.warranty_days, 10) || null
+      : null,
+    colour: item.colour || item.color ? String(item.colour || item.color).trim() : null,
+    // PSL
+    flavour_group: item.flavour_group ? String(item.flavour_group).trim() : null,
+    scoop_count: item.scoop_count != null && item.scoop_count !== ''
+      ? Math.max(1, parseInt(item.scoop_count, 10) || 1)
+      : null,
+    crust_options: item.crust_options ? String(item.crust_options).trim() : null,
+    toppings_allowed: item.toppings_allowed != null
+      ? parseBoolCell(item.toppings_allowed, false)
+      : null,
+    topping_extra_price: item.topping_extra_price != null && item.topping_extra_price !== ''
+      ? parseFloat(item.topping_extra_price) || null
+      : null,
+    // Restaurant kitchen timing (also accepted for any LOB if sent)
+    prep_time_fixed: item.prep_time_fixed != null && item.prep_time_fixed !== ''
+      ? Math.max(0, parseInt(item.prep_time_fixed, 10) || 0)
+      : undefined,
+    batch_size: item.batch_size != null && item.batch_size !== ''
+      ? Math.max(1, parseInt(item.batch_size, 10) || 1)
+      : undefined,
+    time_per_batch: item.time_per_batch != null && item.time_per_batch !== ''
+      ? Math.max(1, parseInt(item.time_per_batch, 10) || 1)
+      : undefined,
+    packing_time: item.packing_time != null && item.packing_time !== ''
+      ? Math.max(0, parseFloat(item.packing_time) || 0)
+      : undefined,
+    holds_well: item.holds_well != null && item.holds_well !== ''
+      ? parseBoolCell(item.holds_well, false)
+      : undefined,
+    fulfillment_section: item.fulfillment_section != null && String(item.fulfillment_section).trim() !== ''
+      ? String(item.fulfillment_section).trim()
+      : undefined,
   };
 
-  return { row, errors, name, price, pack, components };
+  // Drop undefined kitchen fields so updates don't wipe existing values when omitted.
+  for (const key of [
+    'prep_time_fixed', 'batch_size', 'time_per_batch', 'packing_time',
+    'holds_well', 'fulfillment_section', 'scoop_count', 'toppings_allowed',
+  ]) {
+    if (row[key] === undefined) delete row[key];
+  }
+
+  void lobType;
+  return { row, errors, name, price: row.price, pack, components };
 }
 
 async function writeMenuItemRow(kind, targetId, restaurantId, row) {
@@ -1313,6 +1375,11 @@ async function writeMenuItemRow(kind, targetId, restaurantId, row) {
     }
     ({ data, error } = await run(withoutBundle));
   }
+  if (error && /how_to_use/i.test(error.message || '')) {
+    const withoutHowTo = { ...row };
+    delete withoutHowTo.how_to_use;
+    ({ data, error } = await run(withoutHowTo));
+  }
   return { data, error };
 }
 
@@ -1328,11 +1395,11 @@ async function handleMenuItemCreate(req, res) {
       .eq('id', restaurantId)
       .maybeSingle();
     const lobType = String(tenantRow?.lob_type || '').toLowerCase();
-    const packagedLob = ['food_products', 'retail', 'b2b', 'psl'].includes(lobType);
+    const packagedLob = ['food_products', 'retail', 'b2b', 'psl', 'jewellery', 'supply', 'b2b_supply'].includes(lobType);
     const blockNoFssai = lobType === 'food_products'
       && !String(tenantRow?.fssai_license || '').trim();
 
-    const { row, errors, pack } = normalizeMenuItemBody(req.body || {}, { packagedLob });
+    const { row, errors, pack } = normalizeMenuItemBody(req.body || {}, { packagedLob, lobType });
     if (errors.length) return res.status(400).json({ error: errors[0], errors });
 
     const { data: existingRows } = await supabaseAdmin
@@ -1381,12 +1448,24 @@ async function handleMenuItemCreate(req, res) {
         category: row.category,
         packagedLob,
       }),
-      prep_time_fixed: Math.max(0, parseInt(req.body.prep_time_fixed, 10) || 5),
-      batch_size: Math.max(1, parseInt(req.body.batch_size, 10) || 1),
-      time_per_batch: Math.max(1, parseInt(req.body.time_per_batch, 10) || 10),
-      packing_time: Math.max(0, parseFloat(req.body.packing_time) || 1),
-      holds_well: parseBoolCell(req.body.holds_well, false),
-      fulfillment_section: String(req.body.fulfillment_section || 'main').trim() || 'main',
+      prep_time_fixed: row.prep_time_fixed != null
+        ? row.prep_time_fixed
+        : Math.max(0, parseInt(req.body.prep_time_fixed, 10) || 5),
+      batch_size: row.batch_size != null
+        ? row.batch_size
+        : Math.max(1, parseInt(req.body.batch_size, 10) || 1),
+      time_per_batch: row.time_per_batch != null
+        ? row.time_per_batch
+        : Math.max(1, parseInt(req.body.time_per_batch, 10) || 10),
+      packing_time: row.packing_time != null
+        ? row.packing_time
+        : Math.max(0, parseFloat(req.body.packing_time) || 1),
+      holds_well: row.holds_well != null
+        ? row.holds_well
+        : parseBoolCell(req.body.holds_well, false),
+      fulfillment_section: row.fulfillment_section
+        || String(req.body.fulfillment_section || 'main').trim()
+        || 'main',
       archived_at: null,
       created_at: now,
       updated_at: now,
@@ -1449,13 +1528,14 @@ async function handleMenuItemUpdate(req, res) {
       .eq('id', restaurantId)
       .maybeSingle();
     const lobType = String(tenantRow?.lob_type || '').toLowerCase();
-    const packagedLob = ['food_products', 'retail', 'b2b', 'psl'].includes(lobType);
+    const packagedLob = ['food_products', 'retail', 'b2b', 'psl', 'jewellery', 'supply', 'b2b_supply'].includes(lobType);
     const blockNoFssai = lobType === 'food_products'
       && !String(tenantRow?.fssai_license || '').trim();
 
     const { row, errors } = normalizeMenuItemBody(req.body || {}, {
       packagedLob,
       existingMeta: existing.meta,
+      lobType,
     });
     if (errors.length) return res.status(400).json({ error: errors[0], errors });
 

@@ -38,7 +38,7 @@ const RESTAURANT_SELECT_FULL = [
   'takeaway_ready_range', 'delivery_ready_range', 'kitchen_busy', 'opening_hours',
   'restaurant_type', 'pickup_address', 'pickup_latitude', 'pickup_longitude',
   'google_maps_url',
-  'delivery_charge_default', 'delivery_charge_tiers',
+  'delivery_charge_default', 'delivery_charge_tiers', 'delivery_distance_tiers_enabled',
   'min_delivery_order_amount', 'min_takeaway_order_amount',
   'scheduled_delivery_enabled', 'scheduled_takeaway_enabled', 'scheduled_kds_lead_minutes', 'max_delivery_radius_km',
   'lob_type',
@@ -99,6 +99,7 @@ async function fetchRestaurantRow(restaurantId) {
     fallback.data.max_delivery_radius_km = 0;
     fallback.data.delivery_charge_default = 30;
     fallback.data.delivery_charge_tiers = [];
+    fallback.data.delivery_distance_tiers_enabled = false;
     fallback.data.min_delivery_order_amount = 0;
     fallback.data.min_takeaway_order_amount = 0;
     fallback.data.lob_type = fallback.data.lob_type || 'restaurant';
@@ -565,16 +566,33 @@ router.get('/customer-cohorts', authenticateToken, getRestaurantId, requireOutle
   }
 });
 
-// ── POST /api/dashboard/shipment/manual — merchant enters courier + AWB ───────
+// ── POST /api/dashboard/shipment/manual — custom courier mark-as-shipped ─────
 router.post('/shipment/manual', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
   try {
     const bookingId = String(req.body?.booking_id || '').trim();
     const courierName = String(req.body?.courier_name || '').trim();
-    const awb = String(req.body?.awb || '').trim();
+    const trackingUrl = String(req.body?.tracking_url || '').trim();
+    const awbLegacy = String(req.body?.awb || '').trim();
+    const trackingOrAwb = trackingUrl || awbLegacy;
     const status = String(req.body?.status || 'Shipped').trim() || 'Shipped';
 
-    if (!bookingId || !courierName || !awb) {
-      return res.status(400).json({ error: 'booking_id, courier_name, and awb are required' });
+    if (!bookingId || !courierName || !trackingOrAwb) {
+      return res.status(400).json({
+        error: 'booking_id, courier_name, and tracking_url are required',
+      });
+    }
+
+    const { data: tenant, error: tenantErr } = await supabaseAdmin
+      .from('tenants')
+      .select('shipping_provider')
+      .eq('id', req.restaurant_id)
+      .maybeSingle();
+    if (tenantErr) throw tenantErr;
+    const { normalizeShippingProvider } = require('../helpers/courierRates');
+    if (normalizeShippingProvider(tenant?.shipping_provider) !== 'custom') {
+      return res.status(403).json({
+        error: 'Manual mark-as-shipped is only available for custom courier merchants.',
+      });
     }
 
     const { data: booking, error: bookingErr } = await supabaseAdmin
@@ -589,9 +607,13 @@ router.post('/shipment/manual', authenticateToken, getRestaurantId, requireOutle
     const nextMeta = {
       ...(booking.meta || {}),
       courier_name: courierName,
-      awb,
-      shipment_status: 'manual',
+      tracking_url: trackingUrl || trackingOrAwb,
+      // Keep awb only when explicitly provided; do not invent Shiprocket AWB from tracking link.
+      ...(awbLegacy ? { awb: awbLegacy } : {}),
+      shipment_status: 'shipped',
       shipment_mode: 'manual',
+      shipping_provider: 'custom',
+      delivery_channel: (booking.meta || {}).delivery_channel || 'custom',
       shiprocket_last_error: null,
     };
     const { error: updateErr } = await supabaseAdmin
@@ -613,7 +635,8 @@ router.post('/shipment/manual', authenticateToken, getRestaurantId, requireOutle
         customer_phone: booking.customer_phone,
         order_ref: booking.order_ref || booking.id,
         courier_name: courierName,
-        awb,
+        // Chat helper expects `awb`; pass tracking link/number so WhatsApp still shows it.
+        awb: trackingOrAwb,
         status,
       }),
     });
@@ -622,7 +645,7 @@ router.post('/shipment/manual', authenticateToken, getRestaurantId, requireOutle
       return res.status(500).json({ error: notifyData.error || 'WhatsApp notification failed' });
     }
 
-    res.json({ success: true, booking_id: booking.id });
+    res.json({ success: true, booking_id: booking.id, meta: nextMeta });
   } catch (err) {
     console.error('[dashboard/shipment/manual]', err.message);
     res.status(500).json({ error: err.message });
@@ -1054,27 +1077,130 @@ router.get('/shipping-label/:bookingId', authenticateToken, getRestaurantId, req
   }
 });
 
-/** Today's packing slips as a simple multi-page PDF (one slip per booking with delivery). */
+/** Today's packing slips as a multi-page PDF (one slip per today's packing booking). */
 router.get('/packing-slips/today', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
   try {
     const PDFDocument = require('pdfkit');
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    const { data: bookings, error } = await supabaseAdmin
+    const { istTodayYmd } = require('../helpers/istDate');
+    const todayIst = istTodayYmd();
+    const startIso = new Date(`${todayIst}T00:00:00+05:30`).toISOString();
+    const endIso = new Date(`${todayIst}T23:59:59.999+05:30`).toISOString();
+    const bookingCols = 'id, order_ref, customer_name, customer_phone, delivery_address, meta, created_at, token_number, kds_sent_at';
+
+    // Primary: bookings linked to packing KDS work today (matches packing board).
+    const [kdsCreated, kdsUpdated] = await Promise.all([
+      supabaseAdmin
+        .from('kds_items')
+        .select('token_number')
+        .eq('restaurant_id', req.restaurant_id)
+        .eq('queue', 'packing')
+        .gte('created_at', startIso)
+        .lte('created_at', endIso)
+        .limit(300),
+      supabaseAdmin
+        .from('kds_items')
+        .select('token_number')
+        .eq('restaurant_id', req.restaurant_id)
+        .eq('queue', 'packing')
+        .gte('updated_at', startIso)
+        .lte('updated_at', endIso)
+        .limit(300),
+    ]);
+    if (kdsCreated.error) throw kdsCreated.error;
+    if (kdsUpdated.error) throw kdsUpdated.error;
+
+    const tokenIds = [...new Set(
+      [...(kdsCreated.data || []), ...(kdsUpdated.data || [])]
+        .flatMap((i) => {
+          const raw = String(i.token_number || '').trim();
+          if (!raw) return [];
+          const upper = raw.toUpperCase();
+          const digits = upper.replace(/^T-/i, '');
+          return [raw, upper, `T-${digits}`, digits];
+        })
+        .filter(Boolean),
+    )];
+
+    const byId = new Map();
+
+    if (tokenIds.length) {
+      const { data: byToken, error: tokenBookErr } = await supabaseAdmin
+        .from('bookings')
+        .select(bookingCols)
+        .eq('restaurant_id', req.restaurant_id)
+        .in('token_number', tokenIds)
+        .order('created_at', { ascending: true })
+        .limit(120);
+      if (tokenBookErr) throw tokenBookErr;
+      for (const b of byToken || []) byId.set(String(b.id), b);
+
+      // Portal / walk-in tokens may store booking_id in meta instead of bookings.token_number.
+      const { data: portalRows } = await supabaseAdmin
+        .from('walk_in_tokens')
+        .select('id, meta')
+        .eq('restaurant_id', req.restaurant_id)
+        .in('id', tokenIds)
+        .limit(120);
+      const portalBookingIds = [...new Set(
+        (portalRows || [])
+          .map((r) => r?.meta?.booking_id)
+          .filter(Boolean)
+          .map(String),
+      )];
+      if (portalBookingIds.length) {
+        const { data: fromPortal, error: portalBookErr } = await supabaseAdmin
+          .from('bookings')
+          .select(bookingCols)
+          .eq('restaurant_id', req.restaurant_id)
+          .in('id', portalBookingIds)
+          .limit(120);
+        if (portalBookErr) throw portalBookErr;
+        for (const b of fromPortal || []) byId.set(String(b.id), b);
+      }
+    }
+
+    // Fallback: bookings created today (webcart / pre-KDS edge cases).
+    const { data: byCreated, error: createdErr } = await supabaseAdmin
       .from('bookings')
-      .select('id, order_ref, customer_name, customer_phone, delivery_address, meta, created_at')
+      .select(bookingCols)
       .eq('restaurant_id', req.restaurant_id)
-      .gte('created_at', start.toISOString())
+      .gte('created_at', startIso)
+      .lte('created_at', endIso)
       .order('created_at', { ascending: true })
       .limit(80);
-    if (error) throw error;
+    if (createdErr) throw createdErr;
+    for (const b of byCreated || []) byId.set(String(b.id), b);
 
-    const shipped = (bookings || []).filter((b) => {
-      const meta = b.meta || {};
-      return b.delivery_address || meta.delivery_address || meta.web_cart_submission;
+    // Scheduled orders created earlier but sent to KDS today.
+    const { data: byKdsSent, error: kdsSentErr } = await supabaseAdmin
+      .from('bookings')
+      .select(bookingCols)
+      .eq('restaurant_id', req.restaurant_id)
+      .gte('kds_sent_at', startIso)
+      .lte('kds_sent_at', endIso)
+      .order('kds_sent_at', { ascending: true })
+      .limit(80);
+    if (kdsSentErr && !/kds_sent_at/i.test(kdsSentErr.message || '')) throw kdsSentErr;
+    if (!kdsSentErr) {
+      for (const b of byKdsSent || []) byId.set(String(b.id), b);
+    }
+
+    const shipped = [...byId.values()].sort((a, b) => {
+      const ta = new Date(a.kds_sent_at || a.created_at || 0).getTime();
+      const tb = new Date(b.kds_sent_at || b.created_at || 0).getTime();
+      return ta - tb;
     });
 
     if (!shipped.length) {
+      return res.status(404).json({ error: 'No shippable bookings today' });
+    }
+
+    const payloads = [];
+    for (const b of shipped) {
+      const payload = await loadBookingPackPayload(req.restaurant_id, b.id);
+      if (payload) payloads.push({ bookingId: b.id, payload });
+    }
+    if (!payloads.length) {
       return res.status(404).json({ error: 'No shippable bookings today' });
     }
 
@@ -1086,16 +1212,13 @@ router.get('/packing-slips/today', authenticateToken, getRestaurantId, requireOu
       doc.on('error', reject);
     });
 
-    for (const b of shipped) {
-      const payload = await loadBookingPackPayload(req.restaurant_id, b.id);
-      if (!payload) continue;
+    for (const { bookingId, payload } of payloads) {
       doc.addPage();
-      // Inline compact slip (reuse fields without nested PDFDocument)
       const r = payload.restaurant;
       doc.fontSize(16).text(r.name || 'Packing slip');
       if (r.fssai_license) doc.fontSize(9).text(`FSSAI ${r.fssai_license}`);
       doc.moveDown(0.4);
-      doc.fontSize(11).text(`Order ${payload.booking.order_ref || b.id}`);
+      doc.fontSize(11).text(`Order ${payload.booking.order_ref || bookingId}`);
       doc.fontSize(10).text(payload.booking.customer_name || '');
       doc.text(payload.booking.customer_phone || '');
       if (payload.booking.delivery_address || payload.booking.meta?.delivery_address) {
@@ -1105,9 +1228,14 @@ router.get('/packing-slips/today', authenticateToken, getRestaurantId, requireOu
       for (const line of payload.lines) {
         doc.text(`${line.qty}× ${line.name}${line.pack ? ` (${line.pack})` : ''}`);
       }
-      if (payload.booking.meta?.awb) {
+      if (payload.booking.meta?.awb || payload.booking.meta?.tracking_url) {
         doc.moveDown(0.3);
-        doc.text(`AWB ${payload.booking.meta.awb} · ${payload.booking.meta.courier_name || ''}`);
+        const track = payload.booking.meta.tracking_url || payload.booking.meta.awb;
+        doc.text(
+          `${payload.booking.meta.courier_name || 'Courier'}`
+          + (payload.booking.meta.awb ? ` · AWB ${payload.booking.meta.awb}` : '')
+          + (track && track !== payload.booking.meta.awb ? ` · ${track}` : ''),
+        );
       }
     }
     doc.end();

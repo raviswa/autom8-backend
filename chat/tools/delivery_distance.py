@@ -18,7 +18,6 @@ from config.settings import settings
 from tools.booking_mechanisms import get_http
 from tools.order_pricing import (
     DEFAULT_DELIVERY_CHARGE,
-    DEFAULT_DELIVERY_TIERS,
     delivery_charge_from_tiers,
     haversine_km,
 )
@@ -679,7 +678,11 @@ def resolve_delivery_charge_from_session(session_state: dict[str, Any] | None) -
     """Delivery fee using pre-computed session distance when available."""
     state = session_state or {}
     default = float(state.get("delivery_charge_default") or DEFAULT_DELIVERY_CHARGE)
-    tiers = state.get("delivery_charge_tiers") or DEFAULT_DELIVERY_TIERS
+    if not state.get("delivery_distance_tiers_enabled"):
+        return round(default, 2)
+    tiers = state.get("delivery_charge_tiers") or []
+    if not tiers:
+        return round(default, 2)
     distance = state.get("delivery_distance_km")
     try:
         distance = float(distance) if distance is not None else None

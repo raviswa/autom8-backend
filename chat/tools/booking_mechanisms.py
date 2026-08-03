@@ -230,7 +230,7 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict | None:
             "whatsapp_number,address,phone,gstin,fssai_license,sac_code,website,city,state,"
             "parcel_charge_per_item,takeaway_ready_range,delivery_ready_range,kitchen_busy,"
             "restaurant_type,pickup_address,pickup_latitude,pickup_longitude,delivery_charge_default,"
-            "delivery_charge_tiers,min_delivery_order_amount,min_takeaway_order_amount,"
+            "delivery_charge_tiers,delivery_distance_tiers_enabled,min_delivery_order_amount,min_takeaway_order_amount,"
             "scheduled_delivery_enabled,scheduled_takeaway_enabled,scheduled_kds_lead_minutes,"
             "max_delivery_radius_km,scheduled_slot_max_orders,schedule_buffer_minutes,"
             "schedule_rounding_minutes,payment_mode"
@@ -238,6 +238,17 @@ async def fetch_restaurant_info(restaurant_id: str) -> dict | None:
         select_attempts = [
             f"{base_select},services_enabled,subscribed_features",
             f"{base_select},subscribed_features",
+            # Pre-migration fallback (column not yet applied)
+            (
+                "name,display_name,receipt_tagline,cuisine_type,timezone,"
+                "whatsapp_number,address,phone,gstin,fssai_license,sac_code,website,city,state,"
+                "parcel_charge_per_item,takeaway_ready_range,delivery_ready_range,kitchen_busy,"
+                "restaurant_type,pickup_address,pickup_latitude,pickup_longitude,delivery_charge_default,"
+                "delivery_charge_tiers,min_delivery_order_amount,min_takeaway_order_amount,"
+                "scheduled_delivery_enabled,scheduled_takeaway_enabled,scheduled_kds_lead_minutes,"
+                "max_delivery_radius_km,scheduled_slot_max_orders,schedule_buffer_minutes,"
+                "schedule_rounding_minutes,payment_mode,subscribed_features"
+            ),
         ]
 
         last_status: int | None = None
@@ -303,6 +314,10 @@ async def cache_restaurant_pricing(session_state: dict, restaurant_id: str) -> N
         session_state["delivery_charge_default"] = float(info.get("delivery_charge_default") or 30)
     except (TypeError, ValueError):
         session_state["delivery_charge_default"] = 30.0
+
+    session_state["delivery_distance_tiers_enabled"] = bool(
+        info.get("delivery_distance_tiers_enabled")
+    )
 
     tiers = info.get("delivery_charge_tiers")
     session_state["delivery_charge_tiers"] = tiers if isinstance(tiers, list) and tiers else None

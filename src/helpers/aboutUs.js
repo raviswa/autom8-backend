@@ -31,7 +31,7 @@ function instagramProfileUrl(handle) {
 }
 
 /**
- * Public About tab payload for webcart. Returns null when the tab should be hidden.
+ * Public Contact Us payload for webcart. Returns null when the entry should be hidden.
  */
 function buildAboutPayload(restaurant) {
   if (!restaurant || !restaurant.about_enabled) return null;

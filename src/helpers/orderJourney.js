@@ -10,6 +10,7 @@ const {
   shouldCreateShiprocketForMeta,
   isLocalShiprocketPending,
 } = require('./fulfillmentChannels');
+const { normalizeShippingProvider } = require('./courierRates');
 
 const ACTIVE_TOKEN_STATUSES = new Set([
   'waiting', 'seated', 'takeaway', 'delivery', 'pending_approval', 'preparing', 'ready',
@@ -19,6 +20,19 @@ function trackUrlFromMeta(meta = {}) {
   if (meta.tracking_url) return String(meta.tracking_url);
   const awb = String(meta.awb || '').trim();
   if (!awb) return null;
+
+  const provider = normalizeShippingProvider(meta.shipping_provider);
+  const channel = String(meta.delivery_channel || '').toLowerCase();
+  const mode = String(meta.shipment_mode || '').toLowerCase();
+  // Manual / custom courier entries must never invent a Shiprocket tracking link.
+  if (
+    provider === 'custom'
+    || mode === 'manual'
+    || channel === 'custom'
+    || channel === 'own_team'
+  ) {
+    return null;
+  }
   return `https://shiprocket.co/tracking/${encodeURIComponent(awb)}`;
 }
 
@@ -155,6 +169,10 @@ async function buildOrderJourney({ restaurantId, restaurant = null }) {
     const meta = {
       ...(token.meta || {}),
       ...(booking?.meta || {}),
+      shipping_provider: (booking?.meta || {}).shipping_provider
+        || (token.meta || {}).shipping_provider
+        || rest?.shipping_provider
+        || null,
     };
     const serviceType = booking?.service_type
       || items[0]?.service_type
@@ -172,9 +190,9 @@ async function buildOrderJourney({ restaurantId, restaurant = null }) {
       queue: i.queue || 'cooking',
     }));
 
-    const skip = (!shipment.shiprocket_order_id && !shipment.awb)
+    const skip = (!shipment.shiprocket_order_id && !shipment.awb && !shipment.tracking_url)
       ? skipReasonFor({ meta, restaurant: rest, serviceType })
-      : (shipment.shiprocket_last_error && !shipment.awb ? 'shiprocket_error' : null);
+      : (shipment.shiprocket_last_error && !shipment.awb && !shipment.tracking_url ? 'shiprocket_error' : null);
 
     return {
       token_number: token.id,
@@ -192,8 +210,11 @@ async function buildOrderJourney({ restaurantId, restaurant = null }) {
       fulfillment_type: meta.fulfillment_type || null,
       delivery_channel: meta.delivery_channel || null,
       delivery_channel_status: meta.delivery_channel_status || null,
+      shipping_provider: meta.shipping_provider || null,
       shipment: {
         ...shipment,
+        shipping_provider: meta.shipping_provider || null,
+        delivery_channel: meta.delivery_channel || null,
         tracking_url: trackUrlFromMeta(meta),
       },
       skip_reason: skip,
