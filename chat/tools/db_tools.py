@@ -3805,8 +3805,8 @@ _KEYWORD_GREETING_WORDS: set[str] = {
     "hi", "hey", "hello", "hlo", "hii", "hai", "hola",
     "namaste", "namaskar", "vanakkam",
     # Indic-script greetings across all supported locales
-    # Tamil (incl. pulli-stripped fallbacks from older normalizer)
-    "வணக்கம்", "வணககம", "ஹாய்", "ஹய", "ஹி", "ஹ", "ஹலோ",
+    # Tamil (incl. pulli-stripped fallbacks from older normalizer / mobile keyboards)
+    "வணக்கம்", "வணக்கம", "வணககம", "ஹாய்", "ஹய", "ஹி", "ஹ", "ஹலோ",
     # Hindi / Marathi (Devanagari)
     "नमस्ते", "नमसत", "नमस्कार", "हाय", "हेलो", "हॅलो",
     # Telugu
@@ -3839,15 +3839,19 @@ def _normalize_routing_text(message: str) -> str:
 
     Python's \\w does not include Mn/Mc marks, so a naive [^\\w\\s] strip
     turns 'ஹி'→'ஹ' and 'அம்மா'→'அமம', breaking greeting + outlet parsing.
+    Also drops zero-width/format chars common in WhatsApp paste.
     """
     import unicodedata
 
     out: list[str] = []
-    for ch in (message or "").lower():
+    for ch in unicodedata.normalize("NFC", message or "").lower():
+        cat = unicodedata.category(ch)
+        if cat in ("Cf", "Cc"):
+            continue
         if ch.isalnum() or ch.isspace():
             out.append(ch)
             continue
-        if unicodedata.category(ch) in ("Mn", "Mc", "Lm"):
+        if cat in ("Mn", "Mc", "Lm"):
             out.append(ch)
     return "".join(out).strip()
 
@@ -3858,13 +3862,21 @@ def extract_short_code(message: str) -> str | None:
 
     "Hi Munafe"          → "munafe"
     "Hi Amma" / "வணக்கம் அம்மா" / "ஹி அம்மா" → "amma"
+    "வணக்கம் fnb" / "வணக்கம fnb" → "fnb"
     "Hi psl"             → "psl"
     "Hi" / "வணக்கம்"     → None   (plain greeting — use default tenant)
     "Hi, I want biryani" → None   (2+ tokens — treat as normal message, not a keyword)
     """
     raw = (message or "").strip()
     cleaned = _normalize_routing_text(raw)
-    tokens  = [t for t in cleaned.split() if t and t not in _KEYWORD_GREETING_WORDS]
+    tokens = [t for t in cleaned.split() if t and t not in _KEYWORD_GREETING_WORDS]
+    # Mobile Tamil often drops pulli — treat pulli-stripped greeting tokens as greetings too
+    if tokens:
+        pulli_greetings = {w.replace("\u0bcd", "") for w in _KEYWORD_GREETING_WORDS}
+        tokens = [
+            t for t in tokens
+            if t not in pulli_greetings and t.replace("\u0bcd", "") not in pulli_greetings
+        ]
     if len(tokens) != 1:
         return None
     candidate = tokens[0]

@@ -45,6 +45,7 @@ from db.queries import (
     get_supply_session,
     save_supply_session,
     get_client_outstanding,
+    get_client_credit_limit,
     create_payment_claim,
     log_supply_notification,
     get_last_supply_order,
@@ -107,8 +108,9 @@ _METHOD_MAP = {
 }
 
 _GREETING_RE = re.compile(
-    r'(?i)^(hi|hello|hey|hii|namaste|namaskar)\b'
-    r'|^नमस्ते|^नमस्कार|^নমস্কার|^হ্যালো|^నమస్కారం|^వందనం|^வணக்கம்'
+    r'(?i)^(hi|hello|hey|hii|namaste|namaskar|vanakkam|vanakam|vankkam)\b'
+    r'|^नमस्ते|^नमस्कार|^নমস্কার|^হ্যালো|^నమస్కారం|^వందనం'
+    r'|^வணக்கம்|^வணக்கம|^வணககம'
 )
 _SUPPLY_KEYWORD_RE = re.compile(r'(?i)\bfnb\b')
 
@@ -132,10 +134,22 @@ def _method_label(lang: str, method: str) -> str:
 
 
 def _is_supply_greeting(text: str) -> bool:
-    """True for Hi / Hi fnb and other bare supply entry phrases."""
+    """True for Hi / வணக்கம் fnb / bare fnb and other supply entry phrases."""
     cleaned = (text or '').strip()
     if not cleaned:
         return False
+    try:
+        from agents.customer.booking_helpers import is_greeting
+        if is_greeting(cleaned):
+            return True
+    except Exception:
+        pass
+    try:
+        from tools.db_tools import extract_short_code
+        if extract_short_code(cleaned):
+            return True
+    except Exception:
+        pass
     lower = cleaned.lower()
     if lower in {'hi', 'hello', 'hey', 'fnb'}:
         return True
@@ -365,15 +379,32 @@ async def _handle_place_order(
 async def _handle_balance(
     phone: str, supplier_id: str, client_id: str, session: dict
 ) -> None:
-    """Reply with current outstanding balance from credit ledger."""
+    """Reply with outstanding balance and credit limit when configured."""
     balance = await get_client_outstanding(supplier_id, client_id)
+    credit_limit = await get_client_credit_limit(client_id)
     session['_state'] = 'idle'
     lang = _lang(session)
 
+    limit_part = (
+        f" / *₹{_fmt_money(credit_limit)}*" if credit_limit > 0 else ''
+    )
+
     if balance <= 0:
-        msg = reply(lang, 'balance_zero')
+        if credit_limit > 0:
+            msg = reply(
+                lang,
+                'balance_zero_with_limit',
+                credit_limit=_fmt_money(credit_limit),
+            )
+        else:
+            msg = reply(lang, 'balance_zero')
     else:
-        msg = reply(lang, 'balance_due', balance=_fmt_money(balance))
+        msg = reply(
+            lang,
+            'balance_due',
+            balance=_fmt_money(balance),
+            limit_part=limit_part,
+        )
 
     await send_supply_text(phone, msg, supplier_id, client_id)
 

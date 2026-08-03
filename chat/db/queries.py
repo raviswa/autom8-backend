@@ -394,6 +394,34 @@ async def get_client_outstanding(supplier_id: str, client_id: str) -> float:
     return total_debits - total_credits
 
 
+async def get_client_credit_limit(client_id: str) -> float:
+    """Return supply_clients.credit_limit (0 if unset / missing)."""
+    if not client_id:
+        return 0.0
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            _url("supply_clients"),
+            headers=_headers(),
+            params={
+                "id":     f"eq.{client_id}",
+                "select": "credit_limit",
+                "limit":  "1",
+            },
+        )
+    if resp.status_code != 200:
+        logger.error(
+            f"[queries] get_client_credit_limit HTTP {resp.status_code}: {resp.text[:200]}"
+        )
+        return 0.0
+    rows = resp.json() or []
+    if not rows:
+        return 0.0
+    try:
+        return max(0.0, float(rows[0].get("credit_limit") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 async def get_client_latest_order(supplier_id: str, client_id: str) -> Optional[dict]:
     """Return the most recent non-cancelled order for a client, or None."""
     async with httpx.AsyncClient(timeout=10) as client:

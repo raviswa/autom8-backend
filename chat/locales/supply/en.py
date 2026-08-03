@@ -28,8 +28,12 @@ REPLIES = {
         "Please try again in a moment or ask your supplier to resend it."
     ),
     'balance_zero': "✅ Great news — you have no outstanding balance with us right now!",
+    'balance_zero_with_limit': (
+        "✅ Great news — you have no outstanding balance with us right now.\n"
+        "Credit limit: *₹{credit_limit}* (fully available)."
+    ),
     'balance_due': (
-        "Your current outstanding balance is *₹{balance}*.\n\n"
+        "Your current outstanding balance is *₹{balance}*{limit_part}.\n\n"
         "To record a payment, send the amount and payment details "
         '(e.g. "Paid ₹5000 GPay ref 123456789").'
     ),

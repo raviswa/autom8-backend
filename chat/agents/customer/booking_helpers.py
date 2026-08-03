@@ -463,8 +463,8 @@ _GREETING_WORDS: set[str] = {
     "yes","no","yep","nope","thanks","thank you","thankyou","bye","goodbye",
     "help","start","back","reset","restart","cancel",
     "namaste", "namaskar",
-    # Tamil
-    "வணக்கம்", "ஹி", "ஹலோ", "ஹாய்",
+    # Tamil (full + pulli-stripped mobile-keyboard variants)
+    "வணக்கம்", "வணக்கம", "வணககம", "ஹி", "ஹலோ", "ஹாய்",
     "vanakkam", "vanakam", "vankkam",
     # Hindi / Marathi (Devanagari)
     "नमस्ते", "नमस्कार", "हाय", "हेलो", "हॅलो",
@@ -541,8 +541,8 @@ _GREETING_PREFIX_RE = re.compile(
     r"hi|hello|hey|hii|helo|hola|namaste|namaskar|vanakkam|vanakam|vankkam"
     r")\b"
     r"|^(?:"
-    # Tamil
-    r"ஹி|வணக்கம்|ஹலோ|ஹாய்"
+    # Tamil (incl. pulli-stripped mobile variants)
+    r"ஹி|வணக்கம்|வணக்கம|வணககம|ஹலோ|ஹாய்"
     # Hindi / Marathi (Devanagari)
     r"|नमस्ते|नमस्कार|हाय|हेलो|हॅलो"
     # Telugu
@@ -560,18 +560,44 @@ _GREETING_PREFIX_RE = re.compile(
 )
 
 
+def _normalize_greeting_text(text: str) -> str:
+    """NFC + drop zero-width/format chars so mobile Tamil greetings match."""
+    import unicodedata
+
+    raw = unicodedata.normalize("NFC", text or "")
+    cleaned = "".join(
+        ch for ch in raw
+        if unicodedata.category(ch) not in ("Cf", "Cc")
+    )
+    return re.sub(r"\s+", " ", cleaned.strip().lower())
+
+
 def is_greeting(text: str) -> bool:
-    """Bare greeting, short ack words, or 'hi <restaurant>' style openers."""
-    normalized = re.sub(r"\s+", " ", (text or "").strip().lower())
+    """Bare greeting, short ack words, or 'hi <restaurant>' / 'வணக்கம் fnb' openers."""
+    normalized = _normalize_greeting_text(text)
     if not normalized:
         return False
     if normalized in _GREETING_WORDS:
         return True
+    # Pulli-stripped exact match (mobile keyboards often drop Tamil virama)
+    pulli_free = normalized.replace("\u0bcd", "")
+    if pulli_free in _GREETING_WORDS or pulli_free in {
+        w.replace("\u0bcd", "") for w in _GREETING_WORDS if "\u0bcd" in w
+    }:
+        # Only when the whole message is a greeting word (no outlet keyword)
+        if " " not in normalized:
+            return True
     match = _GREETING_PREFIX_RE.match(normalized)
     if not match:
-        return False
+        # Retry prefix match on pulli-stripped text for "வணக்கம fnb"
+        stripped = normalized.replace("\u0bcd", "")
+        match = _GREETING_PREFIX_RE.match(stripped)
+        if not match:
+            return False
+        remainder = stripped[match.end():].strip()
+        return len(remainder.split()) <= 1
     remainder = normalized[match.end():].strip()
-    # "hi" / "hi munafe" / "ஹி அம்மா" — not "hi I'd like a table for 4"
+    # "hi" / "hi munafe" / "வணக்கம் fnb" — not "hi I'd like a table for 4"
     return len(remainder.split()) <= 1
 
 
