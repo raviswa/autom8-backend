@@ -45,7 +45,92 @@ def _phone_variants(phone: str) -> list[str]:
         variants.append(digits[-10:])
     if digits.startswith('91') and len(digits) == 12:
         variants.append(digits[2:])
+    # Clients are often stored with a leading '+' (portal normalisePhone keeps it).
+    for v in list(variants):
+        variants.append(f'+{v}')
     return list(dict.fromkeys(variants))
+
+
+async def get_supplier_for_supply_tenant(restaurant_id: str) -> Optional[dict]:
+    """
+    Resolve suppliers.id for a supply/b2b Autom8 tenant (shared-WABA keyword route).
+
+    "Hi fnb" → tenants.short_code=fnb (lob_type=supply) is the *supplier* business,
+    not a buyer restaurant. Link path:
+      tenants.id → employees(role=owner) → suppliers.auth_user_id (or email).
+
+    Returns {'id': <suppliers.id>, ...} or None.
+    """
+    if not restaurant_id:
+        return None
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        emp_resp = await client.get(
+            _url("employees"),
+            headers=_headers(),
+            params={
+                "restaurant_id": f"eq.{restaurant_id}",
+                "role":          "eq.owner",
+                "select":        "id,email",
+                "order":         "created_at.asc",
+                "limit":         "5",
+            },
+        )
+        if emp_resp.status_code != 200:
+            logger.error(
+                f"[queries] get_supplier_for_supply_tenant employees HTTP "
+                f"{emp_resp.status_code}: {emp_resp.text[:200]}"
+            )
+            return None
+        owners = emp_resp.json() or []
+        if not owners:
+            logger.warning(
+                f"[queries] no owner employee for supply tenant {restaurant_id}"
+            )
+            return None
+
+        for owner in owners:
+            auth_id = owner.get("id")
+            if auth_id:
+                resp = await client.get(
+                    _url("suppliers"),
+                    headers=_headers(),
+                    params={
+                        "auth_user_id": f"eq.{auth_id}",
+                        "is_active":    "eq.true",
+                        "select":       "id,business_name,email,auth_user_id",
+                        "limit":        "1",
+                    },
+                )
+                if resp.status_code == 200 and resp.json():
+                    return resp.json()[0]
+                if resp.status_code != 200:
+                    logger.error(
+                        f"[queries] get_supplier_for_supply_tenant suppliers HTTP "
+                        f"{resp.status_code}: {resp.text[:200]}"
+                    )
+
+            email = (owner.get("email") or "").strip().lower()
+            if email:
+                resp = await client.get(
+                    _url("suppliers"),
+                    headers=_headers(),
+                    params={
+                        "email":     f"eq.{email}",
+                        "is_active": "eq.true",
+                        "select":    "id,business_name,email,auth_user_id",
+                        "limit":     "1",
+                    },
+                )
+                if resp.status_code == 200 and resp.json():
+                    return resp.json()[0]
+                if resp.status_code != 200:
+                    logger.error(
+                        f"[queries] get_supplier_for_supply_tenant email lookup HTTP "
+                        f"{resp.status_code}: {resp.text[:200]}"
+                    )
+
+    return None
 
 
 async def get_client_by_phone(supplier_id: str, phone: str) -> Optional[dict]:

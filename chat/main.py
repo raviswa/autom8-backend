@@ -363,44 +363,63 @@ async def _dispatch_to_lob(
     Testing-mode note (shared WABA number)
     ---------------------------------------
     Until each supplier gets its own dedicated WABA number, multiple LOBs
-    (fnb, psl, ...) share Munafe's restaurant WhatsApp number and are routed
-    here purely via the "Hi <short_code>" keyword. Because of that, a
-    "supply" tenant here is a *client* of some supplier, not a supplier
-    itself — its real supplier_id/client_id must be resolved via the
-    supply_clients bridge row (supply_clients.munafe_restaurant_id), never
-    assumed to equal restaurant_id.
+    (fnb, psl, ...) share Munafe's WhatsApp number and are routed here via
+    "Hi <short_code>". A supply tenant resolved by keyword is the *supplier*
+    business (e.g. FNB Supply Lab). Resolve suppliers via the tenant owner,
+    then match the inbound phone to supply_clients. Fallback: restaurant-as-
+    client bridge via supply_clients.munafe_restaurant_id (demo path).
+    Never treat restaurant_id as supplier_id.
     """
     restaurant_id = restaurant["id"]
 
     if lob_type == "supply":
-        from db.queries import get_supply_client_by_restaurant_id
+        from db.queries import (
+            get_supplier_for_supply_tenant,
+            get_supply_client_by_restaurant_id,
+        )
 
-        # Shared-WABA entry: "Hi fnb" → tenant with short_code=fnb, lob_type=supply.
-        # Resolve the real supplier/client bridge via munafe_restaurant_id —
-        # never treat the shared tenant id as supplier_id.
-        client_row = await get_supply_client_by_restaurant_id(restaurant_id)
-        if not client_row:
-            logger.warning(
-                f"[lob-dispatch] no supply_clients row for restaurant {restaurant_id} "
-                f"(munafe_restaurant_id not linked) — dropping supply message"
+        # Primary: keyword → supply tenant → supplier portal → client by phone
+        supplier_row = await get_supplier_for_supply_tenant(restaurant_id)
+        if supplier_row:
+            logger.info(
+                f"[lob-dispatch] supply tenant {restaurant_id} → "
+                f"supplier={supplier_row['id']} phone={phone[-4:]}"
             )
-            from tools.whatsapp_tools import send_whatsapp_message as _send
-            await _send(
-                phone,
-                "This outlet isn't registered as a supply client yet. "
-                "Please contact your supplier to get set up. 🙏",
-                restaurant_id,
+            await handle_supply_message(
+                phone           = phone,
+                supplier_id     = supplier_row["id"],
+                client_id       = None,  # agent resolves via get_client_by_phone
+                message         = message_body,
+                message_type    = msg_type,
+                raw_message_obj = message_obj,
             )
             return
 
-        await handle_supply_message(
-            phone           = phone,
-            supplier_id     = client_row["supplier_id"],
-            client_id       = client_row["id"],
-            message         = message_body,
-            message_type    = msg_type,
-            raw_message_obj = message_obj,
+        # Fallback: restaurant-as-client bridge (shared-WABA demo)
+        client_row = await get_supply_client_by_restaurant_id(restaurant_id)
+        if client_row:
+            await handle_supply_message(
+                phone           = phone,
+                supplier_id     = client_row["supplier_id"],
+                client_id       = client_row["id"],
+                message         = message_body,
+                message_type    = msg_type,
+                raw_message_obj = message_obj,
+            )
+            return
+
+        logger.warning(
+            f"[lob-dispatch] no supplier/client for supply tenant {restaurant_id} "
+            f"(owner→suppliers + munafe_restaurant_id both empty) — dropping"
         )
+        from tools.whatsapp_tools import send_whatsapp_message as _send
+        await _send(
+            phone,
+            "This outlet isn't registered as a supply client yet. "
+            "Please contact your supplier to get set up. 🙏",
+            restaurant_id,
+        )
+        return
 
     elif lob_type == "retail":
         # Should not run — retail is handled by minimal agent before _dispatch_to_lob.
