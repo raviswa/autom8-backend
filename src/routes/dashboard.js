@@ -956,15 +956,71 @@ router.post('/shipment/shiprocket/:bookingId', authenticateToken, getRestaurantI
 const { buildPackingSlipPdf, buildShippingLabelPdf } = require('../helpers/packingLabels');
 const { cartWeightKg, resolveCartLineWeights } = require('../helpers/cartWeight');
 
+/** Display order ref — bookings has no order_ref column; use token / meta / id. */
+function resolveBookingOrderRef(booking) {
+  const meta = booking?.meta || {};
+  return (
+    meta.web_cart_submission?.order_ref
+    || meta.order_ref
+    || booking?.token_number
+    || (booking?.id ? String(booking.id) : null)
+  );
+}
+
+function resolveBookingCustomer(booking) {
+  const meta = booking?.meta || {};
+  const cust = booking?.customers || booking?.customer || {};
+  const submission = meta.web_cart_submission || {};
+  return {
+    customer_name:
+      booking?.customer_name
+      || cust.name
+      || submission.customer_name
+      || meta.customer_name
+      || null,
+    customer_phone:
+      booking?.customer_phone
+      || cust.phone
+      || submission.customer_phone
+      || meta.customer_phone
+      || null,
+  };
+}
+
 async function loadBookingPackPayload(restaurantId, bookingId) {
-  const { data: booking, error: bookingErr } = await supabaseAdmin
+  // Real bookings columns only — no order_ref / customer_name (those are not on the table).
+  let booking = null;
+  let bookingErr = null;
+  ({ data: booking, error: bookingErr } = await supabaseAdmin
     .from('bookings')
-    .select('id, restaurant_id, customer_phone, customer_name, order_ref, delivery_address, meta, created_at')
+    .select('id, restaurant_id, customer_id, token_number, delivery_address, meta, created_at, customers(name, phone)')
     .eq('restaurant_id', restaurantId)
     .eq('id', bookingId)
-    .maybeSingle();
+    .maybeSingle());
+  if (bookingErr && /customers|meta/i.test(bookingErr.message || '')) {
+    // Fallback without embed / meta if schema is thinner
+    ({ data: booking, error: bookingErr } = await supabaseAdmin
+      .from('bookings')
+      .select('id, restaurant_id, customer_id, token_number, delivery_address, created_at, schedule_meta')
+      .eq('restaurant_id', restaurantId)
+      .eq('id', bookingId)
+      .maybeSingle());
+    if (booking && !booking.meta && booking.schedule_meta) {
+      booking.meta = booking.schedule_meta;
+    }
+  }
   if (bookingErr) throw bookingErr;
   if (!booking) return null;
+
+  // Resolve customer from FK if embed missing
+  if (booking.customer_id && !(booking.customers || booking.customer)) {
+    const { data: custRow } = await supabaseAdmin
+      .from('customers')
+      .select('name, phone')
+      .eq('id', booking.customer_id)
+      .maybeSingle();
+    if (custRow) booking.customers = custRow;
+  }
 
   const { data: restaurant } = await supabaseAdmin
     .from('tenants')
@@ -973,6 +1029,9 @@ async function loadBookingPackPayload(restaurantId, bookingId) {
     .maybeSingle();
 
   const meta = booking.meta || {};
+  const cust = resolveBookingCustomer(booking);
+  const orderRef = resolveBookingOrderRef(booking);
+  const customerPhone = cust.customer_phone;
   const cart = meta.web_cart_submission?.items
     || meta.cart
     || meta.items
@@ -998,13 +1057,13 @@ async function loadBookingPackPayload(restaurantId, bookingId) {
         price: l.price ?? src?.price,
       };
     });
-  } else {
-    // Fallback: recent order_items for this phone today
+  } else if (customerPhone) {
+    // Fallback: recent order_items for this phone
     const { data: orders } = await supabaseAdmin
       .from('orders')
       .select('id')
       .eq('restaurant_id', restaurantId)
-      .eq('customer_phone', booking.customer_phone)
+      .eq('customer_phone', customerPhone)
       .order('created_at', { ascending: false })
       .limit(3);
     const orderIds = (orders || []).map((o) => o.id);
@@ -1040,6 +1099,9 @@ async function loadBookingPackPayload(restaurantId, bookingId) {
     },
     booking: {
       ...booking,
+      order_ref: orderRef,
+      customer_name: cust.customer_name,
+      customer_phone: customerPhone,
       pincode: meta.pincode || null,
     },
     lines,
@@ -1085,7 +1147,7 @@ router.get('/packing-slips/today', authenticateToken, getRestaurantId, requireOu
     const todayIst = istTodayYmd();
     const startIso = new Date(`${todayIst}T00:00:00+05:30`).toISOString();
     const endIso = new Date(`${todayIst}T23:59:59.999+05:30`).toISOString();
-    const bookingCols = 'id, order_ref, customer_name, customer_phone, delivery_address, meta, created_at, token_number, kds_sent_at';
+    const bookingCols = 'id, token_number, created_at, kds_sent_at';
 
     // Primary: bookings linked to packing KDS work today (matches packing board).
     const [kdsCreated, kdsUpdated] = await Promise.all([
