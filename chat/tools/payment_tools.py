@@ -503,6 +503,91 @@ def checkout_gateway_label(gateway: str) -> str:
     return "PhonePe" if str(gateway or "").lower() == "phonepe" else "Razorpay"
 
 
+async def get_tenant_payment_provider(restaurant_id: str | None) -> str | None:
+    """Load tenants.payment_provider (phonepe|razorpay) or None if unset/unavailable."""
+    if not restaurant_id:
+        return None
+    try:
+        from config.settings import settings as _settings
+        import httpx
+
+        base = (_settings.autom8_supabase_url or "").rstrip("/")
+        key = _settings.autom8_supabase_service_key or ""
+        if not base or not key:
+            return None
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get(
+                f"{base}/rest/v1/tenants",
+                headers={
+                    "apikey": key,
+                    "Authorization": f"Bearer {key}",
+                },
+                params={
+                    "id": f"eq.{restaurant_id}",
+                    "select": "payment_provider",
+                    "limit": "1",
+                },
+            )
+        if resp.status_code != 200:
+            logger.warning(
+                "[checkout] get_tenant_payment_provider HTTP %s: %s",
+                resp.status_code,
+                resp.text[:160],
+            )
+            return None
+        rows = resp.json() or []
+        if not rows:
+            return None
+        p = str(rows[0].get("payment_provider") or "").strip().lower()
+        return p if p in ("phonepe", "razorpay") else None
+    except Exception as exc:
+        logger.warning("[checkout] get_tenant_payment_provider failed: %s", exc)
+        return None
+
+
+async def resolve_checkout_gateway(
+    restaurant_id: str | None = None,
+    *,
+    override: str | None = None,
+) -> str:
+    """
+    Choose phonepe|razorpay for this outlet.
+    Order: explicit override (?gw=) → tenants.payment_provider → PAYMENT_GATEWAY
+    → configured availability fallback.
+    """
+    from tools.phonepe_tools import phonepe_configured
+
+    if override and str(override).strip().lower() in ("phonepe", "razorpay"):
+        gateway = str(override).strip().lower()
+    else:
+        preferred = await get_tenant_payment_provider(restaurant_id)
+        gateway = (preferred or settings.payment_gateway or "phonepe").lower()
+        if gateway not in ("phonepe", "razorpay"):
+            gateway = "phonepe"
+
+    if gateway == "phonepe":
+        if phonepe_configured() and await phonepe_prepay_available():
+            return "phonepe"
+        if razorpay_configured():
+            logger.warning(
+                "[checkout] PhonePe preferred/unavailable for restaurant=%s — Razorpay fallback",
+                restaurant_id,
+            )
+            return "razorpay"
+        return "phonepe"
+
+    # razorpay preferred
+    if razorpay_configured():
+        return "razorpay"
+    if phonepe_configured() and await phonepe_prepay_available():
+        logger.warning(
+            "[checkout] Razorpay preferred but unavailable for restaurant=%s — PhonePe fallback",
+            restaurant_id,
+        )
+        return "phonepe"
+    return "razorpay"
+
+
 async def send_confirm_and_pay_cta(
     customer_phone: str,
     restaurant_id: str,
@@ -609,20 +694,23 @@ async def ensure_prepay_payment_link(
     *,
     customer_phone: str | None = None,
     session_state: dict[str, Any] | None = None,
+    restaurant_id: str | None = None,
 ) -> str | None:
     """
     Return a hosted checkout URL for booking_id.
 
-    PhonePe-primary with runtime Razorpay fallback: probes PhonePe availability
-    (credentials + OAuth) before choosing a gateway. Generic over booking shape —
-    safe for restaurant / webcart / future multi-LOB checkout callers.
+    Honors tenants.payment_provider when restaurant_id is known; otherwise
+    platform PAYMENT_GATEWAY. Falls back to the other gateway if preferred
+    is not configured.
     """
     if not booking_id:
         return None
 
     checkout_url = build_checkout_page_url(str(booking_id))
+    rid = restaurant_id or (str((session_state or {}).get("restaurant_id") or "") or None)
+    gateway = await resolve_checkout_gateway(rid)
 
-    if await phonepe_prepay_available():
+    if gateway == "phonepe":
         _record_prepay_gateway(session_state, booking_id, "phonepe")
         if session_state is not None:
             session_state["payment_link"] = checkout_url
@@ -632,7 +720,7 @@ async def ensure_prepay_payment_link(
         session_state,
         booking_id,
         "razorpay",
-        reason="phonepe_unavailable",
+        reason="preferred_or_fallback",
     )
 
     if not razorpay_configured():

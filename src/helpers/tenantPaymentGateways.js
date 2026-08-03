@@ -1,13 +1,16 @@
 'use strict';
 
 /**
- * Per-tenant payment gateway registry (PhonePe MID for partnership/audit).
- * Never stores salt keys or end-customer payment PII.
+ * Per-tenant payment gateway registry.
+ * - PhonePe MID rows: partnership / audit (never stores salt keys).
+ * - tenants.payment_provider: customer checkout preference (phonepe | razorpay)
+ *   using platform Railway credentials — not per-tenant API secrets.
  */
 
 const { supabaseAdmin } = require('../config/supabase');
 
 const ALLOWED_STATUS = new Set(['pending', 'live', 'kyc_failed', 'inactive']);
+const ALLOWED_PROVIDERS = new Set(['phonepe', 'razorpay']);
 
 function getPhonePePartnerReferralUrl() {
   const raw = String(process.env.PHONEPE_PARTNER_REFERRAL_URL || '').trim();
@@ -122,7 +125,6 @@ async function markPhonePeReferralIntent(restaurantId) {
     .single();
 
   if (error) {
-    // Race: another request inserted — return that row
     if (error.code === '23505') {
       return getPhonePeGateway(restaurantId);
     }
@@ -147,11 +149,85 @@ function summarizePhonePeMerchant(gateway) {
   };
 }
 
+/** @returns {'phonepe'|'razorpay'|null} */
+async function getPreferredPaymentProvider(restaurantId) {
+  if (!restaurantId) return null;
+  const { data, error } = await supabaseAdmin
+    .from('tenants')
+    .select('payment_provider')
+    .eq('id', restaurantId)
+    .maybeSingle();
+  if (error) throw error;
+  const p = String(data?.payment_provider || '').trim().toLowerCase();
+  return ALLOWED_PROVIDERS.has(p) ? p : null;
+}
+
+/**
+ * Set customer checkout gateway preference for an outlet.
+ * @returns {'phonepe'|'razorpay'}
+ */
+async function setPreferredPaymentProvider(restaurantId, provider) {
+  if (!restaurantId) {
+    const err = new Error('restaurant_id is required');
+    err.status = 400;
+    throw err;
+  }
+  const p = String(provider || '').trim().toLowerCase();
+  if (!ALLOWED_PROVIDERS.has(p)) {
+    const err = new Error("preferred_provider must be 'phonepe' or 'razorpay'");
+    err.status = 400;
+    throw err;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('tenants')
+    .update({ payment_provider: p })
+    .eq('id', restaurantId)
+    .select('id, payment_provider')
+    .single();
+
+  if (error) throw error;
+  return data.payment_provider;
+}
+
+/**
+ * Ops bulk set. Returns { updated, failed }.
+ */
+async function bulkSetPreferredPaymentProvider(restaurantIds, provider) {
+  const p = String(provider || '').trim().toLowerCase();
+  if (!ALLOWED_PROVIDERS.has(p)) {
+    const err = new Error("preferred_provider must be 'phonepe' or 'razorpay'");
+    err.status = 400;
+    throw err;
+  }
+  const ids = [...new Set((restaurantIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+  if (!ids.length) {
+    const err = new Error('restaurant_ids array is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('tenants')
+    .update({ payment_provider: p })
+    .in('id', ids)
+    .select('id, payment_provider');
+
+  if (error) throw error;
+  const updated = (data || []).map((r) => r.id);
+  const failed = ids.filter((id) => !updated.includes(id));
+  return { preferred_provider: p, updated, failed };
+}
+
 module.exports = {
   ALLOWED_STATUS,
+  ALLOWED_PROVIDERS,
   getPhonePePartnerReferralUrl,
   getPhonePeGateway,
   upsertPhonePeGateway,
   markPhonePeReferralIntent,
   summarizePhonePeMerchant,
+  getPreferredPaymentProvider,
+  setPreferredPaymentProvider,
+  bulkSetPreferredPaymentProvider,
 };

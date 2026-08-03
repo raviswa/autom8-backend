@@ -49,6 +49,9 @@ const {
   upsertPhonePeGateway,
   markPhonePeReferralIntent,
   getPhonePePartnerReferralUrl,
+  getPreferredPaymentProvider,
+  setPreferredPaymentProvider,
+  bulkSetPreferredPaymentProvider,
 } = require('../helpers/tenantPaymentGateways');
 
 const BRAND_ROLES = ['brand_owner', 'brand_manager'];
@@ -221,6 +224,7 @@ router.get('/', authenticateToken, getRestaurantId, async (req, res) => {
     const billing     = computeBillingFlags(sub, req.restaurant_id);
     const referralBonusDays = await loadReferralBonusDays(req.restaurant_id);
     const phonepeGateway = await getPhonePeGateway(req.restaurant_id).catch(() => null);
+    const preferredProvider = await getPreferredPaymentProvider(req.restaurant_id).catch(() => null);
     const lifetime = isLifetimeTenant(req.restaurant_id);
 
     const { data: payments } = await supabaseAdmin
@@ -260,6 +264,7 @@ router.get('/', authenticateToken, getRestaurantId, async (req, res) => {
       applied_offer_code: sub?.applied_offer_code || null,
       phonepe_configured: phonepeConfigured(),
       phonepe_merchant: phonepeGateway,
+      preferred_provider: preferredProvider || process.env.PAYMENT_GATEWAY || 'phonepe',
       payments: payments || [],
       business_name: restaurant?.display_name || restaurant?.name || null,
       whatsapp_needs_existing_pin: Boolean(restaurant?.whatsapp_needs_existing_pin),
@@ -339,17 +344,27 @@ router.get('/brand', authenticateToken, getRestaurantId, async (req, res) => {
   }
 });
 
-// ── GET/PUT PhonePe merchant registry (partnership / audit — no secrets) ─────
+// ── GET/PUT payment gateway preference + PhonePe MID registry ────────────────
 
 router.get('/payment-gateway', authenticateToken, getRestaurantId, async (req, res) => {
   try {
     const restaurantId = req.query.restaurant_id || req.restaurant_id;
     await assertOutletAccess(req, restaurantId);
-    const gateway = await getPhonePeGateway(restaurantId);
+    const [gateway, preferredProvider] = await Promise.all([
+      getPhonePeGateway(restaurantId),
+      getPreferredPaymentProvider(restaurantId),
+    ]);
+    const platformDefault = String(process.env.PAYMENT_GATEWAY || 'phonepe').toLowerCase();
     res.json({
       success: true,
       gateway,
+      preferred_provider: preferredProvider || platformDefault,
+      preferred_provider_explicit: preferredProvider,
       referral_url: getPhonePePartnerReferralUrl(),
+      razorpay: {
+        provider: 'razorpay',
+        note: 'Uses Autom8 platform Razorpay credentials — no merchant ID required.',
+      },
     });
   } catch (err) {
     const status = err.status || 500;
@@ -373,21 +388,53 @@ router.put('/payment-gateway', authenticateToken, getRestaurantId, async (req, r
   try {
     const restaurantId = req.body.restaurant_id || req.restaurant_id;
     await assertOutletAccess(req, restaurantId);
-    // Owners may set MID + name + referral code; status stays pending unless ops elevates
-    const body = {
-      merchant_id: req.body.merchant_id,
-      merchant_name: req.body.merchant_name,
-      partner_referral_code: req.body.partner_referral_code,
-    };
-    // Only KDS/ops path below sets status=live; owners default to pending if new
-    if (req.body.status && ['owner', 'brand_owner', 'brand_manager'].includes(req.user_role)) {
-      // Allow owner to mark inactive; live/kyc still via ops
-      if (req.body.status === 'inactive' || req.body.status === 'pending') {
-        body.status = req.body.status;
-      }
+
+    let preferredProvider = null;
+    if (req.body.preferred_provider != null && String(req.body.preferred_provider).trim() !== '') {
+      preferredProvider = await setPreferredPaymentProvider(restaurantId, req.body.preferred_provider);
     }
-    const gateway = await upsertPhonePeGateway(restaurantId, body);
-    res.json({ success: true, gateway });
+
+    let gateway = null;
+    const mid = req.body.merchant_id != null ? String(req.body.merchant_id).trim() : '';
+    if (mid) {
+      const body = {
+        merchant_id: req.body.merchant_id,
+        merchant_name: req.body.merchant_name,
+        partner_referral_code: req.body.partner_referral_code,
+      };
+      if (req.body.status && ['owner', 'brand_owner', 'brand_manager'].includes(req.user_role)) {
+        if (req.body.status === 'inactive' || req.body.status === 'pending') {
+          body.status = req.body.status;
+        }
+      }
+      gateway = await upsertPhonePeGateway(restaurantId, body);
+    } else {
+      gateway = await getPhonePeGateway(restaurantId);
+    }
+
+    if (preferredProvider == null) {
+      preferredProvider = await getPreferredPaymentProvider(restaurantId);
+    }
+
+    res.json({
+      success: true,
+      gateway,
+      preferred_provider: preferredProvider || process.env.PAYMENT_GATEWAY || 'phonepe',
+    });
+  } catch (err) {
+    const status = err.status || 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+/** Ops: bulk-set preferred_provider for existing Razorpay (or PhonePe) outlets */
+router.put('/payment-gateway/preferred/bulk', requireKdsSecret, async (req, res) => {
+  try {
+    const result = await bulkSetPreferredPaymentProvider(
+      req.body?.restaurant_ids,
+      req.body?.preferred_provider,
+    );
+    res.json({ success: true, ...result });
   } catch (err) {
     const status = err.status || 500;
     res.status(status).json({ error: err.message });

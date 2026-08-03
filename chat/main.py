@@ -52,6 +52,8 @@ from tools.payment_tools import (
     render_method_selection_html,
     verify_checkout_payment,
     ensure_prepay_payment_link,
+    resolve_checkout_gateway,
+    checkout_gateway_label,
 )
 from tools.phonepe_tools import (
     phonepe_status_message,
@@ -1360,6 +1362,7 @@ async def internal_webcart_confirm_pay(request: Request):
         f"Web cart {service_type.replace('_', ' ')} order",
         customer_phone=canonical_phone,
         session_state=session_state,
+        restaurant_id=restaurant_id,
     )
     if not payment_link:
         return JSONResponse(
@@ -1405,7 +1408,9 @@ async def internal_webcart_confirm_pay(request: Request):
             lang, "webcart_confirm_more_items", count=len(items) - 6,
         )
 
-    gateway_label = "Razorpay" if settings.payment_gateway == "razorpay" else "PhonePe"
+    gateway_label = checkout_gateway_label(
+        session_state.get("payment_gateway") or settings.payment_gateway
+    )
     # Both fields use the monthly booking counter — never Node session.id / OC… order_ref.
     order_ref_display = display_token
     token_display = display_token
@@ -1602,21 +1607,28 @@ async def pay_failure_event(request: Request):
 async def pay_checkout(booking_id: str, request: Request):
     """Hosted checkout entry point — routes to PhonePe or Razorpay.
 
-    Gateway is settings.payment_gateway ("phonepe" by default). Append
-    ?gw=razorpay or ?gw=phonepe to a link to force a specific gateway for
-    testing without redeploying.
+    Uses tenants.payment_provider when set; else PAYMENT_GATEWAY.
+    Append ?gw=razorpay or ?gw=phonepe to force a gateway (support / debug).
     """
     token = request.query_params.get("t", "")
+    gw_override = request.query_params.get("gw")
 
-    from tools.phonepe_tools import phonepe_configured 
-    
-    gateway = (request.query_params.get("gw") or settings.payment_gateway or "phonepe").lower()
+    restaurant_id = None
+    try:
+        from tools.db_tools import get_booking_with_customer
+        booking = await get_booking_with_customer(booking_id)
+        if booking:
+            restaurant_id = str(booking.get("restaurant_id") or "") or None
+    except Exception as exc:
+        logger.warning(f"[pay-checkout] booking lookup for gateway failed: {exc}")
 
-    if gateway == "phonepe" and not phonepe_configured():
-        logger.warning(f"[pay-checkout] PhonePe not configured, falling back to Razorpay, booking={booking_id}")
-        gateway = "razorpay"
+    gateway = await resolve_checkout_gateway(restaurant_id, override=gw_override)
+    logger.info(
+        f"[pay-checkout] booking={booking_id} restaurant={restaurant_id} "
+        f"gateway={gateway} override={gw_override or '-'}"
+    )
 
-    if gateway == "phonepe" and phonepe_configured():
+    if gateway == "phonepe":
         result = await prepare_phonepe_redirect(booking_id, token)
         if result.get("error") == "invalid_token":
             return HTMLResponse("<h1>Invalid or expired payment link</h1>", status_code=403)
