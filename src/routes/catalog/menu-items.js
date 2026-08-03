@@ -17,6 +17,16 @@ const {
   isReadymadeCategory,
 } = require('./shared/uploadParse');
 const { recordActivationEvent } = require('../../helpers/tenantActivation');
+const { normalizePublicImageUrl } = require('../../helpers/publicImageUrl');
+
+function bustWebcartMenuCache(restaurantId) {
+  try {
+    const { invalidateMenuCache } = require('../webcart/shared');
+    invalidateMenuCache(restaurantId);
+  } catch (e) {
+    console.warn('[menu-items] menu cache invalidate skipped:', e.message);
+  }
+}
 // ── POST /api/menu/upload (and /api/catalog/menu-upload) — Bulk menu upload ──
 
 async function handleMenuUpload(req, res) {
@@ -524,6 +534,7 @@ async function handleMenuUpload(req, res) {
     if (allWarnings.length) {
       response.warnings = allWarnings.map((w) => (typeof w === 'string' ? w : w.warning || JSON.stringify(w)));
     }
+    bustWebcartMenuCache(restaurantId);
     res.json(response);
   } catch (err) {
     console.error('[menu/upload]', err.message);
@@ -1262,7 +1273,7 @@ function normalizeMenuItemBody(item, { packagedLob, existingMeta, lobType }) {
     description: String(item.description || '').trim(),
     price: Number.isFinite(price) ? price : 0,
     category,
-    image_url: item.image_url || item.image_link || null,
+    image_url: normalizePublicImageUrl(item.image_url || item.image_link) || null,
     time_slot: mapTimeSlot(timeSlotRaw || 'all'),
     item_type,
     variant_group_id: item.variant_group_id ? String(item.variant_group_id).trim() : null,
@@ -1285,10 +1296,10 @@ function normalizeMenuItemBody(item, { packagedLob, existingMeta, lobType }) {
     allergens: item.allergens ? String(item.allergens).trim() : null,
     bundle_components: components,
     meta: Object.keys(metaBase).length ? metaBase : {},
-    image_url_2: item.image_url_2 || null,
-    image_url_3: item.image_url_3 || null,
-    image_url_4: item.image_url_4 || null,
-    image_url_5: item.image_url_5 || null,
+    image_url_2: normalizePublicImageUrl(item.image_url_2) || null,
+    image_url_3: normalizePublicImageUrl(item.image_url_3) || null,
+    image_url_4: normalizePublicImageUrl(item.image_url_4) || null,
+    image_url_5: normalizePublicImageUrl(item.image_url_5) || null,
     low_stock_alert_units: (() => {
       if (item.low_stock_alert_units == null || item.low_stock_alert_units === '') {
         return packagedLob ? 5 : null;
@@ -1497,6 +1508,8 @@ async function handleMenuItemCreate(req, res) {
 
     res.json({ success: true, item: data, warnings: warnings.length ? warnings : undefined });
 
+    bustWebcartMenuCache(restaurantId);
+
     if (data.retailer_id) {
       pushSingleItemToMetaCatalog({
         retailerId: data.retailer_id,
@@ -1621,6 +1634,8 @@ async function handleMenuItemUpdate(req, res) {
 
     res.json({ success: true, item: data, warnings: warnings.length ? warnings : undefined });
 
+    bustWebcartMenuCache(restaurantId);
+
     if (data.retailer_id) {
       pushSingleItemToMetaCatalog({
         retailerId: data.retailer_id,
@@ -1673,6 +1688,8 @@ async function handleMenuItemDelete(req, res) {
     });
 
     res.json({ success: true, id: existing.id, archived: true });
+
+    bustWebcartMenuCache(restaurantId);
 
     if (existing.retailer_id) {
       pushSingleItemToMetaCatalog({

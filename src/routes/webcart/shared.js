@@ -37,6 +37,19 @@ const MENU_CACHE_TTL_MS = 45 * 1000;
 let _restaurantCache = { rows: null, fetchedAt: 0 };
 const _menuCache = new Map(); // restaurantId -> { items, categorySlotMap, fetchedAt }
 
+function invalidateMenuCache(restaurantId = null) {
+  if (restaurantId == null) {
+    _menuCache.clear();
+    return;
+  }
+  const prefix = `${restaurantId}:`;
+  for (const key of _menuCache.keys()) {
+    if (key === String(restaurantId) || String(key).startsWith(prefix)) {
+      _menuCache.delete(key);
+    }
+  }
+}
+
 function digitsOnly(value) {
   return String(value || '').replace(/\D/g, '');
 }
@@ -895,8 +908,10 @@ async function fetchMenuItems(restaurantId, { catalogLob = false } = {}) {
   const items = (itemsRes.data || []).map(item => {
     const { stocked, comingSoon, status } = deriveStockStatus(item, componentsByRetailerId);
     const discount = deriveMenuDiscount(item);
+    const { normalizeMenuItemImageFields } = require('../../helpers/publicImageUrl');
+    const withImages = normalizeMenuItemImageFields(item);
     return {
-      ...item,
+      ...withImages,
       is_available: !!item.is_available,
       is_stocked: stocked,
       current_stock: item.current_stock == null ? null : Number(item.current_stock),
@@ -1038,6 +1053,7 @@ module.exports = {
   resolveSession,
   deriveStockStatus,
   fetchMenuItems,
+  invalidateMenuCache,
   triggerConfirmAndPay,
   SHIPROCKET_STATUS_MAP,
   triggerShipmentNotify,
