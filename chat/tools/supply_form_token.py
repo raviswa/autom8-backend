@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 _IST = ZoneInfo('Asia/Kolkata')
 _DEFAULT_SECRET = 'dev_form_signing_secret'
-_DEFAULT_BASE_URL = 'https://order.autom8.works'
+_DEFAULT_BASE_URL = 'https://app.autom8.works'
 
 
 def _signing_secret() -> str:

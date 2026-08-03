@@ -77,7 +77,7 @@ const TEMPLATES = {
     language: 'en',
     components: ({ client_name, order_form_url }) => {
       // Meta URL buttons take only the dynamic path suffix, not a full URL.
-      // Template is typically registered as https://order.autom8.works/{{1}}
+      // Template path suffix is typically /s/{{1}} on the SPA host (app.autom8.works)
       // so pass "s/<token>" (or whatever path follows the host).
       let buttonParam = order_form_url || '';
       if (buttonParam.includes('://')) {

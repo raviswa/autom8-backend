@@ -36,7 +36,7 @@ const opsRoles = requireSupplyRole('owner', 'manager');
 const { createFormToken }       = require('./supplyFormToken');
 const { notifyClient }          = require('./notify');
 
-const SUPPLY_FORM_BASE_URL = process.env.SUPPLY_FORM_BASE_URL || 'https://order.autom8.works';
+const SUPPLY_FORM_BASE_URL = process.env.SUPPLY_FORM_BASE_URL || 'https://app.autom8.works';
 
 // Gracefully skip welcome message until Module 12 (supplyWhatsapp.js) exists.
 // Set to true once notify.js and supplyWhatsapp.js are deployed.

@@ -78,7 +78,7 @@ class Settings(BaseSettings):
 
     # Public order form (/s/:token) — must match Node SUPPLY_FORM_* env vars
     supply_form_signing_secret: str = ''
-    supply_form_base_url: str = 'https://order.autom8.works'
+    supply_form_base_url: str = 'https://app.autom8.works'
 
 
 settings = Settings()

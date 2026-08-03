@@ -66,6 +66,19 @@ app.use('/api/supply/notify',         require('./src/routes/supply/notify'));
 app.use('/api/supply/webhook',        require('./src/routes/supply/webhook'));
 app.use('/api/supply/scheduler',      require('./src/routes/supply/scheduler'));
 
+// ── Supply public order form — SPA on frontend (order.autom8.works may point here)
+const SUPPLY_ORDER_SPA_URL = (
+  process.env.SUPPLY_ORDER_SPA_URL ||
+  process.env.FRONTEND_URL ||
+  process.env.SUPPLY_FRONTEND_URL ||
+  'https://app.autom8.works'
+).replace(/\/$/, '');
+app.get(['/s/:token', '/s/b/:token'], (req, res) => {
+  const permanent = req.path.startsWith('/s/b/');
+  const dest = `${SUPPLY_ORDER_SPA_URL}${permanent ? '/s/b/' : '/s/'}${encodeURIComponent(req.params.token)}`;
+  return res.redirect(302, dest);
+});
+
 // ── Health check ─────────────────────────────────────────────────────────────
 app.get('/health', async (req, res) => {
   let dbProbe = 'ok';

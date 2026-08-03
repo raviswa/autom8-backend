@@ -18,7 +18,7 @@ const { generateStatement } = require('./statements');
 const { isSubscriptionSoftLocked } = require('../../helpers/subscriptionAccess');
 const { createFormToken } = require('./supplyFormToken');
 
-const DEFAULT_FORM_BASE_URL = 'https://order.autom8.works';
+const DEFAULT_FORM_BASE_URL = 'https://app.autom8.works';
 const SUPPLY_FORM_BASE_URL = process.env.SUPPLY_FORM_BASE_URL || DEFAULT_FORM_BASE_URL;
 
 function getTodayCutoffDate(supplier) {

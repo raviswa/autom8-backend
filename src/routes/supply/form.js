@@ -26,7 +26,7 @@ const { createFormToken, validateFormToken, renewPermanentToken }
 const supplyLedger                              = require('./ledger');
 const { nextSupplyDeliveryDate }                = require('../../helpers/istDate');
 
-const BASE_URL = process.env.SUPPLY_FORM_BASE_URL || 'https://order.autom8.works';
+const BASE_URL = process.env.SUPPLY_FORM_BASE_URL || 'https://app.autom8.works';
 
 // ── POST /api/supply/form/generate-link ──────────────────────────────────────
 // Must be registered BEFORE /:token so "generate-link" is never treated as a token.

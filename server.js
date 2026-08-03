@@ -132,6 +132,20 @@ app.use('/api/whatsapp',    require('./src/routes/webhook'));
 app.use('/api/v1/takeaway', require('./src/routes/takeaway'));
 app.use('/api/staff',       require('./src/routes/staff'));
 
+// ── Supply public order form — SPA lives on the frontend host ─────────────────
+// order.autom8.works currently points at this Express service; WhatsApp links
+// hit /s/:token here and used to 404 ("Cannot GET /s/..."). Redirect to the SPA.
+const SUPPLY_ORDER_SPA_URL = (
+  process.env.SUPPLY_ORDER_SPA_URL ||
+  process.env.FRONTEND_URL ||
+  'https://app.autom8.works'
+).replace(/\/$/, '');
+app.get(['/s/:token', '/s/b/:token'], (req, res) => {
+  const permanent = req.path.startsWith('/s/b/');
+  const dest = `${SUPPLY_ORDER_SPA_URL}${permanent ? '/s/b/' : '/s/'}${encodeURIComponent(req.params.token)}`;
+  return res.redirect(302, dest);
+});
+
 // ── Public web cart (slug/token based) ──────────────────────────────────────
 app.use('/',                require('./src/routes/webcart'));
 
