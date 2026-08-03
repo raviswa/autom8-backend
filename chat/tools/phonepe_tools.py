@@ -153,6 +153,13 @@ async def create_phonepe_order(
             "type": "PG_CHECKOUT",
             "message": (description or f"Munafe order {str(booking_id)[:8]}")[:120],
             "merchantUrls": {"redirectUrl": _return_url(booking_id)},
+            # Suppress UPI QR (same-device scan friction); keep Intent/Collect + cards/NB.
+            "paymentModeConfig": {
+                "version": "V2",
+                "disabledPaymentModes": [
+                    {"type": "UPI", "flows": ["QR"]},
+                ],
+            },
         },
     }
 
