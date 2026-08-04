@@ -263,6 +263,7 @@ async function handleMenuUpload(req, res) {
         made_on_date:        item.made_on_date ? String(item.made_on_date).trim().slice(0, 10) : null,
         ingredients:         item.ingredients ? String(item.ingredients).trim() : null,
         how_to_use:          item.how_to_use ? String(item.how_to_use).trim() : null,
+        how_to_store:        item.how_to_store ? String(item.how_to_store).trim() : null,
         allergens:           item.allergens ? String(item.allergens).trim() : null,
         availability_status: (() => {
           const raw = String(item.availability_status || '').toLowerCase().trim();
@@ -1293,6 +1294,7 @@ function normalizeMenuItemBody(item, { packagedLob, existingMeta, lobType }) {
     made_on_date: item.made_on_date ? String(item.made_on_date).trim().slice(0, 10) : null,
     ingredients: item.ingredients ? String(item.ingredients).trim() : null,
     how_to_use: item.how_to_use ? String(item.how_to_use).trim() : null,
+    how_to_store: item.how_to_store ? String(item.how_to_store).trim() : null,
     allergens: item.allergens ? String(item.allergens).trim() : null,
     bundle_components: components,
     meta: Object.keys(metaBase).length ? metaBase : {},
@@ -1409,6 +1411,11 @@ async function writeMenuItemRow(kind, targetId, restaurantId, row) {
     const withoutHowTo = { ...row };
     delete withoutHowTo.how_to_use;
     ({ data, error } = await run(withoutHowTo));
+  }
+  if (error && /how_to_store/i.test(error.message || '')) {
+    const withoutHowToStore = { ...row };
+    delete withoutHowToStore.how_to_store;
+    ({ data, error } = await run(withoutHowToStore));
   }
   return { data, error };
 }

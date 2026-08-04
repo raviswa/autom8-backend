@@ -801,6 +801,21 @@
     .product-gallery-dots span.active { background: var(--brand); }
     .product-detail-row { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; padding: 4px 0; }
     .product-detail-row span:first-child { color: var(--muted); }
+    .product-trust-block {
+      margin: 10px 0 0;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+    }
+    .product-trust-block .modal-section-title { margin-bottom: 4px; }
+    .product-trust-text {
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.45;
+      color: #334155;
+      white-space: pre-wrap;
+    }
     .discount-badge {
       display: inline-block; font-size: 11px; font-weight: 700; color: #fff;
       background: #16a34a; padding: 2px 8px; border-radius: 999px; margin-left: 6px; vertical-align: middle;
@@ -2719,7 +2734,7 @@ $('subtotal').textContent = money(subtotal);
       // Catalog LOBs always; restaurant LOBs when the item has gallery/detail content.
       if (isCatalogProductLob()) return true;
       const urls = itemGalleryUrls(item);
-      return urls.length > 0 || !!(item.description || item.how_to_use || item.ingredients);
+      return urls.length > 0 || !!(item.description || item.how_to_use || item.how_to_store || item.ingredients);
     }
 
     function isFlatCatalogProduct(item) {
@@ -2790,9 +2805,7 @@ $('subtotal').textContent = money(subtotal);
       if (item.weight_grams) rows.push(['Weight', `${item.weight_grams} g`]);
       if (item.made_on_date) rows.push(['Made on', String(item.made_on_date).slice(0, 10)]);
       if (item.shelf_life_days) rows.push(['Shelf life', `${item.shelf_life_days} days`]);
-      if (item.ingredients) rows.push(['Ingredients', item.ingredients]);
       if (item.allergens) rows.push(['Allergens', item.allergens]);
-      if (item.how_to_use) rows.push(['How to use', item.how_to_use]);
       if (item.condition) rows.push(['Condition', item.condition]);
       if (item.original_mrp && Number(item.original_mrp) > Number(item.price)) {
         const pct = Math.round((1 - Number(item.price) / Number(item.original_mrp)) * 100);
@@ -2801,6 +2814,18 @@ $('subtotal').textContent = money(subtotal);
       }
       if (item.warranty_days) rows.push(['Warranty', `${item.warranty_days} days`]);
       if (item.colour) rows.push(['Colour', item.colour]);
+
+      const trustBlocks = [
+        ['Ingredients', item.ingredients],
+        ['How to use', item.how_to_use],
+        ['How to store', item.how_to_store],
+      ].filter(([, text]) => !!String(text || '').trim())
+        .map(([title, text]) => `
+          <div class="product-trust-block">
+            <div class="modal-section-title">${escapeHtml(title)}</div>
+            <p class="product-trust-text">${escapeHtml(String(text).trim())}</p>
+          </div>`).join('');
+
       const comps = bundleComponentsOf(item);
       if (comps.length) {
         const lines = comps.map((c) => {
@@ -2810,12 +2835,15 @@ $('subtotal').textContent = money(subtotal);
             : c.retailer_id;
           return `${c.qty || 1}× ${label}`;
         });
-        includesHtml = `<div class="modal-section"><div class="modal-section-title">Includes</div>${lines.map((line) => `<div class="product-detail-row"><strong>${line}</strong></div>`).join('')}</div>`;
+        includesHtml = `<div class="modal-section"><div class="modal-section-title">Includes</div>${lines.map((line) => `<div class="product-detail-row"><strong>${escapeHtml(line)}</strong></div>`).join('')}</div>`;
       }
       const detailsHtml = rows.length
-        ? `<div class="modal-section"><div class="modal-section-title">Details</div>${rows.map(([k, v]) => `<div class="product-detail-row"><span>${k}</span><strong>${v}</strong></div>`).join('')}</div>`
+        ? `<div class="modal-section"><div class="modal-section-title">Details</div>${rows.map(([k, v]) => `<div class="product-detail-row"><span>${escapeHtml(k)}</span><strong>${escapeHtml(String(v))}</strong></div>`).join('')}</div>`
         : '';
-      return `${detailsHtml}${includesHtml}`;
+      const trustHtml = trustBlocks
+        ? `<div class="modal-section"><div class="modal-section-title">Good to know</div>${trustBlocks}</div>`
+        : '';
+      return `${detailsHtml}${trustHtml}${includesHtml}`;
     }
 
     function galleryHtml(urls, groupId) {

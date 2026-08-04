@@ -824,7 +824,7 @@ const RESTAURANT_MENU_ITEM_SELECT =
   'id, retailer_id, name, price, category, description, image_url, image_url_2, image_url_3, image_url_4, image_url_5, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked, is_available, discount_percent, discount_ends_at';
 
 const CATALOG_MENU_ITEM_SELECT =
-  `${RESTAURANT_MENU_ITEM_SELECT}, variant_group_id, size_label, item_type, flavour_group, scoop_count, crust_options, toppings_allowed, topping_extra_price, pack_size_label, weight_grams, shelf_life_days, made_on_date, ingredients, how_to_use, allergens, condition, original_mrp, warranty_days, colour, meta, current_stock, availability_status, launch_at, deposit_amount, bundle_components, low_stock_alert_units`;
+  `${RESTAURANT_MENU_ITEM_SELECT}, variant_group_id, size_label, item_type, flavour_group, scoop_count, crust_options, toppings_allowed, topping_extra_price, pack_size_label, weight_grams, shelf_life_days, made_on_date, ingredients, how_to_use, how_to_store, allergens, condition, original_mrp, warranty_days, colour, meta, current_stock, availability_status, launch_at, deposit_amount, bundle_components, low_stock_alert_units`;
 
 // Single source of truth for "can this item actually be bought right now" —
 // used both when rendering the storefront AND when validating checkout server-side,
