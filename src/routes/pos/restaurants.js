@@ -595,6 +595,212 @@ router.put('/restaurants/integration', authenticateToken, getRestaurantId, requi
   }
 });
 
+// ── Ecommerce integrations (own-store push) ───────────────────────────────────
+const {
+  ECOMMERCE_PROVIDERS,
+  PROVIDER_LABELS,
+  normalizeProvider,
+  testProviderConnection,
+} = require('../../integrations/ecommerce');
+
+function sanitizeEcommerceRow(row, provider) {
+  const cfg = (row?.config && typeof row.config === 'object') ? { ...row.config } : {};
+  // Never echo secrets — only non-secret config keys for the UI.
+  const safeConfig = {};
+  if (cfg.site_id) safeConfig.site_id = String(cfg.site_id);
+  if (cfg.store_id) safeConfig.store_id = String(cfg.store_id);
+  if (cfg.webhook_url) safeConfig.webhook_url = String(cfg.webhook_url);
+  if (cfg.notes) safeConfig.notes = String(cfg.notes);
+
+  const hasAccessToken = !!(row?.access_token && String(row.access_token).trim());
+  const hasWebhookSecret = !!(row?.webhook_secret && String(row.webhook_secret).trim());
+  const hasEndpoint = !!(row?.api_endpoint && String(row.api_endpoint).trim());
+
+  return {
+    provider,
+    label: PROVIDER_LABELS[provider] || provider,
+    is_active: !!(row && row.is_active),
+    api_endpoint: row?.api_endpoint || '',
+    config: safeConfig,
+    access_token_configured: hasAccessToken,
+    webhook_secret_configured: hasWebhookSecret,
+    has_credentials: hasAccessToken || hasWebhookSecret || hasEndpoint || !!safeConfig.webhook_url,
+    coming_soon: provider === 'ondc',
+  };
+}
+
+router.get('/restaurants/ecommerce-integrations', authenticateToken, getRestaurantId, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('tenant_integrations')
+      .select('id, provider, channel, api_endpoint, access_token, webhook_secret, config, is_active')
+      .eq('restaurant_id', req.restaurant_id)
+      .eq('channel', 'ecommerce');
+    if (error) throw error;
+
+    const byProvider = {};
+    for (const row of data || []) {
+      const p = normalizeProvider(row.provider);
+      if (p) byProvider[p] = row;
+    }
+
+    const integrations = ECOMMERCE_PROVIDERS.map((provider) =>
+      sanitizeEcommerceRow(byProvider[provider] || null, provider),
+    );
+    res.json({ success: true, integrations });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put(
+  '/restaurants/ecommerce-integrations/:provider',
+  authenticateToken,
+  getRestaurantId,
+  requireSettingsAccess,
+  async (req, res) => {
+    try {
+      const provider = normalizeProvider(req.params.provider);
+      if (!provider) {
+        return res.status(400).json({ error: 'Unknown ecommerce provider' });
+      }
+
+      const body = req.body || {};
+      const { data: existing } = await supabaseAdmin
+        .from('tenant_integrations')
+        .select('id, api_endpoint, access_token, webhook_secret, config, is_active')
+        .eq('restaurant_id', req.restaurant_id)
+        .eq('channel', 'ecommerce')
+        .eq('provider', provider)
+        .maybeSingle();
+
+      const updates = {
+        channel: 'ecommerce',
+        provider,
+        updated_at: new Date().toISOString(),
+      };
+
+      if (body.is_active !== undefined) {
+        updates.is_active = !!body.is_active;
+      } else if (!existing) {
+        updates.is_active = false;
+      }
+
+      if (body.api_endpoint !== undefined) {
+        updates.api_endpoint = String(body.api_endpoint || '').trim() || null;
+      }
+
+      // Blank secret = keep existing (Shiprocket pattern).
+      if (body.access_token !== undefined) {
+        const tok = String(body.access_token || '').trim();
+        if (tok) updates.access_token = tok;
+        else if (!existing) updates.access_token = null;
+      }
+      if (body.webhook_secret !== undefined) {
+        const sec = String(body.webhook_secret || '').trim();
+        if (sec) updates.webhook_secret = sec;
+        else if (!existing) updates.webhook_secret = null;
+      }
+
+      if (body.config !== undefined && typeof body.config === 'object' && body.config) {
+        const prev = (existing?.config && typeof existing.config === 'object') ? existing.config : {};
+        const next = { ...prev };
+        for (const key of ['site_id', 'store_id', 'webhook_url', 'notes']) {
+          if (body.config[key] !== undefined) {
+            const v = String(body.config[key] || '').trim();
+            if (v) next[key] = v;
+            else delete next[key];
+          }
+        }
+        updates.config = next;
+      }
+
+      let result;
+      if (existing?.id) {
+        const { data, error } = await supabaseAdmin
+          .from('tenant_integrations')
+          .update(updates)
+          .eq('id', existing.id)
+          .select('id, provider, channel, api_endpoint, access_token, webhook_secret, config, is_active')
+          .single();
+        if (error) throw error;
+        result = data;
+      } else {
+        const { data, error } = await supabaseAdmin
+          .from('tenant_integrations')
+          .insert({
+            restaurant_id: req.restaurant_id,
+            ...updates,
+            is_active: updates.is_active !== undefined ? updates.is_active : false,
+          })
+          .select('id, provider, channel, api_endpoint, access_token, webhook_secret, config, is_active')
+          .single();
+        if (error) throw error;
+        result = data;
+      }
+
+      invalidateRestaurantConfigCache(req.restaurant_id);
+      res.json({
+        success: true,
+        integration: sanitizeEcommerceRow(result, provider),
+      });
+    } catch (err) {
+      res.status(400).json({ error: err.message });
+    }
+  },
+);
+
+router.post(
+  '/restaurants/ecommerce-integrations/:provider/test',
+  authenticateToken,
+  getRestaurantId,
+  requireSettingsAccess,
+  async (req, res) => {
+    try {
+      const provider = normalizeProvider(req.params.provider);
+      if (!provider) {
+        return res.status(400).json({ error: 'Unknown ecommerce provider' });
+      }
+
+      const { data: existing } = await supabaseAdmin
+        .from('tenant_integrations')
+        .select('id, provider, channel, api_endpoint, access_token, webhook_secret, config, is_active')
+        .eq('restaurant_id', req.restaurant_id)
+        .eq('channel', 'ecommerce')
+        .eq('provider', provider)
+        .maybeSingle();
+
+      // Allow testing unsaved form values from the request body.
+      const body = req.body || {};
+      const merged = {
+        provider,
+        channel: 'ecommerce',
+        api_endpoint: body.api_endpoint !== undefined
+          ? String(body.api_endpoint || '').trim()
+          : (existing?.api_endpoint || ''),
+        access_token: String(body.access_token || '').trim()
+          || existing?.access_token
+          || '',
+        webhook_secret: String(body.webhook_secret || '').trim()
+          || existing?.webhook_secret
+          || '',
+        config: {
+          ...((existing?.config && typeof existing.config === 'object') ? existing.config : {}),
+          ...((body.config && typeof body.config === 'object') ? body.config : {}),
+        },
+      };
+
+      const result = await testProviderConnection(merged);
+      if (!result.ok) {
+        return res.status(400).json({ success: false, error: result.error || 'Connection failed' });
+      }
+      res.json({ success: true, ...result });
+    } catch (err) {
+      res.status(400).json({ success: false, error: err.message });
+    }
+  },
+);
+
 // ── Payments ─────────────────────────────────────────────────────────────────
 
 module.exports = router;

@@ -144,6 +144,18 @@ router.get('/api/webcart/payment-status', async (req, res) => {
     const paymentStatus = String(booking?.payment_status || '').trim().toLowerCase();
     const paid = paymentStatus === 'paid' || bookingStatus === 'confirmed';
 
+    // Best-effort ecommerce push when payment-status poll sees paid (idempotent).
+    if (paid && bookingId) {
+      try {
+        const { pushEcommerceOrders } = require('../../integrations/ecommerce');
+        pushEcommerceOrders(bookingId).catch((e) =>
+          console.warn('[webcart/payment-status] ecommerce push:', e.message),
+        );
+      } catch (e) {
+        console.warn('[webcart/payment-status] ecommerce require:', e.message);
+      }
+    }
+
     return res.json({
       ok: true,
       has_active_submission: true,
@@ -758,6 +770,22 @@ router.post('/api/webcart/submit', async (req, res) => {
       }
     } catch (draftErr) {
       console.warn('[webcart/submit] draft convert:', draftErr.message);
+    }
+
+    // If confirm already returned a paid booking (rare), push immediately.
+    if (confirmResult?.booking_id) {
+      const alreadyPaid = String(confirmResult?.payment_status || '').toLowerCase() === 'paid'
+        || String(confirmResult?.status || '').toLowerCase() === 'confirmed';
+      if (alreadyPaid) {
+        try {
+          const { pushEcommerceOrders } = require('../../integrations/ecommerce');
+          pushEcommerceOrders(confirmResult.booking_id).catch((e) =>
+            console.warn('[webcart/submit] ecommerce push:', e.message),
+          );
+        } catch (e) {
+          console.warn('[webcart/submit] ecommerce require:', e.message);
+        }
+      }
     }
 
     return res.json({

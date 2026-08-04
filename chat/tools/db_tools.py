@@ -10,6 +10,7 @@ import hashlib
 import re
 import time
 import os as _os
+import asyncio
 import httpx as _httpx
 from contextlib import asynccontextmanager
 
@@ -1070,7 +1071,62 @@ async def update_booking_payment_status(booking_id: str, payment_status: str) ->
         session.add(booking)
         await session.commit()
 
-        return {"id": str(booking.id), "payment_status": booking.payment_status}
+        paid_now = str(payment_status or "").lower() in {"paid", "captured", "success"}
+        out = {"id": str(booking.id), "payment_status": booking.payment_status}
+
+    # Fire-and-forget ecommerce push AFTER commit (never block payment path).
+    if paid_now:
+        try:
+            asyncio.create_task(_trigger_ecommerce_order_push(str(booking_id)))
+        except Exception as push_err:
+            logger.warning(
+                f"[ecommerce] schedule push failed for {booking_id}: {push_err}"
+            )
+
+    return out
+
+
+async def _trigger_ecommerce_order_push(booking_id: str) -> None:
+    """Best-effort POST to Node internal ecommerce push. Never raises to callers."""
+    try:
+        base = (
+            _os.getenv("AUTOM8_BACKEND_URL")
+            or getattr(settings, "autom8_backend_url", None)
+            or "https://api.autom8.works"
+        ).rstrip("/")
+        secret = (_os.getenv("AUTOM8_KDS_SECRET") or "").strip()
+        if not secret:
+            env = (
+                _os.getenv("NODE_ENV")
+                or _os.getenv("RAILWAY_ENVIRONMENT")
+                or ""
+            ).lower()
+            if env != "production":
+                secret = "munafe_kds_sync_2026"
+        if not secret:
+            logger.warning("[ecommerce] AUTOM8_KDS_SECRET missing — skip push")
+            return
+
+        url = f"{base}/api/internal/ecommerce/push"
+        async with _httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                url,
+                json={"booking_id": booking_id, "secret": secret},
+                headers={
+                    "Authorization": f"Bearer {secret}",
+                    "x-internal-secret": secret,
+                    "Content-Type": "application/json",
+                },
+            )
+        if resp.status_code >= 400:
+            logger.warning(
+                f"[ecommerce] push HTTP {resp.status_code} for {booking_id}: "
+                f"{resp.text[:200]}"
+            )
+        else:
+            logger.info(f"[ecommerce] push ok for {booking_id}: {resp.text[:200]}")
+    except Exception as err:
+        logger.warning(f"[ecommerce] push error for {booking_id} (non-fatal): {err}")
 
 
 async def save_booking_payment_meta(
