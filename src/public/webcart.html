@@ -2708,7 +2708,18 @@ $('subtotal').textContent = money(subtotal);
     }
 
     function isCatalogProductLob() {
-      return state.catalogLob || ['food_products', 'retail'].includes(state.lobType);
+      return state.catalogLob || ['food_products', 'retail', 'psl', 'b2b', 'jewellery', 'supply', 'b2b_supply'].includes(state.lobType);
+    }
+
+    /** Any shoppable product can open the detail sheet (all LOBs, including pack variants). */
+    function canOpenProductDetail(item) {
+      if (!item) return false;
+      const type = (item.item_type || 'PRODUCT').toUpperCase();
+      if (['FLAVOUR', 'ADDON', 'CUP', 'CONE', 'SUNDAE'].includes(type)) return false;
+      // Catalog LOBs always; restaurant LOBs when the item has gallery/detail content.
+      if (isCatalogProductLob()) return true;
+      const urls = itemGalleryUrls(item);
+      return urls.length > 0 || !!(item.description || item.how_to_use || item.ingredients);
     }
 
     function isFlatCatalogProduct(item) {
@@ -2717,6 +2728,23 @@ $('subtotal').textContent = money(subtotal);
       if (['FLAVOUR', 'ADDON', 'CUP', 'CONE', 'SUNDAE'].includes(type)) return false;
       return !item.variant_group_id;
     }
+
+    // #region agent log
+    function agentDebugLog(hypothesisId, location, message, data) {
+      fetch('http://127.0.0.1:7380/ingest/982e28a2-86ba-4a90-a485-a232585f9d4f', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '6ce792' },
+        body: JSON.stringify({
+          sessionId: '6ce792',
+          hypothesisId,
+          location,
+          message,
+          data,
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+    }
+    // #endregion
 
     function itemGalleryUrls(item) {
       const normalize = (raw) => {
@@ -2756,36 +2784,33 @@ $('subtotal').textContent = money(subtotal);
     }
 
     function productDetailFieldsHtml(item) {
-      const lob = state.lobType;
       const rows = [];
       let includesHtml = '';
-      if (lob === 'food_products') {
-        if (item.pack_size_label || item.size_label) rows.push(['Pack', item.pack_size_label || item.size_label]);
-        if (item.weight_grams) rows.push(['Weight', `${item.weight_grams} g`]);
-        if (item.made_on_date) rows.push(['Made on', String(item.made_on_date).slice(0, 10)]);
-        if (item.shelf_life_days) rows.push(['Shelf life', `${item.shelf_life_days} days`]);
-        if (item.ingredients) rows.push(['Ingredients', item.ingredients]);
-        if (item.allergens) rows.push(['Allergens', item.allergens]);
-        const comps = bundleComponentsOf(item);
-        if (comps.length) {
-          const lines = comps.map((c) => {
-            const found = (state.menu || []).find((m) => String(m.retailer_id) === String(c.retailer_id));
-            const label = found
-              ? `${found.name}${found.pack_size_label || found.size_label ? ` (${found.pack_size_label || found.size_label})` : ''}`
-              : c.retailer_id;
-            return `${c.qty || 1}× ${label}`;
-          });
-          includesHtml = `<div class="modal-section"><div class="modal-section-title">Includes</div>${lines.map((line) => `<div class="product-detail-row"><strong>${line}</strong></div>`).join('')}</div>`;
-        }
-      } else if (lob === 'retail') {
-        if (item.condition) rows.push(['Condition', item.condition]);
-        if (item.original_mrp && Number(item.original_mrp) > Number(item.price)) {
-          const pct = Math.round((1 - Number(item.price) / Number(item.original_mrp)) * 100);
-          rows.push(['MRP', money(item.original_mrp)]);
-          rows.push(['You save', `${pct}%`]);
-        }
-        if (item.warranty_days) rows.push(['Warranty', `${item.warranty_days} days`]);
-        if (item.colour) rows.push(['Colour', item.colour]);
+      if (item.pack_size_label || item.size_label) rows.push(['Pack', item.pack_size_label || item.size_label]);
+      if (item.weight_grams) rows.push(['Weight', `${item.weight_grams} g`]);
+      if (item.made_on_date) rows.push(['Made on', String(item.made_on_date).slice(0, 10)]);
+      if (item.shelf_life_days) rows.push(['Shelf life', `${item.shelf_life_days} days`]);
+      if (item.ingredients) rows.push(['Ingredients', item.ingredients]);
+      if (item.allergens) rows.push(['Allergens', item.allergens]);
+      if (item.how_to_use) rows.push(['How to use', item.how_to_use]);
+      if (item.condition) rows.push(['Condition', item.condition]);
+      if (item.original_mrp && Number(item.original_mrp) > Number(item.price)) {
+        const pct = Math.round((1 - Number(item.price) / Number(item.original_mrp)) * 100);
+        rows.push(['MRP', money(item.original_mrp)]);
+        rows.push(['You save', `${pct}%`]);
+      }
+      if (item.warranty_days) rows.push(['Warranty', `${item.warranty_days} days`]);
+      if (item.colour) rows.push(['Colour', item.colour]);
+      const comps = bundleComponentsOf(item);
+      if (comps.length) {
+        const lines = comps.map((c) => {
+          const found = (state.menu || []).find((m) => String(m.retailer_id) === String(c.retailer_id));
+          const label = found
+            ? `${found.name}${found.pack_size_label || found.size_label ? ` (${found.pack_size_label || found.size_label})` : ''}`
+            : c.retailer_id;
+          return `${c.qty || 1}× ${label}`;
+        });
+        includesHtml = `<div class="modal-section"><div class="modal-section-title">Includes</div>${lines.map((line) => `<div class="product-detail-row"><strong>${line}</strong></div>`).join('')}</div>`;
       }
       const detailsHtml = rows.length
         ? `<div class="modal-section"><div class="modal-section-title">Details</div>${rows.map(([k, v]) => `<div class="product-detail-row"><span>${k}</span><strong>${v}</strong></div>`).join('')}</div>`
@@ -3123,6 +3148,7 @@ $('subtotal').textContent = money(subtotal);
     function rowCardHtml(item) {
       const qty = rowQty(item);
       const catalogProduct = isFlatCatalogProduct(item);
+      const openDetail = canOpenProductDetail(item);
       const comingSoon = !!item.is_coming_soon;
       const soldOut = item.is_publicly_available === false && !comingSoon;
       let actions;
@@ -3137,7 +3163,7 @@ $('subtotal').textContent = money(subtotal);
       const thumb = galleryUrls[0];
       const statusSuffix = comingSoon ? ' · Coming soon' : (soldOut ? ' · Sold out' : '');
       return `
-        <div class="row-card${catalogProduct ? ' catalog-product' : ''}${(soldOut || comingSoon) ? ' sold-out' : ''}"${catalogProduct ? ` data-product-detail="${item.id}"` : ''} style="${(soldOut || comingSoon) ? 'opacity:.72' : ''}">
+        <div class="row-card${(catalogProduct || openDetail) ? ' catalog-product' : ''}${(soldOut || comingSoon) ? ' sold-out' : ''}"${openDetail ? ` data-product-detail="${item.id}"` : ''} style="${(soldOut || comingSoon) ? 'opacity:.72' : ''}">
           ${imgTag(thumb)}
           <div class="row-info">
             <div class="row-cat">${item.category || 'General'}</div>
@@ -3223,8 +3249,27 @@ $('subtotal').textContent = money(subtotal);
         ? `<div class="stepper"><button data-step="-1" data-base="${current.id}">−</button><span>${qty}</span><button data-step="1" data-pizza="${current.id}">+</button></div>`
         : `<button class="btn-add" data-pizza="${current.id}">+</button>`;
 
+      // #region agent log
+      if (/amla/i.test(String(base.name || ''))) {
+        agentDebugLog('H1_H2_H5', 'webcart.html:variantCardHtml', 'variant card rendered', {
+          groupId,
+          name: base.name,
+          lobType: state.lobType,
+          catalogLob: !!state.catalogLob,
+          isFlat: isFlatCatalogProduct(current),
+          canOpenDetail: canOpenProductDetail(current),
+          hasDataProductDetailAttr: canOpenProductDetail(current),
+          thumbPresent: !!thumb,
+          thumbHost: (() => { try { return thumb ? new URL(thumb).hostname : null; } catch (_) { return 'invalid'; } })(),
+          galleryCounts: rows.map((r) => itemGalleryUrls(r).length),
+          currentId: current.id,
+        });
+      }
+      // #endregion
+
+      const openDetail = canOpenProductDetail(current);
       return `
-        <div class="row-card" data-variant-group="${groupId}">
+        <div class="row-card${openDetail ? ' catalog-product' : ''}" data-variant-group="${groupId}"${openDetail ? ` data-product-detail="${current.id}"` : ''}>
           ${imgTag(thumb)}
           <div class="row-info">
             <div class="row-cat">${base.category || 'General'}</div>
@@ -3292,9 +3337,28 @@ $('subtotal').textContent = money(subtotal);
         card.addEventListener('click', (e) => {
           if (e.target.closest('button')) return;
           const item = state.menu.find(i => String(i.id) === card.dataset.productDetail);
+          // #region agent log
+          agentDebugLog('H2_H5', 'webcart.html:productDetailClick', 'product detail click', {
+            itemId: card.dataset.productDetail,
+            found: !!item,
+            name: item?.name || null,
+          });
+          // #endregion
           if (item) openProductDetailModal(item);
         });
       });
+      // #region agent log
+      root.querySelectorAll('.row-card[data-variant-group]').forEach(card => {
+        card.addEventListener('click', (e) => {
+          if (e.target.closest('button')) return;
+          agentDebugLog('H2_H5', 'webcart.html:variantCardClick', 'variant card click without detail handler', {
+            groupId: card.dataset.variantGroup,
+            lobType: state.lobType,
+            targetTag: e.target && e.target.tagName,
+          });
+        });
+      });
+      // #endregion
       root.querySelectorAll('.size-pill').forEach(pill => {
         pill.addEventListener('click', (e) => {
           e.stopPropagation();

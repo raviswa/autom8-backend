@@ -1366,6 +1366,21 @@ async function writeMenuItemRow(kind, targetId, restaurantId, row) {
   // Harden NOT NULL bools — callers may omit LOB-specific fields.
   if (row && row.toppings_allowed == null) row.toppings_allowed = false;
 
+  // Resolve viewer/share image links (Kommodo etc.) to direct <img src> URLs before save.
+  try {
+    const { resolveMenuItemImageFields } = require('../../helpers/publicImageUrl');
+    const resolved = await resolveMenuItemImageFields(row);
+    Object.assign(row, {
+      image_url: resolved.image_url,
+      image_url_2: resolved.image_url_2,
+      image_url_3: resolved.image_url_3,
+      image_url_4: resolved.image_url_4,
+      image_url_5: resolved.image_url_5,
+    });
+  } catch (e) {
+    console.warn('[menu-items] image resolve skipped:', e.message);
+  }
+
   async function run(payload) {
     if (kind === 'update') {
       return supabaseAdmin.from('menu_items').update(payload)

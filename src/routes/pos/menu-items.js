@@ -77,7 +77,9 @@ router.get('/menu-items', authenticateToken, getRestaurantId, async (req, res) =
 
     const { data, error } = await query;
     if (error) throw error;
-    res.json({ success: true, count: data.length, items: data, current_slot: currentSlot, ist_hour: istHour });
+    const { resolveMenuItemImageFields } = require('../../helpers/publicImageUrl');
+    const items = await Promise.all((data || []).map((row) => resolveMenuItemImageFields(row)));
+    res.json({ success: true, count: items.length, items, current_slot: currentSlot, ist_hour: istHour });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

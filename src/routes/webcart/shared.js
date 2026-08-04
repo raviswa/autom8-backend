@@ -824,7 +824,7 @@ const RESTAURANT_MENU_ITEM_SELECT =
   'id, retailer_id, name, price, category, description, image_url, image_url_2, image_url_3, image_url_4, image_url_5, is_special_today, is_todays_special, special_note, applicable_slots, is_stocked, is_available, discount_percent, discount_ends_at';
 
 const CATALOG_MENU_ITEM_SELECT =
-  `${RESTAURANT_MENU_ITEM_SELECT}, variant_group_id, size_label, item_type, flavour_group, scoop_count, crust_options, toppings_allowed, topping_extra_price, pack_size_label, weight_grams, shelf_life_days, made_on_date, ingredients, allergens, condition, original_mrp, warranty_days, colour, meta, current_stock, availability_status, launch_at, deposit_amount, bundle_components, low_stock_alert_units`;
+  `${RESTAURANT_MENU_ITEM_SELECT}, variant_group_id, size_label, item_type, flavour_group, scoop_count, crust_options, toppings_allowed, topping_extra_price, pack_size_label, weight_grams, shelf_life_days, made_on_date, ingredients, how_to_use, allergens, condition, original_mrp, warranty_days, colour, meta, current_stock, availability_status, launch_at, deposit_amount, bundle_components, low_stock_alert_units`;
 
 // Single source of truth for "can this item actually be bought right now" —
 // used both when rendering the storefront AND when validating checkout server-side,
@@ -905,11 +905,46 @@ async function fetchMenuItems(restaurantId, { catalogLob = false } = {}) {
     }
   }
 
-  const items = (itemsRes.data || []).map(item => {
+  const { resolveMenuItemImageFields } = require('../../helpers/publicImageUrl');
+  const items = await Promise.all((itemsRes.data || []).map(async (item) => {
     const { stocked, comingSoon, status } = deriveStockStatus(item, componentsByRetailerId);
     const discount = deriveMenuDiscount(item);
-    const { normalizeMenuItemImageFields } = require('../../helpers/publicImageUrl');
-    const withImages = normalizeMenuItemImageFields(item);
+    const withImages = await resolveMenuItemImageFields(item);
+    // #region agent log
+    if (/amla/i.test(String(item.name || '')) || /pickle/i.test(String(item.category || ''))) {
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const logPath = path.join(__dirname, '..', '..', '..', '..', 'debug-6ce792.log');
+        const imgHost = (() => {
+          try { return withImages.image_url ? new URL(withImages.image_url).hostname : null; } catch (_) { return 'invalid'; }
+        })();
+        fs.appendFileSync(logPath, `${JSON.stringify({
+          sessionId: '6ce792',
+          runId: 'post-fix',
+          hypothesisId: 'H1_H2_H4_H5',
+          location: 'webcart/shared.js:fetchMenuItems',
+          message: 'menu item image/detail fields after resolve',
+          data: {
+            id: item.id,
+            name: item.name,
+            category: item.category,
+            variant_group_id: item.variant_group_id || null,
+            item_type: item.item_type || null,
+            hasImageUrl: !!withImages.image_url,
+            hasImage2: !!withImages.image_url_2,
+            hasImage3: !!withImages.image_url_3,
+            imgHost,
+            imageUrlLen: withImages.image_url ? String(withImages.image_url).length : 0,
+            hasWhitespaceInImage: /\s/.test(String(item.image_url || '')),
+            hasHowToUseCol: Object.prototype.hasOwnProperty.call(withImages, 'how_to_use'),
+            catalogLob: !!catalogLob,
+          },
+          timestamp: Date.now(),
+        })}\n`);
+      } catch (_) { /* ignore debug log failures */ }
+    }
+    // #endregion
     return {
       ...withImages,
       is_available: !!item.is_available,
@@ -930,7 +965,7 @@ async function fetchMenuItems(restaurantId, { catalogLob = false } = {}) {
       discount_days_left: discount.discount_days_left,
       discount_hours_left: discount.discount_hours_left,
     };
-  });
+  }));
 
   _menuCache.set(cacheKey, { items, categorySlotMap, fetchedAt: now });
 
