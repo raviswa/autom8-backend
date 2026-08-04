@@ -910,41 +910,6 @@ async function fetchMenuItems(restaurantId, { catalogLob = false } = {}) {
     const { stocked, comingSoon, status } = deriveStockStatus(item, componentsByRetailerId);
     const discount = deriveMenuDiscount(item);
     const withImages = await resolveMenuItemImageFields(item);
-    // #region agent log
-    if (/amla/i.test(String(item.name || '')) || /pickle/i.test(String(item.category || ''))) {
-      try {
-        const fs = require('fs');
-        const path = require('path');
-        const logPath = path.join(__dirname, '..', '..', '..', '..', 'debug-6ce792.log');
-        const imgHost = (() => {
-          try { return withImages.image_url ? new URL(withImages.image_url).hostname : null; } catch (_) { return 'invalid'; }
-        })();
-        fs.appendFileSync(logPath, `${JSON.stringify({
-          sessionId: '6ce792',
-          runId: 'post-fix',
-          hypothesisId: 'H1_H2_H4_H5',
-          location: 'webcart/shared.js:fetchMenuItems',
-          message: 'menu item image/detail fields after resolve',
-          data: {
-            id: item.id,
-            name: item.name,
-            category: item.category,
-            variant_group_id: item.variant_group_id || null,
-            item_type: item.item_type || null,
-            hasImageUrl: !!withImages.image_url,
-            hasImage2: !!withImages.image_url_2,
-            hasImage3: !!withImages.image_url_3,
-            imgHost,
-            imageUrlLen: withImages.image_url ? String(withImages.image_url).length : 0,
-            hasWhitespaceInImage: /\s/.test(String(item.image_url || '')),
-            hasHowToUseCol: Object.prototype.hasOwnProperty.call(withImages, 'how_to_use'),
-            catalogLob: !!catalogLob,
-          },
-          timestamp: Date.now(),
-        })}\n`);
-      } catch (_) { /* ignore debug log failures */ }
-    }
-    // #endregion
     return {
       ...withImages,
       is_available: !!item.is_available,

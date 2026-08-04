@@ -5,35 +5,13 @@
  * Leaves already-direct http(s) image URLs unchanged (sync transforms only).
  */
 function normalizePublicImageUrl(raw) {
-  const rawStr = String(raw || '');
-  const s = rawStr.trim();
+  const s = String(raw || '').trim();
   if (!s) return null;
   if (!/^https?:\/\//i.test(s)) return null;
 
   try {
     const u = new URL(s);
     const host = u.hostname.toLowerCase();
-    // #region agent log
-    try {
-      const fs = require('fs');
-      const path = require('path');
-      const logPath = path.join(__dirname, '..', '..', '..', 'debug-6ce792.log');
-      fs.appendFileSync(logPath, `${JSON.stringify({
-        sessionId: '6ce792',
-        hypothesisId: 'H1_H3',
-        location: 'publicImageUrl.js:normalizePublicImageUrl',
-        message: 'normalize image url',
-        data: {
-          host,
-          hasWhitespace: /\s/.test(rawStr),
-          rawLen: rawStr.length,
-          trimmedLen: s.length,
-          pathPrefix: u.pathname.slice(0, 40),
-        },
-        timestamp: Date.now(),
-      })}\n`);
-    } catch (_) { /* ignore debug log failures */ }
-    // #endregion
 
     // Google Drive share / open → direct view
     // https://drive.google.com/file/d/FILE_ID/view?...
@@ -101,28 +79,6 @@ async function resolvePublicImageUrl(raw) {
       });
       const html = await res.text();
       const og = extractOgImage(html);
-      // #region agent log
-      try {
-        const fs = require('fs');
-        const path = require('path');
-        const logPath = path.join(__dirname, '..', '..', '..', 'debug-6ce792.log');
-        fs.appendFileSync(logPath, `${JSON.stringify({
-          sessionId: '6ce792',
-          runId: 'post-fix',
-          hypothesisId: 'H1',
-          location: 'publicImageUrl.js:resolvePublicImageUrl',
-          message: 'kommodo resolve result',
-          data: {
-            status: res.status,
-            contentType: String(res.headers.get('content-type') || ''),
-            resolved: !!og,
-            resolvedHost: og ? new URL(og).hostname : null,
-            id: idMatch[2].slice(0, 12),
-          },
-          timestamp: Date.now(),
-        })}\n`);
-      } catch (_) { /* ignore */ }
-      // #endregion
       if (og) return og;
     } finally {
       clearTimeout(timer);

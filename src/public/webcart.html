@@ -2744,23 +2744,6 @@ $('subtotal').textContent = money(subtotal);
       return !item.variant_group_id;
     }
 
-    // #region agent log
-    function agentDebugLog(hypothesisId, location, message, data) {
-      fetch('http://127.0.0.1:7380/ingest/982e28a2-86ba-4a90-a485-a232585f9d4f', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '6ce792' },
-        body: JSON.stringify({
-          sessionId: '6ce792',
-          hypothesisId,
-          location,
-          message,
-          data,
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-    }
-    // #endregion
-
     function itemGalleryUrls(item) {
       const normalize = (raw) => {
         const s = String(raw || '').trim();
@@ -3277,24 +3260,6 @@ $('subtotal').textContent = money(subtotal);
         ? `<div class="stepper"><button data-step="-1" data-base="${current.id}">−</button><span>${qty}</span><button data-step="1" data-pizza="${current.id}">+</button></div>`
         : `<button class="btn-add" data-pizza="${current.id}">+</button>`;
 
-      // #region agent log
-      if (/amla/i.test(String(base.name || ''))) {
-        agentDebugLog('H1_H2_H5', 'webcart.html:variantCardHtml', 'variant card rendered', {
-          groupId,
-          name: base.name,
-          lobType: state.lobType,
-          catalogLob: !!state.catalogLob,
-          isFlat: isFlatCatalogProduct(current),
-          canOpenDetail: canOpenProductDetail(current),
-          hasDataProductDetailAttr: canOpenProductDetail(current),
-          thumbPresent: !!thumb,
-          thumbHost: (() => { try { return thumb ? new URL(thumb).hostname : null; } catch (_) { return 'invalid'; } })(),
-          galleryCounts: rows.map((r) => itemGalleryUrls(r).length),
-          currentId: current.id,
-        });
-      }
-      // #endregion
-
       const openDetail = canOpenProductDetail(current);
       return `
         <div class="row-card${openDetail ? ' catalog-product' : ''}" data-variant-group="${groupId}"${openDetail ? ` data-product-detail="${current.id}"` : ''}>
@@ -3365,28 +3330,9 @@ $('subtotal').textContent = money(subtotal);
         card.addEventListener('click', (e) => {
           if (e.target.closest('button')) return;
           const item = state.menu.find(i => String(i.id) === card.dataset.productDetail);
-          // #region agent log
-          agentDebugLog('H2_H5', 'webcart.html:productDetailClick', 'product detail click', {
-            itemId: card.dataset.productDetail,
-            found: !!item,
-            name: item?.name || null,
-          });
-          // #endregion
           if (item) openProductDetailModal(item);
         });
       });
-      // #region agent log
-      root.querySelectorAll('.row-card[data-variant-group]').forEach(card => {
-        card.addEventListener('click', (e) => {
-          if (e.target.closest('button')) return;
-          agentDebugLog('H2_H5', 'webcart.html:variantCardClick', 'variant card click without detail handler', {
-            groupId: card.dataset.variantGroup,
-            lobType: state.lobType,
-            targetTag: e.target && e.target.tagName,
-          });
-        });
-      });
-      // #endregion
       root.querySelectorAll('.size-pill').forEach(pill => {
         pill.addEventListener('click', (e) => {
           e.stopPropagation();
