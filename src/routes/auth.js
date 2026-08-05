@@ -18,8 +18,27 @@ const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { recordActivationEvent } = require('../helpers/tenantActivation');
 
 const BRAND_ROLES = ['brand_owner', 'brand_manager'];
+const { registerOwnerWithShellTenant } = require('../helpers/ownerRegister');
+
+// ── POST /api/auth/register ───────────────────────────────────────────────────
+// Email-first merchant signup: Auth + shell tenant + owner employee + session.
+router.post('/register', async (req, res) => {
+  try {
+    const { email, password, full_name } = req.body || {};
+    const result = await registerOwnerWithShellTenant({ email, password, full_name });
+    return res.status(201).json(result);
+  } catch (err) {
+    const status = err.status || 400;
+    const body = { error: err.message || 'Registration failed' };
+    if (err.code) body.code = err.code;
+    if (err.login_url) body.login_url = err.login_url;
+    console.error('[auth/register]', err.message);
+    return res.status(status).json(body);
+  }
+});
 
 // ── POST /api/auth/signup ─────────────────────────────────────────────────────
+// Staff invite path (existing restaurant_id) — not merchant self-serve.
 router.post('/signup', async (req, res) => {
   try {
     const { email, password, full_name, restaurant_id, role = 'kitchen_staff' } = req.body;
@@ -148,14 +167,29 @@ router.post('/login', async (req, res) => {
 
     let lobType = null;
     let restaurantName = null;
+    let lifecycleStatus = null;
+    let onboardingStep = null;
     if (effectiveRestaurantId) {
-      const { data: tenant } = await supabaseAdmin
+      let tenant = null;
+      const full = await supabaseAdmin
         .from('tenants')
-        .select('lob_type, display_name, name')
+        .select('lob_type, display_name, name, lifecycle_status, onboarding_step')
         .eq('id', effectiveRestaurantId)
         .maybeSingle();
+      if (!full.error) {
+        tenant = full.data;
+      } else if (/lifecycle_status|onboarding_step/i.test(full.error.message || '')) {
+        const core = await supabaseAdmin
+          .from('tenants')
+          .select('lob_type, display_name, name')
+          .eq('id', effectiveRestaurantId)
+          .maybeSingle();
+        tenant = core.data;
+      }
       lobType = tenant?.lob_type || null;
       restaurantName = tenant?.display_name || tenant?.name || null;
+      lifecycleStatus = tenant?.lifecycle_status || 'active';
+      onboardingStep = tenant?.onboarding_step ?? null;
     }
 
     res.json({
@@ -167,6 +201,8 @@ router.post('/login', async (req, res) => {
         restaurant_id: effectiveRestaurantId,
         restaurant_name: restaurantName,
         lob_type: lobType,
+        lifecycle_status: lifecycleStatus,
+        onboarding_step: onboardingStep,
         scope:     isBrandEmployee ? 'brand' : 'outlet',
         brand:     brandInfo,
         outlets,   // populated only for brand employees; undefined for outlet employees

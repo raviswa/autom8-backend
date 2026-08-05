@@ -54,11 +54,16 @@ const {
 const { slugify, selectDroppingMissingColumns } = require('./webcart/shared');
 const { handleMenuUpload } = require('./catalog/menu-items');
 const { buildTenantInsertFields } = require('../helpers/registrationPayload');
+const { APP_SIGNUP_URL } = require('../helpers/ownerRegister');
+const { normalizeShippingProvider } = require('../helpers/courierRates');
 const {
   assertWhatsAppAssetsAvailable,
   recordRegistrationFailure,
   rollbackRegistration,
 } = require('../helpers/registrationGuards');
+
+// Auth-gated wizard (email-first onboarding)
+router.use(require('./onboardingWizard'));
 
 /**
  * Registration's Step 4 catalog upload uses a simplified per-LOB column set
@@ -223,179 +228,14 @@ router.get('/slug-check/:slug', async (req, res) => {
   return res.json({ slug: candidate, available: !taken });
 });
 
-// ── POST /api/onboarding/register (+ /register/upload for WP multipart) ───────
-// Also mounted at /api/v1/register for the WordPress registration form.
+// ── POST /api/onboarding/register — DEPRECATED (email-first signup) ───────────
+// Public full-wizard registration is retired. Merchants use app /signup instead.
 
-router.post(['/register', '/register/upload'], async (req, res) => {
-  // Multipart signup: JSON payload may be in req.body.data
-  if (req.body?.data && typeof req.body.data === 'string') {
-    try {
-      const parsed = JSON.parse(req.body.data);
-      Object.assign(req.body, parsed);
-    } catch (_) { /* ignore bad JSON */ }
-  }
-
-  const {
-    // Core restaurant fields
-    name,
-    email,
-    phone               = null,
-    owner_whatsapp      = null,    // owner's personal WA for OTP — not the WABA number
-    contact_phone       = null,    // business contact phone on tenants
-    owner_name,
-    owner_password,
-    slug                = null,
-
-    // WhatsApp
-    whatsapp_number     = null,
-    phone_number_id     = null,    // Meta phone_number_id for this outlet
-    access_token        = null,    // WABA access token
-    meta_access_token   = null,    // WP register form alias
-    waba_id             = null,
-
-    // Embedded Signup (from website Connect WhatsApp — no Meta Developer Console)
-    embedded_signup_code = null,
-    es_code              = null,
-    display_phone_number = null,
-
-    // Optional settings
-    timezone             = 'Asia/Kolkata',
-    dining_duration_minutes = 90,
-    payment_mode         = 'prepay',
-    manager_phone        = null,
-    meta_catalog_id      = null,
-    table_count          = 0,
-
-    // ── Chain mode (new) ──────────────────────────────────────────────────────
-    // Providing chain_name triggers chain mode:
-    //   - Creates a brands row (the parent entity)
-    //   - Creates a brand_owner employee (no restaurant_id)
-    //   - Creates the outlet as the first restaurant under the brand
-    //   - Creates a separate outlet-level owner (if outlet_owner_email provided)
-    chain_name           = null,
-    meta_business_id     = null,
-    outlet_code          = null,
-    outlet_owner_email   = null,   // Optional separate outlet owner (defaults to email if omitted)
-    outlet_owner_name    = null,
-    outlet_owner_password = null,
-  } = req.body;
-
-  if (!name?.trim())          return res.status(400).json({ error: 'name is required' });
-  if (!email?.trim())         return res.status(400).json({ error: 'email is required' });
-  if (!owner_name?.trim())    return res.status(400).json({ error: 'owner_name is required' });
-  if (!owner_password)        return res.status(400).json({ error: 'owner_password is required' });
-  if (String(owner_password).length < 8) {
-    return res.status(400).json({ error: 'owner_password must be at least 8 characters' });
-  }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email).trim())) {
-    return res.status(400).json({ error: 'email format is invalid' });
-  }
-
-  // FR-8: idempotency
-  const idempotencyKey = req.get('Idempotency-Key') || req.body.idempotency_key || null;
-  if (idempotencyKey) {
-    const { data: cached } = await supabaseAdmin
-      .from('registration_idempotency_keys')
-      .select('response, status_code')
-      .eq('idempotency_key', String(idempotencyKey).trim())
-      .maybeSingle();
-    if (cached?.response) {
-      return res.status(cached.status_code || 201).json(cached.response);
-    }
-  }
-
-  // Distinguish existing account vs new signup (FR-10 minimum)
-  const emailNorm = email.trim().toLowerCase();
-  const { data: existingEmp } = await supabaseAdmin
-    .from('employees')
-    .select('id, role')
-    .eq('email', emailNorm)
-    .maybeSingle();
-  if (existingEmp) {
-    return res.status(409).json({
-      error: 'You already have an Autom8 account — log in and add a new business from your dashboard',
-      code: 'existing_owner',
-      login_url: (process.env.FRONTEND_URL || 'https://app.autom8.works').replace(/\/$/, '') + '/login',
-    });
-  }
-
-  const lobResolved = resolveRegistrationLobType(req.body);
-  if (lobResolved.error) return res.status(400).json({ error: lobResolved.error });
-  const lob_type = lobResolved.lob_type;
-  const business_family = lobResolved.business_family || null;
-  const business_vertical = lobResolved.business_vertical || null;
-  const business_vertical_other = lobResolved.business_vertical_other || null;
-
-  // Owner personal WhatsApp (OTP recovery) vs business contact vs WABA number
-  const ownerPhone = (owner_whatsapp || phone || '').toString().replace(/\D/g, '') || null;
-  const businessPhone = (contact_phone || phone || '').toString().replace(/\D/g, '') || null;
-
-  const resolvedAccessToken = access_token || meta_access_token || null;
-  const esCode = (embedded_signup_code || es_code || '').trim() || null;
-  const embeddedSignup = esCode ? {
-    code: esCode,
-    waba_id: waba_id || null,
-    phone_number_id: phone_number_id || null,
-    display_phone_number: display_phone_number || whatsapp_number || null,
-  } : null;
-
-  // When ES will finish Graph exchange, skip inserting a placeholder integration row
-  const deferIntegration = Boolean(
-    embeddedSignup?.code && embeddedSignup?.waba_id && embeddedSignup?.phone_number_id,
-  );
-
-  const isChain = !!chain_name?.trim();
-
-  // ── CHAIN MODE ────────────────────────────────────────────────────────────
-  if (isChain) {
-    return registerChain(req, res, {
-      chain_name, email, phone: ownerPhone, owner_name, owner_password,
-      waba_id, meta_business_id,
-      first_outlet: {
-        name, phone: businessPhone, whatsapp_number,
-        phone_number_id: deferIntegration ? null : phone_number_id,
-        access_token:    deferIntegration ? null : resolvedAccessToken,
-        timezone, dining_duration_minutes, payment_mode, manager_phone,
-        table_count, outlet_code, lob_type,
-        business_family, business_vertical, business_vertical_other,
-      },
-      outlet_owner_email:    outlet_owner_email    || null,
-      outlet_owner_name:     outlet_owner_name     || null,
-      outlet_owner_password: outlet_owner_password || null,
-      embeddedSignup,
-      referral_source: req.body.referral_source || null,
-      referrer_waba: req.body.referrer_waba || null,
-      signup_source_detail: req.body.signup_source_detail || null,
-      utm_source: req.body.utm_source || null,
-      utm_campaign: req.body.utm_campaign || null,
-    });
-  }
-
-  // ── STANDALONE MODE (existing behaviour, unchanged) ───────────────────────
-  return registerStandalone(req, res, {
-    name, email, phone: ownerPhone, owner_name, owner_password, slug,
-    contact_phone: businessPhone,
-    whatsapp_number,
-    phone_number_id: deferIntegration ? null : phone_number_id,
-    access_token:    deferIntegration ? null : resolvedAccessToken,
-    waba_id:         deferIntegration ? null : waba_id,
-    timezone, dining_duration_minutes, payment_mode, manager_phone, table_count,
-    meta_catalog_id, lob_type,
-    business_family, business_vertical, business_vertical_other,
-    embeddedSignup,
-    idempotencyKey,
-    display_name: req.body.display_name || null,
-    city: req.body.city || null,
-    country_code: req.body.country_code || null,
-    currency_code: req.body.currency_code || null,
-    address_line1: req.body.address_line1 || null,
-    kitchen_workflow: req.body.kitchen_workflow || null,
-    cuisines: req.body.cuisines || req.body.categories || null,
-    referral_source: req.body.referral_source || null,
-    referrer_waba: req.body.referrer_waba || null,
-    signup_source_detail: req.body.signup_source_detail || null,
-    utm_source: req.body.utm_source || null,
-    utm_campaign: req.body.utm_campaign || null,
+router.post(['/register', '/register/upload'], async (_req, res) => {
+  return res.status(410).json({
+    error: 'Public registration has moved. Create your account at the app signup page.',
+    code: 'register_deprecated',
+    signup_url: APP_SIGNUP_URL,
   });
 });
 
@@ -421,7 +261,7 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
     }
 
     const [
-      { data: tenant },
+      tenantResult,
       integration,
       { count: menuCount },
       { data: sub },
@@ -429,7 +269,7 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
     ] = await Promise.all([
       supabaseAdmin
         .from('tenants')
-        .select('id, name, display_name, subscribed_features, whatsapp_needs_existing_pin, lob_type, whatsapp_number, waba_id')
+        .select('id, name, display_name, subscribed_features, whatsapp_needs_existing_pin, lob_type, whatsapp_number, waba_id, lifecycle_status, onboarding_step')
         .eq('id', restaurantId)
         .maybeSingle(),
       getActiveWhatsAppIntegration(restaurantId).catch((err) => {
@@ -447,6 +287,16 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
         .maybeSingle(),
       getPhonePeGateway(restaurantId).catch(() => null),
     ]);
+
+    let tenant = tenantResult.data;
+    if (tenantResult.error && /lifecycle_status|onboarding_step/i.test(tenantResult.error.message || '')) {
+      const core = await supabaseAdmin
+        .from('tenants')
+        .select('id, name, display_name, subscribed_features, whatsapp_needs_existing_pin, lob_type, whatsapp_number, waba_id')
+        .eq('id', restaurantId)
+        .maybeSingle();
+      tenant = core.data ? { ...core.data, lifecycle_status: 'active', onboarding_step: 5 } : null;
+    }
 
     if (!tenant) {
       return res.status(404).json({
@@ -606,6 +456,8 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
       restaurant_id: restaurantId,
       business_name: tenant.display_name || tenant.name,
       lob_type: lobType,
+      lifecycle_status: tenant.lifecycle_status || 'active',
+      onboarding_step: tenant.onboarding_step ?? null,
       business_family: taxonomy.business_family,
       business_vertical: taxonomy.business_vertical,
       business_vertical_other: taxonomy.business_vertical_other,
@@ -712,69 +564,21 @@ router.get('/email-check/:email', async (req, res) => {
   }
 });
 
-// FR-6: checkpoint WhatsApp linkage by email before final submit
-router.post('/draft', async (req, res) => {
-  try {
-    const email = String(req.body.email || '').trim().toLowerCase();
-    if (!email) return res.status(400).json({ error: 'email is required' });
-    const draft = { ...(req.body.draft || {}) };
-    delete draft.owner_password;
-    delete draft.password;
-    const row = {
-      email,
-      draft,
-      waba_id: req.body.waba_id || draft.waba_id || null,
-      phone_number_id: req.body.phone_number_id || draft.phone_number_id || null,
-      whatsapp_number: req.body.whatsapp_number || draft.whatsapp_number || null,
-      embedded_signup_code: req.body.embedded_signup_code || null,
-      updated_at: new Date().toISOString(),
-      expires_at: new Date(Date.now() + 7 * 86400000).toISOString(),
-    };
-    const { data: existing } = await supabaseAdmin
-      .from('registration_drafts')
-      .select('id')
-      .eq('email', email)
-      .maybeSingle();
-    let saved;
-    if (existing) {
-      const { data, error } = await supabaseAdmin
-        .from('registration_drafts').update(row).eq('id', existing.id).select().single();
-      if (error) throw error;
-      saved = data;
-    } else {
-      const { data, error } = await supabaseAdmin
-        .from('registration_drafts').insert(row).select().single();
-      if (error) throw error;
-      saved = data;
-    }
-    res.json({ success: true, draft_id: saved.id });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
+// FR-6: public registration drafts retired with email-first signup
+router.post('/draft', async (_req, res) => {
+  return res.status(410).json({
+    error: 'Registration drafts are no longer accepted. Use app signup.',
+    code: 'draft_deprecated',
+    signup_url: APP_SIGNUP_URL,
+  });
 });
 
-router.get('/draft/:email', async (req, res) => {
-  try {
-    const email = decodeURIComponent(req.params.email || '').trim().toLowerCase();
-    const { data } = await supabaseAdmin
-      .from('registration_drafts')
-      .select('id, draft, waba_id, phone_number_id, whatsapp_number, expires_at')
-      .eq('email', email)
-      .maybeSingle();
-    if (!data) return res.json({ draft: null });
-    if (data.expires_at && new Date(data.expires_at) < new Date()) {
-      return res.json({ draft: null, expired: true });
-    }
-    res.json({
-      draft_id: data.id,
-      draft: data.draft,
-      waba_id: data.waba_id,
-      phone_number_id: data.phone_number_id,
-      whatsapp_number: data.whatsapp_number,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+router.get('/draft/:email', async (_req, res) => {
+  return res.status(410).json({
+    error: 'Registration drafts are no longer available.',
+    code: 'draft_deprecated',
+    signup_url: APP_SIGNUP_URL,
+  });
 });
 
 
