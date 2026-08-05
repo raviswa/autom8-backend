@@ -124,6 +124,7 @@ app.use('/api/admin',       require('./src/routes/admin/platform'));
 app.use('/api/public',      require('./src/routes/public/churnFeedback'));
 app.use('/api/internal',    require('./src/routes/internalNotify'));
 app.use('/api/internal',    require('./src/routes/internalEcommerce'));
+app.use('/api/internal',    require('./src/routes/internalRefill'));
 // TODO(scale): if dedicated support staff need isolated access, split notify
 // into a narrower secret or move WA send into autom8-support with its own Meta app.
 

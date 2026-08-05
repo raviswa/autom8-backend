@@ -260,6 +260,11 @@ async function handleMenuUpload(req, res) {
           return Number.isFinite(n) && n >= 0 ? n : (packagedLob ? 5 : null);
         })(),
         shelf_life_days:     item.shelf_life_days != null && item.shelf_life_days !== '' ? parseInt(item.shelf_life_days, 10) || null : null,
+        days_to_empty: (() => {
+          if (item.days_to_empty == null || item.days_to_empty === '') return null;
+          const n = parseInt(item.days_to_empty, 10);
+          return Number.isFinite(n) && n > 0 && n <= 3650 ? n : null;
+        })(),
         made_on_date:        item.made_on_date ? String(item.made_on_date).trim().slice(0, 10) : null,
         ingredients:         item.ingredients ? String(item.ingredients).trim() : null,
         how_to_use:          item.how_to_use ? String(item.how_to_use).trim() : null,
@@ -1291,6 +1296,11 @@ function normalizeMenuItemBody(item, { packagedLob, existingMeta, lobType }) {
     shelf_life_days: item.shelf_life_days != null && item.shelf_life_days !== ''
       ? parseInt(item.shelf_life_days, 10) || null
       : null,
+    days_to_empty: (() => {
+      if (item.days_to_empty == null || item.days_to_empty === '') return null;
+      const n = parseInt(item.days_to_empty, 10);
+      return Number.isFinite(n) && n > 0 && n <= 3650 ? n : null;
+    })(),
     made_on_date: item.made_on_date ? String(item.made_on_date).trim().slice(0, 10) : null,
     ingredients: item.ingredients ? String(item.ingredients).trim() : null,
     how_to_use: item.how_to_use ? String(item.how_to_use).trim() : null,
@@ -1416,6 +1426,11 @@ async function writeMenuItemRow(kind, targetId, restaurantId, row) {
     const withoutHowToStore = { ...row };
     delete withoutHowToStore.how_to_store;
     ({ data, error } = await run(withoutHowToStore));
+  }
+  if (error && /days_to_empty/i.test(error.message || '')) {
+    const withoutDays = { ...row };
+    delete withoutDays.days_to_empty;
+    ({ data, error } = await run(withoutDays));
   }
   return { data, error };
 }

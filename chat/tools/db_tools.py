@@ -1082,6 +1082,12 @@ async def update_booking_payment_status(booking_id: str, payment_status: str) ->
             logger.warning(
                 f"[ecommerce] schedule push failed for {booking_id}: {push_err}"
             )
+        try:
+            asyncio.create_task(_trigger_refill_cycles(str(booking_id)))
+        except Exception as refill_err:
+            logger.warning(
+                f"[refill] schedule cycles failed for {booking_id}: {refill_err}"
+            )
 
     return out
 
@@ -1128,6 +1134,48 @@ async def _trigger_ecommerce_order_push(booking_id: str) -> None:
     except Exception as err:
         logger.warning(f"[ecommerce] push error for {booking_id} (non-fatal): {err}")
 
+
+async def _trigger_refill_cycles(booking_id: str) -> None:
+    """Best-effort POST to Node internal refill cycle create. Never raises."""
+    try:
+        base = (
+            _os.getenv("AUTOM8_BACKEND_URL")
+            or getattr(settings, "autom8_backend_url", None)
+            or "https://api.autom8.works"
+        ).rstrip("/")
+        secret = (_os.getenv("AUTOM8_KDS_SECRET") or "").strip()
+        if not secret:
+            env = (
+                _os.getenv("NODE_ENV")
+                or _os.getenv("RAILWAY_ENVIRONMENT")
+                or ""
+            ).lower()
+            if env != "production":
+                secret = "munafe_kds_sync_2026"
+        if not secret:
+            logger.warning("[refill] AUTOM8_KDS_SECRET missing — skip cycles")
+            return
+
+        url = f"{base}/api/internal/refill/cycles"
+        async with _httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                url,
+                json={"booking_id": booking_id, "secret": secret},
+                headers={
+                    "Authorization": f"Bearer {secret}",
+                    "x-internal-secret": secret,
+                    "Content-Type": "application/json",
+                },
+            )
+        if resp.status_code >= 400:
+            logger.warning(
+                f"[refill] cycles HTTP {resp.status_code} for {booking_id}: "
+                f"{resp.text[:200]}"
+            )
+        else:
+            logger.info(f"[refill] cycles ok for {booking_id}: {resp.text[:200]}")
+    except Exception as err:
+        logger.warning(f"[refill] cycles error for {booking_id} (non-fatal): {err}")
 
 async def save_booking_payment_meta(
     booking_id: str,

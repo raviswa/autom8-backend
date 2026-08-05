@@ -1,7 +1,7 @@
 'use strict';
 
 const { supabaseAdmin } = require('../../config/supabase');
-const { sendWhatsAppMessage } = require('../../helpers/whatsapp');
+const { sendWhatsAppMessage, sendWebCartMenuLink } = require('../../helpers/whatsapp');
 const { forwardGeocode } = require('../../services/geocoding');
 const { findNearestOutlet, haversineKm } = require('../../services/outletMatching');
 const { updateSessionContext, getSession } = require('../session/sessionStore');
@@ -143,9 +143,101 @@ async function confirmAddress(session, addressText, candidateCoords = null, opts
   return true;
 }
 
+async function handleRefillReply(replyId, session) {
+  const restaurantId = session.restaurant_id;
+  const phone = session.phone;
+
+  if (replyId.startsWith('refill_reorder:')) {
+    const cycleId = replyId.slice('refill_reorder:'.length).trim();
+    if (!cycleId) return true;
+
+    const { data: cycle } = await supabaseAdmin
+      .from('refill_cycles')
+      .select('id, item_name, status')
+      .eq('id', cycleId)
+      .eq('restaurant_id', restaurantId)
+      .maybeSingle();
+
+    if (!cycle) {
+      await sendWhatsAppMessage(
+        phone,
+        'That refill reminder is no longer available. Reply *menu* to browse again.',
+        restaurantId,
+      );
+      return true;
+    }
+
+    await supabaseAdmin
+      .from('refill_cycles')
+      .update({ status: 'reordered', updated_at: new Date().toISOString() })
+      .eq('id', cycleId)
+      .eq('restaurant_id', restaurantId);
+
+    const itemLabel = cycle.item_name ? String(cycle.item_name) : 'your item';
+    await sendWhatsAppMessage(
+      phone,
+      `Great — reorder *${itemLabel}* from the menu below.`,
+      restaurantId,
+    );
+    await sendWebCartMenuLink(phone, restaurantId);
+    return true;
+  }
+
+  if (replyId.startsWith('refill_snooze:')) {
+    const rest = replyId.slice('refill_snooze:'.length);
+    const parts = rest.split(':');
+    const cycleId = String(parts[0] || '').trim();
+    const days = Number.parseInt(String(parts[1] || ''), 10);
+    if (!cycleId || ![3, 7].includes(days)) {
+      await sendWhatsAppMessage(
+        phone,
+        'Sorry, that snooze option is invalid. We’ll remind you again when due.',
+        restaurantId,
+      );
+      return true;
+    }
+
+    const snoozeUntil = new Date(Date.now() + days * 86400000).toISOString();
+    const { data: cycle, error } = await supabaseAdmin
+      .from('refill_cycles')
+      .update({
+        status: 'snoozed',
+        snooze_until: snoozeUntil,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', cycleId)
+      .eq('restaurant_id', restaurantId)
+      .select('id, item_name')
+      .maybeSingle();
+
+    if (error || !cycle) {
+      await sendWhatsAppMessage(
+        phone,
+        'Could not snooze that reminder. Please try again later.',
+        restaurantId,
+      );
+      return true;
+    }
+
+    await sendWhatsAppMessage(
+      phone,
+      `Got it — we’ll remind you about *${cycle.item_name || 'your item'}* in ${days} days.`,
+      restaurantId,
+    );
+    return true;
+  }
+
+  // Unknown refill_* id — consume so chat doesn’t treat it as free text
+  return true;
+}
+
 async function handleInteractiveReply(message, session) {
   const replyId = extractReplyId(message);
   if (!replyId) return false;
+
+  if (replyId.startsWith('refill_')) {
+    return handleRefillReply(replyId, session);
+  }
   if (!replyId.startsWith('addr_')) return false;
 
   return handleAddressSelection(replyId, session);
@@ -155,6 +247,7 @@ module.exports = {
   handleInteractiveReply,
   handleCustomAddressText,
   handleAddressSelection,
+  handleRefillReply,
   confirmAddress,
   extractReplyId,
 };

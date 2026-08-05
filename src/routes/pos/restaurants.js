@@ -232,6 +232,7 @@ router.put(
   'gstin','fssai_license','sac_code','receipt_tagline',
   'packaging_weight_grams',
   'daily_settlement_enabled','weekly_promo_drafts_enabled','instagram_handle','instagram_user_id',
+  'refill_reminders_enabled','refill_lead_time_days','refill_safety_buffer_days',
   'subscribed_features', 'enabled_services',
   'lob_type', 'allow_manager_menu_upload',
   'business_family', 'business_vertical', 'business_vertical_other',
@@ -393,6 +394,24 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
     if (updates.order_ops_mode !== undefined) {
       const mode = String(updates.order_ops_mode || '').toLowerCase();
       updates.order_ops_mode = mode === 'split' ? 'split' : 'combined';
+    }
+
+    if (updates.refill_reminders_enabled !== undefined) {
+      updates.refill_reminders_enabled = !!updates.refill_reminders_enabled;
+    }
+    if (updates.refill_lead_time_days !== undefined) {
+      const n = parseInt(updates.refill_lead_time_days, 10);
+      if (!Number.isFinite(n) || n < 0 || n > 90) {
+        return res.status(400).json({ error: 'refill_lead_time_days must be 0–90' });
+      }
+      updates.refill_lead_time_days = n;
+    }
+    if (updates.refill_safety_buffer_days !== undefined) {
+      const n = parseInt(updates.refill_safety_buffer_days, 10);
+      if (!Number.isFinite(n) || n < 0 || n > 90) {
+        return res.status(400).json({ error: 'refill_safety_buffer_days must be 0–90' });
+      }
+      updates.refill_safety_buffer_days = n;
     }
 
     // shiprocket_api_key stores the Shiprocket API User password (misnamed historically).

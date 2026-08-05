@@ -173,6 +173,7 @@ const LOB_SCHEMAS = {
       'item_type', 'variant_group_id', 'pack_size_label', 'weight_grams', 'current_stock',
       'availability_status', 'launch_at', 'deposit_amount',
       'shelf_life_days', 'made_on_date', 'ingredients', 'allergens', 'how_to_use', 'how_to_store',
+      'days_to_empty',
       'bundle_components',
       'image_url_2', 'image_url_3', 'image_url_4', 'image_url_5',
       'discount_percent', 'discount_days',
@@ -183,18 +184,19 @@ const LOB_SCHEMAS = {
       { wch: 10 }, { wch: 16 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
       { wch: 14 }, { wch: 14 }, { wch: 12 },
       { wch: 12 }, { wch: 12 }, { wch: 28 }, { wch: 22 }, { wch: 28 }, { wch: 28 },
+      { wch: 12 },
       { wch: 28 },
       { wch: 40 }, { wch: 40 }, { wch: 40 }, { wch: 40 },
       { wch: 14 }, { wch: 12 },
       { wch: 14 },
     ],
     templateExamples: [
-      ['MP-250', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 150, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '250g', 250, 50, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', 'Mix with rice or curd rice', 'Store in a cool, dry place. Refrigerate after opening.', '', '', '', '', '', 20, 7, 5],
-      ['MP-500', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 280, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '500g', 500, 40, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', 'Mix with rice or curd rice', 'Store in a cool, dry place. Refrigerate after opening.', '', '', '', '', '', '', '', 5],
-      ['MP-1KG', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 520, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '1kg', 1000, 20, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', 'Mix with rice or curd rice', 'Store in a cool, dry place. Refrigerate after opening.', '', '', '', '', '', '', '', 5],
-      ['MP-100', 'Mango Pickle', '100g jar for samplers', 70, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '100g', 100, 100, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', 'Store in a cool, dry place.', '', '', '', '', '', '', '', 10],
-      ['NEW-GINGER', 'Ginger Pickle (launch)', 'Batch cooking next week', 180, 'Pickles', '', 'TRUE', 'PRODUCT', '', '250g', 250, '', 'coming_soon', '2026-08-01', 50, 90, '', 'Ginger, chilli, mustard oil', 'Mustard', '', 'Keep away from direct sunlight.', '', '', '', '', '', '', '', 5],
-      ['HAMPER-PICKLE-3', 'Pickle Sampler (3×100g)', 'Three favourite pickles in travel jars', 249, 'Hampers', '', 'TRUE', 'BUNDLE', '', '3×100g', 300, 15, '', '', '', 90, '2026-07-15', '', '', '', 'Store jars upright in a cool, dry place.', 'MP-100:3', '', '', '', '', '', '', 5],
+      ['MP-250', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 150, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '250g', 250, 50, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', 'Mix with rice or curd rice', 'Store in a cool, dry place. Refrigerate after opening.', 45, '', '', '', '', '', 20, 7, 5],
+      ['MP-500', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 280, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '500g', 500, 40, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', 'Mix with rice or curd rice', 'Store in a cool, dry place. Refrigerate after opening.', 60, '', '', '', '', '', '', '', 5],
+      ['MP-1KG', 'Mango Pickle', 'Traditional Andhra-style mango pickle', 520, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '1kg', 1000, 20, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', 'Mix with rice or curd rice', 'Store in a cool, dry place. Refrigerate after opening.', 90, '', '', '', '', '', '', '', 5],
+      ['MP-100', 'Mango Pickle', '100g jar for samplers', 70, 'Pickles', '', 'TRUE', 'PRODUCT', 'MANGO-PICKLE', '100g', 100, 100, '', '', '', 90, '2026-07-15', 'Mango, chilli, mustard oil, salt', 'Mustard', '', 'Store in a cool, dry place.', 30, '', '', '', '', '', '', '', 10],
+      ['NEW-GINGER', 'Ginger Pickle (launch)', 'Batch cooking next week', 180, 'Pickles', '', 'TRUE', 'PRODUCT', '', '250g', 250, '', 'coming_soon', '2026-08-01', 50, 90, '', 'Ginger, chilli, mustard oil', 'Mustard', '', 'Keep away from direct sunlight.', 45, '', '', '', '', '', '', '', 5],
+      ['HAMPER-PICKLE-3', 'Pickle Sampler (3×100g)', 'Three favourite pickles in travel jars', 249, 'Hampers', '', 'TRUE', 'BUNDLE', '', '3×100g', 300, 15, '', '', '', 90, '2026-07-15', '', '', '', 'Store jars upright in a cool, dry place.', '', 'MP-100:3', '', '', '', '', '', '', 5],
     ],
     columnHelp: [
       ['Column guide - PACKAGED FOOD / Home Baker (NOT restaurant)'],
@@ -214,6 +216,7 @@ const LOB_SCHEMAS = {
       ['launch_at - ISO date for coming_soon (e.g. 2026-08-01)'],
       ['deposit_amount - optional preorder deposit (INR)'],
       ['shelf_life_days / made_on_date (YYYY-MM-DD) / ingredients / allergens / how_to_use / how_to_store - customer trust fields'],
+      ['days_to_empty - optional days until a typical unit runs out (enables WhatsApp refill reminders when enabled in Settings)'],
       ['bundle_components - for BUNDLE only: retailer_id:qty, e.g. MP-100:3,GARLIC-100:3'],
       ['image_url_2 … image_url_5 - extra gallery photos for storefront / Instagram carousel'],
       ['discount_percent + discount_days - optional time-bound sale (e.g. 20 and 7 = 20% off for 7 days from upload)'],
@@ -267,6 +270,13 @@ const LOB_SCHEMAS = {
         allergens: strOrNull(row['allergens'] ?? row['Allergens']),
         how_to_use: strOrNull(row['how_to_use'] ?? row['How To Use'] ?? row['how to use']),
         how_to_store: strOrNull(row['how_to_store'] ?? row['How To Store'] ?? row['how to store']),
+        days_to_empty: (() => {
+          const raw = row['days_to_empty'] ?? row['Days To Empty'] ?? row['days to empty'];
+          if (raw == null || raw === '') return null;
+          const n = parseInt(String(raw).replace(/\D/g, ''), 10);
+          if (!Number.isFinite(n) || n <= 0 || n > 3650) return null;
+          return n;
+        })(),
         bundle_components: components,
         meta: Object.keys(meta).length ? meta : undefined,
         image_url_2: strOrNull(row['image_url_2'] ?? row['Image URL 2']),
@@ -313,17 +323,17 @@ const LOB_SCHEMAS = {
     templateHeaders: [
       ...BASE_TEMPLATE_HEADERS,
       'condition', 'original_mrp', 'warranty_days', 'colour',
-      'ingredients', 'how_to_use', 'how_to_store', 'shelf_life_days',
+      'ingredients', 'how_to_use', 'how_to_store', 'shelf_life_days', 'days_to_empty',
       'image_url_2', 'image_url_3', 'image_url_4', 'image_url_5',
     ],
     templateColWidths: [
       { wch: 10 }, { wch: 26 }, { wch: 40 }, { wch: 8 }, { wch: 16 }, { wch: 48 }, { wch: 12 },
       { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 12 },
-      { wch: 28 }, { wch: 28 }, { wch: 28 }, { wch: 12 },
+      { wch: 28 }, { wch: 28 }, { wch: 28 }, { wch: 12 }, { wch: 12 },
       { wch: 48 }, { wch: 48 }, { wch: 48 }, { wch: 48 },
     ],
     templateExamples: [
-      ['RT001', 'iPhone 12 (Refurbished, 64GB)', 'Grade A refurbished', 24999, 'Phones', 'https://images.unsplash.com/photo-1592286927505-1def25115558?w=800', 'TRUE', 'Refurbished', 32999, 180, 'Black', '', '', '', '', '', '', '', ''],
+      ['RT001', 'iPhone 12 (Refurbished, 64GB)', 'Grade A refurbished', 24999, 'Phones', 'https://images.unsplash.com/photo-1592286927505-1def25115558?w=800', 'TRUE', 'Refurbished', 32999, 180, 'Black', '', '', '', '', '', '', '', '', ''],
     ],
     columnHelp: [
       ['Column guide - Retail / Electronics'],
@@ -332,6 +342,7 @@ const LOB_SCHEMAS = {
       ['condition - New / Refurbished / Used (shown in webcart product detail)'],
       ['original_mrp - optional; webcart shows a discount badge when higher than price'],
       ['ingredients / how_to_use / how_to_store / shelf_life_days - optional trust fields for ingredient-led retail (no FSSAI gate)'],
+      ['days_to_empty - optional days until a typical unit runs out (WhatsApp refill reminders when enabled in Settings)'],
       ['image_link - primary image; image_url_2 … image_url_5 for extra gallery photos'],
     ],
     previewColumns: [
@@ -358,6 +369,13 @@ const LOB_SCHEMAS = {
         shelf_life_days: row['shelf_life_days'] != null && row['shelf_life_days'] !== ''
           ? parseInt(String(row['shelf_life_days']).replace(/\D/g, ''), 10) || null
           : null,
+        days_to_empty: (() => {
+          const raw = row['days_to_empty'] ?? row['Days To Empty'] ?? row['days to empty'];
+          if (raw == null || raw === '') return null;
+          const n = parseInt(String(raw).replace(/\D/g, ''), 10);
+          if (!Number.isFinite(n) || n <= 0 || n > 3650) return null;
+          return n;
+        })(),
         image_url_2: strOrNull(row['image_url_2'] ?? row['Image URL 2']),
         image_url_3: strOrNull(row['image_url_3'] ?? row['Image URL 3']),
         image_url_4: strOrNull(row['image_url_4'] ?? row['Image URL 4']),

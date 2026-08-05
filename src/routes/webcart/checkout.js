@@ -154,6 +154,14 @@ router.get('/api/webcart/payment-status', async (req, res) => {
       } catch (e) {
         console.warn('[webcart/payment-status] ecommerce require:', e.message);
       }
+      try {
+        const { createRefillCyclesForBooking } = require('../../helpers/refillCycles');
+        createRefillCyclesForBooking(bookingId).catch((e) =>
+          console.warn('[webcart/payment-status] refill cycles:', e.message),
+        );
+      } catch (e) {
+        console.warn('[webcart/payment-status] refill require:', e.message);
+      }
     }
 
     return res.json({
@@ -784,6 +792,14 @@ router.post('/api/webcart/submit', async (req, res) => {
           );
         } catch (e) {
           console.warn('[webcart/submit] ecommerce require:', e.message);
+        }
+        try {
+          const { createRefillCyclesForBooking } = require('../../helpers/refillCycles');
+          createRefillCyclesForBooking(confirmResult.booking_id).catch((e) =>
+            console.warn('[webcart/submit] refill cycles:', e.message),
+          );
+        } catch (e) {
+          console.warn('[webcart/submit] refill require:', e.message);
         }
       }
     }

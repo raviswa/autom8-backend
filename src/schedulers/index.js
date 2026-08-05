@@ -9,7 +9,9 @@
 //   startFeedbackScheduler()          — 2-hr post-visit feedback (every 10 min)
 //   startAccountingSyncScheduler()    — nightly Zoho/Tally push at 23:30 IST
 //   startMarketingScheduler()         — scheduled campaigns + automations (every 5 min)
-//   startProductAffinityScheduler()   — refresh co-purchase cache for cart nudges (every 6h)
+//   startDailySettlementScheduler()   — daily settlement digests
+//   startWeeklyPromoScheduler()       — Monday promo drafts
+//   startRefillReminderScheduler()    — consumable refill WhatsApp nudges (45 min)
 // ============================================================================
 
 'use strict';
@@ -573,6 +575,8 @@ function startAllSchedulers() {
   startProductAffinityScheduler();
   startDailySettlementScheduler();
   startWeeklyPromoScheduler();
+  const { startRefillReminderScheduler } = require('../helpers/refillReminders');
+  startRefillReminderScheduler();
 }
 
 module.exports = { startAllSchedulers };

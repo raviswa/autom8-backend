@@ -513,6 +513,54 @@ async function createMenuLinkToken(restaurantId, phone, sessionToken, walkInToke
   if (error) throw error;
 }
 
+/**
+ * Refill reminder — 3 reply buttons (Meta max). Session-window only.
+ * Titles must be ≤20 chars.
+ */
+async function sendRefillReminderButtons({
+  toNumber,
+  restaurantId,
+  cycleId,
+  itemName,
+  daysToEmpty,
+}) {
+  const id = String(cycleId || '').trim();
+  if (!id || !toNumber) return false;
+
+  const name = String(itemName || 'your item').trim() || 'your item';
+  const days = Number(daysToEmpty);
+  const daysLabel = Number.isFinite(days) && days > 0 ? String(days) : 'a few';
+
+  return sendWhatsAppInteractive(
+    toNumber,
+    {
+      type: 'button',
+      body: {
+        text:
+          `Your ${name} usually lasts about ${daysLabel} days — `
+          + 'it might be running low soon.',
+      },
+      action: {
+        buttons: [
+          {
+            type: 'reply',
+            reply: { id: `refill_reorder:${id}`, title: 'Reorder now' },
+          },
+          {
+            type: 'reply',
+            reply: { id: `refill_snooze:${id}:3`, title: 'Remind in 3 days' },
+          },
+          {
+            type: 'reply',
+            reply: { id: `refill_snooze:${id}:7`, title: 'Remind in 7 days' },
+          },
+        ],
+      },
+    },
+    restaurantId,
+  );
+}
+
 async function sendWebCartMenuLink(toNumber, restaurantId, walkInTokenId = null) {
   try {
     const label = await getRestaurantLabel(restaurantId);
@@ -802,6 +850,8 @@ module.exports = {
   sendWhatsAppProductList,
   sendSpecialDishesNote,
   sendWhatsAppCatalogWithSpecials,
+  sendWebCartMenuLink,
+  sendRefillReminderButtons,
   sendPlatformWhatsAppTemplate,
   sendPlatformWhatsAppMessage,
   notifyOrderReady,

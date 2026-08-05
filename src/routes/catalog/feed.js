@@ -74,7 +74,8 @@ router.get('/feed/template', authenticateToken, getRestaurantId, async (req, res
       } catch (_) {
         LOB_SCHEMAS = null;
       }
-      const schema = LOB_SCHEMAS?.food_products || LOB_SCHEMAS?.[lobType];
+      const schemaKey = lobType === 'jewellery' ? 'retail' : lobType;
+      const schema = LOB_SCHEMAS?.[schemaKey] || LOB_SCHEMAS?.food_products;
       const headers = schema?.templateHeaders || [];
 
       const { data: rawItems, error } = await supabaseAdmin
@@ -83,17 +84,42 @@ router.get('/feed/template', authenticateToken, getRestaurantId, async (req, res
           retailer_id, name, description, price, image_url, is_stocked, is_available, category,
           item_type, variant_group_id, pack_size_label, size_label, weight_grams, current_stock,
           availability_status, launch_at, deposit_amount, shelf_life_days, made_on_date,
-          ingredients, allergens, meta, bundle_components, image_url_2, image_url_3, image_url_4,
-          image_url_5, discount_percent, discount_ends_at, low_stock_alert_units
+          ingredients, allergens, how_to_use, how_to_store, meta, bundle_components,
+          image_url_2, image_url_3, image_url_4, image_url_5, discount_percent, discount_ends_at,
+          low_stock_alert_units, condition, original_mrp, warranty_days, colour, days_to_empty
         `)
         .eq('restaurant_id', restaurantId)
         .not('retailer_id', 'is', null)
         .is('archived_at', null)
         .order('category', { ascending: true })
         .order('name', { ascending: true });
-      if (error) throw error;
+      let catalogRows = rawItems;
+      if (error) {
+        // Columns may be missing until migrations 20260803/04 are applied.
+        if (/how_to_use|how_to_store|days_to_empty/i.test(error.message || '')) {
+          const retry = await supabaseAdmin
+            .from('menu_items')
+            .select(`
+              retailer_id, name, description, price, image_url, is_stocked, is_available, category,
+              item_type, variant_group_id, pack_size_label, size_label, weight_grams, current_stock,
+              availability_status, launch_at, deposit_amount, shelf_life_days, made_on_date,
+              ingredients, allergens, meta, bundle_components, image_url_2, image_url_3, image_url_4,
+              image_url_5, discount_percent, discount_ends_at, low_stock_alert_units,
+              condition, original_mrp, warranty_days, colour
+            `)
+            .eq('restaurant_id', restaurantId)
+            .not('retailer_id', 'is', null)
+            .is('archived_at', null)
+            .order('category', { ascending: true })
+            .order('name', { ascending: true });
+          if (retry.error) throw retry.error;
+          catalogRows = retry.data;
+        } else {
+          throw error;
+        }
+      }
 
-      if (!rawItems?.length) {
+      if (!catalogRows?.length) {
         const examples = (schema?.templateExamples || []).map((row) => {
           const obj = {};
           headers.forEach((h, i) => { obj[h] = row[i] != null ? row[i] : ''; });
@@ -111,7 +137,7 @@ router.get('/feed/template', authenticateToken, getRestaurantId, async (req, res
 
       const seen = new Set();
       const items = [];
-      for (const item of rawItems) {
+      for (const item of catalogRows) {
         const key = String(item.retailer_id || '').toUpperCase();
         if (!key || seen.has(key)) continue;
         seen.add(key);
@@ -143,6 +169,13 @@ router.get('/feed/template', authenticateToken, getRestaurantId, async (req, res
           made_on_date: item.made_on_date || '',
           ingredients: item.ingredients || '',
           allergens: item.allergens || '',
+          how_to_use: item.how_to_use || '',
+          how_to_store: item.how_to_store || '',
+          days_to_empty: item.days_to_empty ?? '',
+          condition: item.condition || '',
+          original_mrp: item.original_mrp ?? '',
+          warranty_days: item.warranty_days ?? '',
+          colour: item.colour || '',
           bundle_components: comps,
           image_url_2: item.image_url_2 || '',
           image_url_3: item.image_url_3 || '',
