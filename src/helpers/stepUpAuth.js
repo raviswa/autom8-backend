@@ -21,6 +21,7 @@ const OTP_LENGTH = 6;
 const STEPUP_PURPOSES = new Set([
   'delete_account',
   'whatsapp_bind',
+  'instagram_bind',
   'change_owner_phone_old',
   'change_owner_phone_new',
   'change_owner_email',

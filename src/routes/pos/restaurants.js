@@ -232,6 +232,7 @@ router.put(
   'gstin','fssai_license','sac_code','receipt_tagline',
   'packaging_weight_grams',
   'daily_settlement_enabled','weekly_promo_drafts_enabled','instagram_handle','instagram_user_id',
+  'instagram_feature_on_autom8',
   'refill_reminders_enabled','refill_lead_time_days','refill_safety_buffer_days',
   'subscribed_features', 'enabled_services',
   'lob_type', 'allow_manager_menu_upload',
@@ -555,16 +556,57 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
   }
 });
 
-// ── WhatsApp integration credentials ──────────────────────────────────────────
+// ── Meta integration credentials (WhatsApp / Instagram) ───────────────────────
+function sanitizeMetaIntegration(row, channel) {
+  if (!row) {
+    return {
+      channel,
+      provider: 'meta',
+      is_active: false,
+      phone_number_id: channel === 'whatsapp' ? '' : undefined,
+      access_token_configured: false,
+      webhook_secret_configured: false,
+      webhook_verify_token_configured: false,
+      token_expires_at: null,
+      config: {},
+    };
+  }
+  const cfg = (row.config && typeof row.config === 'object') ? { ...row.config } : {};
+  const safeConfig = {};
+  if (cfg.token_expires_at) safeConfig.token_expires_at = String(cfg.token_expires_at);
+  if (cfg.token_type) safeConfig.token_type = String(cfg.token_type);
+  return {
+    id: row.id,
+    channel: row.channel || channel,
+    provider: row.provider || 'meta',
+    is_active: !!row.is_active,
+    phone_number_id: channel === 'whatsapp' ? (row.phone_number_id || '') : undefined,
+    access_token_configured: !!(row.access_token && String(row.access_token).trim()),
+    webhook_secret_configured: !!(row.webhook_secret && String(row.webhook_secret).trim()),
+    webhook_verify_token_configured: !!(row.webhook_verify_token && String(row.webhook_verify_token).trim()),
+    token_expires_at: cfg.token_expires_at || null,
+    config: safeConfig,
+  };
+}
+
 router.get('/restaurants/integration', authenticateToken, getRestaurantId, async (req, res) => {
   try {
+    const channel = String(req.query.channel || 'whatsapp').trim().toLowerCase() === 'instagram'
+      ? 'instagram'
+      : 'whatsapp';
     const { data } = await supabaseAdmin
       .from('tenant_integrations')
       .select('id,provider,channel,phone_number_id,access_token,webhook_secret,webhook_verify_token,config,is_active')
       .eq('restaurant_id', req.restaurant_id)
-      .eq('provider', 'meta').eq('channel', 'whatsapp')
+      .eq('provider', 'meta').eq('channel', channel)
       .maybeSingle();
-    res.json({ success: true, integration: data ?? null });
+
+    // WhatsApp callers historically expected the raw row (including token). Keep that
+    // shape for channel=whatsapp; Instagram never echoes the secret.
+    if (channel === 'whatsapp') {
+      return res.json({ success: true, integration: data ?? null });
+    }
+    res.json({ success: true, integration: sanitizeMetaIntegration(data, 'instagram') });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -572,25 +614,50 @@ router.get('/restaurants/integration', authenticateToken, getRestaurantId, async
 
 router.put('/restaurants/integration', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
   try {
+    const channel = String(req.body?.channel || 'whatsapp').trim().toLowerCase() === 'instagram'
+      ? 'instagram'
+      : 'whatsapp';
+    const stepPurpose = channel === 'instagram' ? 'instagram_bind' : 'whatsapp_bind';
     try {
-      await requireStepUpInHandler(req, 'whatsapp_bind');
+      await requireStepUpInHandler(req, stepPurpose);
     } catch (stepErr) {
       return res.status(stepErr.status || 403).json({
-        error: stepErr.message || 'WhatsApp verification required before updating integration credentials.',
+        error: stepErr.message || 'Verification required before updating integration credentials.',
       });
     }
 
-    const { provider = 'meta', channel = 'whatsapp', phone_number_id, access_token, webhook_secret, webhook_verify_token } = req.body;
+    const { provider = 'meta', phone_number_id, access_token, webhook_secret, webhook_verify_token, is_active, config } = req.body || {};
     const updates = { updated_at: new Date().toISOString() };
-    if (phone_number_id     !== undefined) updates.phone_number_id     = phone_number_id;
-    if (access_token        !== undefined) updates.access_token        = access_token;
-    if (webhook_secret      !== undefined) updates.webhook_secret      = webhook_secret;
-    if (webhook_verify_token!== undefined) updates.webhook_verify_token= webhook_verify_token;
+    if (phone_number_id !== undefined && channel === 'whatsapp') updates.phone_number_id = phone_number_id;
+    if (webhook_secret !== undefined) updates.webhook_secret = webhook_secret;
+    if (webhook_verify_token !== undefined) updates.webhook_verify_token = webhook_verify_token;
+    if (is_active !== undefined) updates.is_active = !!is_active;
 
     const { data: existing } = await supabaseAdmin
       .from('tenant_integrations')
-      .select('id').eq('restaurant_id', req.restaurant_id)
-      .eq('provider', provider).eq('channel', channel).maybeSingle();
+      .select('id, access_token, config')
+      .eq('restaurant_id', req.restaurant_id)
+      .eq('provider', provider)
+      .eq('channel', channel)
+      .maybeSingle();
+
+    // Blank token = keep existing (ecommerce pattern). Explicit null/empty only clears when sent as clear:true.
+    if (access_token !== undefined) {
+      const tok = String(access_token || '').trim();
+      if (tok) {
+        updates.access_token = tok;
+      } else if (!existing && req.body?.clear_token === true) {
+        updates.access_token = null;
+      } else if (req.body?.clear_token === true) {
+        updates.access_token = null;
+      }
+      // else omit — leave existing token unchanged
+    }
+
+    if (config !== undefined && typeof config === 'object' && config !== null) {
+      const prev = (existing?.config && typeof existing.config === 'object') ? existing.config : {};
+      updates.config = { ...prev, ...config };
+    }
 
     let result;
     if (existing) {
@@ -600,14 +667,27 @@ router.put('/restaurants/integration', authenticateToken, getRestaurantId, requi
       if (error) throw error;
       result = data;
     } else {
+      const insertRow = {
+        restaurant_id: req.restaurant_id,
+        provider,
+        channel,
+        is_active: true,
+        ...updates,
+      };
+      if (!insertRow.access_token && channel === 'instagram') {
+        return res.status(400).json({ error: 'access_token is required when creating Instagram integration' });
+      }
       const { data, error } = await supabaseAdmin
         .from('tenant_integrations')
-        .insert({ restaurant_id: req.restaurant_id, provider, channel, is_active: true, ...updates })
+        .insert(insertRow)
         .select().single();
       if (error) throw error;
       result = data;
     }
     invalidateRestaurantConfigCache(req.restaurant_id);
+    if (channel === 'instagram') {
+      return res.json({ success: true, integration: sanitizeMetaIntegration(result, 'instagram') });
+    }
     res.json({ success: true, integration: result });
   } catch (err) {
     res.status(400).json({ error: err.message });

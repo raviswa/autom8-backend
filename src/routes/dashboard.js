@@ -15,6 +15,7 @@ const { backfillPaidSales } = require('../helpers/backfillPaidSales');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { getKdsSecret } = require('../config/internalSecret');
 const { autoLinkDemoWhatsAppIfNeeded } = require('../helpers/linkExistingWaba');
+const { selectDroppingMissingColumns } = require('./webcart/shared');
 
 const CHAT_SERVICE_URL = (process.env.CHAT_SERVICE_URL || 'http://localhost:8001').replace(/\/$/, '');
 
@@ -53,6 +54,7 @@ const RESTAURANT_SELECT_FULL = [
   'gstin', 'fssai_license', 'sac_code', 'receipt_tagline',
   'packaging_weight_grams',
   'daily_settlement_enabled', 'weekly_promo_drafts_enabled', 'instagram_handle', 'instagram_user_id',
+  'instagram_feature_on_autom8',
   'refill_reminders_enabled', 'refill_lead_time_days', 'refill_safety_buffer_days',
   'legal_name', 'address_line1', 'address_line2', 'city', 'state', 'postal_code', 'country',
   'contact_phone', 'contact_email', 'website_url', 'cuisine_type',
@@ -71,46 +73,23 @@ const RESTAURANT_SELECT_BASE = [
 ].join(', ');
 
 async function fetchRestaurantRow(restaurantId) {
-  const { data, error } = await supabaseAdmin
-    .from('tenants')
-    .select(RESTAURANT_SELECT_FULL)
-    .eq('id', restaurantId)
-    .maybeSingle();
+  // Drop only missing columns and retry — never fall back to a thin select that
+  // omits postal_code / address (see tenant-schema-select-safety rule).
+  const { data, error } = await selectDroppingMissingColumns(
+    'dashboard.tenants',
+    RESTAURANT_SELECT_FULL,
+    (select) => supabaseAdmin
+      .from('tenants')
+      .select(select)
+      .eq('id', restaurantId)
+      .maybeSingle(),
+  );
 
-  if (!error) {
-    return { data: sanitizeRestaurantForClient(data), error: null };
+  if (error) {
+    console.error('[dashboard] tenant select failed:', error.message);
+    return { data: null, error };
   }
-
-  console.warn('[dashboard] full tenant select failed — falling back to base columns:', error.message);
-  const fallback = await supabaseAdmin
-    .from('tenants')
-    .select(RESTAURANT_SELECT_BASE)
-    .eq('id', restaurantId)
-    .maybeSingle();
-  if (fallback.data) {
-    fallback.data.kitchen_workflow = 'Both_KOT_and_KDS';
-    fallback.data.kot_printer_enabled = false;
-    fallback.data.meta_catalog_id = null;
-    fallback.data.parcel_charge_per_item = 0;
-    fallback.data.takeaway_ready_range = null;
-    fallback.data.delivery_ready_range = null;
-    fallback.data.kitchen_busy = false;
-    fallback.data.scheduled_delivery_enabled = false;
-    fallback.data.scheduled_takeaway_enabled = false;
-    fallback.data.max_delivery_radius_km = 0;
-    fallback.data.delivery_charge_default = 30;
-    fallback.data.delivery_charge_tiers = [];
-    fallback.data.delivery_distance_tiers_enabled = false;
-    fallback.data.min_delivery_order_amount = 0;
-    fallback.data.min_takeaway_order_amount = 0;
-    fallback.data.lob_type = fallback.data.lob_type || 'restaurant';
-    fallback.data.business_family = fallback.data.business_family || null;
-    fallback.data.business_vertical = fallback.data.business_vertical || null;
-    fallback.data.business_vertical_other = fallback.data.business_vertical_other || null;
-    fallback.data.allow_manager_menu_upload = fallback.data.allow_manager_menu_upload ?? false;
-    fallback.data.order_ops_mode = fallback.data.order_ops_mode || 'combined';
-  }
-  return { data: sanitizeRestaurantForClient(fallback.data), error: fallback.error };
+  return { data: sanitizeRestaurantForClient(data), error: null };
 }
 
 /** Never send Shiprocket password (stored in shiprocket_api_key) to the browser. */
