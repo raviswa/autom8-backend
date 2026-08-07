@@ -230,6 +230,14 @@ router.get('/api/webcart/session', async (req, res) => {
       pricing_config: {
         parcel_charge_per_item: restaurant.parcel_charge_per_item || 0,
         gst_rate: restaurant.gst_rate || 5,
+        gst_inclusive: !!restaurant.gst_inclusive,
+        platform_charge_enabled: !!restaurant.platform_charge_enabled,
+        platform_charge_conversation: Number(restaurant.platform_charge_conversation) > 0
+          ? Number(restaurant.platform_charge_conversation)
+          : 1,
+        platform_charge_per_order: Number(restaurant.platform_charge_per_order) > 0
+          ? Number(restaurant.platform_charge_per_order)
+          : 2,
         delivery_charge_default: restaurant.delivery_charge_default || 40,
         free_delivery_above: Number(restaurant.free_delivery_above) > 0
           ? Number(restaurant.free_delivery_above)

@@ -919,6 +919,7 @@
             <div class="line" id="parcelRow" style="display:none"><span>Parcel/packaging</span><strong id="parcelAmt">Rs 0</strong></div>
             <div class="line" id="deliveryRow" style="display:none"><span>Delivery charge</span><strong id="deliveryAmt">Rs 0</strong></div>
             <div class="line" id="gstRow" style="display:none"><span id="gstLabel">GST (5%)</span><strong id="gstAmt">Rs 0</strong></div>
+            <div class="line" id="platformRow" style="display:none"><span>Platform charge</span><strong id="platformAmt">Rs 0</strong></div>
             <div class="line grand"><span>Total</span><strong id="grand">Rs 0</strong></div>
           </div>
           <div id="fulfillmentWrap" style="display:none;margin-top:12px">
@@ -2004,6 +2005,7 @@ function cartTotals() {
         : ((state.session && state.session.type) || 'takeaway');
       const parcelPerItem = parseFloat(cfg.parcel_charge_per_item || 0);
       const gstRate = parseFloat(cfg.gst_rate || 5);
+      const gstInclusive = !!cfg.gst_inclusive;
       const deliveryDefault = parseFloat(cfg.delivery_charge_default || 40);
 
       // Parcel charge: qty × rate, only for takeaway / delivery
@@ -2023,11 +2025,32 @@ function cartTotals() {
       }
 
       const preGst = Math.round((afterDiscount + parcelCharge + deliveryCharge) * 100) / 100;
-      const gstAmount = Math.round(preGst * gstRate / 100 * 100) / 100;
-      const total = Math.round((preGst + gstAmount) * 100) / 100;
+      let gstAmount;
+      let chargedAfterGst;
+      if (gstInclusive) {
+        gstAmount = gstRate > 0
+          ? Math.round((preGst - (preGst / (1 + gstRate / 100))) * 100) / 100
+          : 0;
+        chargedAfterGst = preGst;
+      } else {
+        gstAmount = Math.round(preGst * gstRate / 100 * 100) / 100;
+        chargedAfterGst = Math.round((preGst + gstAmount) * 100) / 100;
+      }
+
+      // GST-exempt platform charge (after GST)
+      let platformCharge = 0;
+      if (cfg.platform_charge_enabled) {
+        const lob = String((state.restaurant && state.restaurant.lob_type) || '').toLowerCase();
+        const isRestaurantLob = lob === 'restaurant' || lob === 'cloud_kitchen';
+        platformCharge = isRestaurantLob
+          ? Number(cfg.platform_charge_per_order || 2)
+          : Number(cfg.platform_charge_conversation || 1);
+        platformCharge = Math.round(platformCharge * 100) / 100;
+      }
+      const total = Math.round((chargedAfterGst + platformCharge) * 100) / 100;
 
       return { lines, subtotal, promo, afterDiscount, parcelCharge, deliveryCharge,
-               gstRate, gstAmount, total, count, shipped, pickup };
+               platformCharge, gstRate, gstInclusive, gstAmount, total, count, shipped, pickup };
     }
 
     function baseItemName(name) {
@@ -2172,7 +2195,9 @@ function cartTotals() {
         afterDiscount,
         parcelCharge,
         deliveryCharge,
+        platformCharge,
         gstRate,
+        gstInclusive,
         gstAmount,
         total,
         count,
@@ -2260,11 +2285,21 @@ $('subtotal').textContent = money(subtotal);
 
       // GST row — always show when cart has items
       if (count > 0) {
-        $('gstLabel').textContent = `GST (${gstRate}%)`;
+        $('gstLabel').textContent = gstInclusive
+          ? `GST incl. (${gstRate}%)`
+          : `GST (${gstRate}%)`;
         $('gstAmt').textContent = money(gstAmount);
         $('gstRow').style.display = '';
       } else {
         $('gstRow').style.display = 'none';
+      }
+
+      // Platform charge (GST-exempt) — hide when ₹0
+      if (platformCharge > 0) {
+        $('platformAmt').textContent = money(platformCharge);
+        $('platformRow').style.display = '';
+      } else if ($('platformRow')) {
+        $('platformRow').style.display = 'none';
       }
 
       $('grand').textContent = money(total);

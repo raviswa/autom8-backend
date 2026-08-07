@@ -48,6 +48,11 @@ const {
   normalizeSocialLinks,
 } = require('../../helpers/aboutUs');
 const { requireStepUpInHandler, normalizePhoneKey } = require('../../helpers/stepUpAuth');
+const {
+  assertDisclosureAccepted,
+  tenantHasCurrentDisclosure,
+  META_UTILITY_DISCLOSURE_VERSION,
+} = require('../../helpers/registrationGuards');
 
 router.post('/restaurants/resolve-pickup', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
   try {
@@ -230,6 +235,8 @@ router.put(
   'cod_enabled_city','cod_enabled_outstation',
   'shipping_provider','courier_name','courier_rate_card',
   'gstin','fssai_license','sac_code','receipt_tagline',
+  'gst_rate','gst_inclusive',
+  'platform_charge_enabled',
   'packaging_weight_grams',
   'daily_settlement_enabled','weekly_promo_drafts_enabled','instagram_handle','instagram_user_id',
   'instagram_feature_on_autom8',
@@ -259,6 +266,12 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
     }
     if (updates.about_enabled !== undefined) {
       updates.about_enabled = !!updates.about_enabled;
+    }
+    if (updates.platform_charge_enabled !== undefined) {
+      updates.platform_charge_enabled = !!updates.platform_charge_enabled;
+    }
+    if (updates.gst_inclusive !== undefined) {
+      updates.gst_inclusive = !!updates.gst_inclusive;
     }
     if (updates.about_note !== undefined) {
       updates.about_note = normalizeAboutNote(updates.about_note);
@@ -342,6 +355,34 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
       if (!check.ok) return res.status(403).json({ error: check.error });
 
       updates.subscribed_features = nextEnabled;
+    }
+
+    // Enabling platform charge requires current Meta utility disclosure acceptance
+    if (updates.platform_charge_enabled === true) {
+      const { data: currentDisc } = await supabaseAdmin
+        .from('tenants')
+        .select('platform_charge_enabled, disclosure_version, disclosure_accepted_at')
+        .eq('id', req.restaurant_id)
+        .maybeSingle();
+
+      if (!tenantHasCurrentDisclosure(currentDisc)) {
+        try {
+          assertDisclosureAccepted(req.body || {});
+        } catch (discErr) {
+          return res.status(discErr.status || 400).json({
+            error: discErr.message,
+            code: discErr.code,
+            required_disclosure_version: META_UTILITY_DISCLOSURE_VERSION,
+          });
+        }
+        updates.disclosure_version = META_UTILITY_DISCLOSURE_VERSION;
+        updates.disclosure_accepted_at = new Date().toISOString();
+      }
+    }
+    // Strip client-supplied disclosure stamp fields unless we just server-set them above
+    if (updates.platform_charge_enabled !== true) {
+      delete updates.disclosure_accepted_at;
+      delete updates.disclosure_version;
     }
 
     // Auto-resolve pickup coordinates for cloud kitchens when saving address/maps link

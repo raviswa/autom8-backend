@@ -329,6 +329,14 @@ router.put('/kds/:id/status', authenticateToken, getRestaurantId, async (req, re
       .select().single();
     if (error) throw error;
 
+    const extras = {
+      awaiting_shipment_details: false,
+      booking_id: null,
+      own_team_mode: null,
+      delivery_channel: null,
+      customer_notified: false,
+    };
+
     if (status === 'ready') {
       try {
         const { data: kdsItem } = await supabaseAdmin.from('kds_items')
@@ -342,13 +350,96 @@ router.put('/kds/:id/status', authenticateToken, getRestaurantId, async (req, re
             .eq('restaurant_id', req.restaurant_id);
           const orderItems = (allItems ?? []).filter(i => i.order_item?.order_id === orderId);
           const allReady = orderItems.length > 0 && orderItems.every(i => i.status === 'ready');
-          if (allReady) await notifyOrderReady({ orderId, restaurantId: req.restaurant_id, kdsItem });
 
           // Packing queue: when every packing line for this order is ready, create Shiprocket.
           const packingLines = orderItems.filter((i) => i.queue === 'packing');
           const packingAllReady = packingLines.length > 0
             && packingLines.every((i) => i.status === 'ready');
-          if (packingAllReady || (kdsItem?.queue === 'packing' && allReady)) {
+          const packingComplete = packingAllReady || (kdsItem?.queue === 'packing' && allReady);
+
+          if (allReady) {
+            const {
+              isShippedLob,
+              normalizeOwnTeamMode,
+              needsShipmentDetailsBeforeNotify,
+              shouldCreateShiprocketForMeta,
+            } = require('../../helpers/fulfillmentChannels');
+
+            const { data: tenant } = await supabaseAdmin
+              .from('tenants')
+              .select('lob_type')
+              .eq('id', req.restaurant_id)
+              .maybeSingle();
+
+            const svc = String(kdsItem?.service_type || '').toLowerCase();
+            const isDelivery = svc === 'delivery' || svc.includes('delivery');
+            const shippedLob = isShippedLob(tenant?.lob_type);
+
+            let booking = null;
+            let meta = {};
+            if (shippedLob && isDelivery) {
+              const { resolveBookingForPackedOrder } = require('../../helpers/shiprocketShipment');
+              booking = await resolveBookingForPackedOrder({
+                restaurantId: req.restaurant_id,
+                tokenNumber: kdsItem?.token_number,
+                customerPhone: kdsItem?.customer_phone,
+                orderNumber: kdsItem?.order_item?.order?.order_number,
+              });
+              meta = booking?.meta || {};
+              extras.booking_id = booking?.id || null;
+              extras.delivery_channel = meta.delivery_channel || null;
+              extras.own_team_mode = meta.own_team_mode != null
+                ? normalizeOwnTeamMode(meta.own_team_mode)
+                : normalizeOwnTeamMode(null);
+            }
+
+            const channel = String(meta.delivery_channel || '').toLowerCase();
+            const shiprocketPath = shippedLob && isDelivery && shouldCreateShiprocketForMeta(meta);
+            const ownTeamChannel = channel === 'own_team' || channel === 'custom'
+              || (!channel && shippedLob && isDelivery && !shiprocketPath);
+            const mode = extras.own_team_mode || normalizeOwnTeamMode(meta.own_team_mode);
+            const awaitDetails = shippedLob && isDelivery && ownTeamChannel
+              && (needsShipmentDetailsBeforeNotify({ ...meta, delivery_channel: channel || 'own_team', own_team_mode: mode })
+                // Prompt packing UI for all own_team deliveries so merchant can confirm
+                // own_driver vs rider vs parcel before the customer is notified.
+                || mode === 'own_driver'
+                || !meta.own_team_mode);
+
+            if (awaitDetails && !shiprocketPath) {
+              extras.awaiting_shipment_details = true;
+              extras.own_team_mode = mode;
+              extras.delivery_channel = channel || 'own_team';
+              // Mark order ready for ops, but defer customer WhatsApp until shipment details.
+              await supabaseAdmin
+                .from('orders')
+                .update({ status: 'ready' })
+                .eq('id', orderId)
+                .neq('status', 'ready')
+                .neq('status', 'cancelled');
+            } else if (shiprocketPath || channel === 'shiprocket') {
+              // Defer customer WhatsApp until AWB is assigned (shiprocketShipment).
+              extras.delivery_channel = extras.delivery_channel || 'shiprocket';
+              await supabaseAdmin
+                .from('orders')
+                .update({ status: 'ready' })
+                .eq('id', orderId)
+                .neq('status', 'ready')
+                .neq('status', 'cancelled');
+            } else {
+              await notifyOrderReady({
+                orderId,
+                restaurantId: req.restaurant_id,
+                kdsItem,
+                deliveryExtras: {
+                  driver_name: meta.driver_name,
+                  driver_phone: meta.driver_phone,
+                },
+              });
+              extras.customer_notified = true;
+            }
+          }
+
+          if (packingComplete) {
             const { maybeCreateShiprocketOnPackingComplete } = require('../../helpers/shiprocketShipment');
             maybeCreateShiprocketOnPackingComplete({
               restaurantId: req.restaurant_id,
@@ -366,7 +457,7 @@ router.put('/kds/:id/status', authenticateToken, getRestaurantId, async (req, re
       }
     }
 
-    res.json({ success: true, item: data });
+    res.json({ success: true, item: data, ...extras });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

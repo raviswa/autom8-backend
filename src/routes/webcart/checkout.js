@@ -439,6 +439,7 @@ router.post('/api/webcart/submit', async (req, res) => {
     else if (sessionMeta.service_type) serviceType = String(sessionMeta.service_type).toLowerCase();
     const parcelPerItem = parseFloat(restaurant.parcel_charge_per_item || 0);
     const gstRate = parseFloat(restaurant.gst_rate || 5.0);
+    const gstInclusive = !!restaurant.gst_inclusive;
 
 // Parcel charge: sum of qty × rate per item (only for takeaway/delivery)
     let parcelCharge = 0;
@@ -495,8 +496,31 @@ router.post('/api/webcart/submit', async (req, res) => {
 
     const discountedSubtotal = Math.max(0, subtotal - promoDiscount);
     const preGst = Math.round((discountedSubtotal + parcelCharge + deliveryCharge) * 100) / 100;
-    const gstAmount = Math.round(preGst * gstRate / 100 * 100) / 100;
-    let totalAmount = Math.round((preGst + gstAmount) * 100) / 100;
+    let gstAmount;
+    let chargedAfterGst;
+    if (gstInclusive) {
+      // Listed prices already include GST — back-calculate for disclosure only.
+      gstAmount = gstRate > 0
+        ? Math.round((preGst - (preGst / (1 + gstRate / 100))) * 100) / 100
+        : 0;
+      chargedAfterGst = preGst;
+    } else {
+      gstAmount = Math.round(preGst * gstRate / 100 * 100) / 100;
+      chargedAfterGst = Math.round((preGst + gstAmount) * 100) / 100;
+    }
+
+    // GST-exempt Autom8 platform charge (pass-through Meta utility cost) — after GST
+    let platformCharge = 0;
+    if (restaurant.platform_charge_enabled) {
+      const lob = String(restaurant.lob_type || '').toLowerCase();
+      const isRestaurantLob = lob === 'restaurant' || lob === 'cloud_kitchen';
+      platformCharge = isRestaurantLob
+        ? Number(restaurant.platform_charge_per_order || 2)
+        : Number(restaurant.platform_charge_conversation || 1);
+      platformCharge = Math.round(platformCharge * 100) / 100;
+    }
+    const totalAmountBase = Math.round((chargedAfterGst + platformCharge) * 100) / 100;
+    let totalAmount = totalAmountBase;
 
     let loyaltyDiscount = 0;
     let loyaltyRedeemed = 0;
@@ -597,8 +621,10 @@ router.post('/api/webcart/submit', async (req, res) => {
         items: normalizedItems,
         parcel_charge: parcelCharge,
         delivery_charge: deliveryCharge,
+        platform_charge: platformCharge,
         promo_discount: promoDiscount || 0,
         gst_rate: gstRate,
+        gst_inclusive: gstInclusive,
         gst_amount: gstAmount,
         pre_gst_total: preGst,
         total: totalAmount,
@@ -656,8 +682,10 @@ router.post('/api/webcart/submit', async (req, res) => {
       special_request: special_request ? String(special_request).trim().slice(0, 500) : null,
       delivery_charge: deliveryCharge,
       parcel_charge: parcelCharge,
+      platform_charge: platformCharge,
       gst_amount: gstAmount,
       gst_rate: gstRate,
+      gst_inclusive: gstInclusive,
       delivery_zone: fulfillmentMeta.delivery_zone || deliveryQuote?.zone || undefined,
       delivery_source: fulfillmentMeta.delivery_source || deliveryQuote?.source || undefined,
       fulfillment_type: fulfillmentMeta.fulfillment_type || undefined,

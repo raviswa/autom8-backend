@@ -24,6 +24,11 @@ const {
 } = require('../helpers/tenantPaymentGateways');
 const { getDemoWhatsAppNumber } = require('../helpers/subscriptionAccess');
 const { APP_SIGNUP_URL } = require('../helpers/ownerRegister');
+const {
+  assertDisclosureAccepted,
+  tenantHasCurrentDisclosure,
+  META_UTILITY_DISCLOSURE_VERSION,
+} = require('../helpers/registrationGuards');
 
 const FRONTEND = (process.env.FRONTEND_URL || 'https://app.autom8.works').replace(/\/$/, '');
 const API_PUBLIC = (process.env.PUBLIC_API_URL || process.env.API_PUBLIC_URL || 'https://api.autom8.works').replace(/\/$/, '');
@@ -33,7 +38,9 @@ const TENANT_WIZARD_SELECT =
   + 'whatsapp_number, contact_phone, manager_phone, subscribed_features, '
   + 'delivery_distance_tiers_enabled, delivery_charge_tiers, shipping_provider, '
   + 'shiprocket_email, shiprocket_api_key, shiprocket_connected, '
-  + 'payment_provider, lifecycle_status, onboarding_step';
+  + 'payment_provider, lifecycle_status, onboarding_step, '
+  + 'platform_charge_enabled, platform_charge_conversation, platform_charge_per_order, '
+  + 'disclosure_accepted_at, disclosure_version';
 
 async function loadTenant(restaurantId) {
   const full = await supabaseAdmin
@@ -353,9 +360,18 @@ router.post('/wizard/complete', authenticateToken, getRestaurantId, async (req, 
       });
     }
 
+    assertDisclosureAccepted(req.body || {});
+
+    const chargeEnabled = req.body?.platform_charge_enabled === true
+      || req.body?.platform_charge_enabled === 'true'
+      || req.body?.platform_charge_enabled === 1;
+
     const updated = await patchTenant(req.restaurant_id, {
       lifecycle_status: 'active',
       onboarding_step: 5,
+      platform_charge_enabled: !!chargeEnabled,
+      disclosure_version: META_UTILITY_DISCLOSURE_VERSION,
+      disclosure_accepted_at: new Date().toISOString(),
     });
 
     const url = webcartUrl(updated || tenant);
@@ -368,9 +384,14 @@ router.post('/wizard/complete', authenticateToken, getRestaurantId, async (req, 
       demo_whatsapp_number: getDemoWhatsAppNumber() || null,
       dashboard_url: `${FRONTEND}/dashboard/owner`,
       signup_url: APP_SIGNUP_URL,
+      disclosure_version: META_UTILITY_DISCLOSURE_VERSION,
+      platform_charge_enabled: !!chargeEnabled,
     });
   } catch (err) {
     console.error('[onboarding/wizard complete]', err.message);
+    if (err.status === 400 || err.code === 'disclosure_required' || err.code === 'disclosure_version_stale') {
+      return res.status(400).json({ error: err.message, code: err.code });
+    }
     res.status(500).json({ error: err.message || 'Could not complete onboarding' });
   }
 });

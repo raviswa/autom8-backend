@@ -221,7 +221,50 @@ async function rollbackRegistration({
   };
 }
 
+/** Bump when Meta utility disclosure wording changes. */
+const META_UTILITY_DISCLOSURE_VERSION = '2026-08-07';
+
+function truthyDisclosure(v) {
+  return v === true || v === 'true' || v === 1 || v === '1';
+}
+
+/**
+ * Reject registration / enable-charge if disclosure not accepted for current version.
+ * Throws Error with status 400.
+ */
+function assertDisclosureAccepted(body = {}) {
+  if (!truthyDisclosure(body.disclosure_accepted)) {
+    const err = new Error(
+      'You must confirm you have read the Autom8 Meta utility-messaging cost disclosure.',
+    );
+    err.status = 400;
+    err.code = 'disclosure_required';
+    throw err;
+  }
+  const version = String(body.disclosure_version || '').trim();
+  if (!version || version !== META_UTILITY_DISCLOSURE_VERSION) {
+    const err = new Error(
+      'Disclosure version is missing or outdated. Refresh the form and accept the current disclosure.',
+    );
+    err.status = 400;
+    err.code = 'disclosure_version_stale';
+    throw err;
+  }
+  return true;
+}
+
+/**
+ * Whether tenant already accepted the current disclosure version.
+ */
+function tenantHasCurrentDisclosure(tenant = {}) {
+  return String(tenant.disclosure_version || '').trim() === META_UTILITY_DISCLOSURE_VERSION
+    && !!tenant.disclosure_accepted_at;
+}
+
 module.exports = {
+  META_UTILITY_DISCLOSURE_VERSION,
+  assertDisclosureAccepted,
+  tenantHasCurrentDisclosure,
   assertWhatsAppAssetsAvailable,
   isPhoneNumberIdExempt,
   recordRegistrationFailure,

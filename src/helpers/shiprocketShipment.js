@@ -39,6 +39,9 @@ function shipmentPayloadFromMeta(meta = {}) {
     tracking_url: meta.tracking_url || null,
     shipping_provider: meta.shipping_provider || null,
     delivery_channel: meta.delivery_channel || null,
+    own_team_mode: meta.own_team_mode || null,
+    driver_name: meta.driver_name || null,
+    driver_phone: meta.driver_phone || null,
   };
 }
 
@@ -398,6 +401,29 @@ async function createOrRetryShiprocketShipment({ restaurantId, bookingId, force 
   };
 
   const updated = await persistBookingShipmentMeta(booking.id, patch);
+
+  // Notify customer once AWB is assigned (packing "ready" deliberately skips WhatsApp for Shiprocket).
+  if (awb && booking.customer_phone) {
+    try {
+      const { notifyCustomerPackedShipped } = require('./whatsapp');
+      const track = `https://shiprocket.co/tracking/${encodeURIComponent(awb)}`;
+      await notifyCustomerPackedShipped({
+        restaurantId: booking.restaurant_id,
+        customerPhone: booking.customer_phone,
+        orderNumber: booking.order_ref || booking.token_number || booking.id,
+        courierName: courierName || 'Shiprocket',
+        awb,
+        trackingUrl: track,
+      });
+      await persistBookingShipmentMeta(booking.id, {
+        customer_shipment_notified_at: new Date().toISOString(),
+        tracking_url: track,
+      });
+    } catch (notifyErr) {
+      console.error('[shiprocketShipment] AWB WhatsApp notify failed:', notifyErr.message);
+    }
+  }
+
   return {
     ok: !awbError || !!awb,
     error: awbError || null,

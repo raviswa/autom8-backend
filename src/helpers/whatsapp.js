@@ -651,7 +651,49 @@ function isDeliveryOrder(serviceType, orderSource) {
   return svc === 'delivery' || src === 'delivery' || src.includes('delivery');
 }
 
-async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
+/** Courier / AWB packed message (local rider, parcel courier, Shiprocket). */
+function buildPackedShippedMessage({ orderNumber, courierName, awb, trackingUrl }) {
+  const courier = String(courierName || 'Courier').trim() || 'Courier';
+  const tracking = String(awb || trackingUrl || '').trim();
+  let body =
+    `✅ *Your order is packed and shipped!*\n` +
+    `Order: *${orderNumber || ''}*\n` +
+    `Courier: ${courier}`;
+  if (tracking) body += `\nAWB: ${tracking}`;
+  return body;
+}
+
+/** Own-driver packed message (no courier identity). */
+function buildOwnDriverPackedMessage({ orderNumber, tokenLabel, driverName, driverPhone }) {
+  let body =
+    `✅ *Your delivery order is ready!*\n\n` +
+    (tokenLabel ? `Queue number: *${tokenLabel}*\n` : '') +
+    `Order: *${orderNumber || ''}*\n\n` +
+    `Your order is packed and on its way to you shortly. 🛵`;
+  const driver = String(driverName || '').trim();
+  const phone = String(driverPhone || '').trim();
+  if (driver || phone) {
+    body += `\n\nDriver: ${driver || 'Our delivery partner'}`;
+    if (phone) body += ` (${phone})`;
+  }
+  return body;
+}
+
+async function notifyCustomerPackedShipped({
+  restaurantId,
+  customerPhone,
+  orderNumber,
+  courierName,
+  awb,
+  trackingUrl,
+}) {
+  const phone = String(customerPhone || '').trim();
+  if (!phone) return false;
+  const msg = buildPackedShippedMessage({ orderNumber, courierName, awb, trackingUrl });
+  return sendWhatsAppMessage(phone, msg, restaurantId);
+}
+
+async function notifyOrderReady({ orderId, restaurantId, kdsItem, deliveryExtras = null }) {
   try {
     const { data: updated, error: updateErr } = await supabaseAdmin
       .from('orders')
@@ -685,10 +727,12 @@ async function notifyOrderReady({ orderId, restaurantId, kdsItem }) {
         const tokenLabel = tokenNumber || null;
         await sendWhatsAppMessage(
           phone,
-          `✅ *Your delivery order is ready!*\n\n` +
-          (tokenLabel ? `Queue number: *${tokenLabel}*\n` : '') +
-          `Order: *${updated.order_number}*\n\n` +
-          `Your order is packed and on its way to you shortly. 🛵`,
+          buildOwnDriverPackedMessage({
+            orderNumber: updated.order_number,
+            tokenLabel,
+            driverName: deliveryExtras?.driver_name,
+            driverPhone: deliveryExtras?.driver_phone,
+          }),
           restaurantId,
         );
       } else {
@@ -855,6 +899,9 @@ module.exports = {
   sendPlatformWhatsAppTemplate,
   sendPlatformWhatsAppMessage,
   notifyOrderReady,
+  buildPackedShippedMessage,
+  buildOwnDriverPackedMessage,
+  notifyCustomerPackedShipped,
   CATALOG_PICKER_FULL_ID,
   slugifySubdomain,
   getRestaurantLabel,

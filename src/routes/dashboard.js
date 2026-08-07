@@ -52,6 +52,9 @@ const RESTAURANT_SELECT_FULL = [
   'cod_enabled_city', 'cod_enabled_outstation',
   'shipping_provider', 'courier_name', 'courier_rate_card',
   'gstin', 'fssai_license', 'sac_code', 'receipt_tagline',
+  'gst_rate', 'gst_inclusive',
+  'platform_charge_enabled', 'platform_charge_conversation', 'platform_charge_per_order',
+  'disclosure_accepted_at', 'disclosure_version',
   'packaging_weight_grams',
   'daily_settlement_enabled', 'weekly_promo_drafts_enabled', 'instagram_handle', 'instagram_user_id',
   'instagram_feature_on_autom8',
@@ -546,7 +549,9 @@ router.get('/customer-cohorts', authenticateToken, getRestaurantId, requireOutle
   }
 });
 
-// ── POST /api/dashboard/shipment/manual — custom courier mark-as-shipped ─────
+// ── POST /api/dashboard/shipment/manual — mark shipped + WhatsApp notify ─────
+// Used for: custom courier merchants, and own_team sub-modes (local_rider_app /
+// parcel_courier / own_driver) from the packing screen.
 router.post('/shipment/manual', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
   try {
     const bookingId = String(req.body?.booking_id || '').trim();
@@ -555,25 +560,26 @@ router.post('/shipment/manual', authenticateToken, getRestaurantId, requireOutle
     const awbLegacy = String(req.body?.awb || '').trim();
     const trackingOrAwb = trackingUrl || awbLegacy;
     const status = String(req.body?.status || 'Shipped').trim() || 'Shipped';
+    const driverName = String(req.body?.driver_name || '').trim();
+    const driverPhone = String(req.body?.driver_phone || '').trim();
+    const {
+      normalizeOwnTeamMode,
+      OWN_TEAM_MODES,
+    } = require('../helpers/fulfillmentChannels');
+    const requestedMode = String(req.body?.own_team_mode || '').trim().toLowerCase();
 
-    if (!bookingId || !courierName || !trackingOrAwb) {
-      return res.status(400).json({
-        error: 'booking_id, courier_name, and tracking_url are required',
-      });
+    if (!bookingId) {
+      return res.status(400).json({ error: 'booking_id is required' });
     }
 
     const { data: tenant, error: tenantErr } = await supabaseAdmin
       .from('tenants')
-      .select('shipping_provider')
+      .select('shipping_provider, lob_type')
       .eq('id', req.restaurant_id)
       .maybeSingle();
     if (tenantErr) throw tenantErr;
     const { normalizeShippingProvider } = require('../helpers/courierRates');
-    if (normalizeShippingProvider(tenant?.shipping_provider) !== 'custom') {
-      return res.status(403).json({
-        error: 'Manual mark-as-shipped is only available for custom courier merchants.',
-      });
-    }
+    const provider = normalizeShippingProvider(tenant?.shipping_provider);
 
     const { data: booking, error: bookingErr } = await supabaseAdmin
       .from('bookings')
@@ -584,17 +590,90 @@ router.post('/shipment/manual', authenticateToken, getRestaurantId, requireOutle
     if (bookingErr) throw bookingErr;
     if (!booking) return res.status(404).json({ error: 'Booking not found' });
 
+    const prevMeta = booking.meta || {};
+    const channel = String(prevMeta.delivery_channel || '').toLowerCase();
+    const isOwnTeamFlow = channel === 'own_team' || channel === 'custom'
+      || OWN_TEAM_MODES.has(requestedMode);
+    const isCustomProvider = provider === 'custom';
+
+    if (!isCustomProvider && !isOwnTeamFlow) {
+      return res.status(403).json({
+        error: 'Manual mark-as-shipped is only available for own-team / custom courier deliveries.',
+      });
+    }
+
+    const mode = OWN_TEAM_MODES.has(requestedMode)
+      ? requestedMode
+      : normalizeOwnTeamMode(prevMeta.own_team_mode);
+
+    if (mode === 'own_driver') {
+      // Optional driver identity; notify with the simple packed message.
+      const nextMeta = {
+        ...prevMeta,
+        own_team_mode: 'own_driver',
+        delivery_channel: prevMeta.delivery_channel || 'own_team',
+        shipment_status: 'own_team',
+        shipment_mode: 'own_driver',
+        ...(driverName ? { driver_name: driverName } : {}),
+        ...(driverPhone ? { driver_phone: driverPhone } : {}),
+        ...(courierName ? { courier_name: courierName } : {}),
+        shiprocket_last_error: null,
+      };
+      const { error: updateErr } = await supabaseAdmin
+        .from('bookings')
+        .update({ meta: nextMeta })
+        .eq('id', booking.id);
+      if (updateErr) throw updateErr;
+
+      const { buildOwnDriverPackedMessage, sendWhatsAppMessage } = require('../helpers/whatsapp');
+      if (booking.customer_phone) {
+        await sendWhatsAppMessage(
+          booking.customer_phone,
+          buildOwnDriverPackedMessage({
+            orderNumber: booking.order_ref || booking.id,
+            driverName,
+            driverPhone,
+          }),
+          booking.restaurant_id,
+        );
+      }
+
+      return res.json({ success: true, booking_id: booking.id, meta: nextMeta, own_team_mode: 'own_driver' });
+    }
+
+    if (mode === 'parcel_courier') {
+      if (!courierName || !trackingOrAwb) {
+        return res.status(400).json({
+          error: 'Parcel courier requires courier_name and AWB / tracking number',
+        });
+      }
+    } else if (mode === 'local_rider_app') {
+      if (!courierName) {
+        return res.status(400).json({
+          error: 'Local rider requires a service name (e.g. Dunzo, Rapido, Porter)',
+        });
+      }
+      // AWB / tracking / rider phone optional for local_rider_app
+    } else if (isCustomProvider) {
+      if (!courierName || !trackingOrAwb) {
+        return res.status(400).json({
+          error: 'booking_id, courier_name, and tracking_url are required',
+        });
+      }
+    }
+
     const nextMeta = {
-      ...(booking.meta || {}),
-      courier_name: courierName,
-      tracking_url: trackingUrl || trackingOrAwb,
-      // Keep awb only when explicitly provided; do not invent Shiprocket AWB from tracking link.
-      ...(awbLegacy ? { awb: awbLegacy } : {}),
+      ...prevMeta,
+      own_team_mode: mode,
+      courier_name: courierName || prevMeta.courier_name || null,
+      tracking_url: trackingUrl || trackingOrAwb || prevMeta.tracking_url || null,
+      ...(awbLegacy ? { awb: awbLegacy } : (trackingOrAwb && mode === 'parcel_courier' ? { awb: trackingOrAwb } : {})),
       shipment_status: 'shipped',
-      shipment_mode: 'manual',
-      shipping_provider: 'custom',
-      delivery_channel: (booking.meta || {}).delivery_channel || 'custom',
+      shipment_mode: mode === 'local_rider_app' ? 'local_rider_app' : (isCustomProvider ? 'manual' : 'parcel_courier'),
+      shipping_provider: isCustomProvider ? 'custom' : (prevMeta.shipping_provider || null),
+      delivery_channel: prevMeta.delivery_channel || (isCustomProvider ? 'custom' : 'own_team'),
       shiprocket_last_error: null,
+      customer_shipment_notified_at: new Date().toISOString(),
     };
     const { error: updateErr } = await supabaseAdmin
       .from('bookings')
@@ -602,30 +681,41 @@ router.post('/shipment/manual', authenticateToken, getRestaurantId, requireOutle
       .eq('id', booking.id);
     if (updateErr) throw updateErr;
 
-    const secret = getKdsSecret();
-    const notifyRes = await fetch(`${CHAT_SERVICE_URL}/internal/shipment-notify`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-internal-secret': secret,
-        Authorization: `Bearer ${secret}`,
-      },
-      body: JSON.stringify({
-        restaurant_id: booking.restaurant_id,
-        customer_phone: booking.customer_phone,
-        order_ref: booking.order_ref || booking.id,
-        courier_name: courierName,
-        // Chat helper expects `awb`; pass tracking link/number so WhatsApp still shows it.
-        awb: trackingOrAwb,
-        status,
-      }),
+    const { notifyCustomerPackedShipped } = require('../helpers/whatsapp');
+    const notified = await notifyCustomerPackedShipped({
+      restaurantId: booking.restaurant_id,
+      customerPhone: booking.customer_phone,
+      orderNumber: booking.order_ref || booking.id,
+      courierName: courierName || 'Courier',
+      awb: awbLegacy || (mode === 'parcel_courier' ? trackingOrAwb : ''),
+      trackingUrl: trackingUrl || trackingOrAwb,
     });
-    const notifyData = await notifyRes.json().catch(() => ({}));
-    if (!notifyRes.ok || !notifyData.ok) {
-      return res.status(500).json({ error: notifyData.error || 'WhatsApp notification failed' });
+    if (!notified && booking.customer_phone) {
+      // Fall back to chat-service path for tenants that rely on it
+      const secret = getKdsSecret();
+      const notifyRes = await fetch(`${CHAT_SERVICE_URL}/internal/shipment-notify`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-internal-secret': secret,
+          Authorization: `Bearer ${secret}`,
+        },
+        body: JSON.stringify({
+          restaurant_id: booking.restaurant_id,
+          customer_phone: booking.customer_phone,
+          order_ref: booking.order_ref || booking.id,
+          courier_name: courierName || 'Courier',
+          awb: trackingOrAwb || courierName,
+          status,
+        }),
+      });
+      const notifyData = await notifyRes.json().catch(() => ({}));
+      if (!notifyRes.ok || !notifyData.ok) {
+        return res.status(500).json({ error: notifyData.error || 'WhatsApp notification failed' });
+      }
     }
 
-    res.json({ success: true, booking_id: booking.id, meta: nextMeta });
+    res.json({ success: true, booking_id: booking.id, meta: nextMeta, own_team_mode: mode });
   } catch (err) {
     console.error('[dashboard/shipment/manual]', err.message);
     res.status(500).json({ error: err.message });
@@ -863,6 +953,7 @@ router.get('/shipment-lookup', authenticateToken, getRestaurantId, requireOutlet
       fulfillment_type: booking.meta?.fulfillment_type || null,
       delivery_channel: booking.meta?.delivery_channel || null,
       delivery_channel_status: booking.meta?.delivery_channel_status || null,
+      own_team_mode: booking.meta?.own_team_mode || null,
       shipment: {
         ...shipmentPayloadFromMeta(booking.meta || {}),
         tracking_url: require('../helpers/orderJourney').trackUrlFromMeta(booking.meta || {}),

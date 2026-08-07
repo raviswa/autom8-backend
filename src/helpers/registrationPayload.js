@@ -154,6 +154,18 @@ function buildTenantInsertFields(opts) {
     row.short_code = s;
   }
 
+  // Meta utility disclosure + optional platform charge (defaults: charge off)
+  const { META_UTILITY_DISCLOSURE_VERSION } = require('./registrationGuards');
+  row.platform_charge_enabled = truthy(body.platform_charge_enabled);
+  const conv = Number(body.platform_charge_conversation);
+  const perOrder = Number(body.platform_charge_per_order);
+  row.platform_charge_conversation = Number.isFinite(conv) && conv >= 0 ? conv : 1.00;
+  row.platform_charge_per_order = Number.isFinite(perOrder) && perOrder >= 0 ? perOrder : 2.00;
+  row.disclosure_version = String(body.disclosure_version || META_UTILITY_DISCLOSURE_VERSION).trim()
+    || META_UTILITY_DISCLOSURE_VERSION;
+  // Always server-stamp — ignore client disclosure_accepted_at
+  row.disclosure_accepted_at = new Date().toISOString();
+
   return row;
 }
 

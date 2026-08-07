@@ -3,6 +3,11 @@
 /**
  * Packed-food fulfillment channels: pickup vs delivery, same-city
  * own_team vs shiprocket (manager gate), outstation shiprocket-only.
+ *
+ * own_team sub-modes (own_team_mode):
+ *   own_driver       — merchant staff; notify on pack (default)
+ *   local_rider_app  — Dunzo/Rapido/Porter; notify after rider details
+ *   parcel_courier   — India Post/DTDC/etc; notify after courier + AWB
  */
 
 const { resolveCourierZone, normalizePincode, normalizeShippingProvider } = require('./courierRates');
@@ -10,6 +15,7 @@ const { resolveEnabledFeatures, enabledOrderServices, ALL_FEATURES } = require('
 
 const LOCAL_CHANNEL_PENDING_HOURS = 4;
 const SHIPPED_LOBS = new Set(['food_products', 'retail', 'psl', 'b2b']);
+const OWN_TEAM_MODES = new Set(['own_driver', 'local_rider_app', 'parcel_courier']);
 
 function hasShiprocketCreds(restaurant) {
   return !!(
@@ -36,11 +42,29 @@ function isShippedLob(lobType) {
 }
 
 /**
+ * Normalize own_team delivery sub-mode. Unset → own_driver (legacy default).
+ */
+function normalizeOwnTeamMode(raw) {
+  const mode = String(raw || '').trim().toLowerCase();
+  if (OWN_TEAM_MODES.has(mode)) return mode;
+  return 'own_driver';
+}
+
+function needsShipmentDetailsBeforeNotify(meta = {}) {
+  const channel = String(meta.delivery_channel || '').toLowerCase();
+  if (channel === 'shiprocket') return false;
+  if (channel !== 'own_team' && channel !== 'custom') return false;
+  const mode = normalizeOwnTeamMode(meta.own_team_mode);
+  return mode === 'local_rider_app' || mode === 'parcel_courier';
+}
+
+/**
  * Resolve shopper choice into booking/walk-in meta fields.
  */
 function buildFulfillmentMeta({
   fulfillmentType,
   deliveryChannel,
+  ownTeamMode,
   quote,
   restaurant,
 }) {
@@ -55,6 +79,7 @@ function buildFulfillmentMeta({
       delivery_channel: null,
       delivery_channel_requested: null,
       delivery_channel_status: 'confirmed',
+      own_team_mode: null,
       courier_zone: null,
       delivery_zone: null,
       delivery_source: null,
@@ -81,6 +106,9 @@ function buildFulfillmentMeta({
   }
 
   const needsManager = isLocal && channel === 'shiprocket' && shipOk;
+  const resolvedOwnMode = (channel === 'own_team' || channel === 'custom')
+    ? normalizeOwnTeamMode(ownTeamMode)
+    : null;
 
   return {
     fulfillment_type: 'delivery',
@@ -88,6 +116,7 @@ function buildFulfillmentMeta({
     delivery_channel: channel,
     delivery_channel_requested: channel,
     delivery_channel_status: needsManager ? 'pending_manager' : 'confirmed',
+    own_team_mode: resolvedOwnMode,
     courier_zone: courierZone,
     delivery_zone: zone,
     delivery_source: quote?.source
@@ -143,9 +172,12 @@ function chargeForChannel(quote, deliveryChannel) {
 module.exports = {
   LOCAL_CHANNEL_PENDING_HOURS,
   SHIPPED_LOBS,
+  OWN_TEAM_MODES,
   hasShiprocketCreds,
   packagedServicesEnabled,
   isShippedLob,
+  normalizeOwnTeamMode,
+  needsShipmentDetailsBeforeNotify,
   buildFulfillmentMeta,
   isLocalShiprocketPending,
   pendingTimedOut,

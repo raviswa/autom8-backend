@@ -58,6 +58,7 @@ const { APP_SIGNUP_URL } = require('../helpers/ownerRegister');
 const { normalizeShippingProvider } = require('../helpers/courierRates');
 const {
   assertWhatsAppAssetsAvailable,
+  assertDisclosureAccepted,
   recordRegistrationFailure,
   rollbackRegistration,
 } = require('../helpers/registrationGuards');
@@ -638,6 +639,8 @@ async function registerStandalone(req, res, opts) {
   }
 
   try {
+    assertDisclosureAccepted(req.body || {});
+
     // Preflight WhatsApp uniqueness (FR-3)
     await assertWhatsAppAssetsAvailable({
       phone_number_id: embeddedSignup?.phone_number_id || phone_number_id,
@@ -928,6 +931,9 @@ async function registerStandalone(req, res, opts) {
       });
     }
     console.error('[onboarding/standalone]', err.message);
+    if (err.status === 400 || err.code === 'disclosure_required' || err.code === 'disclosure_version_stale') {
+      return res.status(400).json({ error: err.message, code: err.code });
+    }
     if (err.status === 409 || err.code === 'whatsapp_number_taken' || err.code === 'waba_taken') {
       return res.status(409).json({ error: err.message, code: err.code });
     }
