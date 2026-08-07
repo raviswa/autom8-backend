@@ -20,7 +20,7 @@ const express = require('express');
 const router  = express.Router();
 
 const { supabaseAdmin }         = require('../config/supabase');
-const { sendWhatsAppMessage }   = require('../helpers/whatsapp');
+const { sendWhatsAppMessage, scheduleWhatsAppReadReceipt } = require('../helpers/whatsapp');
 const { broadcastToRestaurant } = require('../websocket');
 const { resolveRestaurantByPhone } = require('../helpers/resolveRestaurant');
 
@@ -133,6 +133,11 @@ router.post('/webhook', async (req, res) => {
             if (restaurantId) {
               console.warn(`[WA Webhook] phone_number_id not found in integrations — using DEFAULT_RESTAURANT_ID`);
             }
+          }
+
+          // Delayed blue ticks + typing (~4.5s) — does not block reply pipeline
+          if (restaurantId && message.id) {
+            scheduleWhatsAppReadReceipt(message.id, restaurantId);
           }
 
           const session = restaurantId

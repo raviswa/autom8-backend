@@ -78,6 +78,72 @@ async function sendWhatsAppMessage(toNumber, message, restaurantId = null) {
   }
 }
 
+const READ_RECEIPT_DELAY_MS = 4500;
+
+/**
+ * Mark an inbound WhatsApp message as read (blue ticks). Optionally show typing.
+ * Uses the same Cloud API messages endpoint as outbound sends.
+ */
+async function markWhatsAppMessageRead(messageId, restaurantId = null, { typing = true } = {}) {
+  try {
+    const wamid = String(messageId || '').trim();
+    if (!wamid) return false;
+
+    const creds = restaurantId ? await getWhatsAppIntegration(restaurantId) : null;
+    const accessToken   = creds?.accessToken   || process.env.WHATSAPP_ACCESS_TOKEN;
+    const phoneNumberId = creds?.phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const apiUrl        = creds?.apiUrl        || process.env.WHATSAPP_API_URL;
+
+    if (!accessToken || !phoneNumberId || !apiUrl) {
+      console.warn('[WhatsApp] Missing credentials — skipping mark-as-read');
+      return false;
+    }
+
+    const body = {
+      messaging_product: 'whatsapp',
+      status: 'read',
+      message_id: wamid,
+    };
+    if (typing) {
+      body.typing_indicator = { type: 'text' };
+    }
+
+    const response = await fetch(`${apiUrl}/${phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(8_000),
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      console.error('[WhatsApp] mark-as-read error:', JSON.stringify(err).slice(0, 300));
+      return false;
+    }
+    console.log(`[WhatsApp] ✅ Marked read${typing ? ' + typing' : ''}: ${wamid.slice(0, 24)}…`);
+    return true;
+  } catch (err) {
+    console.error('[WhatsApp] Failed to mark message read:', err.message);
+    return false;
+  }
+}
+
+/**
+ * Fire-and-forget delayed mark-as-read (~4.5s) so inbound messages flip to blue ticks.
+ */
+function scheduleWhatsAppReadReceipt(messageId, restaurantId, delayMs = READ_RECEIPT_DELAY_MS) {
+  const wamid = String(messageId || '').trim();
+  if (!wamid || !restaurantId) return;
+  const ms = Number.isFinite(delayMs) && delayMs >= 0 ? delayMs : READ_RECEIPT_DELAY_MS;
+  const timer = setTimeout(() => {
+    void markWhatsAppMessageRead(wamid, restaurantId, { typing: true });
+  }, ms);
+  if (typeof timer.unref === 'function') timer.unref();
+}
+
 // ── sendWhatsAppInteractive ───────────────────────────────────────────────────
 // Sends a WhatsApp interactive message (list, button, product_list, etc.).
 
@@ -888,6 +954,8 @@ module.exports = {
   isWhatsAppConfigured,
   isPlatformWhatsAppConfigured,
   sendWhatsAppMessage,
+  markWhatsAppMessageRead,
+  scheduleWhatsAppReadReceipt,
   sendWhatsAppInteractive,
   sendWhatsAppCatalogMessage,
   sendCatalogCategoryPicker,
