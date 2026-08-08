@@ -551,6 +551,210 @@ async function handleMenuUpload(req, res) {
 const menuUploadMiddleware = [authenticateToken, getRestaurantId, handleMenuUpload];
 router.post('/menu-upload', ...menuUploadMiddleware);
 
+// ── POST /api/catalog/upload-image — tenant-scoped product photo ──────────────
+const crypto = require('crypto');
+const path = require('path');
+let multer;
+let imageSizeFn;
+try { multer = require('multer'); } catch (_) { /* optional */ }
+try {
+  const imageSizeMod = require('image-size');
+  imageSizeFn = imageSizeMod.imageSize || imageSizeMod.default || imageSizeMod;
+} catch (_) { /* optional */ }
+
+const PRODUCT_IMAGES_BUCKET = process.env.PRODUCT_IMAGES_BUCKET || 'product-images';
+const MAX_IMAGE_BYTES = 1 * 1024 * 1024;
+const MIN_LANDSCAPE_RATIO = 1.2;
+const ALLOWED_IMAGE_MIME = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const UPLOAD_RATE_WINDOW_MS = 60 * 1000;
+const UPLOAD_RATE_MAX = 30;
+/** @type {Map<string, { count: number, resetAt: number }>} */
+const uploadRateByIp = new Map();
+
+function clientIp(req) {
+  const xf = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return xf || req.ip || req.socket?.remoteAddress || 'unknown';
+}
+
+function checkUploadRateLimit(ip) {
+  const now = Date.now();
+  let row = uploadRateByIp.get(ip);
+  if (!row || row.resetAt <= now) {
+    row = { count: 0, resetAt: now + UPLOAD_RATE_WINDOW_MS };
+    uploadRateByIp.set(ip, row);
+  }
+  row.count += 1;
+  if (row.count > UPLOAD_RATE_MAX) {
+    const err = new Error('Too many image uploads. Please wait a minute and try again.');
+    err.status = 429;
+    throw err;
+  }
+}
+
+function extForMime(mime) {
+  if (mime === 'image/png') return 'png';
+  if (mime === 'image/webp') return 'webp';
+  return 'jpg';
+}
+
+const imageUpload = multer
+  ? multer({
+      storage: multer.memoryStorage(),
+      limits: { fileSize: MAX_IMAGE_BYTES, files: 1 },
+      fileFilter(_req, file, cb) {
+        if (!ALLOWED_IMAGE_MIME.has(String(file.mimetype || '').toLowerCase())) {
+          return cb(new Error('Only JPEG, PNG, or WebP images are allowed'));
+        }
+        return cb(null, true);
+      },
+    })
+  : null;
+
+async function requireMenuUploadRole(req, res) {
+  const OWNER_ROLES = ['owner', 'brand_owner'];
+  if (!OWNER_ROLES.includes(req.user_role) && req.user_role !== 'manager') {
+    res.status(403).json({ error: 'Unauthorized' });
+    return false;
+  }
+  if (req.user_role === 'manager') {
+    const { data: tenant, error: tenantErr } = await supabaseAdmin
+      .from('tenants')
+      .select('allow_manager_menu_upload')
+      .eq('id', req.restaurant_id)
+      .maybeSingle();
+    if (tenantErr) {
+      res.status(500).json({ error: 'Could not verify upload permission' });
+      return false;
+    }
+    if (!tenant?.allow_manager_menu_upload) {
+      res.status(403).json({
+        error: 'Menu upload is restricted to the owner for this outlet. Ask your owner to enable manager upload access in Settings.',
+      });
+      return false;
+    }
+  }
+  return true;
+}
+
+async function handleCatalogImageUpload(req, res) {
+  try {
+    if (!multer || !imageUpload) {
+      return res.status(503).json({ error: 'Image upload is not available (multer missing)' });
+    }
+    if (!imageSizeFn) {
+      return res.status(503).json({ error: 'Image upload is not available (image-size missing)' });
+    }
+    if (!(await requireMenuUploadRole(req, res))) return;
+
+    try {
+      checkUploadRateLimit(clientIp(req));
+    } catch (rateErr) {
+      return res.status(rateErr.status || 429).json({ error: rateErr.message });
+    }
+
+    const file = req.file;
+    if (!file?.buffer?.length) {
+      return res.status(400).json({ error: 'image file is required (field name: image)' });
+    }
+    if (file.size > MAX_IMAGE_BYTES || file.buffer.length > MAX_IMAGE_BYTES) {
+      return res.status(400).json({
+        error: 'Image must be 1MB or smaller after compression',
+        code: 'file_too_large',
+      });
+    }
+    const mime = String(file.mimetype || '').toLowerCase();
+    if (!ALLOWED_IMAGE_MIME.has(mime)) {
+      return res.status(400).json({ error: 'Only JPEG, PNG, or WebP images are allowed' });
+    }
+
+    let dimensions;
+    try {
+      dimensions = imageSizeFn(file.buffer);
+    } catch (dimErr) {
+      return res.status(400).json({ error: 'Could not read image dimensions', code: 'invalid_image' });
+    }
+    const width = Number(dimensions?.width) || 0;
+    const height = Number(dimensions?.height) || 0;
+    if (!width || !height) {
+      return res.status(400).json({ error: 'Could not read image dimensions', code: 'invalid_image' });
+    }
+    if (width <= height * MIN_LANDSCAPE_RATIO) {
+      return res.status(400).json({
+        error: 'This photo looks like portrait/square — please upload a landscape photo',
+        code: 'not_landscape',
+        width,
+        height,
+      });
+    }
+
+    const restaurantId = String(req.restaurant_id || '').trim();
+    if (!restaurantId) {
+      return res.status(400).json({ error: 'No outlet context' });
+    }
+
+    const originalFilename = path.basename(String(file.originalname || 'image.jpg'));
+    const ext = extForMime(mime);
+    const storagePath = `${restaurantId}/${crypto.randomUUID()}.${ext}`;
+
+    const { error: uploadErr } = await supabaseAdmin.storage
+      .from(PRODUCT_IMAGES_BUCKET)
+      .upload(storagePath, file.buffer, {
+        contentType: mime,
+        upsert: false,
+      });
+    if (uploadErr) {
+      console.error('[catalog/upload-image] storage:', uploadErr.message);
+      return res.status(500).json({ error: 'Could not store image' });
+    }
+
+    const { data: pub } = supabaseAdmin.storage
+      .from(PRODUCT_IMAGES_BUCKET)
+      .getPublicUrl(storagePath);
+    const url = pub?.publicUrl || null;
+    if (!url) {
+      return res.status(500).json({ error: 'Could not resolve public image URL' });
+    }
+
+    return res.json({
+      url,
+      original_filename: originalFilename,
+      path: storagePath,
+      width,
+      height,
+    });
+  } catch (err) {
+    console.error('[catalog/upload-image]', err.message);
+    if (/File too large|LIMIT_FILE_SIZE/i.test(err.message || '')) {
+      return res.status(400).json({ error: 'Image must be 1MB or smaller', code: 'file_too_large' });
+    }
+    return res.status(err.status || 500).json({ error: err.message || 'Upload failed' });
+  }
+}
+
+if (imageUpload) {
+  router.post(
+    '/upload-image',
+    authenticateToken,
+    getRestaurantId,
+    (req, res, next) => {
+      imageUpload.single('image')(req, res, (err) => {
+        if (err) {
+          const msg = err.message || 'Upload failed';
+          const status = /File too large|LIMIT_FILE_SIZE/i.test(msg) ? 400 : 400;
+          return res.status(status).json({
+            error: /File too large|LIMIT_FILE_SIZE/i.test(msg)
+              ? 'Image must be 1MB or smaller'
+              : msg,
+            code: /File too large|LIMIT_FILE_SIZE/i.test(msg) ? 'file_too_large' : undefined,
+          });
+        }
+        return next();
+      });
+    },
+    handleCatalogImageUpload,
+  );
+}
+
 // ── PUT /api/menu-items/:id/availability — Toggle stock + Meta Catalog push ──
 
 async function handleMenuItemAvailability(req, res) {
