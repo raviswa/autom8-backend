@@ -946,55 +946,73 @@ async function sendPlatformWhatsAppTemplate(toNumber, opts = {}) {
       || process.env.MUNAFE_SYSTEM_OTP_TEMPLATE_LANG
       || 'en';
 
-    const components = [];
-    const bodyParams = opts.bodyParams || [];
-    if (bodyParams.length) {
-      components.push({
-        type: 'body',
-        parameters: bodyParams.map((text) => ({ type: 'text', text: String(text) })),
-      });
-    }
-    // Authentication templates usually bind the same OTP to the URL/copy-code button
-    const buttonParams = opts.buttonParams || bodyParams;
-    if (buttonParams.length) {
-      components.push({
-        type: 'button',
-        sub_type: 'url',
-        index: '0',
-        parameters: buttonParams.map((text) => ({ type: 'text', text: String(text) })),
-      });
-    }
-
     const to = String(toNumber || '').replace(/\D/g, '');
     if (!to) {
       console.warn('[WhatsApp:platform] Empty destination phone');
       return false;
     }
 
-    const payload = {
-      messaging_product: 'whatsapp',
-      to,
-      type: 'template',
-      template: {
-        name: templateName,
-        language: { code: languageCode },
-        ...(components.length ? { components } : {}),
-      },
+    const buildComponents = (includeButton) => {
+      const components = [];
+      const bodyParams = opts.bodyParams || [];
+      if (bodyParams.length) {
+        components.push({
+          type: 'body',
+          parameters: bodyParams.map((text) => ({ type: 'text', text: String(text) })),
+        });
+      }
+      if (includeButton) {
+        const buttonParams = opts.buttonParams || bodyParams;
+        if (buttonParams.length) {
+          components.push({
+            type: 'button',
+            sub_type: 'url',
+            index: '0',
+            parameters: buttonParams.map((text) => ({ type: 'text', text: String(text) })),
+          });
+        }
+      }
+      return components;
     };
 
-    const response = await fetch(`${apiUrl}/${phoneNumberId}/messages`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(10_000),
-    });
+    const postTemplate = async (includeButton) => {
+      const components = buildComponents(includeButton);
+      const payload = {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'template',
+        template: {
+          name: templateName,
+          language: { code: languageCode },
+          ...(components.length ? { components } : {}),
+        },
+      };
+      const response = await fetch(`${apiUrl}/${phoneNumberId}/messages`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(10_000),
+      });
+      const errBody = response.ok ? null : await response.json().catch(() => ({}));
+      return { ok: response.ok, status: response.status, errBody };
+    };
 
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      console.error('[WhatsApp:platform] API error:', JSON.stringify(err).slice(0, 400));
+    // Auth templates often include a copy-code / URL button — if Graph rejects the
+    // button component, retry body-only so OTP still delivers.
+    let result = await postTemplate(true);
+    if (!result.ok) {
+      console.warn(
+        '[WhatsApp:platform] template+button failed — retrying body-only:',
+        JSON.stringify(result.errBody || {}).slice(0, 400),
+      );
+      result = await postTemplate(false);
+    }
+
+    if (!result.ok) {
+      console.error('[WhatsApp:platform] API error:', JSON.stringify(result.errBody || {}).slice(0, 400));
       return false;
     }
     console.log(`[WhatsApp:platform] ✅ Template ${templateName} sent to ${to.slice(-4)}`);

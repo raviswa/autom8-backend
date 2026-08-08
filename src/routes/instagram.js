@@ -696,15 +696,8 @@ router.post('/publish', authenticateToken, getRestaurantId, async (req, res) => 
 
 router.get('/oauth/start', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
   try {
-    try {
-      await requireStepUpInHandler(req, 'instagram_bind');
-    } catch (stepErr) {
-      return res.status(stepErr.status || 403).json({
-        error: stepErr.message || 'Verification required before connecting Instagram.',
-        code: stepErr.code,
-      });
-    }
-
+    // Meta Facebook Login is the verification for Connect Instagram.
+    // WhatsApp step-up is reserved for manual token paste (/token/exchange).
     if (!isInstagramOAuthConfigured()) {
       return res.status(503).json({
         error: 'Instagram OAuth is not configured on the server. Set META_APP_ID, META_APP_SECRET, and META_INSTAGRAM_OAUTH_REDIRECT_URI.',
@@ -794,15 +787,6 @@ router.get('/oauth/pending', authenticateToken, getRestaurantId, requireSettings
 
 router.post('/oauth/select-page', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
   try {
-    try {
-      await requireStepUpInHandler(req, 'instagram_bind');
-    } catch (stepErr) {
-      return res.status(stepErr.status || 403).json({
-        error: stepErr.message || 'Verification required before connecting Instagram.',
-        code: stepErr.code,
-      });
-    }
-
     const result = await selectInstagramPage(req.restaurant_id, req.body?.page_id);
     await writeAuditLog({
       user_id: req.user_id || null,

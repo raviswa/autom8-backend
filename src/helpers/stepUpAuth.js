@@ -8,7 +8,12 @@
 
 const crypto = require('crypto');
 const { supabaseAdmin } = require('../config/supabase');
-const { sendPlatformWhatsAppTemplate, normalizePhoneDigits } = require('./whatsapp');
+const {
+  sendPlatformWhatsAppTemplate,
+  sendWhatsAppMessage,
+  isPlatformWhatsAppConfigured,
+  normalizePhoneDigits,
+} = require('./whatsapp');
 const { hashOtpCode } = require('./loginOtp');
 
 const OTP_TTL_MS = 10 * 60 * 1000;
@@ -175,11 +180,39 @@ async function requestStepUpOtp({ userId, tenantId, purpose, destPhoneOverride =
     buttonParams: [code],
   });
   if (!sent) {
-    console.warn(`[step-up] Platform WhatsApp send failed for tenant ${tenantId} purpose=${purposeNorm}`);
-    throw httpError(
-      'Could not send the WhatsApp verification code. Check that platform OTP WhatsApp is configured, then try again.',
+    // Fallback: send plain OTP via the restaurant's own WhatsApp line (24h window).
+    // Unblocks Instagram Connect / Settings step-up when platform OTP WABA is down.
+    const fallbackText =
+      `Autom8 verification code: ${code}\n\n`
+      + `It expires in 10 minutes. Do not share this code.`;
+    const fallbackOk = await sendWhatsAppMessage(
+      e164 || destPhone,
+      fallbackText,
+      tenantId,
+    );
+    if (fallbackOk) {
+      console.warn(
+        `[step-up] Platform OTP failed — sent via tenant WhatsApp for ${tenantId} purpose=${purposeNorm}`,
+      );
+      return {
+        success: true,
+        message: 'Verification code sent via WhatsApp. It expires in 10 minutes.',
+        masked_phone: maskPhone(destPhone),
+        purpose: purposeNorm,
+        via: 'tenant_whatsapp',
+      };
+    }
+
+    console.warn(`[step-up] Platform + tenant WhatsApp send failed for tenant ${tenantId} purpose=${purposeNorm}`);
+    const configured = isPlatformWhatsAppConfigured();
+    const err = httpError(
+      configured
+        ? 'Could not send the WhatsApp verification code. Ensure your personal WhatsApp is on file under Team, then try again.'
+        : 'Could not send the WhatsApp verification code. Platform OTP WhatsApp is not configured (MUNAFE_SYSTEM_WABA_TOKEN / MUNAFE_SYSTEM_PHONE_NUMBER_ID), and tenant WhatsApp fallback also failed.',
       502,
     );
+    err.code = configured ? 'otp_send_failed' : 'platform_otp_not_configured';
+    throw err;
   }
 
   return {
@@ -187,6 +220,7 @@ async function requestStepUpOtp({ userId, tenantId, purpose, destPhoneOverride =
     message: 'Verification code sent via WhatsApp. It expires in 10 minutes.',
     masked_phone: maskPhone(destPhone),
     purpose: purposeNorm,
+    via: 'platform',
   };
 }
 

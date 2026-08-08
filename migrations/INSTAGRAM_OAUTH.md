@@ -39,9 +39,10 @@ API_PUBLIC_URL=https://api.autom8.works
 
 ## Routes
 
-- `GET  /api/instagram/oauth/start` — auth + settings + step-up `instagram_bind` → `{ url }`
+- `GET  /api/instagram/oauth/start` — auth + settings → `{ url }` (Meta Login is the verification; no WhatsApp step-up)
 - `GET  /api/instagram/oauth/callback` — public Meta redirect
 - `GET  /api/instagram/oauth/pending` — multi-Page pick list
 - `POST /api/instagram/oauth/select-page` — finish pick `{ page_id }`
 
-Manual paste / `POST /token/exchange` remain as internal overrides; Settings UI uses Connect Instagram only.
+Manual paste / `POST /token/exchange` still requires step-up purpose `instagram_bind`.
+Settings UI uses Connect Instagram only.
