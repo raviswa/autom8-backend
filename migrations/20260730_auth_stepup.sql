@@ -14,6 +14,7 @@ ALTER TABLE public.login_otp_codes
     'password_reset',
     'delete_account',
     'whatsapp_bind',
+    'instagram_bind',
     'change_owner_phone_old',
     'change_owner_phone_new',
     'change_owner_email',
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS public.auth_stepup_tokens (
   CONSTRAINT auth_stepup_tokens_purpose_check CHECK (purpose IN (
     'delete_account',
     'whatsapp_bind',
+    'instagram_bind',
     'change_owner_phone_old',
     'change_owner_phone_new',
     'change_owner_email',

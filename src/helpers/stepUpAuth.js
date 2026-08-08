@@ -161,7 +161,12 @@ async function requestStepUpOtp({ userId, tenantId, purpose, destPhoneOverride =
     expires_at: expiresAt,
   });
   if (insertErr) {
-    console.error('[step-up] otp insert failed:', insertErr.message);
+    console.error(
+      `[step-up] otp insert failed purpose=${purposeNorm} tenant=${tenantId}:`,
+      insertErr.message,
+      insertErr.code || '',
+      insertErr.details || '',
+    );
     throw httpError('Could not send verification code. Please try again later.', 500);
   }
 
@@ -171,6 +176,10 @@ async function requestStepUpOtp({ userId, tenantId, purpose, destPhoneOverride =
   });
   if (!sent) {
     console.warn(`[step-up] Platform WhatsApp send failed for tenant ${tenantId} purpose=${purposeNorm}`);
+    throw httpError(
+      'Could not send the WhatsApp verification code. Check that platform OTP WhatsApp is configured, then try again.',
+      502,
+    );
   }
 
   return {
