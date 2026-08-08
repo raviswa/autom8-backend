@@ -346,18 +346,23 @@ router.put('/kds/:id/status', authenticateToken, getRestaurantId, async (req, re
         const orderId = kdsItem?.order_item?.order_id;
         if (orderId) {
           const { data: allItems } = await supabaseAdmin.from('kds_items')
-            .select('status, queue, order_item:order_item_id!left(order_id)')
+            .select('id, status, queue, order_item:order_item_id!left(order_id)')
             .eq('restaurant_id', req.restaurant_id);
           const orderItems = (allItems ?? []).filter(i => i.order_item?.order_id === orderId);
-          const allReady = orderItems.length > 0 && orderItems.every(i => i.status === 'ready');
+          // Treat this request's item as ready so parallel advanceAll races still detect allReady
+          const allReady = orderItems.length > 0 && orderItems.every(i =>
+            String(i.id) === String(req.params.id) || i.status === 'ready'
+          );
 
           // Packing queue: when every packing line for this order is ready, create Shiprocket.
           const packingLines = orderItems.filter((i) => i.queue === 'packing');
           const packingAllReady = packingLines.length > 0
-            && packingLines.every((i) => i.status === 'ready');
+            && packingLines.every((i) =>
+              String(i.id) === String(req.params.id) || i.status === 'ready'
+            );
           const packingComplete = packingAllReady || (kdsItem?.queue === 'packing' && allReady);
 
-          if (allReady) {
+          if (allReady || packingComplete) {
             const {
               isShippedLob,
               normalizeOwnTeamMode,
@@ -372,12 +377,12 @@ router.put('/kds/:id/status', authenticateToken, getRestaurantId, async (req, re
               .maybeSingle();
 
             const svc = String(kdsItem?.service_type || '').toLowerCase();
-            const isDelivery = svc === 'delivery' || svc.includes('delivery');
+            let isDelivery = svc === 'delivery' || svc.includes('delivery');
             const shippedLob = isShippedLob(tenant?.lob_type);
 
             let booking = null;
             let meta = {};
-            if (shippedLob && isDelivery) {
+            if (shippedLob) {
               const { resolveBookingForPackedOrder } = require('../../helpers/shiprocketShipment');
               booking = await resolveBookingForPackedOrder({
                 restaurantId: req.restaurant_id,
@@ -387,6 +392,12 @@ router.put('/kds/:id/status', authenticateToken, getRestaurantId, async (req, re
               });
               meta = booking?.meta || {};
               extras.booking_id = booking?.id || null;
+              // Prefer booking service_type when KDS row is missing/ambiguous
+              const bookingSvc = String(booking?.service_type || meta.service_type || '').toLowerCase();
+              if (!isDelivery && (bookingSvc === 'delivery' || bookingSvc.includes('delivery')
+                || String(meta.fulfillment_type || '').toLowerCase() === 'delivery')) {
+                isDelivery = true;
+              }
               extras.delivery_channel = meta.delivery_channel || null;
               extras.own_team_mode = meta.own_team_mode != null
                 ? normalizeOwnTeamMode(meta.own_team_mode)
@@ -405,6 +416,8 @@ router.put('/kds/:id/status', authenticateToken, getRestaurantId, async (req, re
                 || mode === 'own_driver'
                 || !meta.own_team_mode);
 
+            // Only run notify / await-details once when the whole order is ready
+            if (allReady) {
             if (awaitDetails && !shiprocketPath) {
               extras.awaiting_shipment_details = true;
               extras.own_team_mode = mode;
@@ -436,6 +449,12 @@ router.put('/kds/:id/status', authenticateToken, getRestaurantId, async (req, re
                 },
               });
               extras.customer_notified = true;
+            }
+            } else if (packingComplete && awaitDetails && !shiprocketPath) {
+              // Packing lines done but kitchen lines may still be open — still prompt delivery capture
+              extras.awaiting_shipment_details = true;
+              extras.own_team_mode = mode;
+              extras.delivery_channel = channel || 'own_team';
             }
           }
 

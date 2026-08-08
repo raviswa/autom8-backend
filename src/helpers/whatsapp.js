@@ -81,49 +81,107 @@ async function sendWhatsAppMessage(toNumber, message, restaurantId = null) {
 const READ_RECEIPT_DELAY_MS = 4500;
 
 /**
- * Mark an inbound WhatsApp message as read (blue ticks). Optionally show typing.
- * Uses the same Cloud API messages endpoint as outbound sends.
+ * Resolve WhatsApp Cloud API creds by restaurant id and/or inbound phone_number_id.
  */
-async function markWhatsAppMessageRead(messageId, restaurantId = null, { typing = true } = {}) {
+async function resolveWhatsAppSendCreds(restaurantId = null, phoneNumberIdHint = null) {
+  if (restaurantId) {
+    const viaTenant = await getWhatsAppIntegration(restaurantId);
+    if (viaTenant?.accessToken && viaTenant?.phoneNumberId && viaTenant?.apiUrl) {
+      return viaTenant;
+    }
+  }
+
+  const hint = String(phoneNumberIdHint || '').trim();
+  if (hint) {
+    try {
+      const { data } = await supabaseAdmin
+        .from('tenant_integrations')
+        .select('access_token, phone_number_id, api_endpoint, restaurant_id')
+        .eq('phone_number_id', hint)
+        .eq('channel', 'whatsapp')
+        .eq('is_active', true)
+        .limit(1)
+        .maybeSingle();
+      if (data?.access_token && data?.phone_number_id) {
+        return {
+          accessToken: data.access_token,
+          phoneNumberId: data.phone_number_id,
+          apiUrl: (data.api_endpoint || process.env.WHATSAPP_API_URL || 'https://graph.facebook.com/v20.0').replace(/\/$/, ''),
+          provider: 'meta',
+        };
+      }
+    } catch (err) {
+      console.warn('[WhatsApp] cred lookup by phone_number_id failed:', err.message);
+    }
+  }
+
+  if (process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID) {
+    return {
+      accessToken: process.env.WHATSAPP_ACCESS_TOKEN,
+      phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID,
+      apiUrl: (process.env.WHATSAPP_API_URL || 'https://graph.facebook.com/v20.0').replace(/\/$/, ''),
+      provider: 'env',
+    };
+  }
+  return null;
+}
+
+/**
+ * Mark an inbound WhatsApp message as read (blue ticks). Optionally show typing.
+ * Retries without typing_indicator if Graph rejects the combined payload.
+ */
+async function markWhatsAppMessageRead(messageId, restaurantId = null, {
+  typing = true,
+  phoneNumberId = null,
+} = {}) {
   try {
     const wamid = String(messageId || '').trim();
     if (!wamid) return false;
 
-    const creds = restaurantId ? await getWhatsAppIntegration(restaurantId) : null;
-    const accessToken   = creds?.accessToken   || process.env.WHATSAPP_ACCESS_TOKEN;
-    const phoneNumberId = creds?.phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
-    const apiUrl        = creds?.apiUrl        || process.env.WHATSAPP_API_URL;
-
-    if (!accessToken || !phoneNumberId || !apiUrl) {
-      console.warn('[WhatsApp] Missing credentials — skipping mark-as-read');
+    const creds = await resolveWhatsAppSendCreds(restaurantId, phoneNumberId);
+    if (!creds?.accessToken || !creds?.phoneNumberId || !creds?.apiUrl) {
+      console.warn('[WhatsApp] Missing credentials — skipping mark-as-read', {
+        restaurantId: restaurantId || null,
+        phoneNumberId: phoneNumberId || null,
+      });
       return false;
     }
 
-    const body = {
-      messaging_product: 'whatsapp',
-      status: 'read',
-      message_id: wamid,
+    const postRead = async (withTyping) => {
+      const body = {
+        messaging_product: 'whatsapp',
+        status: 'read',
+        message_id: wamid,
+      };
+      if (withTyping) body.typing_indicator = { type: 'text' };
+
+      const response = await fetch(`${creds.apiUrl}/${creds.phoneNumberId}/messages`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${creds.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(8_000),
+      });
+      const errBody = response.ok ? null : await response.json().catch(() => ({}));
+      return { ok: response.ok, status: response.status, errBody };
     };
-    if (typing) {
-      body.typing_indicator = { type: 'text' };
+
+    let result = await postRead(!!typing);
+    if (!result.ok && typing) {
+      console.warn(
+        '[WhatsApp] mark-as-read+typing failed — retrying read-only:',
+        JSON.stringify(result.errBody || {}).slice(0, 300),
+      );
+      result = await postRead(false);
     }
 
-    const response = await fetch(`${apiUrl}/${phoneNumberId}/messages`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(8_000),
-    });
-
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      console.error('[WhatsApp] mark-as-read error:', JSON.stringify(err).slice(0, 300));
+    if (!result.ok) {
+      console.error('[WhatsApp] mark-as-read error:', JSON.stringify(result.errBody || {}).slice(0, 300));
       return false;
     }
-    console.log(`[WhatsApp] ✅ Marked read${typing ? ' + typing' : ''}: ${wamid.slice(0, 24)}…`);
+    console.log(`[WhatsApp] ✅ Marked read: ${wamid.slice(0, 24)}…`);
     return true;
   } catch (err) {
     console.error('[WhatsApp] Failed to mark message read:', err.message);
@@ -134,12 +192,20 @@ async function markWhatsAppMessageRead(messageId, restaurantId = null, { typing 
 /**
  * Fire-and-forget delayed mark-as-read (~4.5s) so inbound messages flip to blue ticks.
  */
-function scheduleWhatsAppReadReceipt(messageId, restaurantId, delayMs = READ_RECEIPT_DELAY_MS) {
+function scheduleWhatsAppReadReceipt(messageId, restaurantId, delayMs = READ_RECEIPT_DELAY_MS, opts = {}) {
   const wamid = String(messageId || '').trim();
-  if (!wamid || !restaurantId) return;
+  if (!wamid) return;
+  // Need either a tenant id or the inbound phone_number_id to resolve creds
+  if (!restaurantId && !opts.phoneNumberId) {
+    console.warn('[WhatsApp] schedule read skipped — no restaurantId or phoneNumberId');
+    return;
+  }
   const ms = Number.isFinite(delayMs) && delayMs >= 0 ? delayMs : READ_RECEIPT_DELAY_MS;
   const timer = setTimeout(() => {
-    void markWhatsAppMessageRead(wamid, restaurantId, { typing: true });
+    void markWhatsAppMessageRead(wamid, restaurantId, {
+      typing: true,
+      phoneNumberId: opts.phoneNumberId || null,
+    });
   }, ms);
   if (typeof timer.unref === 'function') timer.unref();
 }

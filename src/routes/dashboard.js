@@ -554,7 +554,7 @@ router.get('/customer-cohorts', authenticateToken, getRestaurantId, requireOutle
 // parcel_courier / own_driver) from the packing screen.
 router.post('/shipment/manual', authenticateToken, getRestaurantId, requireOutlet, async (req, res) => {
   try {
-    const bookingId = String(req.body?.booking_id || '').trim();
+    let bookingId = String(req.body?.booking_id || '').trim();
     const courierName = String(req.body?.courier_name || '').trim();
     const trackingUrl = String(req.body?.tracking_url || '').trim();
     const awbLegacy = String(req.body?.awb || '').trim();
@@ -562,14 +562,27 @@ router.post('/shipment/manual', authenticateToken, getRestaurantId, requireOutle
     const status = String(req.body?.status || 'Shipped').trim() || 'Shipped';
     const driverName = String(req.body?.driver_name || '').trim();
     const driverPhone = String(req.body?.driver_phone || '').trim();
+    const tokenNumber = String(req.body?.token_number || req.body?.token || '').trim();
+    const orderRef = String(req.body?.order_ref || req.body?.order_number || '').trim();
     const {
       normalizeOwnTeamMode,
       OWN_TEAM_MODES,
     } = require('../helpers/fulfillmentChannels');
     const requestedMode = String(req.body?.own_team_mode || '').trim().toLowerCase();
 
+    if (!bookingId && (tokenNumber || orderRef)) {
+      const { resolveBookingForPackedOrder } = require('../helpers/shiprocketShipment');
+      const found = await resolveBookingForPackedOrder({
+        restaurantId: req.restaurant_id,
+        tokenNumber: tokenNumber || null,
+        customerPhone: null,
+        orderNumber: orderRef || null,
+      });
+      bookingId = found?.id || '';
+    }
+
     if (!bookingId) {
-      return res.status(400).json({ error: 'booking_id is required' });
+      return res.status(400).json({ error: 'booking_id is required (or token_number / order_ref)' });
     }
 
     const { data: tenant, error: tenantErr } = await supabaseAdmin
@@ -950,8 +963,14 @@ router.get('/shipment-lookup', authenticateToken, getRestaurantId, requireOutlet
       token_number: booking.token_number,
       order_ref: booking.order_ref,
       service_type: booking.service_type,
-      fulfillment_type: booking.meta?.fulfillment_type || null,
-      delivery_channel: booking.meta?.delivery_channel || null,
+      fulfillment_type: booking.meta?.fulfillment_type
+        || (String(booking.service_type || '').toLowerCase().includes('delivery') ? 'delivery' : null),
+      // Empty channel on a delivery booking → treat as own_team so packing UI can capture details
+      delivery_channel: booking.meta?.delivery_channel
+        || (String(booking.service_type || '').toLowerCase().includes('delivery')
+          || String(booking.meta?.fulfillment_type || '').toLowerCase() === 'delivery'
+          ? 'own_team'
+          : null),
       delivery_channel_status: booking.meta?.delivery_channel_status || null,
       own_team_mode: booking.meta?.own_team_mode || null,
       shipment: {
@@ -959,7 +978,11 @@ router.get('/shipment-lookup', authenticateToken, getRestaurantId, requireOutlet
         tracking_url: require('../helpers/orderJourney').trackUrlFromMeta(booking.meta || {}),
       },
       skip_reason: require('../helpers/orderJourney').skipReasonFor({
-        meta: booking.meta || {},
+        meta: {
+          ...(booking.meta || {}),
+          delivery_channel: booking.meta?.delivery_channel
+            || (String(booking.service_type || '').toLowerCase().includes('delivery') ? 'own_team' : null),
+        },
         restaurant,
         serviceType: booking.service_type,
       }),

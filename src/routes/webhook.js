@@ -135,9 +135,15 @@ router.post('/webhook', async (req, res) => {
             }
           }
 
-          // Delayed blue ticks + typing (~4.5s) — does not block reply pipeline
-          if (restaurantId && message.id) {
-            scheduleWhatsAppReadReceipt(message.id, restaurantId);
+          // Delayed blue ticks + typing (~4.5s) — does not block reply pipeline.
+          // Pass phone_number_id so read still works when restaurant resolve fails
+          // (or Meta webhook only has PNID).
+          if (message.id) {
+            scheduleWhatsAppReadReceipt(message.id, restaurantId, 4500, {
+              phoneNumberId: metadata?.phone_number_id || null,
+            });
+          } else {
+            console.warn('[WA Webhook] inbound message missing id — cannot mark as read');
           }
 
           const session = restaurantId

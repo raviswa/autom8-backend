@@ -37,7 +37,12 @@ from tools.db_tools import (
     get_restaurant_by_id,
     get_booking_with_customer,
 )
-from tools.whatsapp_tools import parse_incoming, send_whatsapp_message, send_whatsapp_cta_url
+from tools.whatsapp_tools import (
+    compact_location_label,
+    parse_incoming,
+    send_whatsapp_message,
+    send_whatsapp_cta_url,
+)
 from agents.customer.booking_helpers import touch_session_activity, is_reset_keyword, mark_session_visit_complete, should_skip_feedback_bridge
 from tools.feedback_bridge import try_handle_feedback_via_api, try_dismiss_feedback_via_api
 from tools.payment_tools import (
@@ -310,7 +315,7 @@ def _extract_message_body(message_obj: dict) -> str:
         lng     = loc.get("longitude", "")
         name    = loc.get("name", "")
         address = loc.get("address", "")
-        label   = f"{name} {address}".strip() or f"{lat}, {lng}"
+        label = compact_location_label(str(name), str(address), str(lat), str(lng))
         return f"LOCATION:{lat},{lng}|{label}"
 
     # order, reaction, image, sticker, etc. — caller handles these separately
@@ -665,6 +670,19 @@ async def _process_meta_payload(payload: dict):
         profile_name  = (
             value.get("contacts", [{}])[0].get("profile", {}).get("name", "")
         )
+
+        # Delayed blue ticks + typing (~4.5s). Covers Meta→Python webhook path
+        # when Node /api/whatsapp/webhook is not the subscribed callback URL.
+        if message_id and message_id != "unknown":
+            try:
+                from tools.whatsapp_tools import schedule_whatsapp_read_receipt
+                schedule_whatsapp_read_receipt(
+                    message_id,
+                    restaurant_id,
+                    phone_number_id=str(phone_number_id or "") or None,
+                )
+            except Exception as read_err:
+                logger.warning("[WhatsApp] schedule read receipt failed: %s", read_err)
 
         # 3e-i. Minimal-message LOBs (packaged food / PSL / retail) — single
         # webcart-link reply per turn, via the existing (but previously

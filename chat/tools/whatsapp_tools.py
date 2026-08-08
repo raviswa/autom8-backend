@@ -20,6 +20,23 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 
+def compact_location_label(name: str, address: str, lat: str = "", lng: str = "") -> str:
+    """Dedupe WhatsApp location name/address when they are the same Plus Code string."""
+    n = str(name or "").strip()
+    a = str(address or "").strip()
+    if a and n and (n.lower() in a.lower() or a.lower() in n.lower()):
+        return a if len(a) >= len(n) else n
+    if a and n:
+        return f"{n} - {a}"
+    if a:
+        return a
+    if n:
+        return n
+    if lat or lng:
+        return f"{lat}, {lng}".strip(", ")
+    return ""
+
+
 # ─── Shared HTTP client ───────────────────────────────────────────────────────
 _http_client: httpx.AsyncClient | None = None
 
@@ -104,6 +121,114 @@ async def send_whatsapp_message(
     except Exception as e:
         logger.error(f"Failed to send WhatsApp message to {phone}: {e}")
         return False
+
+
+READ_RECEIPT_DELAY_SEC = 4.5
+
+
+async def mark_whatsapp_message_read(
+    message_id: str,
+    restaurant_id: str | None = None,
+    *,
+    typing: bool = True,
+    phone_number_id: str | None = None,
+) -> bool:
+    """Mark inbound message as read (blue ticks); optionally show typing."""
+    wamid = str(message_id or "").strip()
+    if not wamid:
+        return False
+
+    credentials = None
+    if restaurant_id:
+        credentials = await _get_whatsapp_credentials(restaurant_id)
+
+    if not credentials and phone_number_id:
+        # Fall back to env / global token with the inbound PNID
+        token = getattr(settings, "whatsapp_access_token", None) or getattr(
+            settings, "botbiz_access_token", None
+        )
+        api = getattr(settings, "whatsapp_api_url", None) or "https://graph.facebook.com/v22.0"
+        if token:
+            credentials = {
+                "access_token": token,
+                "phone_number_id": str(phone_number_id).strip(),
+                "api_endpoint": str(api).rstrip("/"),
+            }
+
+    if not credentials:
+        logger.warning("[WhatsApp] mark-as-read skipped — no credentials")
+        return False
+
+    url = f"{credentials['api_endpoint']}/{credentials['phone_number_id']}/messages"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {credentials['access_token']}",
+    }
+
+    async def _post(with_typing: bool) -> bool:
+        body: Dict[str, Any] = {
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": wamid,
+        }
+        if with_typing:
+            body["typing_indicator"] = {"type": "text"}
+        client = _get_http_client()
+        response = await client.post(url, json=body, headers=headers)
+        if response.status_code in (200, 201):
+            return True
+        logger.warning(
+            "mark_whatsapp_message_read → %s | %s",
+            response.status_code,
+            response.text[:200],
+        )
+        return False
+
+    try:
+        ok = await _post(bool(typing))
+        if not ok and typing:
+            ok = await _post(False)
+        if ok:
+            logger.info("[WhatsApp] marked read: %s…", wamid[:24])
+        return ok
+    except Exception as e:
+        logger.error("Failed to mark WhatsApp message read: %s", e)
+        return False
+
+
+def schedule_whatsapp_read_receipt(
+    message_id: str,
+    restaurant_id: str | None = None,
+    *,
+    phone_number_id: str | None = None,
+    delay_sec: float = READ_RECEIPT_DELAY_SEC,
+) -> None:
+    """Fire-and-forget delayed mark-as-read (covers Meta→Python webhook path)."""
+    import asyncio
+
+    wamid = str(message_id or "").strip()
+    if not wamid:
+        return
+    if not restaurant_id and not phone_number_id:
+        return
+
+    async def _delayed() -> None:
+        try:
+            await asyncio.sleep(max(0.0, float(delay_sec)))
+            await mark_whatsapp_message_read(
+                wamid,
+                restaurant_id,
+                typing=True,
+                phone_number_id=phone_number_id,
+            )
+        except Exception as e:
+            logger.warning("schedule_whatsapp_read_receipt failed: %s", e)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_delayed())
+    except RuntimeError:
+        logger.warning("schedule_whatsapp_read_receipt: no running event loop")
 
 
 def send_location_request_message(
@@ -580,14 +705,7 @@ async def parse_incoming(payload: dict) -> Dict[str, Any]:
             name    = loc.get("name", "")
             address = loc.get("address", "")
             # Prefer WhatsApp's own name/address — no reverse geocoding
-            if name and address:
-                label = f"{name}, {address}"
-            elif name:
-                label = name
-            elif address:
-                label = address
-            else:
-                label = f"{lat}, {lng}"
+            label = compact_location_label(str(name), str(address), str(lat), str(lng))
             message_text = f"LOCATION:{lat},{lng}|{label}"
 
         else:
