@@ -3,10 +3,14 @@
 /**
  * Instagram promo drafts + Content Publishing (Feed / Carousel / Stories).
  *
- * GET  /api/instagram/status         — connection readiness
- * POST /api/instagram/drafts         — AI/fallback sales pitch for an item
- * POST /api/instagram/publish        — confirm and publish (requires IG user id + token)
- * POST /api/instagram/token/exchange — short-lived → long-lived Meta user token
+ * GET  /api/instagram/status              — connection readiness
+ * GET  /api/instagram/oauth/start         — Facebook Login for Business URL
+ * GET  /api/instagram/oauth/callback      — OAuth redirect (public)
+ * GET  /api/instagram/oauth/pending       — multi-page pick list
+ * POST /api/instagram/oauth/select-page   — finish multi-page pick
+ * POST /api/instagram/drafts             — AI/fallback sales pitch for an item
+ * POST /api/instagram/publish            — confirm and publish (requires IG user id + token)
+ * POST /api/instagram/token/exchange     — short-lived → long-lived Meta user token (internal override)
  */
 
 const express = require('express');
@@ -20,6 +24,15 @@ const { buildPromoDraft, collectImageUrls } = require('../helpers/salesCopy');
 const { deriveMenuDiscount } = require('../helpers/menuDiscount');
 const { buildSkuStorySvg } = require('../helpers/skuStory');
 const { requireStepUpInHandler } = require('../helpers/stepUpAuth');
+const {
+  isInstagramOAuthConfigured,
+  getInstagramOAuthUrl,
+  verifyOAuthState,
+  completeInstagramConnect,
+  selectInstagramPage,
+  listPendingPages,
+  buildSettingsRedirect,
+} = require('../helpers/instagramConnect');
 
 const GRAPH = 'https://graph.facebook.com/v20.0';
 const DEFAULT_MIRROR_CAP = 20;
@@ -676,6 +689,136 @@ router.post('/publish', authenticateToken, getRestaurantId, async (req, res) => 
       code: mapped.code,
       meta: mapped.meta || err.meta || undefined,
     });
+  }
+});
+
+// ── Facebook Login for Business (Instagram publishing) ───────────────────────
+
+router.get('/oauth/start', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
+  try {
+    try {
+      await requireStepUpInHandler(req, 'instagram_bind');
+    } catch (stepErr) {
+      return res.status(stepErr.status || 403).json({
+        error: stepErr.message || 'Verification required before connecting Instagram.',
+        code: stepErr.code,
+      });
+    }
+
+    if (!isInstagramOAuthConfigured()) {
+      return res.status(503).json({
+        error: 'Instagram OAuth is not configured on the server. Set META_APP_ID, META_APP_SECRET, and META_INSTAGRAM_OAUTH_REDIRECT_URI.',
+        code: 'oauth_not_configured',
+      });
+    }
+
+    const { url } = getInstagramOAuthUrl(req.restaurant_id);
+    return res.json({ success: true, url });
+  } catch (err) {
+    console.error('[instagram/oauth/start]', err.message);
+    return res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
+/**
+ * Public Meta redirect target — no JWT. State carries restaurantId (HMAC-signed).
+ */
+router.get('/oauth/callback', async (req, res) => {
+  const fail = (message, code = 'oauth_error') => {
+    const dest = buildSettingsRedirect({
+      ig_oauth: 'error',
+      message: String(message || 'Instagram connect failed').slice(0, 240),
+      code,
+    });
+    return res.redirect(302, dest);
+  };
+
+  try {
+    if (req.query.error) {
+      return fail(
+        req.query.error_description || req.query.error || 'Authorization denied',
+        'oauth_denied',
+      );
+    }
+
+    let restaurantId;
+    try {
+      ({ restaurantId } = verifyOAuthState(req.query.state));
+    } catch (stateErr) {
+      return fail(stateErr.message, stateErr.code || 'oauth_state_invalid');
+    }
+
+    const code = String(req.query.code || '').trim();
+    if (!code) return fail('Missing OAuth code', 'oauth_missing_code');
+
+    const result = await completeInstagramConnect(restaurantId, { code });
+    if (result.status === 'pick_required') {
+      return res.redirect(302, buildSettingsRedirect({ ig_oauth: 'pick' }));
+    }
+
+    await writeAuditLog({
+      user_id: null,
+      restaurant_id: restaurantId,
+      action: 'Instagram OAuth connected',
+      details: {
+        ig_user_id: result.ig_user_id,
+        page_id: result.page_id,
+        username: result.username,
+      },
+    }).catch(() => {});
+
+    return res.redirect(302, buildSettingsRedirect({
+      ig_oauth: 'connected',
+      ig_user: result.username || result.ig_user_id || '',
+    }));
+  } catch (err) {
+    console.error('[instagram/oauth/callback]', err.message, err.graph || '');
+    return fail(err.message, err.code || 'oauth_error');
+  }
+});
+
+router.get('/oauth/pending', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
+  try {
+    const pages = listPendingPages(req.restaurant_id);
+    if (!pages) {
+      return res.status(404).json({
+        error: 'No pending Instagram page selection. Connect Instagram again.',
+        code: 'oauth_pending_expired',
+      });
+    }
+    return res.json({ success: true, pages });
+  } catch (err) {
+    return res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
+router.post('/oauth/select-page', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
+  try {
+    try {
+      await requireStepUpInHandler(req, 'instagram_bind');
+    } catch (stepErr) {
+      return res.status(stepErr.status || 403).json({
+        error: stepErr.message || 'Verification required before connecting Instagram.',
+        code: stepErr.code,
+      });
+    }
+
+    const result = await selectInstagramPage(req.restaurant_id, req.body?.page_id);
+    await writeAuditLog({
+      user_id: req.user_id || null,
+      restaurant_id: req.restaurant_id,
+      action: 'Instagram OAuth page selected',
+      details: {
+        ig_user_id: result.ig_user_id,
+        page_id: result.page_id,
+        username: result.username,
+      },
+    }).catch(() => {});
+
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[instagram/oauth/select-page]', err.message);
+    return res.status(err.status || 500).json({ error: err.message, code: err.code });
   }
 });
 

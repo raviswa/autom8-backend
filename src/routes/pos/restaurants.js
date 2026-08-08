@@ -616,6 +616,12 @@ function sanitizeMetaIntegration(row, channel) {
   const safeConfig = {};
   if (cfg.token_expires_at) safeConfig.token_expires_at = String(cfg.token_expires_at);
   if (cfg.token_type) safeConfig.token_type = String(cfg.token_type);
+  if (cfg.oauth) safeConfig.oauth = true;
+  if (cfg.connected_at) safeConfig.connected_at = String(cfg.connected_at);
+  if (cfg.username) safeConfig.username = String(cfg.username).replace(/^@/, '');
+  if (cfg.page_id) safeConfig.page_id = String(cfg.page_id);
+  if (cfg.page_name) safeConfig.page_name = String(cfg.page_name);
+  if (cfg.ig_user_id) safeConfig.ig_user_id = String(cfg.ig_user_id);
   return {
     id: row.id,
     channel: row.channel || channel,

@@ -969,6 +969,8 @@ async function registerChain(req, res, opts) {
   let authUserId = null;
 
   try {
+    assertDisclosureAccepted(req.body || {});
+
     // 1. Create brands row
     const { data: brand, error: brandErr } = await supabaseAdmin
       .from('brands')
@@ -1017,11 +1019,17 @@ async function registerChain(req, res, opts) {
     let outletOwnerId = null;
 
     if (first_outlet?.name) {
+      const outletEmail = outlet_owner_email?.trim().toLowerCase()
+        || `outlet-1@brand-${brandId}.internal`;
+      const stamp = buildTenantInsertFields({
+        name: first_outlet.name.trim(),
+        email: outletEmail,
+        body: req.body || {},
+      });
       const outletRow = {
         brand_id:               brandId,
         name:                   first_outlet.name.trim(),
-        email:                  outlet_owner_email?.trim().toLowerCase()
-                                  || `outlet-1@brand-${brandId}.internal`,
+        email:                  outletEmail,
         phone:                  first_outlet.phone        || null,
         whatsapp_number:        first_outlet.whatsapp_number || null,
         waba_id:                waba_id                   || null,
@@ -1037,6 +1045,11 @@ async function registerChain(req, res, opts) {
         sort_order:             0,
         is_active:              true,
         subscribed_features:    DEFAULT_FEATURES,
+        platform_charge_enabled: stamp.platform_charge_enabled,
+        platform_charge_conversation: stamp.platform_charge_conversation,
+        platform_charge_per_order: stamp.platform_charge_per_order,
+        disclosure_version: stamp.disclosure_version,
+        disclosure_accepted_at: stamp.disclosure_accepted_at,
       };
 
       let { data: restaurant, error: restErr } = await supabaseAdmin
@@ -1214,6 +1227,9 @@ async function registerChain(req, res, opts) {
     if (authUserId) supabaseAdmin.auth.admin.deleteUser(authUserId).catch(() => {});
     if (brandId)    supabaseAdmin.from('brands').delete().eq('id', brandId).catch(() => {});
     console.error('[onboarding/chain]', err.message);
+    if (err.status === 400 || err.code === 'disclosure_required' || err.code === 'disclosure_version_stale') {
+      return res.status(400).json({ error: err.message, code: err.code });
+    }
     if (err.message?.includes('duplicate') || err.message?.includes('already exists'))
       return res.status(409).json({ error: 'A brand or user with this email already exists.' });
     res.status(500).json({ error: err.message });
