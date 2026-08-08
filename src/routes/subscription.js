@@ -38,6 +38,7 @@ const {
 } = require('../helpers/subscriptionAccess');
 const {
   MONTHLY_PRICE_INR,
+  calculateMonthlyPrice,
   phonepeConfigured,
   applyOfferDiscount,
   createSubscriptionPayPage,
@@ -101,10 +102,26 @@ function computeBillingFlags(sub, restaurantId = null) {
   };
 }
 
+async function loadTenantForPricing(restaurantId) {
+  if (!restaurantId) return { lob_type: 'restaurant', supply_enabled: false };
+  const { data } = await supabaseAdmin
+    .from('tenants')
+    .select('id, lob_type, supply_enabled')
+    .eq('id', restaurantId)
+    .maybeSingle();
+  return data || { lob_type: 'restaurant', supply_enabled: false };
+}
+
+async function listPriceForRestaurant(restaurantId) {
+  const tenant = await loadTenantForPricing(restaurantId);
+  return calculateMonthlyPrice(tenant);
+}
+
 async function markSubscriptionPaid({ restaurantId, paymentRowId, amountInr, merchantTxnId }) {
   const now = new Date();
   const renews = new Date(now);
   renews.setDate(renews.getDate() + 30);
+  const basePrice = await listPriceForRestaurant(restaurantId);
 
   await supabaseAdmin
     .from('tenant_subscription_payments')
@@ -127,7 +144,7 @@ async function markSubscriptionPaid({ restaurantId, paymentRowId, amountInr, mer
         status: 'active',
         renews_at: renews.toISOString(),
         final_price: amountInr,
-        base_price: MONTHLY_PRICE_INR,
+        base_price: basePrice,
         billing_cycle: 'monthly',
         updated_at: now.toISOString(),
       })
@@ -137,7 +154,7 @@ async function markSubscriptionPaid({ restaurantId, paymentRowId, amountInr, mer
       restaurant_id: restaurantId,
       status: 'active',
       billing_cycle: 'monthly',
-      base_price: MONTHLY_PRICE_INR,
+      base_price: basePrice,
       discount_pct: 0,
       final_price: amountInr,
       renews_at: renews.toISOString(),
@@ -187,7 +204,7 @@ router.get('/', authenticateToken, getRestaurantId, async (req, res) => {
 
     const { data: restaurant } = await supabaseAdmin
       .from('tenants')
-      .select('subscribed_features, name, display_name, whatsapp_needs_existing_pin')
+      .select('subscribed_features, name, display_name, whatsapp_needs_existing_pin, lob_type, supply_enabled')
       .eq('id', req.restaurant_id)
       .single();
 
@@ -234,7 +251,7 @@ router.get('/', authenticateToken, getRestaurantId, async (req, res) => {
       .order('created_at', { ascending: false })
       .limit(20);
 
-    const basePrice = MONTHLY_PRICE_INR;
+    const basePrice = calculateMonthlyPrice(restaurant || {});
     const appliedOffer = sub?.applied_offer_code
       ? await loadOfferByCode(sub.applied_offer_code)
       : null;
@@ -299,7 +316,7 @@ router.get('/brand', authenticateToken, getRestaurantId, async (req, res) => {
 
     const { data: outlets } = await supabaseAdmin
       .from('tenants')
-      .select('id, name, display_name, whatsapp_number, is_active')
+      .select('id, name, display_name, whatsapp_number, is_active, lob_type, supply_enabled')
       .eq('brand_id', req.brand_id)
       .eq('is_active', true)
       .order('name', { ascending: true });
@@ -319,7 +336,7 @@ router.get('/brand', authenticateToken, getRestaurantId, async (req, res) => {
         status: sub?.status || 'trial',
         trial_ends_at: sub?.trial_ends_at || null,
         renews_at: sub?.renews_at || null,
-        price: MONTHLY_PRICE_INR,
+        price: calculateMonthlyPrice(o),
         soft_locked: billing.soft_locked,
         lifetime: isLifetimeTenant(o.id),
         days_until_due: billing.days_until_due,
@@ -327,7 +344,7 @@ router.get('/brand', authenticateToken, getRestaurantId, async (req, res) => {
       });
     }
 
-    const total = list.length * MONTHLY_PRICE_INR;
+    const total = list.reduce((sum, row) => sum + (Number(row.price) || 0), 0);
     res.json({
       success: true,
       brand_id: req.brand_id,
@@ -335,7 +352,7 @@ router.get('/brand', authenticateToken, getRestaurantId, async (req, res) => {
       outlet_count: list.length,
       total_monthly: total,
       currency: 'INR',
-      per_outlet_price: MONTHLY_PRICE_INR,
+      per_outlet_price: null,
       phonepe_configured: phonepeConfigured(),
     });
   } catch (err) {
@@ -490,11 +507,13 @@ router.post('/apply-offer', authenticateToken, getRestaurantId, async (req, res)
       return res.status(404).json({ error: 'Offer code is invalid or expired' });
     }
 
-    const priced = applyOfferDiscount(MONTHLY_PRICE_INR, offer);
+    const basePrice = await listPriceForRestaurant(restaurantId);
+    const priced = applyOfferDiscount(basePrice, offer);
     await supabaseAdmin
       .from('tenant_subscriptions')
       .update({
         applied_offer_code: offer.code,
+        base_price: basePrice,
         final_price: priced.amountInr,
         updated_at: new Date().toISOString(),
       })
@@ -505,7 +524,7 @@ router.post('/apply-offer', authenticateToken, getRestaurantId, async (req, res)
       code: offer.code,
       discount_type: offer.discount_type,
       discount_value: offer.discount_value,
-      base_price: MONTHLY_PRICE_INR,
+      base_price: basePrice,
       final_price: priced.amountInr,
       discount_inr: priced.discountInr,
       currency: 'INR',
@@ -538,7 +557,8 @@ router.post('/checkout', authenticateToken, getRestaurantId, async (req, res) =>
     const offer = sub?.applied_offer_code
       ? await loadOfferByCode(sub.applied_offer_code)
       : null;
-    const priced = applyOfferDiscount(MONTHLY_PRICE_INR, offer);
+    const basePrice = await listPriceForRestaurant(restaurantId);
+    const priced = applyOfferDiscount(basePrice, offer);
 
     const now = new Date();
     const periodEnd = new Date(now);
@@ -747,14 +767,15 @@ router.put('/paid-features', requireKdsSecret, async (req, res) => {
     } else {
       const trialEnds = new Date();
       trialEnds.setDate(trialEnds.getDate() + 30);
+      const basePrice = await listPriceForRestaurant(restaurant_id);
       await supabaseAdmin.from('tenant_subscriptions').insert({
         restaurant_id,
         features:      paid_features,
         status:        'active',
         billing_cycle: 'monthly',
-        base_price:    MONTHLY_PRICE_INR,
+        base_price:    basePrice,
         discount_pct:  0,
-        final_price:   MONTHLY_PRICE_INR,
+        final_price:   basePrice,
         trial_ends_at: trialEnds.toISOString(),
       });
     }

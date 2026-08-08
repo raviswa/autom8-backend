@@ -65,6 +65,20 @@ async def get_supplier_for_supply_tenant(restaurant_id: str) -> Optional[dict]:
         return None
 
     async with httpx.AsyncClient(timeout=10) as client:
+        # Dual-LOB / supply_enabled: prefer suppliers.restaurant_id
+        by_rest = await client.get(
+            _url("suppliers"),
+            headers=_headers(),
+            params={
+                "restaurant_id": f"eq.{restaurant_id}",
+                "is_active": "eq.true",
+                "select": "id,business_name,email,auth_user_id,restaurant_id",
+                "limit": "1",
+            },
+        )
+        if by_rest.status_code == 200 and by_rest.json():
+            return by_rest.json()[0]
+
         emp_resp = await client.get(
             _url("employees"),
             headers=_headers(),

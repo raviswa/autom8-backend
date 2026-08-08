@@ -78,6 +78,7 @@ function buildTenantInsertFields(opts) {
     manager_phone = null,
     meta_catalog_id = null,
     lob_type = 'restaurant',
+    supply_enabled = false,
     business_family = null,
     business_vertical = null,
     business_vertical_other = null,
@@ -120,6 +121,11 @@ function buildTenantInsertFields(opts) {
     manager_phone: manager_phone || phone || null,
     meta_catalog_id: meta_catalog_id || null,
     lob_type: lob_type || 'restaurant',
+    supply_enabled: (() => {
+      const lob = String(lob_type || '').toLowerCase();
+      if (lob === 'b2b' || lob === 'supply' || lob === 'b2b_supply') return true;
+      return supply_enabled === true || supply_enabled === 'true' || supply_enabled === 1;
+    })(),
     display_name: (display_name || name || '').trim() || null,
     city: city || null,
     country: country_code || body.country || null,

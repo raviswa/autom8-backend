@@ -35,8 +35,7 @@ const router  = express.Router();
 
 const { supabaseAdmin }                                  = require('../../config/supabase');
 const { resolveSupplierByPhone, resolveClientByPhone }   = require('../../helpers/resolveSupplier');
-
-const SUPPLY_CHAT_URL = process.env.SUPPLY_CHAT_SERVICE_URL || 'http://localhost:8002';
+const { forwardToSupplyChatService }                     = require('../../helpers/supplyChatForward');
 
 // ── GET /api/supply/webhook/whatsapp — Meta webhook verification ──────────────
 // Register this URL in Meta: https://[supply-backend]/api/supply/webhook/whatsapp
@@ -148,40 +147,6 @@ router.get('/whatsapp/status', (req, res) => {
 // ── Forward to supply chat service ────────────────────────────────────────────
 // Sends a minimal WhatsApp Business API-shaped payload plus resolved context
 // fields (supplier_id, client_id) so the Python agent doesn't need to re-query.
-
-async function forwardToSupplyChatService(message, metadata, value, supplierId, clientId) {
-  const payload = {
-    object: 'whatsapp_business_account',
-    entry: [{
-      changes: [{
-        field: 'messages',
-        value: {
-          ...value,
-          messages:  [message],
-          metadata,
-          // Injected context — not part of the Meta spec but consumed by the supply agent
-          _supply_context: {
-            supplier_id: supplierId,
-            client_id:   clientId,   // null if client not yet registered
-          },
-        },
-      }],
-    }],
-  };
-
-  const response = await fetch(`${SUPPLY_CHAT_URL}/webhook/supply`, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify(payload),
-    signal:  AbortSignal.timeout(10_000),
-  });
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    console.error(`[supply/webhook] Supply chat returned ${response.status}: ${body.slice(0, 200)}`);
-  } else {
-    console.log(`[supply/webhook] ✅ Forwarded ${message.type} from ${message.from} → supplier ${supplierId}`);
-  }
-}
+// Implementation: src/helpers/supplyChatForward.js
 
 module.exports = router;

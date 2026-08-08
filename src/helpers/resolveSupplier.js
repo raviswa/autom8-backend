@@ -103,4 +103,28 @@ async function resolveClientByPhone(senderPhone, supplierId) {
   }
 }
 
-module.exports = { resolveSupplierByPhone, resolveClientByPhone };
+/**
+ * Resolve supplier linked to an Autom8 tenant (dual-LOB / supply_enabled).
+ * @returns {Promise<string|null>} supplier UUID
+ */
+async function resolveSupplierByRestaurantId(restaurantId) {
+  if (!restaurantId) return null;
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('suppliers')
+      .select('id')
+      .eq('restaurant_id', restaurantId)
+      .eq('is_active', true)
+      .maybeSingle();
+    if (error) {
+      console.warn('[resolveSupplier] by restaurant_id:', error.message);
+      return null;
+    }
+    return data?.id ?? null;
+  } catch (err) {
+    console.warn('[resolveSupplier] resolveSupplierByRestaurantId:', err.message);
+    return null;
+  }
+}
+
+module.exports = { resolveSupplierByPhone, resolveClientByPhone, resolveSupplierByRestaurantId };

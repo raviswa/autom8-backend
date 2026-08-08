@@ -53,6 +53,11 @@ async function recordRegistrationFailure(entry) {
 
 /**
  * Fail if phone_number_id / waba_id / whatsapp_number already linked to another active tenant.
+ *
+ * Real (non-demo) exception: when enabling Supply on an *existing* tenant that already
+ * owns this WhatsApp line, pass excludeRestaurantId = that tenant's id so its own
+ * waba_id / phone_number_id / whatsapp_number are not treated as "taken."
+ * Never create a second tenants row or second channel='whatsapp' integration for dual-LOB.
  */
 async function assertWhatsAppAssetsAvailable({
   phone_number_id = null,

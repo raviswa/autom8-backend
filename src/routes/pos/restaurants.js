@@ -53,6 +53,7 @@ const {
   tenantHasCurrentDisclosure,
   META_UTILITY_DISCLOSURE_VERSION,
 } = require('../../helpers/registrationGuards');
+const { setTenantSupplyEnabled } = require('../../helpers/supplyTenant');
 
 router.post('/restaurants/resolve-pickup', authenticateToken, getRestaurantId, requireSettingsAccess, async (req, res) => {
   try {
@@ -244,6 +245,7 @@ router.put(
   'subscribed_features', 'enabled_services',
   'lob_type', 'allow_manager_menu_upload',
   'business_family', 'business_vertical', 'business_vertical_other',
+  'supply_enabled',
   'order_ops_mode',
   'about_enabled', 'about_note', 'inception_date', 'social_links',
     ];
@@ -255,6 +257,7 @@ router.put(
 const OWNER_ONLY_FIELDS = [
   'lob_type', 'allow_manager_menu_upload', 'shiprocket_api_key', 'shiprocket_email',
   'business_family', 'business_vertical', 'business_vertical_other',
+  'supply_enabled',
 ];
 const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
     
@@ -269,6 +272,9 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
     }
     if (updates.platform_charge_enabled !== undefined) {
       updates.platform_charge_enabled = !!updates.platform_charge_enabled;
+    }
+    if (updates.supply_enabled !== undefined) {
+      updates.supply_enabled = !!updates.supply_enabled;
     }
     if (updates.gst_inclusive !== undefined) {
       updates.gst_inclusive = !!updates.gst_inclusive;
@@ -295,6 +301,9 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
 
     if (!isOwnerLike) {
       for (const key of OWNER_ONLY_FIELDS) delete updates[key];
+      if (Object.keys(updates).length === 0) {
+        return res.status(403).json({ error: 'No permitted fields to update' });
+      }
     }
 
     // Step-up OTP when manager phone or WA binding fields change
@@ -322,6 +331,39 @@ const isOwnerLike = ['owner', 'brand_owner'].includes(req.user_role);
       } catch (stepErr) {
         return res.status(stepErr.status || 403).json({
           error: stepErr.message || 'WhatsApp verification required for this change.',
+        });
+      }
+    }
+
+    // Dual-LOB Supply add-on — create/link suppliers + recalc list price (no second WABA)
+    if (Object.prototype.hasOwnProperty.call(updates, 'supply_enabled')) {
+      if (!isOwnerLike) {
+        return res.status(403).json({ error: 'Only the owner can enable or disable Supply.' });
+      }
+      const wantSupply = !!updates.supply_enabled;
+      delete updates.supply_enabled;
+      try {
+        const supplyResult = await setTenantSupplyEnabled(supabaseAdmin, {
+          restaurantId: req.restaurant_id,
+          enabled: wantSupply,
+          authUserId: req.user?.id || req.user_id || null,
+          email: req.user?.email || null,
+        });
+        // If only supply_enabled was sent, return early with price info
+        if (Object.keys(updates).length === 0) {
+          invalidateRestaurantConfigCache?.(req.restaurant_id);
+          return res.json({
+            success: true,
+            restaurant: sanitizeRestaurantForClient(supplyResult.tenant),
+            supplier_id: supplyResult.supplier?.id || null,
+            monthly_price: supplyResult.monthly_price,
+            subscription: supplyResult.subscription,
+          });
+        }
+      } catch (supplyErr) {
+        return res.status(supplyErr.status || 500).json({
+          error: supplyErr.message || 'Failed to update Supply add-on',
+          code: supplyErr.code || null,
         });
       }
     }

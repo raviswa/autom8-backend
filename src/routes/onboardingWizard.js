@@ -34,7 +34,7 @@ const FRONTEND = (process.env.FRONTEND_URL || 'https://app.autom8.works').replac
 const API_PUBLIC = (process.env.PUBLIC_API_URL || process.env.API_PUBLIC_URL || 'https://api.autom8.works').replace(/\/$/, '');
 
 const TENANT_WIZARD_SELECT =
-  'id, name, display_name, slug, city, lob_type, business_family, business_vertical, business_vertical_other, '
+  'id, name, display_name, slug, city, lob_type, supply_enabled, business_family, business_vertical, business_vertical_other, '
   + 'whatsapp_number, contact_phone, manager_phone, subscribed_features, '
   + 'delivery_distance_tiers_enabled, delivery_charge_tiers, shipping_provider, '
   + 'shiprocket_email, shiprocket_api_key, shiprocket_connected, '
@@ -203,17 +203,28 @@ router.put('/wizard/:step', authenticateToken, getRestaurantId, async (req, res)
         lob_type: body.lob_type,
       });
 
+      const { assertSinglePackagedCatalogLob, parseSupplyEnabledFlag } = require('../helpers/subscriptionPricing');
+      const { setTenantSupplyEnabled } = require('../helpers/supplyTenant');
+      try {
+        assertSinglePackagedCatalogLob(body);
+      } catch (lobErr) {
+        return res.status(400).json({ error: lobErr.message, code: lobErr.code || 'lob_conflict' });
+      }
+
       const city = String(body.city || '').trim() || null;
       const wa = String(body.whatsapp_number || body.owner_whatsapp || '').replace(/\D/g, '') || null;
       const desiredSlug = String(body.slug || businessName).trim();
       const slug = await ensureUniqueSlug(req.restaurant_id, desiredSlug);
+      const nextLob = taxonomy.lob_type || body.lob_type || tenant.lob_type || 'retail';
+      const supplyEnabled = parseSupplyEnabledFlag(body, nextLob);
 
       await patchTenant(req.restaurant_id, {
         name: businessName,
         display_name: String(body.display_name || businessName).trim(),
         city,
         slug,
-        lob_type: taxonomy.lob_type || body.lob_type || tenant.lob_type || 'retail',
+        lob_type: nextLob,
+        supply_enabled: supplyEnabled,
         business_family: taxonomy.business_family || body.business_family || null,
         business_vertical: taxonomy.business_vertical || body.business_vertical || null,
         business_vertical_other: taxonomy.business_vertical_other || body.business_vertical_other || null,
@@ -223,6 +234,23 @@ router.put('/wizard/:step', authenticateToken, getRestaurantId, async (req, res)
         onboarding_step: Math.max(Number(tenant.onboarding_step || 0), 1),
         lifecycle_status: 'onboarding',
       });
+
+      if (supplyEnabled) {
+        try {
+          await setTenantSupplyEnabled(supabaseAdmin, {
+            restaurantId: req.restaurant_id,
+            enabled: true,
+            authUserId: req.user?.id || req.user_id || null,
+            email: tenant.contact_email || tenant.email || req.user?.email || null,
+            name: businessName,
+            businessName: String(body.display_name || businessName).trim(),
+            phone: wa,
+            city,
+          });
+        } catch (supErr) {
+          console.warn('[wizard] ensure supplier failed (non-fatal):', supErr.message);
+        }
+      }
     } else if (step === 2 && !skip) {
       const itemName = String(body.item_name || body.name || '').trim();
       const price = parseFloat(body.price);

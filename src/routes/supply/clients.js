@@ -3,7 +3,10 @@
 // Munafe Supply — Module 2: Client / Buyer Management
 //
 // Buyers are supply_clients for any LOB (restaurants, retail, etc.).
-// Optional munafe_restaurant_id bridges shared-WABA demo tenants only.
+// munafe_restaurant_id links a supply_client to an Autom8 tenant id when useful
+// (e.g. dual-LOB sellers, or buyers that are also Autom8 restaurants).
+// For dual-LOB suppliers (suppliers.restaurant_id set), new clients default this
+// bridge to the seller's restaurant_id unless the caller overrides.
 //   GET    /api/supply/clients                — list all clients for supplier
 //   POST   /api/supply/clients                — add new client
 //   GET    /api/supply/clients/:id            — get single client
@@ -185,6 +188,19 @@ router.post('/', authenticateToken, getSupplierContext, opsRoles, async (req, re
 
     const normPhone = normalisePhone(phone);
 
+    // Dual-LOB: default bridge to seller's Autom8 tenant when caller omits the field
+    let bridgeRestaurantId;
+    if (munafe_restaurant_id !== undefined) {
+      bridgeRestaurantId = munafe_restaurant_id || null;
+    } else {
+      const { data: supplierRow } = await supabaseAdmin
+        .from('suppliers')
+        .select('restaurant_id')
+        .eq('id', req.supplier_id)
+        .maybeSingle();
+      bridgeRestaurantId = supplierRow?.restaurant_id || null;
+    }
+
     // ── Check duplicate phone for this supplier ───────────────────────────────
     const { data: existing } = await supabaseAdmin
       .from('supply_clients')
@@ -240,7 +256,7 @@ router.post('/', authenticateToken, getSupplierContext, opsRoles, async (req, re
         credit_limit:         credit_limit,
         credit_terms_days:    credit_terms_days,
         credit_auto_block:    credit_auto_block,
-        munafe_restaurant_id: munafe_restaurant_id || null,
+        munafe_restaurant_id: bridgeRestaurantId || null,
       })
       .select()
       .single();

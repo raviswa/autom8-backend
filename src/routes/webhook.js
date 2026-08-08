@@ -23,6 +23,12 @@ const { supabaseAdmin }         = require('../config/supabase');
 const { sendWhatsAppMessage, scheduleWhatsAppReadReceipt } = require('../helpers/whatsapp');
 const { broadcastToRestaurant } = require('../websocket');
 const { resolveRestaurantByPhone } = require('../helpers/resolveRestaurant');
+const {
+  resolveSupplierByRestaurantId,
+  resolveClientByPhone,
+} = require('../helpers/resolveSupplier');
+const { forwardToSupplyChatService } = require('../helpers/supplyChatForward');
+const { isSupplyOptedIn } = require('../helpers/subscriptionPricing');
 
 const { handleWhatsAppOrder, handleFeedbackReply, validateReferralCode }
   = require('../handlers/waHandlers');
@@ -38,6 +44,63 @@ const {
 const CHAT_SERVICE_URL  = process.env.CHAT_SERVICE_URL || 'http://localhost:8001';
 const OUR_WHATSAPP_PHONE = process.env.WHATSAPP_PHONE_NUMBER || '';
 const REFERRAL_CODE_REGEX = /^\s*([A-Z0-9]{6})\s*$/i;
+
+const _supplyFlagCache = new Map(); // restaurantId → { supply_enabled, lob_type, expires_at }
+const SUPPLY_FLAG_TTL_MS = 60_000;
+
+async function loadTenantSupplyFlag(restaurantId) {
+  if (!restaurantId) return null;
+  const cached = _supplyFlagCache.get(restaurantId);
+  if (cached && Date.now() < cached.expires_at) return cached;
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('tenants')
+      .select('id, supply_enabled, lob_type')
+      .eq('id', restaurantId)
+      .maybeSingle();
+    if (error) {
+      // Column may not exist until migration — treat as not opted in
+      if (/supply_enabled/i.test(error.message || '')) {
+        const row = { supply_enabled: false, lob_type: null, expires_at: Date.now() + SUPPLY_FLAG_TTL_MS };
+        _supplyFlagCache.set(restaurantId, row);
+        return row;
+      }
+      console.warn('[WA Webhook] supply flag load:', error.message);
+      return null;
+    }
+    const row = {
+      supply_enabled: !!data?.supply_enabled,
+      lob_type: data?.lob_type || null,
+      expires_at: Date.now() + SUPPLY_FLAG_TTL_MS,
+    };
+    _supplyFlagCache.set(restaurantId, row);
+    return row;
+  } catch (err) {
+    console.warn('[WA Webhook] supply flag load failed:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Dual-LOB gate: only when supply is opted in, and only for registered supply_clients.
+ * Unknown senders fall through to the retail/catalog flow.
+ */
+async function tryRouteToSupplyIfClient(message, metadata, value, restaurantId) {
+  if (!restaurantId || !message?.from) return false;
+  const flag = await loadTenantSupplyFlag(restaurantId);
+  if (!flag || !isSupplyOptedIn(flag)) return false;
+
+  const supplierId = await resolveSupplierByRestaurantId(restaurantId);
+  if (!supplierId) {
+    console.warn(`[WA Webhook] supply_enabled but no suppliers row for ${restaurantId}`);
+    return false;
+  }
+  const client = await resolveClientByPhone(message.from, supplierId);
+  if (!client) return false;
+
+  await forwardToSupplyChatService(message, metadata, value, supplierId, client.id);
+  return true;
+}
 
 const GREETING_OR_RESET = new Set([
   'hi', 'hello', 'hey', 'hii', 'hiii', 'hai', 'namaste', 'vanakkam',
@@ -133,6 +196,18 @@ router.post('/webhook', async (req, res) => {
             if (restaurantId) {
               console.warn(`[WA Webhook] phone_number_id not found in integrations — using DEFAULT_RESTAURANT_ID`);
             }
+          }
+
+          // Dual-LOB: registered supply buyers → supply agent (before greeting/retail).
+          // Skipped entirely when supply_enabled is false.
+          if (restaurantId) {
+            const routedSupply = await tryRouteToSupplyIfClient(
+              message, metadata, value, restaurantId,
+            ).catch((err) => {
+              console.error('[WA Webhook] supply dual-route failed:', err.message);
+              return false;
+            });
+            if (routedSupply) continue;
           }
 
           // Delayed blue ticks + typing (~4.5s) — does not block reply pipeline.

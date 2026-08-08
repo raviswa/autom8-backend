@@ -21,7 +21,13 @@ const {
 } = require('../helpers/referrals');
 const { authenticateToken, getRestaurantId } = require('../middleware/auth');
 const { enabledOrderServices, resolvePaidFeatures, resolveEnabledFeatures } = require('../helpers/subscriptionFeatures');
-const { MONTHLY_PRICE_INR } = require('../helpers/phonepeSubscription');
+const { MONTHLY_PRICE_INR, calculateMonthlyPrice } = require('../helpers/phonepeSubscription');
+const {
+  assertSinglePackagedCatalogLob,
+  parseSupplyEnabledFlag,
+  isSupplyImplied,
+} = require('../helpers/subscriptionPricing');
+const { ensureSupplierForTenant } = require('../helpers/supplyTenant');
 const {
   isSubscriptionSoftLocked,
   isLifetimeTenant,
@@ -152,6 +158,12 @@ async function seedCatalogFromRegistration(restaurantId, rawRows, lobType) {
   return result;
 }
 function resolveRegistrationLobType(body) {
+  try {
+    assertSinglePackagedCatalogLob(body || {});
+  } catch (err) {
+    return { error: err.message, code: err.code || 'lob_conflict' };
+  }
+
   const otherLabel = String(body?.business_vertical_other || '').trim();
   const taxonomy = resolveBusinessTaxonomy({
     business_family: body?.business_family,
@@ -169,8 +181,10 @@ function resolveRegistrationLobType(body) {
     if (vertical.custom && !otherLabel) {
       return { error: 'Tell us what your business does — business_vertical_other is required when you pick Others.' };
     }
+    const lob_type = vertical.lob_type;
     return {
-      lob_type: vertical.lob_type,
+      lob_type,
+      supply_enabled: parseSupplyEnabledFlag(body, lob_type),
       business_family: vertical.family,
       business_vertical: vertical.id,
       business_vertical_other: vertical.custom ? otherLabel.slice(0, 160) : null,
@@ -190,6 +204,7 @@ function resolveRegistrationLobType(body) {
   }
   return {
     lob_type: parsed.lob_type,
+    supply_enabled: parseSupplyEnabledFlag(body, parsed.lob_type),
     business_family: taxonomy.business_family || body?.business_family || null,
     business_vertical: taxonomy.business_vertical || null,
     business_vertical_other: taxonomy.business_vertical_other
@@ -270,7 +285,7 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
     ] = await Promise.all([
       supabaseAdmin
         .from('tenants')
-        .select('id, name, display_name, subscribed_features, whatsapp_needs_existing_pin, lob_type, whatsapp_number, waba_id, lifecycle_status, onboarding_step')
+        .select('id, name, display_name, subscribed_features, whatsapp_needs_existing_pin, lob_type, whatsapp_number, waba_id, lifecycle_status, onboarding_step, supply_enabled')
         .eq('id', restaurantId)
         .maybeSingle(),
       getActiveWhatsAppIntegration(restaurantId).catch((err) => {
@@ -487,7 +502,10 @@ router.get('/status', authenticateToken, getRestaurantId, async (req, res) => {
         status: subStatus,
         trial_ends_at: sub?.trial_ends_at || null,
         renews_at: sub?.renews_at || null,
-        price: MONTHLY_PRICE_INR,
+        price: calculateMonthlyPrice({
+          lob_type: lobType,
+          supply_enabled: tenant.supply_enabled,
+        }),
         currency: 'INR',
         soft_locked: softLocked,
         lifetime,
@@ -597,6 +615,7 @@ async function registerStandalone(req, res, opts) {
     business_family = null,
     business_vertical = null,
     business_vertical_other = null,
+    supply_enabled = false,
     embeddedSignup = null,
     idempotencyKey = null,
     display_name = null,
@@ -640,6 +659,12 @@ async function registerStandalone(req, res, opts) {
 
   try {
     assertDisclosureAccepted(req.body || {});
+    assertSinglePackagedCatalogLob(req.body || {});
+
+    const supplyEnabled = parseSupplyEnabledFlag(
+      { ...req.body, supply_enabled },
+      lob_type,
+    );
 
     // Preflight WhatsApp uniqueness (FR-3)
     await assertWhatsAppAssetsAvailable({
@@ -655,6 +680,7 @@ async function registerStandalone(req, res, opts) {
       whatsapp_number, waba_id,
       timezone, dining_duration_minutes, payment_mode, manager_phone,
       meta_catalog_id, lob_type,
+      supply_enabled: supplyEnabled,
       business_family, business_vertical, business_vertical_other,
       display_name, city, country_code, currency_code, address_line1,
       kitchen_workflow, cuisines, slug: candidateSlug || slug,
@@ -673,7 +699,7 @@ async function registerStandalone(req, res, opts) {
         .select()
         .single();
 
-      if (restError && /column .*slug.* does not exist|short_code|kitchen_workflow|opening_hours|country|cuisine|business_family|business_vertical/i.test(restError.message || '')) {
+      if (restError && /column .*slug.* does not exist|short_code|kitchen_workflow|opening_hours|country|cuisine|business_family|business_vertical|supply_enabled/i.test(restError.message || '')) {
         console.warn('[onboarding] optional column missing — retrying stripped insert:', restError.message);
         const fallback = { ...insertPayload };
         delete fallback.slug;
@@ -683,6 +709,7 @@ async function registerStandalone(req, res, opts) {
         delete fallback.business_family;
         delete fallback.business_vertical;
         delete fallback.business_vertical_other;
+        delete fallback.supply_enabled;
         ({ data, error: restError } = await supabaseAdmin
           .from('tenants')
           .insert(fallback)
@@ -778,36 +805,22 @@ async function registerStandalone(req, res, opts) {
       console.warn('[onboarding] Catalog seed failed (non-fatal):', e.message);
     }
 
-    // FR-9: B2B / Supply → create suppliers row linked to same auth user
-    // (catalog alias may store tenants.lob_type as supply|b2b_supply|b2b)
+    // FR-9: B2B / Supply add-on → create suppliers row linked to same auth user + restaurant
+    // (no second tenant, no second WhatsApp integration)
     let supplier = null;
-    const supplyPortalLobs = new Set(['b2b', 'supply', 'b2b_supply']);
-    if (supplyPortalLobs.has(String(lob_type || '').toLowerCase())) {
+    if (isSupplyImplied(lob_type) || supplyEnabled) {
       try {
-        const { data: existingSup } = await supabaseAdmin
-          .from('suppliers')
-          .select('id')
-          .or(`auth_user_id.eq.${authUserId},email.eq.${email.trim().toLowerCase()}`)
-          .maybeSingle();
-        if (existingSup) {
-          supplier = existingSup;
-        } else {
-          const { data: sup, error: supErr } = await supabaseAdmin.from('suppliers').insert({
-            auth_user_id:  authUserId,
-            name:          owner_name.trim(),
-            business_name: (display_name || name).trim(),
-            email:         email.trim().toLowerCase(),
-            phone:         (whatsapp_number || phone || manager_phone || '').toString().replace(/\D/g, '') || '0000000000',
-            city:          city || null,
-            address:       address_line1 || null,
-            lob_type:      'food_service',
-            waba_phone:    whatsapp_number || null,
-            waba_phone_number_id: embeddedSignup?.phone_number_id || phone_number_id || null,
-            is_active:     true,
-          }).select().single();
-          if (supErr) throw supErr;
-          supplier = sup;
-        }
+        supplier = await ensureSupplierForTenant(supabaseAdmin, {
+          restaurantId,
+          authUserId,
+          email: email.trim().toLowerCase(),
+          name: owner_name.trim(),
+          businessName: (display_name || name).trim(),
+          phone: (whatsapp_number || phone || manager_phone || '').toString(),
+          city: city || null,
+          address: address_line1 || null,
+          activate: true,
+        });
       } catch (supCreateErr) {
         console.error('[onboarding] supplier create failed (non-fatal):', supCreateErr.message);
         await recordRegistrationFailure({

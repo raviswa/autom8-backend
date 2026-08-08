@@ -43,6 +43,7 @@ const RESTAURANT_SELECT_FULL = [
   'min_delivery_order_amount', 'min_takeaway_order_amount',
   'scheduled_delivery_enabled', 'scheduled_takeaway_enabled', 'scheduled_kds_lead_minutes', 'max_delivery_radius_km',
   'lob_type',
+  'supply_enabled',
   'business_family', 'business_vertical', 'business_vertical_other',
   'subscribed_features',
   'whatsapp_needs_existing_pin',

@@ -15,7 +15,13 @@
 
 const crypto = require('crypto');
 
-const MONTHLY_PRICE_INR = 1000;
+const {
+  LOB_PRICE_INR,
+  MONTHLY_PRICE_INR,
+  calculateMonthlyPrice,
+  isSupplyImplied,
+  isSupplyOptedIn,
+} = require('./subscriptionPricing');
 
 function phonepeConfigured() {
   return Boolean(process.env.PHONEPE_MERCHANT_ID && process.env.PHONEPE_SALT_KEY);
@@ -199,7 +205,11 @@ function isPhonePePaymentSuccess(statusPayload) {
 }
 
 module.exports = {
+  LOB_PRICE_INR,
   MONTHLY_PRICE_INR,
+  calculateMonthlyPrice,
+  isSupplyImplied,
+  isSupplyOptedIn,
   phonepeConfigured,
   applyOfferDiscount,
   newMerchantTxnId,

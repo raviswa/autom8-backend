@@ -44,12 +44,24 @@ ${bodyHtml}
 function onboardingWelcome(tenant, opts = {}) {
   const name = tenantLabel(tenant);
   const setupUrl = opts.setupUrl || 'https://app.autom8.works/setup';
+  const storefrontUrl = opts.storefrontUrl || null;
+  const supplyPortalUrl = opts.supplyPortalUrl || null;
   const hiccup = opts.hiccupNote ? String(opts.hiccupNote).trim() : '';
   const subject = `Welcome to Autom8 — ${name}`;
+
+  const urlLines = [];
+  if (storefrontUrl) {
+    urlLines.push(`Your customer storefront: ${storefrontUrl}`);
+  }
+  if (supplyPortalUrl) {
+    urlLines.push(`Your supplier portal: ${supplyPortalUrl}`);
+  }
+
   const text =
     `Hi,\n\n` +
     `${name} is set up on Autom8.\n` +
     `Open your setup checklist: ${setupUrl}\n` +
+    (urlLines.length ? `\n${urlLines.join('\n')}\n` : '') +
     `Track what's done and what's pending:\n` +
     `- Account created\n` +
     `- WhatsApp connected\n` +
@@ -58,11 +70,25 @@ function onboardingWelcome(tenant, opts = {}) {
     (hiccup ? `\nNote: ${hiccup}\n` : '') +
     `\nSign in at https://app.autom8.works if you are not already logged in.\n` +
     `If you did not expect this email, reply and we will sort it out.\n`;
+
+  const urlHtml = [];
+  if (storefrontUrl) {
+    urlHtml.push(
+      `<p><strong>Your customer storefront</strong><br/><a href="${esc(storefrontUrl)}">${esc(storefrontUrl)}</a></p>`,
+    );
+  }
+  if (supplyPortalUrl) {
+    urlHtml.push(
+      `<p><strong>Your supplier portal</strong><br/><a href="${esc(supplyPortalUrl)}">${esc(supplyPortalUrl)}</a></p>`,
+    );
+  }
+
   const html = wrap(
     `<p>Hi,</p>
      <p><strong>${esc(name)}</strong> is set up on Autom8.</p>
-     <p><a href="${esc(setupUrl)}" style="display:inline-block;padding:10px 16px;background:#047857;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;">Open setup checklist</a></p>
-     <p>Use the checklist to see what is done and what is still pending:</p>
+     <p><a href="${esc(setupUrl)}" style="display:inline-block;padding:10px 16px;background:#047857;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;">Open setup checklist</a></p>` +
+      urlHtml.join('') +
+      `<p>Use the checklist to see what is done and what is still pending:</p>
      <ul>
        <li>Account created</li>
        <li>WhatsApp connected</li>
