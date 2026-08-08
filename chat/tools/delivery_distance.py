@@ -545,9 +545,7 @@ async def road_route_metrics(
         traffic_min = math.ceil(traffic_sec / 60) if traffic_sec else None
         travel_minutes = traffic_min or duration_min
 
-        if not travel_minutes:
-            return None
-
+        # Keep road distance even when duration is missing; travel time is optional.
         return {
             "distance_km": round(metres / 1000.0, 2),
             "duration_minutes": duration_min,
@@ -617,6 +615,16 @@ async def compute_delivery_distance(session_state: dict[str, Any]) -> dict[str, 
     }
 
     if not origin or not dest:
+        if not origin:
+            logger.warning(
+                "[distance] kitchen pickup_latitude/longitude missing — "
+                "cannot compute delivery distance"
+            )
+        if not dest:
+            logger.warning(
+                "[distance] customer delivery_lat/lng missing — "
+                "cannot compute delivery distance"
+            )
         session_state.pop("delivery_distance_km", None)
         session_state.pop("delivery_distance_method", None)
         session_state.pop("delivery_travel_minutes", None)

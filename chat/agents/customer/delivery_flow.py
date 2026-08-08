@@ -981,6 +981,11 @@ async def handle_delivery_flow(
             intro = _reply(_lang, "delivery_scheduled_browse_addr", address=address_display)
         else:
             intro = _reply(_lang, "delivery_delivering_to", address=address_display)
+        # Distance/charge preview (same as scheduled path + legacy finalize helper)
+        if addr_result.get("message"):
+            await send_whatsapp_message(
+                customer_phone, addr_result["message"], restaurant_id,
+            )
         await send_catalog_with_fallback(
             customer_phone, restaurant_id, session_state, intro=intro,
         )
